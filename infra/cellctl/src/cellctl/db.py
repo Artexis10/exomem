@@ -472,10 +472,24 @@ async def write_export(connection: asyncpg.Connection, export_id: str, updates: 
     if link_issued:
         assignments = ", ".join(filter(None, [
             assignments, "link_issued_at = GREATEST(clock_timestamp(), COALESCE(link_requested_at, '-infinity'))"]))
-    condition = ""
     if updates.get("observed_state") == "ready":
-        # A newer supersede or cell deletion wins over a stale verification result.
-        condition = (" AND requested_state <> 'superseded' AND EXISTS (SELECT 1 FROM exomem_cloud_cells c "
-                     "WHERE c.cell_id=exomem_cloud_exports.cell_id AND c.desired_state <> 'deleted')")
-    await connection.execute(f"UPDATE exomem_cloud_exports SET {assignments} WHERE export_id=$1{condition}",
+        # Lifecycle and export requests lock the cell before its export; no network work occurs here.
+        async with connection.transaction():
+            cell_id = await connection.fetchval("SELECT cell_id FROM exomem_cloud_exports WHERE export_id=$1",
+                                                uuid.UUID(export_id))
+            if cell_id is None:
+                return
+            desired = await connection.fetchval(
+                "SELECT desired_state FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id)
+            if desired is None or desired == "deleted":
+                return
+            requested = await connection.fetchval(
+                "SELECT requested_state FROM exomem_cloud_exports WHERE export_id=$1 AND cell_id=$2 FOR UPDATE",
+                uuid.UUID(export_id), cell_id)
+            if requested is None or requested == "superseded":
+                return
+            await connection.execute(f"UPDATE exomem_cloud_exports SET {assignments} WHERE export_id=$1",
+                                     uuid.UUID(export_id), *parameters)
+        return
+    await connection.execute(f"UPDATE exomem_cloud_exports SET {assignments} WHERE export_id=$1",
                              uuid.UUID(export_id), *parameters)

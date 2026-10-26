@@ -941,8 +941,8 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
 def _job_volumes(*, data_read_only: bool, pvc_name: str) -> list[dict]:
     return [
         {"name": "data", "persistentVolumeClaim": {"claimName": pvc_name, "readOnly": data_read_only}},
-        {"name": "cache", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
-        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
+        {"name": "cache", "emptyDir": {"medium": "Memory", "sizeLimit": _memory(JOB_MEMORY_LIMIT_MIB) if data_read_only else "64Mi"}},
+        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": _memory(JOB_MEMORY_LIMIT_MIB) if data_read_only else "64Mi"}},
     ]
 
 
@@ -989,7 +989,7 @@ def _job_pod_spec(
                         for entry in _restic_env(spec, repo)],
                 "resources": {
                     "requests": {"cpu": JOB_CPU_REQUEST, "memory": JOB_MEMORY_REQUEST},
-                    "limits": {"cpu": JOB_CPU_LIMIT, "memory": "1Gi"},
+                    "limits": {"cpu": JOB_CPU_LIMIT, "memory": _memory(JOB_MEMORY_LIMIT_MIB)},
                 },
                 "securityContext": {
                     "runAsNonRoot": True,
@@ -1185,7 +1185,8 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
     if verify:
         # Verification sees only its signed object version, never a cell volume or a cell key Secret.
         container["command"] = _cell_command(command, scratch=False)
-        container["env"] = [{"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
+        container["env"] = [{"name": "EXOMEM_CLOUD_CELL", "value": "1"},
+                            {"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
                             {"name": "TMPDIR", "value": "/tmp"},
                             {"name": "EXOMEM_EXPORT_VERIFY_URL", "valueFrom": {"secretKeyRef": {
                                 "name": verification_secret_name(item.export_id), "key": "get-url"}}}]

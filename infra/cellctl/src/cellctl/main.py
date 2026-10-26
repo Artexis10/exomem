@@ -106,6 +106,15 @@ def build_reconcile_config() -> ReconcileConfig:
     return ReconcileConfig(**kwargs)
 
 
+def _retention_sources() -> tuple[object, ...]:
+    raw = os.environ.get("CELLCTL_KEY_RETENTION_SOURCES", "[]")
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return (raw,)
+    return tuple(parsed) if isinstance(parsed, list) else (parsed,)
+
+
 def build_storage_config() -> StorageConfig:
     """Read the shared cap and optional local class; accept the earlier nested cap."""
 
@@ -202,7 +211,7 @@ def build_cluster_config() -> ClusterConfig:
     return ClusterConfig(
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
-        key_retention_sources=tuple(json.loads(os.environ.get("CELLCTL_KEY_RETENTION_SOURCES", "[]"))),
+        key_retention_sources=_retention_sources(),
         resources=ResourceSettings(
             cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
             cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),

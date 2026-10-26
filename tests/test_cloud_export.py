@@ -158,9 +158,12 @@ def test_completed_export_uses_range_reads_and_rejects_corruption_and_expired_ve
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
     monkeypatch.setenv("EXOMEM_EXPORT_VERIFY_URL", f"{storage['base']}{signed_path}")
     verification_log = tmp_path / "outcome.json"
-    assert cloud_export.main(["--verify", "--export-id", str(uuid.uuid4()), "--max-bytes", str(1024**3),
-        "--archive-bytes", str(len(archive)), "--archive-sha256", packed["sha256"],
-        "--archive-version-id", "exact", "--termination-log", str(verification_log)]) == 0
+    command = [sys.executable, "-m", "exomem", "cell-export", "--verify", "--export-id", str(uuid.uuid4()),
+        "--max-bytes", str(1024**3), "--archive-bytes", str(len(archive)), "--archive-sha256", packed["sha256"],
+        "--archive-version-id", "exact", "--termination-log", str(verification_log)]
+    environment = {**os.environ, "EXOMEM_CLOUD_CELL": "1", "EXOMEM_CLOUD_RESOURCE_POLICY": "service-v1"}
+    result = subprocess.run(command, env=environment, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr.decode()
     assert json.loads(verification_log.read_text()) == {**verified, "version": "exact"}
     assert storage["base"] not in verification_log.read_text()
     PartStore.objects["/completed?versionId=corrupt"] = archive[:-22] + bytes(22)

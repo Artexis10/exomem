@@ -54,6 +54,7 @@ from .manifests import (
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
     hold_job_name,
+    namespace_name,
 )
 from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
 from .storage.topolvm import LocalVolumeState, LogicalVolume
@@ -178,18 +179,30 @@ class ClusterClient:
     def run_job(self, manifest: dict) -> None:
         self.apply(manifest)
 
-    def delete_secret(self, namespace: str, name: str) -> None:
-        """Delete one controller-owned capability; unrelated exports keep their own Secrets."""
+    def delete_secret(self, namespace: str, name: str, *, cell_id: str) -> bool:
+        """Mutate a Secret only after the namespace API proves its expected cell ownership."""
+        if namespace != namespace_name(cell_id):
+            return False
+        try:
+            owner = self._core.read_namespace(namespace)
+        except ApiException as error:
+            if error.status == 404:
+                return True
+            raise
+        metadata = getattr(owner, "metadata", None)
+        if (metadata is None or getattr(metadata, "name", None) != namespace
+                or (getattr(metadata, "labels", None) or {}).get(CELL_LABEL) != cell_id):
+            return False
         try:
             self._core.delete_namespaced_secret(name, namespace)
         except ApiException as error:
             if error.status != 404:
                 raise
+        return True
 
-    def delete_cell_secrets(self, namespace: str) -> None:
+    def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool:
         """Retire the cell's children without waiting for namespace or provider cleanup."""
-        self.delete_secret(namespace, "cell-credentials")
-
+        return self.delete_secret(namespace, "cell-credentials", cell_id=cell_id)
 
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
         """D3: an hourly hold's clone claim and snapshot. Already gone is done."""

@@ -86,16 +86,20 @@ class FakeClusterGateway:
     def delete_namespace(self, name: str) -> None:
         self.deleted_namespaces.add(name)
 
-    def delete_secret(self, namespace: str, name: str) -> None:
+    def delete_secret(self, namespace: str, name: str, *, cell_id: str) -> bool:
+        observation = self.observations.get(cell_id, ClusterObservation())
+        if namespace != namespace_name(cell_id) or (observation.namespace_exists
+                and observation.namespace_cell_label != cell_id):
+            return False
         self.applied.pop((namespace, "Secret", name), None)
         self.events.append(("delete_secret", namespace, name))
-
-    def delete_cell_secrets(self, namespace: str) -> bool:
-        for key in list(self.applied):
-            if key[0] == namespace and key[1] == "Secret":
-                del self.applied[key]
-        self.events.append(("delete_cell_secrets", namespace))
         return True
+
+    def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool:
+        removed = self.delete_secret(namespace, "cell-credentials", cell_id=cell_id)
+        if removed:
+            self.events.append(("delete_cell_secrets", namespace))
+        return removed
 
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
@@ -3264,5 +3268,43 @@ async def test_key_retirement_does_not_delete_a_conflicting_namespaces_child_sec
                                        _secrets_config(), _cluster_config())
         assert secret_key in cluster.applied
         assert (await db.select_all_rows(connection))[0].cell_root_key_wrapped is None
+    finally:
+        await connection.close()
+
+
+@pytest.mark.parametrize("invalid", [
+    {"observed_at": "unobserved"}, {"observed_at": "2026-01-01T00:00:00"},
+    {"observed_at": "2026-01-02T00:00:00+00:00"}, {"observed_at": None},
+    {"source": " "}, {"source": 7}, {"retention_seconds": True},
+    {"retention_seconds": -1}, {"retention_seconds": 10**30},
+])
+def test_invalid_retention_evidence_never_establishes_finite_expiry(invalid):
+    """Malformed observation, source, window or arithmetic remains unknown instead of claiming destruction."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    sources = [{"kind": kind, "source": "deployed policy", "retention_seconds": 0,
+                "observed_at": now.isoformat()} for kind in (
+                    "control_database", "cluster_datastore", "object_versions")]
+    sources[0].update(invalid)
+    assert reconcile._retention_expiry(sources, now) is None
+
+
+async def test_malformed_retention_is_retained_as_unknown_without_stopping_deletion(cell_db):
+    import json
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "unknown-retention", desired_state="deleted")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    sources = tuple({"kind": kind, "source": "policy", "retention_seconds": 0,
+                     "observed_at": "unobserved"} for kind in (
+                         "control_database", "cluster_datastore", "object_versions"))
+    try:
+        await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
+            {"volume": "per-cell-key", "retained_volumes": []})})
+        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+            _secrets_config(), dataclasses.replace(_cluster_config(), key_retention_sources=sources),
+            now=datetime(2026, 1, 1, tzinfo=UTC))
+        row = (await db.select_all_rows(connection))[0]
+        assert row.observed_state == "deleted" and row.keys_expire_at is None
+        assert json.loads(row.key_retention_sources) == list(sources)
     finally:
         await connection.close()

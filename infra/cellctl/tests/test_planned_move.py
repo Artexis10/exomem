@@ -454,3 +454,50 @@ async def test_move_acceptance_keeps_old_volume_until_exact_mark_and_provider_ab
         assert row.relocation_accepted_at == NOW + timedelta(minutes=2)
     finally:
         await connection.close()
+
+
+@pytest.mark.parametrize("earlier_class", [STORAGE_CLASS, None])
+async def test_a_second_move_and_acceptance_preserve_every_earlier_retained_copy(cell_db, earlier_class):
+    """Replacing the transition pointer must not hide an older shared-key rollback volume."""
+    import json
+
+    from cellctl import db
+
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "successive-moves")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    config = ClusterConfig(object_storage_bucket="b", storage=StorageConfig(per_cell_class="per-cell"))
+    try:
+        await db.write_observed(connection, "aaaaaaaaaaaaaaaa", {
+            "observed_image": IMAGE_A, "observed_state": "running", "observed_generation": 1,
+            "ready": True, "volume_id": "vol-current", "relocation_old_volume_id": "vol-earlier",
+            "custody_observation": json.dumps({"volume": "per-cell-key", "retained_old_volume": "vol-earlier",
+                                               "retained_old_storage_class": earlier_class})})
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _bound("per-cell", pvc_exists=True,
+            pvc_volume_id="vol-current", namespace_move_volume="vol-current", namespace_move_storage_class="per-cell")
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=NOW)
+        row = (await db.select_all_rows(connection))[0]
+        retained = json.loads(row.custody_observation)["retained_volumes"]
+        assert retained == [{"volume_id": "vol-earlier", "storage_class": earlier_class},
+                            {"volume_id": "vol-current", "storage_class": "per-cell"}]
+        await db.write_observed(connection, row.cell_id, {"volume_id": "vol-new"})
+        cluster.observations[row.cell_id] = _bound("per-cell", pvc_exists=True, pvc_volume_id="vol-new",
+                                                   namespace_move_accepted_volume="vol-current")
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=NOW + timedelta(minutes=2))
+        row = (await db.select_all_rows(connection))[0]
+        assert json.loads(row.custody_observation)["retained_volumes"] == [
+            {"volume_id": "vol-earlier", "storage_class": earlier_class}]
+        assert row.relocation_old_volume_id is None
+        owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+        try:
+            await owner.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
+        finally:
+            await owner.close()
+        cluster.observations[row.cell_id] = ClusterObservation()
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=NOW + timedelta(minutes=3))
+        assert (await db.select_all_rows(connection))[0].keys_expire_at is None
+    finally:
+        await connection.close()

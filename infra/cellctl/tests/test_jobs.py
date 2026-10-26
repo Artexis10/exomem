@@ -200,3 +200,17 @@ def test_the_repository_never_reaches_the_job_shell() -> None:
 def test_a_snapshot_id_with_a_trailing_newline_never_reaches_the_restore_shell() -> None:
     with pytest.raises(ValueError):
         render_restore_job(_held_spec(), bucket_name="exomem-cloud-backups", endpoint=ENDPOINT, snapshot_id=SNAPSHOT_ID + "\n")
+
+
+def test_read_only_backup_scratch_uses_the_existing_job_memory_budget():
+    """Normal pack queues must not receive a scratch cap smaller than the Job budget already reserves."""
+    from cellctl.capacity import quantity
+
+    job = render_backup_job(_held_spec(), bucket_name="b", endpoint=ENDPOINT)
+    pod = job["spec"]["template"]["spec"]
+    budget = quantity(pod["containers"][0]["resources"]["limits"]["memory"])
+    for volume in pod["volumes"]:
+        if "emptyDir" in volume:
+            assert volume["emptyDir"]["medium"] == "Memory"
+            assert quantity(volume["emptyDir"]["sizeLimit"]) == budget
+    assert pod["volumes"][0]["persistentVolumeClaim"]["readOnly"] is True

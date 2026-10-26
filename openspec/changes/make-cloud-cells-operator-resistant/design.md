@@ -111,10 +111,16 @@ The media-store producer does not exist yet; its future implementation must use 
 The chart adds a configurable per-cell Hetzner class without editing the immutable legacy class.
 `cellStorage.domain=per-cell` selects it for fresh claims after the real CSI drill.
 An explicit `exomem.io/move-storage-class` destination extends the existing stopped-backup relocation machine.
-C1 records the destination and old volume before claim removal, so a controller restart resumes the same move.
+C1 records the destination and current transition pointer before claim removal, so a controller restart resumes the same move.
+The existing `custody_observation` JSON owns `retained_volumes`, an inventory of every retained copy.
+Each record contains `volume_id` and its original `storage_class`; either value can remain null when evidence is incomplete.
+The controller adopts earlier singular evidence and deduplicates complete identities without replacing a recorded class.
+Starting another planned or emergency move appends its source volume instead of overwriting earlier custody.
 The retained volume remains available for rollback until separate acceptance and soak evidence permits its destruction.
 After that cleanup, `exomem.io/move-accepted-volume` names the exact old volume.
-The controller clears retained-volume metadata only when its recorded Hetzner class and provider absence both match.
+The controller removes only the matching inventory entry when its recorded Hetzner class and provider absence both match.
+It clears the transition pointer only when that pointer names the accepted entry.
+Ambiguous or incomplete custody remains unknown, and every remaining entry prevents finite destruction or compliance claims.
 An old local volume needs its own future absence proof; a Hetzner lookup cannot prove it absent.
 The existing local-storage and import-admission rules still apply.
 
@@ -135,7 +141,7 @@ Publication remains fenced against newer supersede and deletion requests, and fa
 | Import staging and age identity | Existing `/data/.import-*` and `/data/.import-keys` | Same volume; outside canonical backup roots |
 | Writable Job restic cache | `/data/scratch/cache` | Same volume; outside canonical backup roots |
 | Owner export part | `/data/scratch/export` | One reusable temporary file; no whole archive |
-| Read-only clone Job cache and temporary files | Two memory-backed emptyDirs, each capped at 64 MiB | Inside the existing 1 GiB Job limit; never writes into the clone |
+| Read-only backup and clone Job cache and temporary files | Memory-backed emptyDirs whose caps use the existing Job memory limit | The shared Pod cgroup enforces the combined budget; never writes into the clone |
 | Fixed `/tmp` fallbacks and content-free logs | Memory-backed emptyDir capped at 64 MiB | Inside each Pod's memory limit |
 
 Cell commands disable core dumps before execution.

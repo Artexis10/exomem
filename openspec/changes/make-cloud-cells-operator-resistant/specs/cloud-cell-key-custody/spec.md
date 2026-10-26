@@ -14,6 +14,11 @@ Every content-bearing scratch path of a cell SHALL sit on the cell's own encrypt
 
 A cell whose volume was created under a shared passphrase SHALL count as migrated only once its data runs on a volume whose LUKS master key was generated for that cell. A keyslot change alone does not migrate a cell. A cell whose storage cannot yet carry a per-cell volume key SHALL be reported as not meeting this requirement.
 
+The existing custody observation SHALL retain every rollback volume with its identity and original storage class.
+A later move SHALL preserve earlier retained copies, including incomplete legacy evidence.
+Acceptance and absence evidence SHALL remove only the matching retained copy.
+Any remaining or unknown retained copy SHALL prevent a finite destruction or compliance claim.
+
 #### Scenario: Two cells' volume keys
 
 - **WHEN** the volume passphrases of two cells are compared

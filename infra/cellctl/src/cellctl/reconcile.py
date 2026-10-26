@@ -415,7 +415,7 @@ class ClusterConfig:
     # (e.g. "https://s3.us-west-002.backblazeb2.com" in production, a local
     # MinIO URL in the 3.10 test).
     object_storage_endpoint: str = ""
-    key_retention_sources: tuple[dict, ...] = ()
+    key_retention_sources: tuple[object, ...] = ()
     resources: ResourceSettings = ResourceSettings()
     model_env: dict[str, str] | None = None
     capacity: CapacityConfig = CapacityConfig()
@@ -522,8 +522,8 @@ class ClusterGateway:
     ) -> dict[str, ClusterObservation | Exception]: ...  # pragma: no cover
     def apply_all(self, manifests: list[dict]) -> None: ...  # pragma: no cover
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
-    def delete_cell_secrets(self, namespace: str) -> None: ...  # pragma: no cover
-    def delete_secret(self, namespace: str, name: str) -> None: ...  # pragma: no cover
+    def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool: ...  # pragma: no cover
+    def delete_secret(self, namespace: str, name: str, *, cell_id: str) -> bool: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
     def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False): ...  # pragma: no cover
@@ -915,6 +915,67 @@ def _compute_render_digest(
         material["storage_class"] = storage_class
     blob = json.dumps(material, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _retained_volumes(row: CellRow) -> list[dict]:
+    """Read the custody inventory and conservatively adopt the earlier singular record."""
+    custody = json.loads(row.custody_observation or "{}")
+    raw = custody.get("retained_volumes", [])
+    entries = list(raw) if isinstance(raw, list) else [{"evidence": raw}]
+    legacy = custody.get("retained_old_volume")
+    legacy_class = custody.get("retained_old_storage_class")
+    if legacy is None and legacy_class is not None and row.relocation_old_volume_id is None:
+        entries.append({"volume_id": None, "storage_class": legacy_class})
+    if legacy is not None:
+        entries.append({"volume_id": legacy, "storage_class": legacy_class})
+    if row.relocation_old_volume_id is not None and not any(
+            isinstance(entry, dict) and entry.get("volume_id") == row.relocation_old_volume_id for entry in entries):
+        entries.append({"volume_id": row.relocation_old_volume_id,
+                        "storage_class": legacy_class if legacy in (None, row.relocation_old_volume_id) else None})
+    retained = []
+    seen = set()
+    for entry in entries:
+        record = dict(entry) if isinstance(entry, dict) else {"evidence": entry}
+        for key in ("volume_id", "storage_class"):
+            value = record.get(key)
+            record[key] = value if isinstance(value, str) and value else None
+        identity = (record["volume_id"], record["storage_class"])
+        if record["volume_id"] is not None:
+            if identity in seen:
+                continue
+            seen.add(identity)
+        retained.append(record)
+    return retained
+
+
+def _retention_expiry(sources: list, now: datetime) -> datetime | None:
+    """Only observed, bounded policy windows can establish a finite expiry."""
+    # These three kinds are the retention evidence protocol declared by the chart schema.
+    required = {"control_database", "cluster_datastore", "object_versions"}
+    kinds = set()
+    windows = []
+    try:
+        for source in sources:
+            if not isinstance(source, dict):
+                return None
+            name, observed_at, seconds = source.get("source"), source.get("observed_at"), source.get("retention_seconds")
+            kind = source.get("kind")
+            if not isinstance(kind, str):
+                return None
+            if not isinstance(name, str) or not name.strip() or not name.isprintable():
+                return None
+            if not isinstance(observed_at, str) or type(seconds) is not int or seconds < 0:
+                return None
+            observed = datetime.fromisoformat(observed_at)
+            if observed.tzinfo is None or observed.utcoffset() is None or observed > now:
+                return None
+            kinds.add(kind)
+            windows.append(seconds)
+        if not required <= kinds:
+            return None
+        return now + timedelta(seconds=max(windows))
+    except (OverflowError, TypeError, ValueError):
+        return None
 
 
 def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False,
@@ -1669,27 +1730,39 @@ async def _reconcile_row(
 
     if row.desired_state == "deleted" and not _identity_conflict(row, observation, cluster_config.storage):
         try:
-            cluster.delete_cell_secrets(namespace_name(row.cell_id))
+            cluster.delete_cell_secrets(namespace_name(row.cell_id), cell_id=row.cell_id)
         except ApiException as error:
             logger.warning("cellctl: child key retirement pending for cell %s: %s",
                            row.cell_id, _describe_error(error))
 
-    old_storage_class = json.loads(row.custody_observation or "{}").get("retained_old_storage_class")
-    old_is_hetzner = (old_storage_class == LEGACY_CLASS or cluster_config.storage.per_cell_class is not None
-                      and old_storage_class == cluster_config.storage.per_cell_class)
-    if (old_is_hetzner and row.desired_state != "deleted" and row.relocation_old_volume_id is not None
-            and row.volume_id is not None and row.volume_id != row.relocation_old_volume_id
-            and observation.namespace_move_accepted_volume == row.relocation_old_volume_id):
+    retained = _retained_volumes(row)
+    accepted_volume = observation.namespace_move_accepted_volume
+    # A volume-only mark cannot disambiguate conflicting original classes; keep custody unknown without blocking service.
+    unambiguous = sum(copy["volume_id"] == accepted_volume for copy in retained) == 1
+    for copy in list(retained):
+        old_class = copy["storage_class"]
+        old_is_hetzner = (old_class == LEGACY_CLASS or cluster_config.storage.per_cell_class is not None
+                          and old_class == cluster_config.storage.per_cell_class)
+        if (not unambiguous or row.desired_state == "deleted" or not old_is_hetzner or copy["volume_id"] != accepted_volume
+                or row.volume_id is None or row.volume_id == accepted_volume):
+            continue
         try:
-            old_absent = _hetzner_volume_absent(row.relocation_old_volume_id, volume_provider, now, memory)
-        except Exception as error:  # noqa: BLE001 -- missing retirement evidence must not stop cell service
+            absent = _hetzner_volume_absent(accepted_volume, volume_provider, now, memory)
+        except Exception as error:  # noqa: BLE001 -- unknown custody must not stop unrelated cell service
             logger.warning("cellctl: retained-volume absence unknown for cell %s: %s", row.cell_id,
                            _describe_error(error))
         else:
-            if old_absent:
-                accepted = {"relocation_old_volume_id": None, "relocation_accepted_at": now}
-                await db.write_observed(connection, row.cell_id, accepted)
-                row = dataclass_replace(row, **accepted)
+            if absent:
+                retained.remove(copy)
+                if row.relocation_old_volume_id == accepted_volume:
+                    custody = json.loads(row.custody_observation or "{}")
+                    custody.pop("retained_old_volume", None)
+                    custody.pop("retained_old_storage_class", None)
+                    custody["retained_volumes"] = retained
+                    accepted = {"relocation_old_volume_id": None, "relocation_accepted_at": now,
+                                "custody_observation": json.dumps(custody, sort_keys=True)}
+                    await db.write_observed(connection, row.cell_id, accepted)
+                    row = dataclass_replace(row, **accepted)
 
     if row.desired_state != "deleted":
         storage = cluster_config.storage
@@ -1706,13 +1779,12 @@ async def _reconcile_row(
                        and storage_class is not None and row.cell_root_key_wrapped is not None
                        else "unsupported-local" if cluster_config.storage.is_local(storage_class)
                        else "legacy-shared-key" if storage_class == LEGACY_CLASS else "unknown"),
-            "retained_old_volume": row.relocation_old_volume_id,
-            "retained_old_storage_class": old_storage_class if row.relocation_old_volume_id else None,
+            "retained_volumes": retained,
             "scratch": "configured" if observation.statefulset_render_digest == render_digest else "unknown",
             "node_swap": "unknown",
             "node_core_policy": "unknown",
             "compliance": "unmet" if storage_class != cluster_config.storage.per_cell_class or
-                          row.relocation_old_volume_id else "unknown",
+                          retained else "unknown",
             "source": "controller-manifest-and-pvc",
             "core_dumps": "configured" if observation.statefulset_render_digest == render_digest else "unknown",
         }
@@ -1810,17 +1882,11 @@ async def _reconcile_row(
         if (observation.namespace_absent_confirmed and observation.pv_absent_confirmed
                 and observation.backup_objects_absent_confirmed and row.last_live_key_destroyed_at is None):
             prior = json.loads(row.custody_observation or "{}")
-            if prior.get("volume") == "per-cell-key" and not prior.get("retained_old_volume"):
+            if prior.get("volume") == "per-cell-key" and not _retained_volumes(row):
                 sources = list(cluster_config.key_retention_sources)
                 inventory = json.dumps(sources, sort_keys=True)
-                # These source kinds fix the retirement evidence protocol, not tenant vocabulary.
-                complete = {source.get("kind") for source in sources} >= {
-                    "control_database", "cluster_datastore", "object_versions"}
-                windows = [source.get("retention_seconds") for source in sources]
-                known = (complete and all(type(window) is int and window >= 0 for window in windows)
-                         and all(source.get("source") and source.get("observed_at") for source in sources))
                 updates = {"last_live_key_destroyed_at": now, "key_retention_sources": inventory,
-                           "keys_expire_at": now + timedelta(seconds=max(windows)) if known else None}
+                           "keys_expire_at": _retention_expiry(sources, now)}
                 await db.write_observed(connection, row.cell_id, updates)
                 row = dataclass_replace(row, **updates)
 
@@ -1944,8 +2010,15 @@ async def _reconcile_row(
         target = observation.namespace_move_storage_class or (cluster_config.storage.local.class_name
                  if cluster_config.storage.local else cluster_config.storage.per_cell_class)
         prior_custody = json.loads(row.custody_observation or "{}")
-        prior_custody.update(retained_old_volume=decision.relocation_volume,
-                             retained_old_storage_class=observation.pvc_storage_class or observation.pv_storage_class)
+        retained = _retained_volumes(row)
+        copy = {"volume_id": decision.relocation_volume,
+                "storage_class": observation.pvc_storage_class or observation.pv_storage_class}
+        if not any(entry["volume_id"] == copy["volume_id"] and entry["storage_class"] == copy["storage_class"]
+                   for entry in retained):
+            retained.append(copy)
+        prior_custody.pop("retained_old_volume", None)
+        prior_custody.pop("retained_old_storage_class", None)
+        prior_custody["retained_volumes"] = retained
         journal = {"relocation_old_volume_id": decision.relocation_volume,
                    "relocation_target_storage_class": target, "relocation_accepted_at": None,
                    "custody_observation": json.dumps(prior_custody, sort_keys=True)}
@@ -2267,7 +2340,9 @@ async def _remove_export(
     deletion that runs before its key goes is the final removal."""
 
     try:
-        cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id))
+        if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
+                                     cell_id=row.cell_id):
+            return
         if storage is not None:
             await asyncio.to_thread(storage.remove, item)
     except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
@@ -2334,7 +2409,9 @@ async def _export_transport(
     if decision.export_transport == "remove":
         await _remove_export(connection, cluster, row, item, storage, {})
     if decision.stop_export_job:
-        cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id))
+        if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
+                                     cell_id=row.cell_id):
+            return storage
         cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
         cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id, verify=True))
     # The row hold survives a crash before the StatefulSet has been stopped.

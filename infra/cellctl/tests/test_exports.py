@@ -616,6 +616,7 @@ async def test_verification_get_capability_stays_in_its_secret_and_failure_remov
         encoded_job = json.dumps(job)
         assert capability not in encoded_job and secret["data"]["get-url"] not in encoded_job
         container = job["spec"]["template"]["spec"]["containers"][0]
+        assert {entry["name"]: entry.get("value") for entry in container["env"]}["EXOMEM_CLOUD_CELL"] == "1"
         reference = next(entry for entry in container["env"] if entry["name"] == "EXOMEM_EXPORT_VERIFY_URL")
         assert reference["valueFrom"]["secretKeyRef"] == {"name": secret_name, "key": "get-url"}
         assert all("persistentVolumeClaim" not in volume for volume in job["spec"]["template"]["spec"]["volumes"])

@@ -819,3 +819,30 @@ def test_listed_objects_are_attributed_only_to_their_own_cells_namespace() -> No
     assert (cell.statefulset_exists, cell.pod_ready) == (False, False)
     assert (cell.pod_exists, cell.pod_uses_volume, cell.pod_terminating) == (True, True, False)
     assert observed["bbbbbbbbbbbbbbbb"].namespace_exists is False
+
+
+@pytest.mark.parametrize("labels", [{CELL_LABEL: "bbbbbbbbbbbbbbbb"}, {}, None])
+def test_secret_deletion_checks_current_namespace_identity_at_the_api_boundary(labels):
+    """A stale export cleanup cannot revoke another cell's Secret, even with a valid export UUID."""
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = Mock()
+    client._core.read_namespace.return_value = NS(metadata=NS(name=NAMESPACE, labels=labels))
+    assert client.delete_secret(NAMESPACE, "export-00000000000040008000000000000001-verify-get",
+                                cell_id=CELL_ID) is False
+    client._core.delete_namespaced_secret.assert_not_called()
+
+
+def test_secret_deletion_is_idempotent_after_its_namespace_disappears():
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = Mock()
+    client._core.read_namespace.side_effect = ApiException(status=404)
+    assert client.delete_secret(NAMESPACE, "cell-credentials", cell_id=CELL_ID) is True
+    client._core.delete_namespaced_secret.assert_not_called()
+
+
+def test_partial_namespace_metadata_cannot_authorize_a_secret_delete():
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = Mock()
+    client._core.read_namespace.return_value = NS(metadata=NS(labels={CELL_LABEL: CELL_ID}))
+    assert client.delete_secret(NAMESPACE, "cell-credentials", cell_id=CELL_ID) is False
+    client._core.delete_namespaced_secret.assert_not_called()

@@ -377,3 +377,40 @@ async def test_deleted_cell_cannot_mint_or_restore_content_keys(cell_db):
     finally:
         await controller.close()
         await owner.close()
+
+
+async def test_export_publication_waits_for_cell_lifecycle_before_locking_its_export(cell_db):
+    """A queued ready write must observe deletion committed while the export row is locked elsewhere."""
+    import asyncio
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "publication-race")
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    blocker = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    observer = await asyncpg.connect(cell_db.server.admin_dsn)
+    try:
+        export_id = await app.fetchval("INSERT INTO exomem_cloud_exports(cell_id) VALUES($1) RETURNING export_id", cell_id)
+        await db.write_export(controller, str(export_id), {"observed_state": "packing", "archive_bytes": 5,
+            "archive_sha256": "b" * 64, "archive_version_id": "version-one"})
+        async with blocker.transaction():
+            await blocker.fetchval("SELECT 1 FROM exomem_cloud_exports WHERE export_id=$1 FOR UPDATE", export_id)
+            async with app.transaction():
+                await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", cell_id)
+                task = asyncio.create_task(db.write_export(controller, str(export_id), {
+                    "observed_state": "ready", "ready_at": datetime(2026, 1, 1, tzinfo=UTC),
+                    "expires_at": datetime(2026, 1, 2, tzinfo=UTC)}))
+                for _ in range(100):
+                    waiting = await observer.fetchval("SELECT wait_event_type='Lock' FROM pg_stat_activity WHERE pid=$1",
+                                                      controller.get_server_pid())
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                assert waiting
+            await asyncio.wait_for(task, timeout=5)
+        assert await app.fetchval("SELECT observed_state FROM exomem_cloud_exports WHERE export_id=$1", export_id) == "packing"
+    finally:
+        await controller.close()
+        await app.close()
+        await blocker.close()
+        await observer.close()
