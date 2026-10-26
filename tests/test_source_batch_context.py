@@ -143,3 +143,13 @@ def test_a_compilation_scaffold_leaves_out_the_excerpt_of_a_source_the_caller_ma
         "Knowledge Base/Sources/Open/page"
     ]
     assert "salary" not in str(scaffold["source_excerpts"])
+    (sources / "Withheld" / "page.md").unlink()
+    find_module.clear_cache()
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp", resolved=True)):
+        absent = commands.op_propose_compilation(
+            vault, sources=["Sources/Open/page", "Sources/Withheld/page"]
+        )
+    assert scaffold == absent
+    assert scaffold["semantic_compilation"]["preparation_route"]["args"]["sources"] == [
+        "Knowledge Base/Sources/Open/page.md",
+    ]

@@ -134,6 +134,7 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
@@ -1813,7 +1814,7 @@ def op_bootstrap(
                 "raw_material": "capture_source",
                 "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
                 "new_durable_conclusion": "create_note",
-                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance and marks each source processed",
+                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance; one live citing derivative clears the citation backlog, not semantic compilation",
                 "small_correction": "edit_note",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "supersede_note",
@@ -3855,7 +3856,7 @@ def op_audit(
       Bare names resolve against filename stems AND frontmatter `title:`
       (so date-prefixed sources with a title match are not flagged).
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
-    - `unprocessed_source`: source that no live note compiles yet (no page
+    - `unprocessed_source`: source without a live citing derivative (no page
       in its `ingested_into:` is live and cites it in its own `sources:`)
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
@@ -3937,8 +3938,8 @@ def op_attention(
       close enough to restate, refine, or contradict (do they conflict?).
     - `stale_review`: active conclusions that are old AND rarely surfaced in
       `find` AND low inbound-degree (possibly stale — still true?).
-    - `unprocessed_source`: sources captured but never compiled (nothing
-      distilled from them yet).
+    - `unprocessed_source`: sources without a live citing derivative.
+      Citation linkage does not assess semantic compilation.
     - `relation_debt`: active compiled pages with no outbound Markdown
       connections (semantic neighbours are not yet durable graph edges).
 
@@ -4243,15 +4244,14 @@ def op_propose_compilation(
     sources: list[str],
     suggested_title: str | None = None,
 ) -> dict:
-    """Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only.
+    """Offer one optional compiled-note scaffold from captured sources. Read-only.
 
     The backlog-drain companion to `audit`'s `unprocessed_source` findings:
-    point it at one or more raw sources and it hands back a ready-to-fill
-    note skeleton — inferred note_type, a Question/Findings/Relations (or
-    Claim/…) outline, the `sources[]` to cite, and adjacent compiled pages to
-    link (computed via the same hybrid retrieval as `suggest_links`). It
-    does NOT write anything: you fill the prose and call `note()` with the
-    returned `suggested_sources` + `suggested_connections`.
+    It returns an optional outline for one note, citation candidates and
+    adjacent pages for review. It is not a source-wide compilation plan.
+    Read the full material before choosing useful destinations and grounded
+    relations. `suggested_connections` are unreviewed candidates, not accepted
+    edges. Write chosen outputs through the normal governed authoring routes.
 
     Group sources yourself before calling — pass a set that genuinely belongs
     in one note (the audit list is aged oldest-first to help you triage).
@@ -4266,9 +4266,8 @@ def op_propose_compilation(
     Returns:
         {suggested_note_type, suggested_title, suggested_sources,
          suggested_connections, outline_markdown, source_excerpts, warnings}.
-        `source_excerpts` holds one bounded excerpt per source, with its
-        recorded import metadata, so the note can be written without a read
-        per source.
+        `source_excerpts` holds opening-only excerpts and admitted full-source
+        read routes. An excerpt or citation does not establish semantic coverage.
 
     Errors:
         INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).
@@ -8178,14 +8177,16 @@ def op_capture_source(
 
     Proof goes to preserve_evidence or preserve_artifacts. source_kind is
     required; domain is optional. Both accept new slugs. compile_guidance
-    returns a proposal; reuse it instead of calling prepare_note.
+    returns an optional one-note scaffold for text, or read/preparation routes
+    for attachments. Semantic compilation remains unassessed. Capture alone
+    does not require compilation; pending extraction does not prohibit original-media use.
 
     Args:
         content: Raw text. Supply this or `files`, not both.
         source_type: Alias of source_kind; conflicts are refused.
         url: Required when the source kind declares it.
         tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Return a reusable proposal.
+        compile_guidance: Return optional compilation preparation guidance.
         suggested_title: Title hint for the proposal.
         source_kind: What it IS; open lowercase slug, including new kinds.
         domain: What it is ABOUT, lowercase slug.
@@ -8203,6 +8204,7 @@ def op_capture_source(
         source_capture.require_authority(vault_root)
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    out: dict
     if files or adoption is not None:
         from . import client_artifacts
 
@@ -8222,39 +8224,51 @@ def op_capture_source(
             raw_protection=raw_protection,
         )
         _note_committed_artifact_targets(captured)
-        return captured
-    source = _add_source(
-        vault_root,
-        source_schema,
-        kind=kind,
-        content=content,
-        title=title,
-        slug=slug,
-        url=url,
-        tags=tags,
-        why_captured=why_captured,
-        domain=domain,
-        projects=projects,
-        raw_protection=raw_protection,
-        source_identity=source_identity,
-    )
-    out: dict = {"source": source}
-    if source_identity is not None:
-        out["capture_outcome"] = source["capture_outcome"]
-        out["mutated"] = source["capture_outcome"] == "created"
-    # The terminal reads these from the leaf's top level.
-    for key in ("vocabulary_resolution", "vocabulary_receipt"):
-        if key in source:
-            out[key] = source[key]
+        out = captured
+        # Stored/replayed are the successful outcomes fixed by the artifact receipt protocol.
+        source_paths = [
+            row["page"] for row in captured.get("files", [])
+            if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
+        ]
+    else:
+        source = _add_source(
+            vault_root,
+            source_schema,
+            kind=kind,
+            content=content,
+            title=title,
+            slug=slug,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+            raw_protection=raw_protection,
+            source_identity=source_identity,
+        )
+        out = {"source": source}
+        if source_identity is not None:
+            out["capture_outcome"] = source["capture_outcome"]
+            out["mutated"] = source["capture_outcome"] == "created"
+        # The terminal reads these from the leaf's top level.
+        for key in ("vocabulary_resolution", "vocabulary_receipt"):
+            if key in source:
+                out[key] = source[key]
+        source_paths = [source["path"]]
+    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
     if compile_guidance:
-        try:
-            out["compile_guidance"] = op_propose_compilation(
-                vault_root,
-                sources=[source["path"]],
-                suggested_title=suggested_title,
-            )
-        except ValueError as exc:
-            out["compile_guidance"] = {"available": False, "error": str(exc)}
+        if files or adoption is not None:
+            # Originals remain usable while extraction is pending; preparation is optional.
+            out["compile_guidance"] = {"semantic_compilation": out["semantic_compilation"]}
+        else:
+            try:
+                out["compile_guidance"] = op_propose_compilation(
+                    vault_root,
+                    sources=source_paths,
+                    suggested_title=suggested_title,
+                )
+            except ValueError as exc:
+                out["compile_guidance"] = {"available": False, "error": str(exc)}
     return out
 
 

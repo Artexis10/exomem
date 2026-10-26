@@ -54,6 +54,7 @@ from . import (
     relation_review,
     semantic_units,
     semantic_writes,
+    source_coverage,
     tag_variants,
     temporal,
     vocabulary_resolution,
@@ -358,7 +359,10 @@ def _build_write_feedback(
             generic_targets.append(target)
 
     typed_note_relations = len(registered_note_relations)
-    typed_block_relations = sum(len(unit.relations) for unit in document.rich_units)
+    typed_block_relations = sum(
+        registry.resolve(relation.kind).status != "unregistered"
+        for unit in document.rich_units for relation in unit.relations
+    )
     relation_kinds = {relation.kind for relation in document.note_relations} | {
         relation.kind for unit in document.rich_units for relation in unit.relations
     }
@@ -396,8 +400,9 @@ def _build_write_feedback(
         else:
             next_actions.append(
                 "cite the `Sources/` page this drew from in `sources:` — each entry "
-                "appends this note's wikilink to that source's `ingested_into:`, which "
-                "is what marks the source processed"
+                "appends this note's wikilink to that source's `ingested_into:`. "
+                "A live citing derivative clears the citation backlog; semantic "
+                "compilation remains unassessed"
             )
     if relation_debt:
         next_actions.append(
@@ -429,6 +434,7 @@ def _build_write_feedback(
     relation_feedback: dict[str, object] = {
         "typed_note": typed_note_relations,
         "typed_block": typed_block_relations,
+        "count_basis": "registered relation syntax, including generic associations; not semantic specificity",
         "errors": [error.as_dict() for error in document.note_relation_errors],
         "relation_debt": relation_debt,
     }
@@ -457,6 +463,7 @@ def _build_write_feedback(
             "backrefs_planned": backrefs_planned,
             "required": note_type in SOURCES_REQUIRED_TYPES,
             "missing": note_type in SOURCES_REQUIRED_TYPES and not sources_norm,
+            "semantic_compilation": source_coverage.compilation_guidance(vault_root, sources_norm),
         },
         "links": {
             "body_wikilinks": len(body_targets),

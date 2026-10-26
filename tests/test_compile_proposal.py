@@ -69,7 +69,15 @@ def test_proposal_filters_source_connections(vault: Path, monkeypatch) -> None:
     monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: fake)
     res = cp.propose_compilation(vault, sources=[_ARTICLE])
     assert res["suggested_connections"] == ["Knowledge Base/Notes/Insights/keep.md"]
-    assert "- relates_to [[Knowledge Base/Notes/Insights/keep.md]]" in res["outline_markdown"]
+    assert "[[Knowledge Base/Notes/Insights/keep.md]]" not in res["outline_markdown"]
+    assert res["semantic_compilation"]["state"] == "unassessed"
+    assert res["outline_scope"] == "optional_single_destination"
+    [source] = res["source_excerpts"]
+    assert source["excerpt_scope"] == "opening_only"
+    assert source["semantic_compilation"]["full_source_reads"] == [{
+        "tool": "read_memory",
+        "args": {"path": f"{_ARTICLE}.md", "include_raw": True, "purpose": "source compilation"},
+    }]
 
 
 def test_session_source_suggests_research_note(vault: Path, monkeypatch) -> None:

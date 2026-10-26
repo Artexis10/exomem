@@ -21,6 +21,37 @@ The owner approved the autonomous organisation plan. It amends this design as fo
 - **Decision 7.** The rule that the baseline exists before any part of this change merges is replaced. Organisation PR A carries no behaviour layer, so the baseline is main with PR A.
 - **Decision 8.** Organisation PR B replaces the f33 protocol with the revised one: small paired development rounds, then one blind held-out run of 40 independent situations under a new preregistered amendment. The f33 amendment stays filed, sealed and unrun.
 
+### Source-quality repair
+
+This repair does not wait for the deferred entity barrier or behaviour measurement.
+A registry-marked generic relation is connectivity, not typed-specific qualification, regardless of its family.
+Specific relations, refined registry extensions and eligible incoming specific relations retain their qualification.
+When admitted authored explicit relations are all generic, one non-blocking advisory asks the agent to review their meaning.
+That advisory reports the authored pattern even when an incoming specific relation qualifies; it never claims that the page has no typed relation.
+It replaces a duplicate typed-edge-absent warning for the same pattern.
+Other connectivity-only cases retain the existing warning.
+No count, quota, forced predicate, new refusal or entity barrier is introduced.
+
+One live citing derivative clears the existing source-backlog criterion; this establishes citation linkage only.
+Original custody, media extraction, valid citations and semantic compilation are independent facts.
+Source descriptions, proposals and ordinary compact capture/write responses report semantic compilation as `unassessed`.
+No note count, edge count, citation or extraction result establishes semantic completion.
+Feedback uses only the already admitted source view and offers bounded actionable routes; full detail remains available.
+Opening excerpts disclose their limited scope and the existing full-source read route.
+File capture and adoption honour requested compilation guidance instead of returning before that route is prepared.
+Pending media extraction does not prevent the agent from using an available original.
+
+Compile proposals remain optional scaffolds for one note, not source-wide semantic plans.
+Adjacent pages are unreviewed candidates, and the generator authors no generic default bullet or instruction to copy candidates as accepted edges.
+The active conversation agent inventories available full-source themes and central durable referents, then retrieves prior knowledge, entities and filing context.
+It splits independently useful outputs by meaning, preserves attribution and uncertainty, and authors specific grounded relations when appropriate.
+It checks that inventory once after the writes and reports unread, unavailable or uncompiled material honestly.
+The workflow adds no semantic word list, fixed topic set, minimum output count or repeated per-source backlog warning.
+
+The boundary proof uses default MCP capture, attachment and compiled-write responses, with generic-writable and restricted/absent twins.
+These deterministic checks prove the contract and feedback, not no-nudge semantic autonomy.
+Independent source truth, actor runs and scoring remain with the measurement lane under its existing holds.
+
 ### Destructive undo binds the original incarnation
 
 Entity undo binds the immutable page reference from the exact creation image.
