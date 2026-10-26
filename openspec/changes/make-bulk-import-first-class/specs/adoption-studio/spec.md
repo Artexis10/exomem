@@ -43,13 +43,13 @@ Own-note creation SHALL only create pages that did not exist; it SHALL NOT edit,
 
 The `exomem import <folder>` command SHALL enumerate the folder without following symbolic links, and SHALL select files by these rules:
 
-- A hidden entry, at any depth, SHALL be left behind unless the user passes `--include-hidden`.
+- A hidden entry (a name that starts with a dot, or the Windows hidden attribute), at any depth, SHALL be left behind unless the user passes `--include-hidden`.
 - The `.gitignore` files inside the folder SHALL apply, with git's precedence, unless the user passes `--no-gitignore`. The command SHALL NOT hard-code a folder name to leave behind.
-- A symbolic link at any depth SHALL be left behind and never followed. A special file and an unreadable file SHALL be left behind with their own reasons.
+- A symbolic link or a Windows junction at any depth SHALL be left behind and never followed. A special file and an unreadable file SHALL be left behind with their own reasons.
 
-Before it copies, the command SHALL report what it leaves behind, with the count and bytes under each reason, and SHALL report the selected file count and bytes against the effective limits: the free space of the vault's filesystem and the limits the adoption engine enforces. It SHALL refuse before copying, with the measured value and the limit, when a limit would be exceeded. Otherwise it SHALL copy each selected regular file into `_Imports/<import_id>/<folder name>/`, streaming, record a manifest of relative path, size and SHA-256, re-hash every copy, and report progress while copying. Every entry left behind SHALL get a per-path code in the manifest. The command SHALL never modify the original folder, and the folder's name SHALL be the collection label. An interrupted copy SHALL resume from its manifest under the same import id without copying a verified file again.
+Before it copies, the command SHALL report what it leaves behind, with the count and bytes under each reason, and SHALL report the selected file count and bytes against the free space of the vault's filesystem. It SHALL refuse before copying, with the measured bytes and the free space, when the copy plus a reserve does not fit. The limits the adoption engine applies after staging SHALL be warnings, not refusals. Otherwise it SHALL copy each selected regular file into `_Imports/<import_id>/<folder name>/`, streaming, record a manifest of relative path, size and SHA-256, re-hash every copy, and report progress while copying. Every entry left behind SHALL get a per-path code in the manifest. The command SHALL never modify the original folder, and the folder's name SHALL be the collection label. A file that cannot be copied SHALL be left out with a code and SHALL keep the import open: the command SHALL exit with an error and say that the same command run again retries only those files under the same import id. An interrupted or incomplete copy SHALL resume from its manifest under the same import id without copying a verified file again. On a resume, a staged file that the folder no longer selects SHALL be removed and recorded in the manifest, and a staged file that changed after it was verified SHALL be copied again. The command SHALL name an unfinished import made with other options and SHALL NOT resume it, and SHALL NOT let two runs write the same import at once.
 
-The command SHALL end by reporting the bytes it staged, stating that the staged folder is a second copy of the data on the disk until it is discarded, naming the discard route that exists, and printing the `adoption_studio start` path.
+When every selected file is staged, the command SHALL end by reporting the bytes it staged, stating that the staged folder is a second copy of the data on the disk until it is discarded, naming the discard route that exists, and printing the `adoption_studio start` path.
 
 #### Scenario: A local folder is staged and adopted
 
@@ -65,6 +65,16 @@ The command SHALL end by reporting the bytes it staged, stating that the staged 
 
 - **WHEN** the user passes `--include-hidden` or `--no-gitignore`
 - **THEN** the entries of that reason are staged like the others, and the printed `start` path asks adoption to include hidden files when hidden entries were staged
+
+#### Scenario: A file that cannot be copied keeps the import open
+
+- **WHEN** a selected file changes while the command copies it
+- **THEN** the file is not staged torn, the manifest gives it a code, the command exits with an error and names the rerun, and the same command run again copies only that file under the same import id
+
+#### Scenario: A resume removes what the folder no longer holds
+
+- **WHEN** a file staged by an interrupted run is deleted from the folder before the rerun
+- **THEN** the rerun removes the staged file, and the manifest records the removal
 
 #### Scenario: A folder too large for the disk is refused before copying
 
