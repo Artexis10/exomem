@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1529,6 +1530,47 @@ def _clean_tags(tags: list[str] | None) -> list[str]:
     return out
 
 
+def _frontmatter_lines(fields: Mapping[str, str | Sequence[str]]) -> str:
+    """Front-matter lines for a caller's extra fields: a scalar, or an inline list."""
+    lines = []
+    for key, value in fields.items():
+        if isinstance(value, str):
+            lines.append(f"{key}: {yaml_scalar(value)}")
+        else:
+            lines.append(f"{key}: [" + ", ".join(yaml_scalar(item) for item in value) + "]")
+    return "\n".join(lines)
+
+
+def planned_destination(
+    vault_root: Path,
+    *,
+    note_type: str,
+    title: str,
+    slug: str | None = None,
+    project: str | None = None,
+    domain: str | None = None,
+) -> str:
+    """The vault-relative path `note` would create for these inputs now; nothing is written.
+
+    It is the same placement `note` uses, so a caller that must freeze a target before
+    it creates the page (an import plan) asks the leaf instead of computing a folder.
+    """
+    root = Path(vault_root)
+    filename_slug, _warnings = resolve_filename_slug(title, slug, vault_root=root)
+    path = _resolve_path(
+        vault_root=root,
+        note_type=note_type,
+        project=project,
+        slug=filename_slug,
+        domain=domain,
+        medium=None,
+        started=None,
+        date_iso=temporal.render_date(temporal.now()),
+        create_parents=False,
+    )
+    return canonical_vault_rel(root, path.relative_to(root).as_posix())
+
+
 def note(
     vault_root: Path,
     *,
@@ -1572,6 +1614,7 @@ def note(
     topics: str | list[str] | None = None,
     _return_prepared: bool = False,
     _supersedes_target: str | None = None,
+    _extra_frontmatter: Mapping[str, str | Sequence[str]] | None = None,
     _preflight_operation: str = "create",
     _predecessor_path: str | None = None,
     _predecessor_content_hash: str | None = None,
@@ -1782,6 +1825,11 @@ def note(
             if boundary == -1:
                 raise NoteError("INVALID_NOTE", [], "rendered note frontmatter is invalid")
             source = source[:boundary] + "\n" + marker + source[boundary:]
+    if _extra_frontmatter:
+        boundary = source.find("\n---\n", 4)
+        if boundary == -1:
+            raise NoteError("INVALID_NOTE", [], "rendered note frontmatter is invalid")
+        source = source[:boundary] + "\n" + _frontmatter_lines(_extra_frontmatter) + source[boundary:]
     try:
         preflight = semantic_writes.preflight_creation(
             root,

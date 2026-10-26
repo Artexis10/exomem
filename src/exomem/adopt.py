@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from .vault import (
     VaultPathError,
     batch_atomic_write,
     kb_root,
+    parse_frontmatter,
     prepend_log_entry,
     resolve_under_vault,
     unique_path,
@@ -349,6 +351,8 @@ def _provenance_lines(planned: Mapping[str, Any], collection: str | None) -> lis
     lines.append(f"original_bytes: {planned['original_bytes']}")
     if planned.get("previous_import"):
         lines.append(f"previous_import: {yaml_scalar(planned['previous_import'])}")
+    if planned.get("previous_note"):
+        lines.append(f"previous_note: {yaml_scalar(context_refs.vault_ref(planned['previous_note']))}")
     return lines
 
 
@@ -437,6 +441,67 @@ def render_artifact_source(
         artifact_digest=planned["original_sha256"],
         artifact_size=planned["original_bytes"],
         extra_lines=_provenance_lines(planned, collection),
+    )
+
+
+def note_body(planned: Mapping[str, Any], text: str) -> str:
+    """The own note's body: the original body after its front matter, then the generated links.
+
+    The links section is the one a Source gets, with each own-note target replaced by that
+    item's note, so an import never rewrites a sentence of the original.
+    """
+    body = parse_frontmatter(text)[1]
+    links = _links_section({"links": planned["note"]["links"]})
+    return "\n".join([body.rstrip("\n"), "", *links]) if links else body
+
+
+def create_draft_note(
+    root: Path,
+    planned: Mapping[str, Any],
+    text: str,
+    *,
+    source_path: str,
+    collection: str | None,
+) -> Any:
+    """Create one own note as a draft through the note leaf's two-phase creation.
+
+    The leaf validates first, and the commit repeats the same arguments with the
+    draft it returned, so the write is the governed one; no relation disposition
+    is recorded, because a draft has reviewed nothing. Returns the leaf's result;
+    the leaf's `NoteError` reaches the caller unchanged.
+    """
+    from . import note as note_module
+
+    note = planned["note"]
+    arguments: dict[str, Any] = {
+        "content": note_body(planned, text),
+        "note_type": note["note_type"],
+        "title": note["title"],
+        "slug": note.get("slug"),
+        "project": note.get("project"),
+        "domain": note.get("domain"),
+        "tags": list(planned.get("tags") or []),
+        "sources": [adoption_plan.wikilink_for(source_path)],
+        "status": note["status"],
+        "_extra_frontmatter": adoption_plan.note_extra_frontmatter(planned, collection),
+    }
+    preflight = note_module.note(root, validate_only=True, **arguments)
+    if preflight.destination != note["target_path"]:
+        # The leaf moves a note off a taken name; it also moves one when its placement
+        # changed since the plan was made. The first is a conflict, the second a stale plan.
+        if os.path.lexists(root / note["target_path"]):
+            raise AdoptError(
+                "TARGET_OCCUPIED",
+                f"{note['target_path']} already exists and is not an import of this file",
+            )
+        raise AdoptError(
+            "PLAN_STALE",
+            f"the note leaf now places this note at {preflight.destination}; re-plan this import",
+        )
+    return note_module.note(
+        root, **arguments,
+        draft_id=preflight.draft_id, draft_hash=preflight.draft_hash,
+        draft_token=preflight.draft_token,
     )
 
 
