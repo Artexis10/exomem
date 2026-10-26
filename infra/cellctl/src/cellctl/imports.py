@@ -8,13 +8,46 @@ from datetime import datetime, timedelta
 
 from botocore.exceptions import ClientError
 
+from .capacity import GIB, pool_takes
 from .state import CellRow, ClusterObservation, Decision
+from .storage_config import DEFAULT_STORAGE
 
 # C5 fixes these state tokens; they are not tenant vocabulary.
 TERMINAL = frozenset({"done", "failed", "expired", "discarded"})
 PHASES = ("prepare", "import", "cleanup", "discard")
 UPLOAD_DEADLINE = timedelta(hours=24)
 PART_BYTES = 64 * 1024 * 1024
+MAX_PARTS = 10000
+MAX_MEMBERS = 500_000
+RESERVE_BYTES = 256 * 1024 * 1024
+SPACE_FACTOR = 2
+
+
+@dataclass(frozen=True)
+class ImportLimits:
+    max_storage_gib: int
+    import_deadline_seconds: int
+    import_growth_deadline_seconds: int
+    max_members: int = MAX_MEMBERS
+    reserve_bytes: int = RESERVE_BYTES
+    space_factor: int = SPACE_FACTOR
+    part_bytes: int = PART_BYTES
+    max_parts: int = MAX_PARTS
+    upload_window_seconds: int = int(UPLOAD_DEADLINE.total_seconds())
+
+    @classmethod
+    def for_cell(cls, row, observation, storage, config, room):
+        maximum = max(storage.max_cell_gib, row.size_gib)
+        if storage.is_local(storage.claim_class(observation.pvc_storage_class or observation.pv_storage_class)):
+            maximum = row.size_gib
+            if room is not None:
+                for size in range(row.size_gib + 1, storage.max_cell_gib + 1):
+                    free = room.free_bytes.get(observation.pv_node)
+                    if pool_takes(storage.local, free_bytes=free, added_bytes=(size - row.size_gib) * GIB,
+                                  largest_cell_gib=max(room.largest_cell_gib, size)):
+                        maximum = size
+        return cls(maximum, int(config.import_deadline.total_seconds()),
+                   int(config.import_growth_deadline.total_seconds()))
 
 
 @dataclass(frozen=True)
@@ -36,6 +69,9 @@ class ImportRow:
     observed_state: str | None = None
     error_code: str | None = None
     updated_at: datetime | None = None
+    required_storage_gib: int | None = None
+    staged_files: int | None = None
+    staged_bytes: int | None = None
 
     def __post_init__(self):
         if str(uuid.UUID(self.import_id)) != self.import_id:
@@ -67,7 +103,8 @@ def job_name(import_id: str, phase: str) -> str:
 
 
 def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation,
-                  jobs: dict[str, ImportJob], *, now: datetime, config=None) -> Decision | None:
+                  jobs: dict[str, ImportJob], *, now: datetime, config=None,
+                  storage=DEFAULT_STORAGE, storage_room=None) -> Decision | None:
     """Separate work completion, volume release and eventual cleanup."""
     from .decide import DEFAULT_RECONCILE_CONFIG
 
@@ -140,6 +177,24 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
     cleanup_started = cleanup_job.exists or cleanup_job.active or cleanup_job.succeeded or cleanup_job.failed
     running = item.observed_state == "cleanup_running"
     failure = item.error_code
+    waiting_for_storage = False
+    if item.recipient is None and item.required_storage_gib is not None:
+        required = item.required_storage_gib
+        waiting_for_storage = (
+            (row.observed_storage_capacity_bytes or 0) < required * GIB
+            or row.observed_storage_generation != row.generation or observation.pvc_resize_pending
+        )
+        if storage.is_local(observation.pv_storage_class):
+            free = storage_room.free_bytes.get(observation.pv_node) if storage_room else None
+            accepted = observation.pvc_request_bytes
+            if free is None or accepted is None:
+                waiting_for_storage = True
+            elif not pool_takes(storage.local, free_bytes=free,
+                                added_bytes=max(0, required * GIB - accepted),
+                                largest_cell_gib=max(storage_room.largest_cell_gib, required)):
+                failure = failure or "IMPORT_STORAGE_NO_ROOM"
+        if waiting_for_storage and now - item.created_at >= config.import_growth_deadline:
+            failure = failure or "IMPORT_STORAGE_UNAVAILABLE"
     if not running and not cleanup_started:
         if row.desired_state == "stopped" and not imported.succeeded:
             failure = failure or "IMPORT_INTERRUPTED"
@@ -178,6 +233,8 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             decision.import_action = cleanup_phase
         return decision
 
+    if waiting_for_storage:
+        return None  # Ordinary reconciliation keeps the runtime mounted and grows the claim.
     decision = held()
     if item.recipient is None:
         if prepared.succeeded:
@@ -215,7 +272,7 @@ class ImportStorage:
     def prepare(self, item: ImportRow) -> tuple[str, list[dict]]:
         # Recover an upload created before cellctl crashed ahead of its C5 write.
         size = item.ciphertext_bytes
-        if not size or size > 10000 * PART_BYTES:
+        if not size or size > MAX_PARTS * PART_BYTES:
             raise ValueError("ciphertext size exceeds multipart capacity")
         upload_id = (open_uploads(self.client, self.bucket, item.key) or [None])[0]
         if upload_id is None:

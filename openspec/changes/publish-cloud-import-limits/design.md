@@ -90,7 +90,9 @@ Environment variables carry the values because the Job's argument parser refuses
 
 ### D5. Staged counts
 
-When the import Job succeeds, cellctl reads the `{files, bytes}` report that the Job already emits. It writes `staged_files` and `staged_bytes` in the same update that records `done`. A failed or cancelled import records none, and an import that finished earlier has none.
+When the import Job succeeds, cellctl reads the `{files, bytes}` report that the Job already emits. It writes the immutable `staged_files` and `staged_bytes` pair before cleanup removes the successful Job's Pod report. A restart then preserves the report while cleanup and finalization keep their existing volume-release proof.
+
+A missing or invalid report stays unknown and does not block cleanup. A later failure or cancellation may retain the raw pair. Public replies expose the pair only for `done` without pending cancel or discard intent. An import that finished earlier has no pair.
 
 ### D6. The CLI reads the limits
 

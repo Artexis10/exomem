@@ -101,7 +101,7 @@ cellctl SHALL pass the member limit and the free-space reserve to the import Job
 
 ### Requirement: An import records the files and bytes it staged
 
-When an import Job succeeds, cellctl SHALL write `staged_files` and `staged_bytes` from the Job's report, in the same update that records `done`. cellctl SHALL write both or neither. It SHALL write neither for an import that fails, is cancelled or expires.
+When an import Job succeeds with a valid report, cellctl SHALL write `staged_files` and `staged_bytes` together before cleanup can remove the Pod report. Both values SHALL be non-negative integers, excluding booleans. A missing or invalid report SHALL leave the counts unknown and SHALL NOT block cleanup. A later failure, cancellation or expiry MAY retain the raw immutable pair. Public replies SHALL expose the pair only for `done` with no pending cancel or discard intent.
 
 #### Scenario: An import succeeds
 
@@ -110,8 +110,14 @@ When an import Job succeeds, cellctl SHALL write `staged_files` and `staged_byte
 
 #### Scenario: An import fails
 
-- **WHEN** the Job fails
+- **WHEN** the Job fails without a successful report
 - **THEN** the row's staged columns stay NULL
+
+#### Scenario: Cleanup restarts after a successful staging report
+
+- **WHEN** cellctl restarts after it records a valid report and before cleanup ends
+- **THEN** the immutable pair survives Job deletion and finalization
+- **AND** public replies hide the pair if a later cancellation or failure ends the import
 
 ### Requirement: The CLI checks the published limits before it creates an import
 

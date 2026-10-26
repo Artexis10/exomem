@@ -329,3 +329,33 @@ def test_a_wrong_key_reads_as_undecryptable_however_slowly_age_exits(vault, tmp_
     with pytest.raises(cloud_import_job.ArchiveRefused) as refused:
         cloud_import_job.run_import(request, vault, lambda: io.BytesIO(ciphertext))
     assert refused.value.code == "ARCHIVE_UNDECRYPTABLE"
+
+
+@pytest.mark.parametrize("member_limit", [None, "1"])
+def test_job_environment_member_limit_refuses_before_vault_write(vault, tmp_path, monkeypatch, member_limit):
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.delenv("EXOMEM_IMPORT_RESERVE_BYTES", raising=False)
+    if member_limit is None:
+        monkeypatch.delenv("EXOMEM_IMPORT_MAX_MEMBERS", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_IMPORT_MAX_MEMBERS", member_limit)
+    import_id = str(uuid.uuid4())
+    recipient = cloud_import_job.prepare(vault.parent, import_id, CELL)
+    content = b"example"
+    ciphertext = _encrypted(tmp_path, recipient, content)
+    request = cloud_import_job.CloudImportRequest(import_id=import_id, cell_id=CELL, kind="adopt",
+        declared_files=2, declared_bytes=len(content) + len(cloud_import_envelope.Envelope(
+            scope="Device", category="Exports", filename="export.zip").encoded()),
+        ciphertext_bytes=len(ciphertext), ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
+    monkeypatch.setattr(cloud_import_job, "urlopen", lambda *args, **kwargs: io.BytesIO(ciphertext))
+    message = tmp_path / "termination.json"
+    code = cloud_import_job.main(["import", "--vault", str(vault), "--import-id", import_id,
+        "--request", request.model_dump_json(), "--url", "https://storage.example/import",
+        "--termination-log", str(message)])
+    report = json.loads(message.read_text())
+    if member_limit is None:
+        assert code == 0 and report == {"ok": True, "files": 2, "bytes": request.declared_bytes}
+    else:
+        assert code == 1 and report == {"ok": False, "error": "ARCHIVE_TOO_LARGE"}
+        assert not (vault / "_Imports").exists()

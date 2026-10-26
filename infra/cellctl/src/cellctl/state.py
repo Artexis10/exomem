@@ -117,6 +117,7 @@ class CellRow:
     usage_observed_at: datetime | None = None
     # Read only: a cell never backed up ages its backup alert from here.
     created_at: datetime | None = None
+    import_limits: dict | None = None
 
     @property
     def size_gib(self) -> int:
@@ -172,6 +173,7 @@ class ClusterObservation:
     pvc_uid: str | None = None
     pvc_resource_version: str | None = None
     pvc_capacity_bytes: int | None = None
+    pvc_request_bytes: int | None = None
     pvc_resize_pending: bool = False
     pv_claim_ref_uid: str | None = None
     pv_storage_class: str | None = None

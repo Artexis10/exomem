@@ -17,6 +17,7 @@ import pytest
 
 from cellctl import db, reconcile
 from cellctl.capacity import CapacityObservation, LocalCapacityObservation
+from cellctl.k8s_client import quantity
 from cellctl.manifests import STORAGE_CLASS, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
@@ -40,6 +41,7 @@ def _served(cell_id: str = "aaaaaaaaaaaaaaaa", **overrides: object) -> ClusterOb
         namespace_cell_label=cell_id,
         pvc_bound=True,
         pvc_uid="pvc-uid-1",
+        pvc_request_bytes=10 * 1024**3,
         pv_claim_ref_uid="pvc-uid-1",
         pv_storage_class=STORAGE_CLASS,
         statefulset_exists=True,
@@ -1177,6 +1179,9 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         namespace_cell_label=cell_id,
         pvc_bound=True,
         pvc_uid="pvc-uid-1",
+        pvc_request_bytes=int(quantity(cluster.applied.get(
+            (namespace_name(cell_id), "PersistentVolumeClaim", "cell-data"),
+            {"spec": {"resources": {"requests": {"storage": "10Gi"}}}})["spec"]["resources"]["requests"]["storage"])),
         pv_claim_ref_uid="pvc-uid-1",
         pv_storage_class=STORAGE_CLASS,
         statefulset_exists=True,

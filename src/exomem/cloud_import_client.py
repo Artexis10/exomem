@@ -150,7 +150,8 @@ def _expected_ciphertext(members: Iterable[tuple[str, int]], folders: Iterable[s
     return tar + tar // 4096 + 1024
 
 
-def _inventory(source: Path, envelope, *, include_hidden: bool, use_gitignore: bool, progress: Progress) -> _Plan:
+def _inventory(source: Path, envelope, *, include_hidden: bool, use_gitignore: bool, progress: Progress,
+               max_members: int | None = DEFAULT_MAX_MEMBERS) -> _Plan:
     """What the import will carry, reported before anything is built."""
     if envelope is not None:
         encoded = envelope.encoded()
@@ -170,25 +171,28 @@ def _inventory(source: Path, envelope, *, include_hidden: bool, use_gitignore: b
         parts = rel.split("/")[:-1]
         folders.update("/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
     entries = len(members) + len(folders)
-    if entries > DEFAULT_MAX_MEMBERS:
+    if max_members is not None and entries > max_members:
         raise CloudImportError(
             PREFLIGHT, ARCHIVE_TOO_LARGE,
             f"the archive would hold {entries:,} entries (files and folders) and Cloud accepts at most "
-            f"{DEFAULT_MAX_MEMBERS:,}; import subfolders one at a time")
+            f"{max_members:,}; import subfolders one at a time")
     return _Plan("adopt", len(members), sum(size for _, size in members), _expected_ciphertext(members, folders), selection)
 
 
-def _check_resources(plan: _Plan, checkpoint: Path, progress: Progress, free_bytes: Callable[[Path], int]) -> None:
+def _check_resources(plan: _Plan, checkpoint: Path, progress: Progress, free_bytes: Callable[[Path], int],
+                     reserve_bytes: int | None = DEFAULT_RESERVE_BYTES) -> None:
     """Refuse before the archive is built when the encrypted copy cannot be written."""
     if shutil.which("age") is None:
         raise CloudImportError(PREFLIGHT, "AGE_MISSING", "the age tool is not on PATH; install age and run the command again")
+    if reserve_bytes is None:
+        return
     free = free_bytes(checkpoint)
     progress.say(f"The encrypted copy needs about {human_bytes(plan.expected_ciphertext)} in {checkpoint}, "
-                 f"and the disk keeps a reserve of {human_bytes(DEFAULT_RESERVE_BYTES)}; {human_bytes(free)} is free there.")
-    if plan.expected_ciphertext + DEFAULT_RESERVE_BYTES > free:
+                 f"and the disk keeps a reserve of {human_bytes(reserve_bytes)}; {human_bytes(free)} is free there.")
+    if plan.expected_ciphertext + reserve_bytes > free:
         raise CloudImportError(
             PREFLIGHT, "INSUFFICIENT_DISK",
-            f"the encrypted copy needs about {plan.expected_ciphertext} bytes plus a reserve of {DEFAULT_RESERVE_BYTES} "
+            f"the encrypted copy needs about {plan.expected_ciphertext} bytes plus a reserve of {reserve_bytes} "
             f"bytes and {free} bytes are free; free space or pass --checkpoint on a larger disk")
 
 
@@ -286,14 +290,15 @@ def _ciphertext(source: Path, target: Path, recipient: str, envelope, plan: _Pla
         pending.unlink(missing_ok=True)
 
 
-def _abandoned(record: Path, ciphertext: Path, import_id: str, code: str, why: str) -> CloudImportError:
+def _abandoned(record: Path, ciphertext: Path, import_id: str, code: str, why: str,
+               *, phase: str = ARCHIVE) -> CloudImportError:
     """Remove a checkpoint that cannot resume, and say what happens next and how to stop the open import."""
     record.unlink(missing_ok=True)
     ciphertext.unlink(missing_ok=True)
     return CloudImportError(
-        ARCHIVE, code,
-        f"{why}. The checkpoint is removed, and a new run starts a new import. Cloud import {import_id} may still "
-        f"be open; to stop it, {_STOP_ON_CLOUD}",
+        phase, code,
+        f"{why}. The checkpoint is removed. Cancel Cloud import {import_id}: {_STOP_ON_CLOUD}, "
+        "then start a new run, which starts a new import",
         import_id, resume=False)
 
 
@@ -301,6 +306,21 @@ def _coded(where: _Where, error: Exception) -> CloudImportError:
     """The content-free failure for an exception; a provider message can hold a signed URL."""
     if isinstance(error, httpx2.HTTPStatusError):
         code, message = server_code(error.response), "the Cloud API or storage refused the request"
+        # C5 fixes these typed admission refusals; they never carry file names.
+        # nosemgrep: ep-word-membership -- C5 fixes these admission refusal codes.
+        if code in ("IMPORT_TOO_MANY_FILES", "IMPORT_STORAGE_LIMIT", "IMPORT_PARTS_LIMIT"):
+            try:
+                limit = error.response.json()["error"]["limit"]
+                unit = safe_code(limit.get("unit"))
+                maximum, requested = limit.get("value"), limit.get("requested")
+                # C5 fixes the units; arbitrary server text must not reach the report.
+                # nosemgrep: ep-word-membership -- C5 fixes these units.
+                if unit not in ("files", "bytes") or type(maximum) is not int or type(requested) is not int:
+                    raise ValueError
+                message = f"Cloud accepts at most {maximum:,} {unit}; the import requests {requested:,} {unit}"
+            except (KeyError, TypeError, ValueError, AttributeError):
+                message = "Cloud refused the import's published limit"
+            return CloudImportError(where.phase, code, message, where.import_id, resume=False)
         # IMPORT_CONFLICT is Cloud's documented refusal while another import is open. Every rerun is refused the
         # same way until that import ends, so the failure must not say to resume.
         if where.phase == REGISTER and code == "IMPORT_CONFLICT":
@@ -355,33 +375,6 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
         _prepare_windows_private_state_root(checkpoint)
     record = checkpoint / "checkpoint.json"
     ciphertext = checkpoint / "archive.age"
-    options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
-    plan: _Plan | None = None
-    if record.exists():
-        state = json.loads(record.read_text(encoding="utf-8"))
-        if state["source"] != str(source) or state["config"] != asdict(config):
-            raise CloudImportError(PREFLIGHT, "CHECKPOINT_MISMATCH", "the checkpoint belongs to another source or Cloud endpoint")
-        if state.get("selection", options) != options:
-            raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
-                                   "the checkpoint was made with other --include-hidden or --no-gitignore options")
-        where.import_id = state["import_id"]
-        progress.say(f"Resuming import {state['import_id']} from {checkpoint}.")
-    else:
-        if source.is_file():
-            if not scope or not category:
-                raise CloudImportError(PREFLIGHT, "SCOPE_AND_CATEGORY_REQUIRED", "ZIP imports require --scope and --category")
-            envelope = cloud_import_envelope.Envelope(scope=scope, category=category, filename=source.name)
-        elif source.is_dir():
-            envelope = None
-        else:
-            raise CloudImportError(PREFLIGHT, "SOURCE_NOT_FOUND", "the source must be a folder or a ZIP file")
-        plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore, progress=progress)
-        _check_resources(plan, checkpoint, progress, free_bytes)
-        state = {"source": str(source), "config": asdict(config), "import_id": str(uuid.uuid4()),
-                 "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
-                 "envelope": envelope.model_dump() if envelope else None, "selection": options}
-        where.import_id = state["import_id"]
-        _private_json(record, state)
     own_api, own_uploads = api is None, uploads is None
     if api is None:
         api = authorized_api_client(config)
@@ -389,7 +382,51 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
         # Presigned storage URLs never receive the API's OAuth bearer.
         uploads = httpx2.AsyncClient(timeout=120)
     base = config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports"
-    endpoint = base + "/" + state["import_id"]
+    try:
+        response = await api.request("GET", base)
+        response.raise_for_status()
+        listing = response.json()
+        limits = listing.get("limits", {"max_members": DEFAULT_MAX_MEMBERS, "reserve_bytes": DEFAULT_RESERVE_BYTES})
+        if limits is None:
+            max_members = reserve_bytes = None
+            progress.say("Import limits are not published; the cell checks limits during the import.")
+        else:
+            max_members, reserve_bytes = limits["max_members"], limits["reserve_bytes"]
+        options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
+        plan: _Plan | None = None
+        if record.exists():
+            state = json.loads(record.read_text(encoding="utf-8"))
+            if state["source"] != str(source) or state["config"] != asdict(config):
+                raise CloudImportError(PREFLIGHT, "CHECKPOINT_MISMATCH", "the checkpoint belongs to another source or Cloud endpoint")
+            if state.get("selection", options) != options:
+                raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
+                                       "the checkpoint was made with other --include-hidden or --no-gitignore options")
+            where.import_id = state["import_id"]
+            progress.say(f"Resuming import {state['import_id']} from {checkpoint}.")
+        else:
+            if source.is_file():
+                if not scope or not category:
+                    raise CloudImportError(PREFLIGHT, "SCOPE_AND_CATEGORY_REQUIRED", "ZIP imports require --scope and --category")
+                envelope = cloud_import_envelope.Envelope(scope=scope, category=category, filename=source.name)
+            elif source.is_dir():
+                envelope = None
+            else:
+                raise CloudImportError(PREFLIGHT, "SOURCE_NOT_FOUND", "the source must be a folder or a ZIP file")
+            plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore, progress=progress, max_members=max_members)
+            _check_resources(plan, checkpoint, progress, free_bytes, reserve_bytes)
+            state = {"source": str(source), "config": asdict(config), "import_id": str(uuid.uuid4()),
+                     "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
+                     "envelope": envelope.model_dump() if envelope else None, "selection": options}
+            where.import_id = state["import_id"]
+            _private_json(record, state)
+        endpoint = base + "/" + state["import_id"]
+
+    except BaseException:
+        if own_api:
+            await api.aclose()
+        if own_uploads:
+            await uploads.aclose()
+        raise
 
     async def call(method, url, **kwargs):
         response = await api.request(method, url, **kwargs)
@@ -441,11 +478,12 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             envelope = cloud_import_envelope.Envelope.model_validate(state["envelope"]) if state["envelope"] else None
             if plan is None:
                 # A restart after the import was declared but before the archive was built: walk the source again.
-                plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore, progress=progress)
+                plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore,
+                                  progress=progress, max_members=max_members)
                 if (plan.files, plan.bytes) != (state["declared_files"], state["declared_bytes"]):
                     raise _abandoned(record, ciphertext, state["import_id"], "SOURCE_CHANGED",
                                      "the source changed since this import was declared")
-                _check_resources(plan, checkpoint, progress, free_bytes)
+                _check_resources(plan, checkpoint, progress, free_bytes, reserve_bytes)
             progress.say("Archiving and encrypting.")
             try:
                 await asyncio.to_thread(_ciphertext, source, ciphertext, item["recipient"], envelope, plan, progress)
@@ -465,19 +503,29 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
         cipher = {"ciphertext_sha256": digest, "ciphertext_bytes": size}
         where.phase = UPLOAD
         if item["requested_state"] == "requested":
-            await call("POST", endpoint + "/prepare-upload", json=cipher)
+            try:
+                await call("POST", endpoint + "/prepare-upload", json=cipher)
+            except httpx2.HTTPStatusError as error:
+                if server_code(error.response) != "IMPORT_PARTS_LIMIT":
+                    raise
+                refusal = _coded(where, error)
+                raise _abandoned(record, ciphertext, state["import_id"], refusal.code,
+                                 refusal.message, phase=UPLOAD) from None
             item = await wait_for(lambda row: bool(row.get("part_urls")))
             parts = item["part_urls"]
             if sum(part["part_size_bytes"] for part in parts) != size:
-                raise CloudImportError(UPLOAD, "PARTS_INVALID", "the issued upload parts do not cover the encrypted copy")
+                raise _abandoned(record, ciphertext, state["import_id"], "PARTS_INVALID",
+                                 "the issued upload parts do not cover the encrypted copy", phase=UPLOAD)
             sent = 0
             with ciphertext.open("rb") as stream:
                 for ordinal, part in enumerate(parts, 1):
                     if part["part_number"] != ordinal:
-                        raise CloudImportError(UPLOAD, "PARTS_INVALID", "the issued upload parts are out of order")
+                        raise _abandoned(record, ciphertext, state["import_id"], "PARTS_INVALID",
+                                         "the issued upload parts are out of order", phase=UPLOAD)
                     payload = stream.read(part["part_size_bytes"])
                     if len(payload) != part["part_size_bytes"]:
-                        raise CloudImportError(UPLOAD, "CIPHERTEXT_SHORT", "the encrypted copy ended early")
+                        raise _abandoned(record, ciphertext, state["import_id"], "CIPHERTEXT_SHORT",
+                                         "the encrypted copy ended early", phase=UPLOAD)
                     if str(ordinal) not in state["parts"]:
                         response = await uploads.put(part["url"], content=payload,
                                                      headers={"Content-Length": str(len(payload))})
@@ -550,5 +598,6 @@ def main(argv=None) -> int:
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
         print(json.dumps({"ok": False, "error": type(error).__name__}))
         return 1
-    print(json.dumps({"ok": True, "import_id": result["import_id"], "state": result["observed_state"]}))
+    print(json.dumps({"ok": True, "import_id": result["import_id"], "state": result["observed_state"],
+                      **{key: result[key] for key in ("staged_files", "staged_bytes") if result.get(key) is not None}}))
     return 0
