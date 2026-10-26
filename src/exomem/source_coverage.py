@@ -228,10 +228,12 @@ def compilation_guidance(root: Path, paths: Sequence[str]) -> dict[str, Any]:
     from .governance import egress
 
     keep = egress.restricted_release_filter(root)
+    # Citation closure owns parent-reference syntax; preparation reads the whole source.
+    source_paths = (
+        source_closure._target(path).removesuffix(".md") + ".md" for path in paths
+    )
     released = list(dict.fromkeys(
-        path if path.endswith(".md") else f"{path}.md"
-        for path in paths
-        if keep is None or keep(path if path.endswith(".md") else f"{path}.md")
+        path for path in source_paths if keep is None or keep(path)
     ))
     selected = [path for path in released if len(path) <= COMPILATION_PATH_CHARS][
         :COMPILATION_SOURCES_LISTED

@@ -309,7 +309,7 @@
     }
   },
   "capture_source": {
-    "description": "Save raw text or file handles losslessly in Sources/.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns an optional one-note scaffold for text, or read/preparation routes\nfor attachments. Semantic compilation remains unassessed. Capture alone\ndoes not require compilation; pending extraction does not prohibit original-media use.",
+    "description": "Save raw text or file handles losslessly in Sources/.\n\nProof: preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Capture leaves semantic\ncompilation unassessed. Pending extraction permits original-media use.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -344,27 +344,27 @@
         },
         "compile_guidance": {
           "default": false,
-          "description": "Return optional compilation preparation guidance.",
+          "description": "Optional text scaffold or attachment read/preparation routes.",
           "type": "boolean"
         },
         "suggested_title": {
           "type": "string",
-          "description": "Title hint for the proposal."
+          "description": "Optional outline title."
         },
         "source_kind": {
           "type": "string",
-          "description": "What it IS; open lowercase slug, including new kinds."
+          "description": "Kind; open lowercase slug."
         },
         "domain": {
           "type": "string",
-          "description": "What it is ABOUT, lowercase slug."
+          "description": "Topic; open lowercase slug."
         },
         "projects": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "Project keys served; never affects storage."
+          "description": "Project keys; does not affect storage."
         },
         "files": {
           "default": [],

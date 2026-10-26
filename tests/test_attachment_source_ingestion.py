@@ -1161,11 +1161,25 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
                 "## Observations\n\n- [constraint] Verify access after the reopening.\n\n"
                 "## Relations\n\n- relates_to [[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]\n"
             ),
-            "sources": [page_path],
+            "sources": [f"{page_path}#Capture" if mode == "text" else page_path],
         }, run_middleware=False))
     written = result.structured_content
     assert written["state"] == "committed", written
     assert written["semantic_compilation"]["state"] == "unassessed"
+    if mode == "text":
+        guidance = written["semantic_compilation"]
+        [read_route] = guidance["full_source_reads"]
+        assert read_route["args"]["path"] == page_path
+        with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+            readback = asyncio.run(mcp.call_tool(
+                read_route["tool"], read_route["args"], run_middleware=False,
+            )).structured_content
+            prepared = asyncio.run(mcp.call_tool(
+                guidance["preparation_route"]["tool"],
+                guidance["preparation_route"]["args"], run_middleware=False,
+            )).structured_content
+        assert original.decode() in readback["body"], readback
+        assert prepared["suggested_sources"] == [page_path.removesuffix(".md")], prepared
     assert [item["code"] for item in written["semantic_advisory"]["findings"]] == [
         "RELATION_AUTHORED_ALL_GENERIC",
     ]

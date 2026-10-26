@@ -8175,22 +8175,20 @@ def op_capture_source(
 ) -> dict:
     """Save raw text or file handles losslessly in Sources/.
 
-    Proof goes to preserve_evidence or preserve_artifacts. source_kind is
-    required; domain is optional. Both accept new slugs. compile_guidance
-    returns an optional one-note scaffold for text, or read/preparation routes
-    for attachments. Semantic compilation remains unassessed. Capture alone
-    does not require compilation; pending extraction does not prohibit original-media use.
+    Proof: preserve_evidence or preserve_artifacts. source_kind is
+    required; domain is optional. Capture leaves semantic
+    compilation unassessed. Pending extraction permits original-media use.
 
     Args:
         content: Raw text. Supply this or `files`, not both.
         source_type: Alias of source_kind; conflicts are refused.
         url: Required when the source kind declares it.
         tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Return optional compilation preparation guidance.
-        suggested_title: Title hint for the proposal.
-        source_kind: What it IS; open lowercase slug, including new kinds.
-        domain: What it is ABOUT, lowercase slug.
-        projects: Project keys served; never affects storage.
+        compile_guidance: Optional text scaffold or attachment read/preparation routes.
+        suggested_title: Optional outline title.
+        source_kind: Kind; open lowercase slug.
+        domain: Topic; open lowercase slug.
+        projects: Project keys; does not affect storage.
         files: Client file handles, captured instead of `content`.
         adoption: Selects exactly one supplied handle. Establishes eligibility,
             not write consent; agent-initiated use obeys proactive_capture.
