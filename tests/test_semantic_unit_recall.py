@@ -167,6 +167,80 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
             assert hidden.relative_to(tmp_path).as_posix() not in parents
 
 
+@pytest.mark.parametrize("result_level", ["unit", "mixed"])
+def test_published_unit_release_removes_corpus_policy_reads_without_changing_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, result_level: str,
+    record_testsuite_property,
+) -> None:
+    """Warm unit ranking must skip corpus policy reads while keeping the live path's hits."""
+    import threading
+
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    write_scope(tmp_path, paths="Notes/held-*.md", name="Restricted readings", default_deny=True)
+    write_rule(tmp_path, ceiling=egress.LEVEL_FULL, audience="partner")
+    _reset_caches()
+    request_thread = threading.get_ident()
+    decide = egress._decide_path
+    decisions: list[str] = []
+
+    def counted(root, path, *args, **kwargs):
+        if threading.get_ident() == request_thread:
+            decisions.append(path)
+        return decide(root, path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "_decide_path", counted)
+    callers = (owner_principal(), RequestPrincipal(audience_id="partner", surface="mcp"),
+               RequestPrincipal(audience_id="external", surface="mcp"))
+    monkeypatch.setattr(embeddings, "embed_texts",
+                        lambda _texts, *, is_query: np.stack([_vector(1.0)]))
+    index = embeddings.get_embedding_index(tmp_path)
+    counts: dict[str, list[dict[str, int]]] = {who.audience_id: [] for who in callers}
+    for start, stop in ((0, 40), (40, 160)):
+        for number in range(start, stop):
+            name = f"held-{number:03d}" if number % 4 == 0 else f"open-{number:03d}"
+            words = "Harbor gauges" if number < 20 else "Distant river currents"
+            path = _write_page(tmp_path, name, body=f"- [config] {words} reading {number}. ^reading")
+            state = semantic_index.build_parent_index_state(tmp_path, path)
+            index.upsert_semantic_units(state, np.stack([_vector(1.0, number / 200)]), 1.0)
+        warm_managed_cell(tmp_path)
+        monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        for who in callers:
+            options = dict(query="harbor gauges", mode="hybrid", scope="kb-only",
+                           graph=False, rerank=False, result_level=result_level, limit=3)
+            with request_scope(who):
+                commands.op_find(tmp_path, **options)
+            decisions.clear()
+            with request_scope(who):
+                warmed = commands.op_find(tmp_path, **options)
+            warm_decisions = len(decisions)
+            # The old per-page path is the identity control, including scores and ranks.
+            decisions.clear()
+            with monkeypatch.context() as control:
+                control.setattr(find_module.FreshnessSnapshot, "_published_admitted_paths",
+                                lambda *_args, **_kwargs: None)
+                with request_scope(who):
+                    fresh = commands.op_find(tmp_path, **options)
+            counts[who.audience_id].append({"parents": stop, "published": warm_decisions,
+                                           "live": len(decisions)})
+            assert warmed == fresh
+            # Every caller avoids the vector mask's corpus pass. Restricted
+            # callers also avoid re-deciding the admitted lexical statistics.
+            passes = 1 if who.audience_id == "owner" else 2
+            assert len(decisions) - warm_decisions >= stop * passes, counts[who.audience_id]
+            hits = warmed["hits"] if isinstance(warmed, dict) else warmed
+            assert hits
+            if who.audience_id == "external":
+                assert all("/held-" not in hit.get("parent_path", hit.get("path", ""))
+                           for hit in hits)
+    record_testsuite_property(f"warm_release_decisions_{result_level}", counts)
+
+
 @pytest.mark.parametrize(("mode", "query", "updated_after"), [
     pytest.param("keyword", "emberlamp", None, id="keyword"),
     pytest.param("hybrid", "emberlamp", None, id="hybrid"),
