@@ -110,7 +110,19 @@ Alternative rejected: a new bulk work-item tool. Curation's work item refuses So
 
 `adoption_studio start` keeps its vault-relative contract. A path that is absolute, or that resolves outside the vault, is refused with `IMPORT_PATH_OUTSIDE_VAULT`, whose message names `exomem import <folder>`.
 
-`exomem import <folder>` is a local CLI command. It enumerates the folder without following symbolic links, reports the file count and bytes against the effective limits (the free space of the vault's filesystem and the adoption limits that the engine enforces), and refuses before copying when a limit would be exceeded. Otherwise it copies each regular file into `_Imports/<import_id>/<folder name>/`, streaming, with a manifest of relative path, size and SHA-256, then re-hashes the copies. It reports progress while it copies and ends with the `adoption_studio start` path to use. Symbolic links, special files and unreadable files get a per-path code in the manifest; none is dropped silently. The original folder is never modified. An interrupted copy resumes from its manifest under the same import id.
+`exomem import <folder>` is a local CLI command. It enumerates the folder without following symbolic links and applies the selection rules below before it reports or copies anything. It then reports the selected file count and bytes against the effective limits (the free space of the vault's filesystem, and the adoption limits that the engine enforces), and refuses before copying when a limit would be exceeded. Otherwise it copies each selected regular file into `_Imports/<import_id>/<folder name>/`, streaming, with a manifest of relative path, size and SHA-256, then re-hashes the copies. It reports progress while it copies. The original folder is never modified, and the folder name is the collection label. An interrupted copy resumes under the same import id without copying a verified file again.
+
+The selection rules are shared with `exomem cloud import`, so one folder gives the same selection on either route:
+
+- A hidden entry (a name that starts with a dot, at any depth) is left behind by default.
+- The `.gitignore` files inside the selected folder apply by default, read through a maintained gitignore parser, with git's precedence: the deepest file with an opinion decides, and an ignored folder is not entered. The command never hard-codes a folder name such as `node_modules`; the folder's own rules say what to leave.
+- A symbolic link at any depth is left behind and never followed. A special file or an unreadable file is left behind with its own reason.
+- Before it copies or encrypts, the command reports what is left behind: count and bytes under each reason (hidden, gitignore, symbolic link, special file, unreadable), each entry under the first reason that applies. `--include-hidden` takes hidden entries, and `--no-gitignore` ignores the `.gitignore` files.
+- Every entry left behind gets a per-path code in the manifest; none is dropped silently.
+
+The command ends with the `adoption_studio start` path, and with the bytes it staged. It states that the staged folder is a second copy of the data on the disk until it is discarded. No Exomem command discards a staged folder: after adoption finishes, the user deletes `_Imports/<import_id>/`. The Sources that adoption committed are governed vault pages and stay.
+
+The manifest lives in the user's state folder, not in the vault: a state folder created next to a vault that is not yet initialised blocks the later initialisation.
 
 This reuses the Cloud staging layout, so `_collection_of`, collection identity and re-run dedupe work unchanged. The adoption-studio requirement that local runs never use staging changes to: local runs scan in place inside the vault, and stage only a folder outside it.
 
@@ -118,7 +130,11 @@ Alternative rejected: letting `start` read an outside path on a local install. I
 
 ### D8. The Cloud CLI needs no setup and reports its phases
 
-`exomem cloud import` and `exomem cloud export` default `--mcp-url` and `--api-base-url` to the production Cloud endpoints. The flags and `EXOMEM_CLOUD_MCP_URL`/`EXOMEM_CLOUD_API_BASE_URL` still override them. The endpoints are one product constant in one module. `exomem cloud import` runs a preflight before it builds the archive: it reports files and bytes, and refuses with the measured values when `age` is not on PATH or when the checkpoint directory's free space is smaller than the ciphertext it will write (the ciphertext is a full-size copy). It then prints then progress for archive and encryption (bytes written), upload (parts and bytes), and server import (state). Every failure names its phase, a content-free reason code and the import id. The existing checkpoint keeps resume.
+`exomem cloud import` and `exomem cloud export` default `--mcp-url` and `--api-base-url` to the production Cloud endpoints. The flags and `EXOMEM_CLOUD_MCP_URL`/`EXOMEM_CLOUD_API_BASE_URL` still override them. The endpoints are one product constant in one module.
+
+`exomem cloud import` selects files with the rules of D7, so a symbolic link is skipped and reported instead of stopping the archive walk, and it reports what it leaves behind before it builds the archive. Its preflight then reports the selected files and bytes, and refuses with the measured values when `age` is not on PATH or when the checkpoint directory's free space is smaller than the ciphertext it will write (the ciphertext is a full-size copy). The client does not carry the cell's member, path or name limits; the cell enforces them, and a published contract can supply them to the client later.
+
+It prints human-readable progress to standard error for archive and encryption (bytes written), upload (parts and bytes), and server import (state). Every failure names its phase, a content-free reason code and the import id, and never a file name or a presigned address. The final standard-output line stays one JSON object, and fields are only added. The existing checkpoint keeps resume. When the run ends, it reports the ciphertext bytes that stay on the disk, states that they duplicate the data until the import finishes, and names the discard route: delete the checkpoint folder and ask the assistant to cancel or discard the import through `transfer_memory`.
 
 ## Risks / Trade-offs
 

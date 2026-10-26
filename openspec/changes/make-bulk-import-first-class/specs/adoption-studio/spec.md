@@ -41,17 +41,40 @@ Own-note creation SHALL only create pages that did not exist; it SHALL NOT edit,
 
 `adoption_studio start` SHALL refuse a `path` that is absolute or that resolves outside the vault with `IMPORT_PATH_OUTSIDE_VAULT`, and the message SHALL name `exomem import <folder>`.
 
-The `exomem import <folder>` command SHALL enumerate the folder without following symbolic links and SHALL report the file count and bytes against the effective limits before copying: the free space of the vault's filesystem and the limits the adoption engine enforces. It SHALL refuse before copying, with the measured value and the limit, when a limit would be exceeded. Otherwise it SHALL copy each regular file into `_Imports/<import_id>/<folder name>/`, streaming, record a manifest of relative path, size and SHA-256, re-hash every copy, report progress while copying, and end with the `adoption_studio start` path. A symbolic link, special file or unreadable file SHALL get a per-path code in the manifest. The command SHALL never modify the original folder. An interrupted copy SHALL resume from its manifest under the same import id without copying a verified file again.
+The `exomem import <folder>` command SHALL enumerate the folder without following symbolic links, and SHALL select files by these rules:
+
+- A hidden entry, at any depth, SHALL be left behind unless the user passes `--include-hidden`.
+- The `.gitignore` files inside the folder SHALL apply, with git's precedence, unless the user passes `--no-gitignore`. The command SHALL NOT hard-code a folder name to leave behind.
+- A symbolic link at any depth SHALL be left behind and never followed. A special file and an unreadable file SHALL be left behind with their own reasons.
+
+Before it copies, the command SHALL report what it leaves behind, with the count and bytes under each reason, and SHALL report the selected file count and bytes against the effective limits: the free space of the vault's filesystem and the limits the adoption engine enforces. It SHALL refuse before copying, with the measured value and the limit, when a limit would be exceeded. Otherwise it SHALL copy each selected regular file into `_Imports/<import_id>/<folder name>/`, streaming, record a manifest of relative path, size and SHA-256, re-hash every copy, and report progress while copying. Every entry left behind SHALL get a per-path code in the manifest. The command SHALL never modify the original folder, and the folder's name SHALL be the collection label. An interrupted copy SHALL resume from its manifest under the same import id without copying a verified file again.
+
+The command SHALL end by reporting the bytes it staged, stating that the staged folder is a second copy of the data on the disk until it is discarded, naming the discard route that exists, and printing the `adoption_studio start` path.
 
 #### Scenario: A local folder is staged and adopted
 
 - **WHEN** `exomem import ~/Notes` runs for a folder outside the vault and adoption then starts on the printed path
 - **THEN** the staged files' hashes equal the originals', the manifest accounts for every entry, and the collection label is the folder's name
 
+#### Scenario: Hidden entries, ignored files and links stay behind and are reported
+
+- **WHEN** the folder holds a hidden folder, a file that its `.gitignore` names, and a symbolic link
+- **THEN** none of them is copied, the report before the copy counts each under its reason with bytes, and the manifest gives each a code
+
+#### Scenario: A user opts back in
+
+- **WHEN** the user passes `--include-hidden` or `--no-gitignore`
+- **THEN** the entries of that reason are staged like the others, and the printed `start` path asks adoption to include hidden files when hidden entries were staged
+
 #### Scenario: A folder too large for the disk is refused before copying
 
 - **WHEN** the folder's bytes exceed the vault filesystem's free space
 - **THEN** the command refuses with the measured bytes and the free space, and copies nothing
+
+#### Scenario: The command names the second copy
+
+- **WHEN** staging finishes
+- **THEN** the report gives the staged bytes, says that they duplicate the original until discarded, and names the discard route
 
 #### Scenario: An outside path given to start is refused with the route
 
