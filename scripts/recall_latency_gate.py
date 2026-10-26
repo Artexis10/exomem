@@ -1159,7 +1159,7 @@ def absolute_cli(output: Path, *, quiescence_bound: float) -> int:
                     worker.close()
                     worker = None
     except (ValueError, OSError) as error:
-        report.update(state="not measured",
+        report.update(state="refused" if isinstance(error, MeasurementRefused) else "not measured",
                       reason=error.code if isinstance(error, MeasurementRefused) else type(error).__name__,
                       phase=(error.phase or "reference-preparation") if isinstance(error, MeasurementRefused)
                       else "reference-preparation")

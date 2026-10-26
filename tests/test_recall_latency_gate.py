@@ -1223,6 +1223,14 @@ def test_missing_prose_refuses_before_a_worker_or_encoder_starts(tmp_path: Path,
     with pytest.raises(gate.MeasurementRefused, match="reference-prose"):
         gate.reference_cases(profile, tmp_path)
 
+    reference_cases = gate.reference_cases
+    monkeypatch.setattr(gate, "reference_cases", lambda _profile: reference_cases(profile, tmp_path))
+    output = tmp_path / "absolute.json"
+    assert gate.absolute_cli(output, quiescence_bound=0) == 0
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused"
+    assert report["reason"] == "reference-prose-unavailable"
+
 
 def test_worker_sample_includes_bound_command_logging(tmp_path: Path, monkeypatch, warm_managed_cell) -> None:
     from types import SimpleNamespace
