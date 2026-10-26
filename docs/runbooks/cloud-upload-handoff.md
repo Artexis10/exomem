@@ -1,0 +1,49 @@
+<!-- authority:non-specification -->
+
+# Cloud upload handoff configuration
+
+A Cloud cell can issue the same exact-byte upload handoff as a personal server.
+The Substrate gateway signs which OAuth login sent each request, and the cell
+verifies that proof with the gateway's public key. This runbook covers the cell
+side; the gateway side is in the Substrate Cloud operations runbook. It does not
+authorize a live rollout.
+
+## What a configured cell does
+
+- It publishes `transfer_artifact`, for `hold=true` uploads only.
+- It serves one private `POST /upload` route. The route requires the cell bearer,
+  then a gateway proof bound to the exact ticket, before it claims the ticket.
+- It refuses the route while `EXOMEM_CLOUD_READ_ONLY` is set, and leaves the
+  ticket unspent.
+- It keeps every other Cloud exclusion. It serves no `/download`, REST or
+  resumable upload route.
+
+## Configuration
+
+| Variable | Value |
+|---|---|
+| `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY` | The PEM public half of the gateway's Ed25519 artifact signing pair. Set it only on cells selected for uploads. |
+
+The gateway selects the same cells with `EXOMEM_CLOUD_UPLOAD_CELL_IDS`. A cell in
+one list and not the other offers no working handoff: keep the two lists equal.
+A malformed key stops the cell at startup and names only the variable.
+The cell never receives the private half.
+
+The platform chart and cellctl do not yet render this variable. Production
+activation adds that rendering for selected cells, the gateway's upload
+variables and an ingress rule for `POST /upload` to the gateway.
+
+## Check a selected cell
+
+1. Call `tools/list` through the gateway; expect `transfer_artifact` and no `read_media`.
+2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256=<digest>)`.
+3. Run `exomem attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
+4. Call `capture_source` with the returned file and the same digest; expect a stored receipt with that hash.
+
+## Undo
+
+1. Remove the cell from the gateway's `EXOMEM_CLOUD_UPLOAD_CELL_IDS`; new uploads to it then fail.
+2. Unset `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY` on the cell and restart it; `transfer_artifact` is withdrawn.
+
+Existing capture receipts stay valid. Unused holds and tickets expire through
+their normal lifetimes.

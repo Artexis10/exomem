@@ -17,7 +17,15 @@ from urllib.parse import urlsplit
 
 from filelock import FileLock
 
-from . import artifact_recovery, auth_sessions, held_uploads, private_state, upload_tokens
+from . import (
+    artifact_recovery,
+    auth_sessions,
+    cloud_cell,
+    cloud_origin,
+    held_uploads,
+    private_state,
+    upload_tokens,
+)
 from .governance import principal, raw_protection
 
 TOKEN_PREFIX = "exomem-upload:"
@@ -43,6 +51,18 @@ def parse_ticket(value: object) -> str | None:
             return nonce
     except ValueError:
         pass
+    return None
+
+
+def parse_handoff_token(value: object) -> str | None:
+    """Return a handoff's upload token in either published form, or None.
+
+    A personal cell issues its ticket directly. A Cloud cell wraps the same
+    ticket in the gateway's routing envelope. Recognition grants no authority:
+    the receiving endpoint verifies whichever form arrives.
+    """
+    if parse_ticket(value) is not None or cloud_origin.envelope_nonce(value) is not None:
+        return value  # type: ignore[return-value]
     return None
 
 
@@ -96,14 +116,26 @@ def prepare_upload(
         expected = validate_sha256(expected_sha256)
         upload_tokens.upload_scope(lane)
         who = replace(principal.effective_principal(), administrative_ingress=False)
+        cloud = cloud_cell.is_cloud_issuer_family(who.issuer_family)
         if who.client_binding is None or who.origin_session is None:
+            if cloud:
+                raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Exomem Cloud request has no verified gateway origin")
             raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this transport has no verified HTTP session; use a personal HTTP MCP connection")
         if not await _active(vault_root, who):
             raise _unavailable()
-        base = (base_url if base_url is not None else os.environ.get("EXOMEM_BASE_URL", "")).rstrip("/")
-        if not base:
-            raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this MCP session has no HTTP upload listener")
-        endpoint = upload_endpoint(base + "/upload")
+        route = None
+        if cloud:
+            # The gateway's capsule names its own fixed endpoint and bounds the ticket's life.
+            request_origin = cloud_origin.current()
+            route = request_origin.route if request_origin is not None else None
+            if route is None:
+                raise _unavailable()
+            endpoint = upload_endpoint(route.upload_url)
+        else:
+            base = (base_url if base_url is not None else os.environ.get("EXOMEM_BASE_URL", "")).rstrip("/")
+            if not base:
+                raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this MCP session has no HTTP upload listener")
+            endpoint = upload_endpoint(base + "/upload")
         configured = int(os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(MAX_BYTES)))
         limit = min(configured, MAX_BYTES, fetch_budget().max_file_bytes)
         if max_bytes is not None:
@@ -130,18 +162,25 @@ def prepare_upload(
                     private_state.remove(path)
             if count >= held_uploads.HOLD_MAX_COUNT:
                 raise ValueError("UPLOAD_HANDOFF_QUOTA: redeem or let previous handoffs expire")
+            ttl = upload_tokens.DEFAULT_TTL
+            if route is not None:
+                ttl = min(ttl, math.floor(route.expires - now))
+                if ttl < 1:
+                    raise _unavailable()
+            expires = now + ttl
             # Lowercase hex survives the terminal scrubber without reducing the ticket's 256-bit entropy.
             secret = secrets.token_hex(_TICKET_BYTES)
             key = hashlib.sha256(secret.encode("ascii")).hexdigest()
             private_state.write_record(store, key, {
                 "principal": asdict(who), "binding": binding,
                 "deployment": artifact_recovery.deployment(vault_root),
-                "expires": now + upload_tokens.DEFAULT_TTL, "lane": lane,
+                "expires": expires, "lane": lane,
                 "expected_sha256": expected, "max_bytes": limit,
             }, temp_suffix=".part")
+        token = cloud_origin.handoff_token(route, secret) if route is not None else TOKEN_PREFIX + secret
         return {
-            "token": TOKEN_PREFIX + secret, "upload_url": endpoint,
-            "ttl_seconds": upload_tokens.DEFAULT_TTL, "hold": True, "lane": lane,
+            "token": token, "upload_url": endpoint,
+            "ttl_seconds": ttl, "hold": True, "lane": lane,
             "expected_sha256": expected, "max_bytes": limit,
             "handoff_status": "handoff_prepared", "committed": False,
         }
