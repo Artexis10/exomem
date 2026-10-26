@@ -177,7 +177,8 @@ def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.Mo
     assert payload["success"] is True
     find_module.clear_cache()
     expected = [h.as_dict() for h in find_module.find(vault, query="metabolism", mode="keyword")]
-    assert payload["data"] == expected
+    # The first recall of the session carries the fixture's due-state block beside the hits.
+    assert payload["data"]["hits"] == expected
 
     explained = client.post(
         "/api/ask_memory",

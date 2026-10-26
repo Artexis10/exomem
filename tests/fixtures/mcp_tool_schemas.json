@@ -80,7 +80,7 @@
     }
   },
   "adoption_studio": {
-    "description": "Review and import an existing collection of notes, documents, images, audio and video in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Plan previews exact imports; apply commits that plan or refuses.\n\nstart scans; select chooses files; plan previews; apply copies each file\ninto Sources; cancel closes pre-apply; finish proves recall and reports\ncoverage. Repeat plan or apply with a returned `continuation`. Then\nwork-item reads context, propose submits proposals, apply-proposal\napproves one. Details: references/operations.md.",
+    "description": "Review and import an existing collection of notes, documents, images, audio and video in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Apply commits the previewed plan or refuses.\n\nstart scans; select chooses files; plan previews; apply copies each file\ninto Sources, and drafts a note under an own-note rule; cancel closes\npre-apply; finish proves recall and reports coverage. Repeat plan or apply\nwith a returned `continuation`. Then\nwork-item reads context, propose submits proposals, apply-proposal\napproves one. Details: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -116,7 +116,7 @@
         },
         "initialize_kb": {
           "default": false,
-          "description": "For `start`, bootstrap a missing Knowledge Base (otherwise KB_NOT_INITIALIZED).",
+          "description": "For `start`, bootstrap a missing Knowledge Base.",
           "type": "boolean"
         },
         "collection": {
@@ -138,7 +138,7 @@
             ]
           },
           "type": "array",
-          "description": "For `select`, paths whose files are selected, or {path, source_kind, domain} to file a folder under registered keys."
+          "description": "For `select`, paths whose files are selected, or {path, source_kind?, domain?} to file a folder under registered keys, or {path, adopt_as: note, note_type, project?, domain?} for a draft note of each Markdown file."
         },
         "exclude": {
           "items": {
@@ -161,7 +161,7 @@
         },
         "plan_id": {
           "type": "string",
-          "description": "For `apply`, from `plan`/`status`; a mismatch or changed selection refuses with PLAN_STALE."
+          "description": "For `apply`, from `plan`/`status`."
         },
         "continuation": {
           "type": "string",
@@ -214,7 +214,7 @@
         },
         "expected_fingerprint": {
           "type": "string",
-          "description": "For `apply-proposal`, the reviewed fingerprint; a mismatch refuses."
+          "description": "For `apply-proposal`, the reviewed fingerprint."
         },
         "expected_hash": {
           "type": "string",
@@ -3806,7 +3806,7 @@
     }
   },
   "review_memory": {
-    "description": "Review health, provenance, drift and backlog.\n\nAttention reads; repairs use maintain_memory. Vocabulary path/query/family\nsubmits a meaning question: requires write access, grants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
+    "description": "Review health, provenance, drift and backlog.\n\nAttention reads; repairs use maintain_memory. unprocessed-sources lists\nSources no live note cites; dismissal is not completion. Vocabulary\npath/query/family submits a meaning question: requires write access, grants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3880,7 +3880,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
+          "description": "Provenance scan path; for evolution it selects the path route (`query` unused); for vocabulary, the page the question concerns."
         },
         "state": {
           "default": "open",
@@ -3909,7 +3909,7 @@
         },
         "family": {
           "type": "string",
-          "description": "Vocabulary family for a meaning question; with `mode=\"vocabulary\"` requires `path` and `query`; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration."
+          "description": "Vocabulary family for a meaning question; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration."
         },
         "response_detail": {
           "default": "compact",

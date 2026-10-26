@@ -1247,9 +1247,11 @@ def test_pending_raw_pages_do_not_displace_managed_guest_recall(tmp_path: Path, 
 def test_managed_guest_scene_admission_uses_pending_parent_changes(
     tmp_path: Path, monkeypatch, managed_runtime, change: str,
 ) -> None:
-    from exomem import commands
+    from exomem import commands, due_state
     from exomem.governance import principal
 
+    # The scene's Source page is a backlog item; the recall envelope that reports it is not under test.
+    monkeypatch.setattr(due_state, "should_emit", lambda *_args, **_kwargs: False)
     _seed_corpus(tmp_path)
     parent = "Knowledge Base/Notes/video.mp4.md"
     child = "Knowledge Base/Notes/frame.jpg.md"

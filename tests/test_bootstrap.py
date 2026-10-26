@@ -645,7 +645,13 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
 ) -> None:
     from exomem import due_state
 
-    block = {"total": 1, "categories": {"prediction": 1}, "items": []}
+    block = {
+        "total": 1,
+        "categories": {"prediction": 1},
+        "outstanding_total": 2,
+        "outstanding": {"prediction": 2},
+        "items": [],
+    }
     served: list[Path] = []
     emitted: list[dict] = []
     monkeypatch.setattr(due_state, "served", lambda root: served.append(root) or block)
@@ -661,7 +667,8 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
     # The fallback is the core, which carries a counts summary and points at the list.
     assert fallback["due_state"] == {
         "total": 1,
-        "top_category": "prediction",
+        "visible_outstanding": {"prediction": [1, 2]},
+        "next": "review_memory(mode='attention', categories=['prediction'], limit=10)",
         "list": "section=epistemics",
     }
     assert served == [vault]

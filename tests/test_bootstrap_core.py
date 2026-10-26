@@ -357,7 +357,7 @@ def test_the_vault_derived_blocks_are_bounded_in_the_core(monkeypatch, surface):
     listed = section["vocabulary"]["entity-types"]
     assert len(listed["top"]) == 12 < CUSTOM_ENTITY_TYPES
     assert listed["more"].startswith("+")
-    assert len(_text(core["due_state"])) <= 200
+    assert len(_text(core["due_state"])) <= 300
     assert core["due_state"]["list"] == "section=epistemics"
     assert core["latency"] == bootstrap_core.LATENCY_POINTER
     assert len(_text({"latency": core["latency"]})) <= 60

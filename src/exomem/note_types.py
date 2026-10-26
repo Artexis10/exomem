@@ -16,6 +16,7 @@ code fixed before the registry existed:
 - E, pages that must cite their sources: `sources_required`.
 - G, the source rank penalty: `ranks_as_source`.
 - H, raw and append-only pages: `raw`.
+- I, captured Sources whose compilation the attention queue tracks: `captured_source`.
 
 The lookup is exact. Each call site keeps its own normalisation of the
 authored value before the lookup, and the lookup adds none.
@@ -124,6 +125,16 @@ def ranks_as_source(note_type: NoteType) -> bool:
 def raw(note_type: NoteType) -> bool:
     """Set H: raw and append-only captures."""
     return note_type.role == "source" or note_type.role == "evidence"
+
+
+def captured_source(note_type: NoteType) -> bool:
+    """Set I: captured Sources whose compilation the attention queue tracks.
+
+    Evidence is raw too, but it records proof and owes no compiled note, so the
+    coverage rule selects `source` alone. Set G has the same members today and a
+    different purpose (ranking); the two change for different reasons.
+    """
+    return note_type.role == "source"
 
 
 Predicate = Callable[[NoteType], bool]

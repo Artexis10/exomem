@@ -139,6 +139,9 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 # Maintained indexes alone do not warm the caller's application caches.
                 # The result cache stays disabled so the measured call still executes its queries.
                 assert "warming" not in invoke()
+                # The Source pages here are a backlog: the first call builds their due-state
+                # projection and the second reuses it, so the measured call is the third.
+                invoke()
                 working_set_runtime.reset_caches_for_tests(packets_only=True)
                 with counts.request():
                     result = invoke()

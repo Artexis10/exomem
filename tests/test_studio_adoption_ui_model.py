@@ -264,6 +264,37 @@ def test_failure_groups_map_codes_and_keep_server_reason_on_unknown() -> None:
     ]
 
 
+def test_an_import_whose_notes_are_still_owed_is_not_all_set() -> None:
+    source = f"""
+      import {{outcomeGroups, resultTitle}} from {MODEL.as_uri()!r};
+      const groups = outcomeGroups({{
+        'Coll/a.md': {{status: 'applied'}},
+        'Coll/b.md': {{status: 'already-applied'}},
+        'Coll/Journal/c.md': {{status: 'source-applied', target_path: 'Sources/c.md'}},
+        'Coll/d.md': {{status: 'failed', code: 'NOT_FOUND', reason: 'gone'}},
+      }});
+      const owedOnly = outcomeGroups({{
+        'Coll/a.md': {{status: 'applied'}},
+        'Coll/Journal/c.md': {{status: 'source-applied'}},
+      }});
+      console.log(JSON.stringify({{
+        remaining: groups.remaining.map((item) => item.original_path),
+        counts: [groups.copied.length, groups.remaining.length, groups.failed.length],
+        title: resultTitle(groups),
+        owedOnly: resultTitle(owedOnly),
+        done: resultTitle(outcomeGroups({{'Coll/a.md': {{status: 'applied'}}}})),
+      }}));
+    """
+
+    result = _node(source)
+
+    assert result["remaining"] == ["Coll/Journal/c.md"]
+    assert result["counts"] == [2, 1, 1]
+    assert result["title"] == "2 files are in · 1 still to finish · 1 couldn't be copied"
+    assert result["owedOnly"] == "1 files are in · 1 still to finish"
+    assert result["done"] == "All set — 1 files are in ✓"
+
+
 def test_stale_notice_and_poll_delay_and_chips() -> None:
     source = f"""
       import {{staleNotice, pollDelay, suggestionChips}} from {MODEL.as_uri()!r};

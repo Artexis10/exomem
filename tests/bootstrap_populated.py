@@ -7,7 +7,7 @@ can reach, so the ceiling is asserted against it and not against a best case.
 The blocks and what bounds them in the core and sections:
 
 - `due_state`: built here from more rows than `due_state.TOP_LIMIT` with long refs and
-  every category present; the core serves a counts summary of at most 200 bytes.
+  every category present; the core serves a counts summary of at most 300 bytes.
 - `latency`: every watched (tool, deep) pair breaches for the calling client.
   Compact and session rows carry the advisory fields; full and diagnostics rows
   retain `DOMINANT_SPANS` spans. The core carries only `LATENCY_POINTER`.

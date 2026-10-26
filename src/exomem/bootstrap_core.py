@@ -264,16 +264,46 @@ def _envelope_digest(envelope: dict) -> dict:
     return digest
 
 
+#: How many outstanding items the `next` route asks for in one batch.
+BATCH_LIMIT = 10
+#: The summary names this many categories, the most outstanding first, and counts the rest.
+#: The core's byte ceiling is a claim about a worst-case vault, so the summary's size
+#: follows this number, never the count of due categories.
+SUMMARY_CATEGORIES = 2
+
+
 def _due_summary(block: object) -> dict:
-    """The core's view of the due-state advisory: how many, the biggest category, and
-    where the list is. Bounded by construction, whatever the vault holds."""
+    """The core's view of the due-state advisory: the counts by category, the route to
+    the next batch of the biggest category, and where the full list is.
+
+    `visible_outstanding` pairs each category's visible count with its outstanding
+    count: a dismissal lowers the first and never the second. The route is built from
+    the category's name, so it holds no per-category table.
+    """
     summary: dict[str, Any] = {}
     if isinstance(block, dict):
         if "total" in block:
             summary["total"] = block["total"]
-        categories = block.get("categories")
-        if isinstance(categories, dict) and categories:
-            summary["top_category"] = max(categories, key=lambda name: categories[name])
+        visible = block.get("categories")
+        visible = visible if isinstance(visible, dict) else {}
+        outstanding = block.get("outstanding")
+        outstanding = outstanding if isinstance(outstanding, dict) else {}
+        names = sorted(
+            {*visible, *outstanding},
+            key=lambda name: (-outstanding.get(name, 0), -visible.get(name, 0), name),
+        )
+        if names:
+            summary["visible_outstanding"] = {
+                name: [visible.get(name, 0), outstanding.get(name)]
+                for name in names[:SUMMARY_CATEGORIES]
+            }
+        if len(names) > SUMMARY_CATEGORIES:
+            summary["more_categories"] = len(names) - SUMMARY_CATEGORIES
+        if visible:
+            largest = max(visible, key=lambda name: visible[name])
+            summary["next"] = (
+                f"review_memory(mode='attention', categories=['{largest}'], limit={BATCH_LIMIT})"
+            )
     summary["list"] = "section=epistemics"
     return summary
 

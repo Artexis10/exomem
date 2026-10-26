@@ -67,7 +67,9 @@ def test_rest_ask_memory_roundtrip_matches_leaf_shape(vault, monkeypatch: pytest
     assert r.status_code == 200, r.text
     payload = r.json()
     assert payload["success"] is True
-    data = payload["data"]
+    # The fixture vault holds uncompiled Sources, so the session's first recall carries the
+    # due-state block and the hits arrive in the recall envelope.
+    data = payload["data"]["hits"]
     assert isinstance(data, list)
     # Same hit shape as the product `ask_memory` tool, wrapped in the shared envelope.
     find_module.clear_cache()

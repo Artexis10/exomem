@@ -83,10 +83,14 @@ def filter_vault(vault: Path) -> Path:
 
 
 @pytest.mark.parametrize("result_level", ["unit", "mixed"])
-def test_raw_unit_candidates_do_not_displace_guest_recall_or_cross_cache_views(filter_vault, result_level):
-    from exomem import commands
+def test_raw_unit_candidates_do_not_displace_guest_recall_or_cross_cache_views(
+    filter_vault, result_level, monkeypatch
+):
+    from exomem import commands, due_state
     from exomem.governance import principal
 
+    # The vault's Source pages are a backlog; the recall envelope that reports it is not under test.
+    monkeypatch.setattr(due_state, "should_emit", lambda *_args, **_kwargs: False)
     original = filter_vault / "Knowledge Base/Notes/matching.md"
     hidden = original.with_name("__exomem_raw_v1__matching.md")
     hidden.write_text(original.read_text().replace("2026-01-03", "2026-10-01"))

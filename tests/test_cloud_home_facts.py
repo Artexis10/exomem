@@ -131,7 +131,8 @@ def test_home_sees_a_recall_with_the_notes_it_released_and_the_note_count_move(c
 
     before, recall, after = cell(scenario)
 
-    released = {hit["path"] for hit in recall["result"]}
+    # The session's first recall carries the vault's due-state block beside the hits.
+    released = {hit["path"] for hit in recall["result"]["hits"]}
     assert released, "sanity: the recall returned notes"
     assert before["events"] == []
     assert [(e["client"], e["action"], e["items"]) for e in after["events"]] == [
