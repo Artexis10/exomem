@@ -542,6 +542,24 @@ it with the current path on the reference corpus.
   Release decisions must still precede scoring and retain their policy, caller
   and source dependencies.
 
+  Unit ranking reuses the catalogue's published release verdicts before scoring.
+  It keeps content admission separate, including the owner's unrestricted corpus
+  and the admitted principal's lexical statistics. Both unit lanes receive the
+  released parent set. An empty set excludes every parent; an unavailable proof
+  retains the live release predicate. Selected hydration and final egress still
+  decide from current evidence. A lost selected parent leaves an empty slot.
+
+  The release predicates share one identity builder. It binds policy, grants,
+  audience, purpose, connector restrictions, registry assignments and tombstones.
+  Registry assignments can move an unchanged page between scopes, so connector
+  admission includes the canonical assignment from its validated arming record.
+  Sessions, bound writers, blocked policies and empty policies publish nothing.
+  Only page-local decisions over ordinary Markdown publish a verdict. Bridges,
+  RAW material and collection placements keep their live dependency checks.
+  Pending pages decide live, and unchanged catalogue rows retain their verdicts
+  across generations. Captured tombstones never replace the page predicate's
+  live tombstone checks. No new cache or ranking rule is added.
+
   Mixed recall also freezes its combined page and unit slots before canonical
   hydration. Each lane retains its original collection limit and rank. Managed
   keyword groups provide their emitted page identities; non-reranked semantic
