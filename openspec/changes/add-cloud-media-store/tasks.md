@@ -43,7 +43,8 @@
 - [ ] 4.6 Write a reference manifest from each backup's clone. Add cellctl's version destruction in the backup hold after prune, under the three conditions. Verify these with tests using the fake provider:
   - a version stays while a months-old retained snapshot names it;
   - a sidecar deleted between clone and backup keeps its version;
-  - an in-flight upload at capture survives;
+  - an upload whose ledger commit is newer than the clone's recovered state, but whose protection record was fully synced first, survives;
+  - a reuse whose source sidecar is deleted before capture survives;
   - a same-cell restore of the oldest backup reads every pinned version;
   - a missing manifest blocks all destruction for the cell.
 - [ ] 4.7 Extend cell deletion. It revokes the edge credential and observes the edge's generation first, aborts unfinished uploads, then deletes the media prefix and the wrapped bundle. Verify these with cellctl deletion tests using the fake provider and a fake edge:
@@ -51,7 +52,7 @@
   - the cell stays `deleting` after a failed listing or an unobserved generation;
   - no upload lands after revocation.
 - [ ] 4.8 Update the Cloud privacy copy to name the media store. Verify: the copy review in `cloud-operator-access` passes.
-- [ ] 4.9 Report vault storage (without cached originals) and media storage (against the allowance) in status and in the usage cellctl publishes for Home. Verify: tests show no double counting with cached originals, and an unknown media figure after a failed listing.
+- [ ] 4.9 Report vault storage (without cached originals) and media storage (against the allowance) in status and in the usage cellctl publishes for Home. Verify: tests show no double counting with cached originals, an unknown media figure when the cell cannot read its references, and an unchanged owner figure when only cellctl's physical listing fails.
 
 ## 5. Gateway, uploads, imports and export (D8, D10)
 

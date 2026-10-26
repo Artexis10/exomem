@@ -2,7 +2,7 @@
 
 ### Requirement: Bound originals are written through to the cell's media store
 
-On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type or size. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger, which SHALL record each upload's object name before the upload starts. An offload SHALL reuse an existing version only when a live sidecar already references that version. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded.
+On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type or size. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded.
 
 #### Scenario: A recording is captured on a selected cell
 
@@ -136,11 +136,11 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions.
 
-Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list every version that the captured sidecars reference, trash included, and every object name that the captured media job ledger lists as uploading, or uploaded and not yet referenced. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
+Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
 
 Only cellctl's key-management authority SHALL destroy versions. It SHALL destroy them only within a backup hold, after that hold's backup and prune succeed, and only a version that meets all of these:
 - it was uploaded before the capture of the newest retained snapshot;
-- no retained snapshot's manifest names it or lists its object name as in flight;
+- no retained snapshot's manifest names it or lists its object name under a protection record;
 - every retained snapshot of the cell has a readable manifest.
 
 No age or time cutoff SHALL decide destruction. cellctl SHALL delete the manifests of pruned snapshots.
@@ -228,7 +228,12 @@ It SHALL report `deleted` only after it observes that the versions and the bundl
 #### Scenario: An upload is confirmed but not yet referenced
 
 - **WHEN** a backup captures the cell between a confirmed upload and the write of its reference into the sidecar
-- **THEN** the manifest lists the object name as in flight, and the version is not destroyed
+- **THEN** the captured ledger holds the synced protection record, the manifest lists the object name, and the version is not destroyed
+
+#### Scenario: An offload reuses a version that another sidecar is about to drop
+
+- **WHEN** an offload selects a version that a live sidecar references, that sidecar is deleted before the next capture, and the offload publishes its own reference after the capture
+- **THEN** the captured protection record names the object, and the version is not destroyed
 
 #### Scenario: A tenant deletes their account
 

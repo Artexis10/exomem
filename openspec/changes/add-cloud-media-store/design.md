@@ -119,7 +119,7 @@ A new in-cluster service, the media edge, moves ciphertext between cells and the
 - **Authentication.** cells carry no ServiceAccount token. cellctl signs a per-cell edge credential with its own signing key, binding audience, cell ID and version, and renders it into the cell's Secret. The edge holds only the public key. It maps the credential's cell ID to that cell's object prefix and accepts no prefix from the request.
 - **Revocation.** A valid signature is not enough. cellctl publishes the active set: each selected cell's ID and current credential version. The edge accepts a credential only while its cell and version are in that set. Rotation bumps the version, and the old credential stops working once the edge loads the new set. The edge reports the set generation it has loaded, so cellctl can observe when a revocation takes effect.
 - **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge cannot hide, list or delete. Its bucket key cannot delete file versions. Only cellctl's key-management authority destroys versions (D9).
-- **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing and alerts when a cell exceeds its allowance plus retained-version headroom, which bounds a misbehaving cell.
+- **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing and alerts when a cell exceeds its allowance plus retained-version headroom. The alert detects abuse; it does not prevent it. Until the operator revokes it, an active cell credential can upload unreferenced objects below the per-object bound. Each such object costs storage, and the operator carries that exposure.
 
 Alternatives:
 - **Projected ServiceAccount tokens.** These would break the cell's no-token rule.
@@ -162,14 +162,20 @@ The job ledger is the job architecture. A Postgres-backed task queue such as Pro
 
 Collection is new lifecycle logic. No existing sweep supplies it: the archive member pool's sweep removes only abandoned temporary files. Collection works by reachability, with no hide step:
 
-- **Reference manifests.** Each backup computes a reference manifest from the clone it backs up. The manifest lists every version that the captured sidecars reference, trash included, and every object name that the captured media job ledger lists as uploading, or uploaded but not yet referenced. It is stored beside the snapshot in the cell's backup prefix, keyed by snapshot ID.
+- **Reference manifests.** Each backup computes a reference manifest from the clone it backs up. The manifest lists every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It is stored beside the snapshot in the cell's backup prefix, keyed by snapshot ID.
+- **Protection records.** A crash-consistent clone may omit the newest commits of a ledger that syncs lazily (WAL with `synchronous=NORMAL`). So the ordering is explicit:
+  1. Before an offload uploads or reuses a version, it commits a protection record for the object name with a full sync. Any later capture therefore contains the record.
+  2. The offload publishes the sidecar reference and syncs that write to disk.
+  3. Only then does it retire the protection record.
+
+  At every capture after step 1, the clone holds the record, the synced reference, or both. A reuse also checks that a live sidecar references the version at the moment its record commits.
 - **Destroy.** cellctl destroys versions only in the backup hold, after that hold's backup and prune succeed. Holds are exclusive per cell, so no restore and no other capture runs in between. It destroys a version only if all of these hold:
   - the version was uploaded before the capture of the newest retained snapshot;
-  - no retained snapshot's manifest names that version or lists its object name as in flight;
+  - no retained snapshot's manifest names that version or lists its object name under a protection record;
   - every retained snapshot has a readable manifest. Otherwise nothing is destroyed for that cell.
 
   cellctl then deletes the manifests of pruned snapshots.
-- **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names either a version uploaded after capture or a version that a live sidecar already referenced, so the chain ends at a protected version. An upload in flight at capture is listed by name. A restore brings back sidecars whose versions some retained manifest names.
+- **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. A version uploaded after the newest capture is never a candidate. A restore brings back sidecars whose versions some retained manifest names.
 - **Owner deletion.** An original the owner deletes leaves the store when the last retained backup that references it is pruned, as deleted vault files leave restic today.
 - **Cell deletion.** cellctl works in this order:
   1. Remove the cell from the edge's active set.
