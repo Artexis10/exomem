@@ -1219,7 +1219,8 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
         problems.append(f"the backups measured {measured}, not a growth and then a larger filesystem at the cap")
     if growth["filesystem_after"]["total_bytes"] <= growth["filled"]["total_bytes"]:
         problems.append("the filesystem inside the cell did not grow")
-    if (at_cap["backup"].get("clone") or {}).get("size") != f"{grown}Gi":
+    # A guarded clone requests its family's exact byte size, not a GiB quantity.
+    if (at_cap["backup"].get("clone") or {}).get("size") != str(grown * drill_cluster.GIB):
         problems.append(f"the next backup's clone is {(at_cap['backup'].get('clone') or {}).get('size')}")
     if slots_after != await d6_slots(grown):
         problems.append(f"the published slots read {slots_after} after the growth, not D6's {await d6_slots(grown)}")
