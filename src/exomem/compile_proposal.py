@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, source_coverage
+from . import corpus_aware, source_corrections, source_coverage
 from . import find as find_module
 from .governance import egress
 from .vault import normalize_wikilink
@@ -56,7 +56,13 @@ def propose_compilation(
 
     for s in sources:
         canonical, _w = normalize_wikilink(s, vault_root, resolver=resolver, strict=False)
-        abs_path = vault_root / f"{canonical}.md"
+        try:
+            current = source_corrections.resolve_current(vault_root, canonical)
+        except source_corrections.SourceCorrectionUnavailable:
+            warnings.append(f"source unavailable, skipped: {s}")
+            continue
+        canonical = current.selected_path.removesuffix(".md")
+        abs_path = vault_root / current.selected_path
         page = find_module._CACHE.get(abs_path, vault_root)
         if page is None:
             warnings.append(f"source not found, skipped: {s}")

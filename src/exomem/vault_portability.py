@@ -244,6 +244,12 @@ _CLASSIFICATION_RULES = (
         _is_review_state,
     ),
     _ClassificationRule(
+        "canonical-source-corrections",
+        ArtifactClass.CANONICAL,
+        "Immutable correction receipts preserve the current original and its history.",
+        lambda path, _parts: reserved_paths.classify_logical(path).descriptor_id == "source-corrections",
+    ),
+    _ClassificationRule(
         "registered-internal-state",
         ArtifactClass.DISPOSABLE_RUNTIME,
         "The security registry owns this path; portability cannot redefine it as content.",

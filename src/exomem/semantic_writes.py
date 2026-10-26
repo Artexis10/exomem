@@ -2292,6 +2292,7 @@ def _commit_existing_locked(
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
     index_reports: list[Any] | None = None,
+    source_guards: tuple[vault.PathGuard, ...] = (),
 ) -> ExistingCommit:
     """Plan lifecycle state and commit while the semantic namespace is held.
 
@@ -2502,7 +2503,7 @@ def _commit_existing_locked(
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
-                required_guards=(*required_guards, *origin_guards, *preflight.read_dependency_guards),
+                required_guards=(*required_guards, *origin_guards, *preflight.read_dependency_guards, *source_guards),
                 index_reports=reports,
                 semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
                 _vocabulary_auxiliaries=manifest,
@@ -3141,6 +3142,7 @@ def _commit_existing(
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,
                         index_reports=index_reports,
+                        source_guards=closure_plan.required_guards,
                     )
             # The fan-out ran as the creation lock was released.
             if committed.index_report is None and index_reports:
@@ -4909,7 +4911,7 @@ def _commit_creation(
                     semantic_state=semantic_index.from_semantic_page_state(
                         preflight.semantic_state
                     ),
-                    extra_required_guards=vocabulary_guards,
+                    extra_required_guards=(*vocabulary_guards, *closure_plan.required_guards),
                     origin_required_guards=_origin_commit_guards(
                         root, preflight.origin_inputs, catalog_writes
                     ),
@@ -5000,7 +5002,7 @@ def _commit_creation(
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
-                required_guards=(*vocabulary_guards, *origin_guards),
+                required_guards=(*vocabulary_guards, *origin_guards, *closure_plan.required_guards),
                 _vocabulary_auxiliaries=manifest,
                 _validate_prepared_bindings=(
                     lambda: _validate_origin_inputs(root, preflight.origin_inputs)

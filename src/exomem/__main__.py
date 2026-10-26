@@ -647,6 +647,9 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     than one session part, one the listener refuses as too large, or any file with
     `--resumable` goes through a resumable upload session that the next run of
     the same command continues.
+
+    `--handoff-file` instead uses the calling MCP session's one-use upload
+    descriptor. Its bound hash, byte limit and lane apply before any upload.
     """
     import mimetypes
 
@@ -654,7 +657,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         prog="exomem attach",
         description=(
             "Upload a file to the managed service's local listener with a local "
-            "client token and print the returned handle."
+            "client token, or use --handoff-file from an MCP session, and print the returned handle."
         ),
     )
     parser.add_argument("file", help="file whose bytes to send")
@@ -681,7 +684,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     parser.add_argument(
         "--lane",
         choices=("evidence", "source"),
-        default="evidence",
+        default=None,
         help="without --scope/--category: the lane the held file is for "
         "(evidence -> preserve_artifacts, source -> capture_source)",
     )
@@ -691,7 +694,21 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     parser.add_argument(
         "--port", default="", help="local listener port (default $EXOMEM_LOCAL_PORT)"
     )
+    parser.add_argument(
+        "--handoff-file", default="", help="upload handoff JSON from this MCP session"
+    )
+    parser.add_argument(
+        "--root", default="", help="allowed root for a handoff upload (default current directory)"
+    )
     args = parser.parse_args(argv)
+    if args.handoff_file:
+        if (args.scope or args.category or args.description or args.raw_protection
+                or args.archive or args.resumable or args.token_file or args.port):
+            parser.error("--handoff-file accepts only a held file, --root, --filename and its bound --lane")
+        return _attach_handoff(args, transport=transport)
+    if args.root:
+        parser.error("--root requires --handoff-file")
+    args.lane = args.lane or "evidence"
 
     token_file = args.token_file or os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
     raw_port = str(args.port or os.environ.get("EXOMEM_LOCAL_PORT", "")).strip()
@@ -789,6 +806,94 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         print("attach: the upload was interrupted; run the same command again to resume",
               file=sys.stderr)
         return 1
+
+
+def _attach_handoff(args, *, transport=None) -> int:
+    """Read local bytes through retained handles and spend one MCP upload ticket."""
+    import hashlib
+    import mimetypes
+
+    import httpx
+
+    from . import held_fs, held_uploads, upload_handoff, upload_tokens
+    from .source_capture import validate_sha256
+
+    try:
+        descriptor_path = Path(args.handoff_file).expanduser()
+        with descriptor_path.open("rb") as descriptor_file:
+            serialized = descriptor_file.read(16 * 1024 + 1)
+        if len(serialized) > 16 * 1024:
+            raise ValueError("handoff descriptor is too large")
+        descriptor = json.loads(serialized)
+        # These are the fields of the upload handoff protocol, not caller-defined vocabulary.
+        fields = {"token", "upload_url", "ttl_seconds", "hold", "lane", "expected_sha256",
+                  "max_bytes", "handoff_status", "committed"}
+        if not isinstance(descriptor, dict) or set(descriptor) != fields:
+            raise ValueError("expected an upload handoff descriptor")
+        token = descriptor["token"]
+        if (upload_handoff.parse_ticket(token) is None
+                or descriptor["hold"] is not True or descriptor["committed"] is not False
+                or descriptor["handoff_status"] != "handoff_prepared"
+                or descriptor["lane"] not in upload_tokens.UPLOAD_LANES
+                or type(descriptor["ttl_seconds"]) is not int
+                or not 0 < descriptor["ttl_seconds"] <= upload_tokens.DEFAULT_TTL
+                or type(descriptor["max_bytes"]) is not int
+                or not 0 < descriptor["max_bytes"] <= upload_handoff.MAX_BYTES):
+            raise ValueError("invalid upload handoff descriptor")
+        endpoint = upload_handoff.upload_endpoint(descriptor["upload_url"])
+        expected = validate_sha256(descriptor["expected_sha256"])
+        if args.lane is not None and args.lane != descriptor["lane"]:
+            raise ValueError("--lane must match the handoff")
+        source = Path(args.file).expanduser()
+        root = Path(args.root).expanduser() if args.root else Path.cwd()
+        if ".." in source.parts or ".." in root.parts:
+            raise ValueError("file paths must not contain traversal")
+        root = root.absolute()
+        source = source if source.is_absolute() else root / source
+        relative = source.relative_to(root)
+        with held_fs.acquire(root).require() as filesystem:
+            with filesystem.parent(relative.parent.as_posix()).require() as parent:
+                with filesystem.file(parent, relative.name).require() as handle:
+                    version = handle.version()
+                    data = filesystem.read(handle, max_bytes=descriptor["max_bytes"]).require()
+                    if version != handle.version():
+                        raise ValueError("file changed while reading")
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != expected:
+            raise ValueError("file bytes do not match expected_sha256")
+    except (OSError, ValueError, TypeError, KeyError, held_fs.HeldFsError):
+        print("attach: invalid handoff or file; use a regular file within --root with the expected SHA-256", file=sys.stderr)
+        return 2
+
+    name = args.filename or relative.name
+    try:
+        with httpx.Client(
+            transport=transport, trust_env=False, follow_redirects=False,
+            timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
+        ) as client:
+            response = client.post(
+                endpoint, headers={"Authorization": f"Bearer {token}"},
+                files={"file": (name, data, mimetypes.guess_type(name)[0] or "application/octet-stream")},
+                data={"hold": "1", "lane": descriptor["lane"]},
+            )
+    except httpx.HTTPError:
+        print("attach: upload acknowledgement unavailable; prepare a new handoff before retrying", file=sys.stderr)
+        return 1
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if response.status_code not in (200, 201) or not isinstance(payload, dict):
+        return _attach_refused(response, payload)
+    if (payload.get("state") != "held" or payload.get("lane") != descriptor["lane"]
+            or payload.get("hash_algorithm") != "sha256" or payload.get("hash") != digest
+            or type(payload.get("size")) is not int or payload["size"] != len(data)
+            or not isinstance(payload.get("file"), dict)
+            or not held_uploads.is_held_reference(payload["file"].get("download_url"))):
+        print("attach: the upload receipt does not match the file bytes", file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
 
 
 def _attach_refused(response, payload: object) -> int:

@@ -16,7 +16,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-from . import held_fs, media_store, originals, request_budget, reserved_paths, upload_tokens, vault
+from . import (
+    held_fs,
+    media_store,
+    originals,
+    request_budget,
+    reserved_paths,
+    source_corrections,
+    upload_tokens,
+    vault,
+)
 from .governance import companions, connector_boundary, egress, policy
 from .governance.principal import effective_principal, request_scope
 
@@ -100,14 +109,24 @@ def native_max_bytes() -> int:
 
 def _companion(root: Path, path: str) -> tuple[str, dict]:
     from .governance import raw_protection
-    from .preserve import _sidecar_path
+    from .preserve import _sidecar_paths
 
-    companion = _sidecar_path(Path(path), protected=raw_protection.marked(path)).as_posix()
-    raw = reserved_paths.read_generic_bytes(root, companion).data
-    frontmatter, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
-    if marker is None:
-        raise RecoveryUnavailable
-    return companion, frontmatter
+    source = Path(path).is_relative_to(vault.kb_root(root).relative_to(root) / "Sources")
+    for candidate in _sidecar_paths(Path(path), protected=raw_protection.marked(path), source=source):
+        companion = candidate.as_posix()
+        try:
+            raw = reserved_paths.read_generic_bytes(root, companion).data
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+            continue
+        frontmatter, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
+        binding = frontmatter.get("governance_companion")
+        bound_path = binding.get("artifact_path") if isinstance(binding, dict) else None
+        if marker is None or path not in (bound_path, frontmatter.get("data_file"), frontmatter.get("evidence_file")):
+            continue
+        return companion, frontmatter
+    raise reserved_paths.ReservedPathLeafError("MISSING")
 
 
 def _resolve(root: Path, selected: str) -> tuple[str, dict]:
@@ -117,11 +136,15 @@ def _resolve(root: Path, selected: str) -> tuple[str, dict]:
     except reserved_paths.ReservedPathLeafError as error:
         if error.code != "MISSING" or not path.lower().endswith(".md"):
             raise RecoveryUnavailable from None
+        try:
+            path = source_corrections.resolve_current(root, path).selected_path
+        except source_corrections.SourceCorrectionUnavailable:
+            raise RecoveryUnavailable from None
         raw = reserved_paths.read_generic_bytes(root, path).data
         metadata, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
         descriptor = metadata.get("governance_companion", {})
         artifact = descriptor.get("artifact_path") if isinstance(descriptor, dict) else None
-        artifact = artifact or metadata.get("data_file")
+        artifact = artifact or metadata.get("data_file") or metadata.get("evidence_file")
         if marker is None or not isinstance(artifact, str):
             raise RecoveryUnavailable from None
         artifact = originals.resolve_original_relative(root, artifact)
@@ -133,6 +156,8 @@ def _resolve(root: Path, selected: str) -> tuple[str, dict]:
 
 
 def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCopy) -> dict:
+    from .client_artifacts import _MAX_CONTENT_TYPE_CHARS
+
     binding = metadata.get("governance_companion")
     if isinstance(binding, dict):
         if (
@@ -141,7 +166,7 @@ def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCop
             or binding.get("artifact_size") != copied.size
         ):
             raise RecoveryUnavailable
-    elif metadata.get("data_file") != path:
+    elif metadata.get("data_file") != path and metadata.get("evidence_file") != path:
         raise RecoveryUnavailable
     if metadata.get("binary_sha256") != copied.sha256 or metadata.get("binary_size") != copied.size:
         raise RecoveryUnavailable
@@ -154,13 +179,13 @@ def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCop
     ):
         raise RecoveryUnavailable
     # Older custody pages stored MIME only in transcription/adoption provenance. Keep inference explicit.
-    provenance = metadata.get("transcription") or metadata.get("adoption") or {}
-    mime = provenance.get("content_type") if isinstance(provenance, dict) else None
+    provenance = metadata.get("transcription") or metadata.get("artifact_adoption") or metadata.get("adoption") or {}
+    mime = metadata.get("original_content_type") or (provenance.get("content_type") if isinstance(provenance, dict) else None)
     source = "stored" if isinstance(mime, str) and mime else "filename"
     mime = mime if source == "stored" else mimetypes.guess_type(name)[0]
     if not mime:
         mime, source = "application/octet-stream", "fallback"
-    if not isinstance(mime, str) or any(ord(c) < 32 or ord(c) > 126 for c in mime):
+    if not isinstance(mime, str) or len(mime) > _MAX_CONTENT_TYPE_CHARS or any(ord(c) < 32 or ord(c) > 126 for c in mime):
         raise RecoveryUnavailable
     return {
         "path": path,
@@ -285,6 +310,8 @@ def stage(
                 ):
                     raise RecoveryUnavailable
                 require_current(root, copied, who, byte_proofs=byte_proofs)
+                if _resolve(root, selected) != (path, metadata):
+                    raise RecoveryUnavailable
                 yield copied, descriptor
             except (
                 reserved_paths.ReservedPathLeafError,

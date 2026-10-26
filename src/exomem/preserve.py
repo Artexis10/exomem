@@ -423,6 +423,16 @@ def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
     return artifact.with_name(f"{artifact.name}.md")
 
 
+def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> tuple[Path, ...]:
+    canonical = _sidecar_path(artifact, protected=protected)
+    if source and not protected:
+        # Legacy Source Markdown captures used the fixed `<original>.md` companion format.
+        legacy = _sidecar_path(artifact, protected=True)
+        if legacy != canonical:
+            return canonical, legacy
+    return (canonical,)
+
+
 def stored_artifact(
     vault_root: Path, *, scope: str, category: str, filename: str, sha256: str, raw_protection: bool = False
 ) -> DuplicateArtifact | None:

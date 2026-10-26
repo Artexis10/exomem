@@ -233,6 +233,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "references-store",
         "refs-store",
         "review-state",
+        "source-corrections",
         "voice-profile-store",
     }
 
