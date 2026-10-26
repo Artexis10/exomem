@@ -843,6 +843,7 @@ def commit(
     before_hash: str,
     previous: str | None,
     added: tuple[str, ...] = (),
+    required_guards: tuple[Any, ...] = (),
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
     from .. import registry_history, vault
@@ -871,11 +872,12 @@ def commit(
             added={spec.name: added},
             private=spec.instance_id != PUBLIC_INSTANCE,
             validate_bindings=admission.recheck,
+            required_guards=required_guards,
         )
     finally:
         invalidate(root, path=path)
     if added:
         from .. import promotions
 
-        promotions.record_registry(root, spec, added, rendered)
+        promotions.record_registry(root, spec, added, rendered, version=history["version"])
     return history

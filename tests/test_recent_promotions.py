@@ -18,8 +18,11 @@ CATEGORY = promotions.FAMILY
 
 @pytest.fixture(autouse=True)
 def _clean_emission_state():
+    from exomem.governance.principal import library_scope
+
     due_state_module.reset_emission_state()
-    yield
+    with library_scope():
+        yield
     due_state_module.reset_emission_state()
 
 
@@ -177,9 +180,16 @@ def test_an_edge_between_two_entities_is_an_entry_and_one_from_a_note_is_not(
 
     _add_relation(vault, second, f"- supports [[{first.removesuffix('.md')}]]")
     edges = [row for row in _ledger(vault) if row["kind"] == "edge"]
-    assert [row["subjects"] for row in edges] == [
-        [{"subject": second, "predicate": "supports", "target": first}]
-    ]
+    assert len(edges) == 1
+    subject = edges[0]["subjects"][0]
+    assert {key: subject[key] for key in ("subject", "predicate", "target")} == {
+        "subject": second, "predicate": "supports", "target": first,
+    }
+    from exomem import memory_refs
+
+    assert subject["source_ref"] == memory_refs.ref_from_markdown((vault / second).read_text())
+    assert subject["target_ref"] == memory_refs.ref_from_markdown((vault / first).read_text())
+    assert subject["introduction"]["source_ref"] == subject["source_ref"]
 
 
 def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
@@ -190,7 +200,12 @@ def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
 
     rows = [row for row in _ledger(vault) if row["kind"] == "registry"]
     assert len(rows) == 1
-    assert rows[0]["subjects"] == [{"registry": "relations", "key": "vault.hosts"}]
+    assert len(rows[0]["subjects"]) == 1
+    subject = rows[0]["subjects"][0]
+    assert subject["registry"] == "relations"
+    assert subject["key"] == "vault.hosts"
+    assert subject["introduced_version"]
+    assert subject["after_hash"]
     assert rows[0]["new_family"] is False, "a relation under a parent is not a new family"
 
     _as(monkeypatch, "session-b")

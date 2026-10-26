@@ -242,7 +242,8 @@ _ARG_FIELDS = {
     "accept-relation": _ACCEPT_RELATION_FIELDS,
     "edit": _EDIT_FIELDS,
     OBSERVE_UNIT_STEP_KIND: _OBSERVE_UNIT_FIELDS,
-    REMOVE_RELATION_STEP_KIND: _REMOVE_RELATION_FIELDS,
+    # The private undo protocol adds one optional binding, with no new required field.
+    REMOVE_RELATION_STEP_KIND: _REMOVE_RELATION_FIELDS | {"_promotion"},
     "supersede": _SUPERSEDE_FIELDS,
     "move": _MOVE_FIELDS,
     "delete": _DELETE_FIELDS,
@@ -500,6 +501,10 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
             raise _error("INVALID_CURATION_PLAN", "edit requires the reviewed expected_hash")
         args["operation"] = normalized_operation
     elif kind == REMOVE_RELATION_STEP_KIND:
+        if "_promotion" in args:
+            from . import promotion_proof
+
+            args["_promotion"] = promotion_proof.metadata(args["_promotion"])
         args["subject"] = normalize_target_path(args.get("subject"), field="subject")
         args["target"] = normalize_target_path(args.get("target"), field="target")
         _require_string(args.get("predicate"), f"steps[{ordinal}].args.predicate", max_chars=200)

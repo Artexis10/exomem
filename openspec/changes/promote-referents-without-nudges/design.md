@@ -21,6 +21,27 @@ The owner approved the autonomous organisation plan. It amends this design as fo
 - **Decision 7.** The rule that the baseline exists before any part of this change merges is replaced. Organisation PR A carries no behaviour layer, so the baseline is main with PR A.
 - **Decision 8.** Organisation PR B replaces the f33 protocol with the revised one: small paired development rounds, then one blind held-out run of 40 independent situations under a new preregistered amendment. The f33 amendment stays filed, sealed and unrun.
 
+### Destructive undo binds the original incarnation
+
+Entity undo binds the immutable page reference from the exact creation image.
+Edge undo also binds both endpoint references, the canonical predicate, and the exact introducing image and transition.
+Registry undo binds the registry instance, key, retained introducing version, and exact rendered overlay hash.
+Paths locate subjects; a path or current fingerprint alone cannot establish continuity.
+
+The internal proof admits every retained history file and guards its bytes and directory census through atomic commit.
+It examines at most the existing compiled-history maximum-page scan budget; reaching that bound reports undo as unavailable.
+Compiled page transitions must form one unique, acyclic, connected chain ending at the exact current image.
+Registry transitions require a unique, acyclic suffix reachable from the introducing image; that introducing version must remain retained.
+Both registry history producers record full raw before and after hashes beside the existing short audit hashes.
+A missing, unreadable, inadmissible, legacy, forked, cyclic, disconnected, or capped proof reports `PROMOTION_SUBJECT_UNVERIFIED`.
+The notice remains readable when admitted, but no destructive undo is offered or partially applied for unknown subjects.
+A proved absence ends the original promotion; restoring the edge or key creates a separate incarnation.
+
+Supported moves can rewrite inbound pages without compiled history.
+This change adds neither move history nor predecessor metadata, so those gaps and earlier cycles can make destructive undo unavailable.
+Registry history pruning can also make undo unavailable when it removes the introducing version.
+These limits affect destructive undo only; ordinary writes remain available, and public history coverage remains unverified.
+
 ## Owner decisions (decided 2026-10-10)
 
 - **O1. Outcome.** Entity, category, relationship and type creation is first class and fully dynamic, and a promotion reaches all future interactions.

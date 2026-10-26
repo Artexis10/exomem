@@ -929,6 +929,7 @@ def plan_registrations(
             else vocabulary_registry.NO_OVERLAY_HASH
         ),
         after_hash=vocabulary_registry.content_hash(updated),
+        rendered=updated,
         added=plan.added(),
     )
     return TaxonomyPlan(

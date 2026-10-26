@@ -789,6 +789,31 @@ def queue_for_owner(
     }
 
 
+def _promotion_removal(root: Path, spec: RegistrySpec, delta: object) -> tuple[object, tuple[Any, ...]]:
+    from .. import promotion_proof, promotions
+
+    if not isinstance(delta, Mapping) or "_promotion" not in delta:
+        return delta, ()
+    binding = promotion_proof.metadata(delta["_promotion"])
+    # nosemgrep: ep-word-set, ep-word-membership -- the reserved undo protocol fixes this removal shape.
+    if set(delta) != {"remove", "_promotion"} or not isinstance(delta["remove"], list):
+        raise RegistryError("PROMOTION_SUBJECT_UNVERIFIED: undo requires a removal-only proposal")
+    _promotion_id, entry = promotions.find(root, binding["ref"])
+    if entry["kind"] != "registry" or any(
+        item.get("registry") != spec.name
+        or (item.get("scope") or registry.PUBLIC_INSTANCE) != spec.instance_id
+        for item in entry["subjects"]
+    ):
+        raise RegistryError("PROMOTION_SUBJECT_UNVERIFIED: registry undo binding does not match")
+    proofs = [promotion_proof.registry(root, item, spec=spec) for item in entry["subjects"]]
+    if any(proof.status == "unverified" for proof in proofs):
+        raise RegistryError("PROMOTION_SUBJECT_UNVERIFIED: original registry continuity is unavailable")
+    keys = [item["key"] for item, proof in zip(entry["subjects"], proofs, strict=True) if proof.status == "same"]
+    if delta["remove"] != keys or not keys or binding["expected_fingerprint"] != promotion_proof.fingerprint(proofs):
+        raise RegistryError("PROMOTION_SUBJECT_CHANGED: original registry subjects changed")
+    return {"remove": keys}, tuple(guard for proof in proofs for guard in proof.guards)
+
+
 def save(
     vault_root: Path,
     spec: RegistrySpec,
@@ -816,6 +841,7 @@ def save(
         raise RegistryError(
             f"STALE_REGISTRY: {spec.name} changed since expected_hash was read; inspect again"
         )
+    delta, proof_guards = _promotion_removal(root, spec, delta)
     document, touched, candidate, blocking, removal = _candidate(root, spec, snapshot, delta)
     if blocking:
         return {"subject": spec.name, "valid": False, "findings": blocking, "saved": None}
@@ -839,6 +865,7 @@ def save(
         before_hash=snapshot.content_hash,
         previous=snapshot.overlay_text,
         added=added,
+        required_guards=proof_guards,
     )
     _mark_committed()
     after = registry._build(spec, rendered)

@@ -234,16 +234,6 @@ def authored_edges(
     return edges
 
 
-def _frontmatter(vault_root: Path, path: str) -> Mapping[str, Any]:
-    from .vault import parse_frontmatter
-
-    try:
-        text = (Path(vault_root) / path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {}
-    return parse_frontmatter(text)[0]
-
-
 def _is_entity(frontmatter: Mapping[str, Any]) -> bool:
     # The entity page type is the structural role the entity writer fixes, not a
     # vocabulary the vault defines (see `note_types` role "entity").
@@ -257,6 +247,8 @@ def record_page_write(
     before_source: str | None,
     after_source: str,
     origin: Mapping[str, Any] | None = None,
+    corpus: Any = None,
+    transition_id: str | None = None,
 ) -> None:
     """Record an entity creation and the typed edges an entity page gained.
 
@@ -264,33 +256,68 @@ def record_page_write(
     page and its target page are both entities. Never raises.
     """
     try:
+        from . import memory_refs
         from .vault import parse_frontmatter
 
         if not _is_entity(parse_frontmatter(after_source)[0]):
             return
         write = write_token()
         if before_source is None:
-            record(vault_root, "entity", [{"path": path}], write=write, origin=origin)
-        resolve = _Resolver(vault_root)
-        before = (
-            {(kind, target) for _line, kind, target in authored_edges(vault_root, before_source, resolve)}
-            if before_source is not None else set()
-        )
-        gained = sorted(
-            {(kind, target) for _line, kind, target in authored_edges(vault_root, after_source, resolve)}
-            - before
-        )
-        subjects = [
-            {"subject": path, "predicate": kind, "target": target}
-            for kind, target in gained
-            if _is_entity(_frontmatter(vault_root, target))
-        ]
+            record(
+                vault_root, "entity",
+                [{"path": path, "ref": memory_refs.ref_from_markdown(after_source)}],
+                write=write, origin=origin,
+            )
+        if corpus is None:
+            return  # An unbound post-commit reread cannot establish an edge's incarnation.
+        from . import semantic_contract
+        from .vault import content_hash
+
+        source_ref = memory_refs.ref_from_markdown(after_source)
+        if source_ref is None:
+            return
+
+        def resolve(raw: str) -> str | None:
+            return semantic_contract._resolve_reference_wikilink_from_context(corpus, raw).path
+
+        def edges(source: str) -> set[tuple[str, str]]:
+            return {
+                (canonical, target)
+                for _line, kind, target in authored_edges(vault_root, source, resolve)
+                if (canonical := corpus.registry.resolve(kind).canonical) is not None
+            }
+
+        before = edges(before_source) if before_source is not None else set()
+        gained = sorted(edges(after_source) - before)
+        introduction = {"source_ref": source_ref, "after_hash": content_hash(after_source)}
+        if before_source is None:
+            introduction["creation_ref"] = source_ref
+        elif transition_id is not None:
+            introduction["transition_id"] = transition_id
+        else:
+            return
+        subjects = []
+        for kind, target in gained:
+            state = corpus.pages.get(target)
+            canonical = corpus.registry.resolve(kind).canonical
+            if state is None or not _is_entity(state.frontmatter) or canonical is None:
+                continue
+            target_id = memory_refs.normalize_id(state.frontmatter.get(memory_refs.ID_FIELD))
+            if target_id is None:
+                continue
+            subjects.append({
+                "subject": path, "predicate": canonical, "target": target,
+                "source_ref": source_ref, "target_ref": memory_refs.memory_ref(target_id),
+                "introduction": introduction,
+            })
         record(vault_root, "edge", subjects, write=write, origin=origin)
     except Exception:  # noqa: BLE001 - recording is best effort
         log.debug("promotion not recorded for %s", path, exc_info=True)
 
 
-def record_registry(vault_root: Path, spec: Any, added: tuple[str, ...], rendered: str) -> None:
+def record_registry(
+    vault_root: Path, spec: Any, added: tuple[str, ...], rendered: str, *, version: str,
+) -> None:
     """Record the keys one registry save added; `rendered` is the overlay it wrote. Never raises."""
     try:
         if not added:
@@ -300,7 +327,12 @@ def record_registry(vault_root: Path, spec: Any, added: tuple[str, ...], rendere
         entries = _build(spec, rendered).entries
 
         scope = {} if spec.instance_id == PUBLIC_INSTANCE else {"scope": spec.instance_id}
-        subjects = [{"registry": spec.name, "key": key, **scope} for key in added]
+        from .vault import content_hash
+
+        subjects = [{
+            "registry": spec.name, "key": key, **scope,
+            "introduced_version": version, "after_hash": content_hash(rendered),
+        } for key in added]
         # A root of its own family: the registry declares parents and this key has none.
         new_family = "parent" in spec.fields and any(
             getattr(entries.get(key), "parent", True) is None for key in added
@@ -326,15 +358,21 @@ def edge_present(
     vault_root: Path, subject: str, predicate: str, target: str,
     resolve: Callable[[str], str | None] | None = None,
 ) -> bool:
+    from . import relation_registry
+    from .vault import PathGuardError, parse_frontmatter, read_guarded_text
+
     page = _safe_page(vault_root, subject)
     if page is None:
         return False
     try:
-        text = page.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        text, _guard = read_guarded_text(vault_root, page)
+    except (OSError, UnicodeDecodeError, PathGuardError):
         return False
+    registry = relation_registry.load_for_page(vault_root, subject, parse_frontmatter(text)[0])
+    # An unregistered label keeps its literal identity for ordinary authorized removal.
+    canonical = registry.resolve(predicate).canonical or predicate
     return any(
-        kind == predicate and resolved == target
+        (registry.resolve(kind).canonical or kind) == canonical and resolved == target
         for _line, kind, resolved in authored_edges(vault_root, text, resolve)
     )
 
@@ -353,34 +391,18 @@ def page_visible(vault_root: Path, path: str) -> bool:
     return keep is None or bool(keep(path))
 
 
-def registry_key_active(vault_root: Path, subject: Mapping[str, Any]) -> bool:
-    """Whether the registry still lists the key as active. An unreadable registry holds."""
-    try:
-        from .vocabulary import instances, registry, registry_spec
-
-        spec = instances.select(
-            vault_root, registry_spec(str(subject["registry"])), subject.get("scope"),
-            authoring=True,
-        )
-        entry = registry.load(spec, Path(vault_root)).entries.get(str(subject["key"]))
-    except Exception:  # noqa: BLE001 - what cannot be read cannot be shown to have ended
-        return True
-    return entry is not None and entry.status == "active"
-
-
 def subject_holds(
     vault_root: Path, kind: str, subject: Mapping[str, Any],
     resolve: Callable[[str], str | None] | None = None,
 ) -> bool:
-    if kind == "entity":
-        page = _safe_page(vault_root, str(subject.get("path") or ""))
-        return page is not None and page.is_file()
-    if kind == "edge":
-        return edge_present(
-            vault_root, str(subject.get("subject") or ""),
-            str(subject.get("predicate") or ""), str(subject.get("target") or ""), resolve,
-        )
-    return registry_key_active(vault_root, subject)
+    from . import promotion_proof
+
+    proof = (
+        promotion_proof.registry(Path(vault_root), subject)
+        if kind == "registry" else promotion_proof.page(Path(vault_root), kind, subject)
+    )
+    # Unknown continuity leaves a readable notice; only proved absence settles it.
+    return proof.status != "ended"
 
 
 def subject_pages(kind: str, subject: Mapping[str, Any]) -> list[str]:
@@ -396,18 +418,49 @@ def subject_visible(
     vault_root: Path, kind: str, subject: Mapping[str, Any],
     keep: Callable[[str], bool] | None,
 ) -> bool:
-    """Admit registry definitions or page endpoints before examining a promotion."""
+    """Admit the original subject before disclosing its stored identity binding."""
+    from .governance import egress
+
     if kind == "registry":
+        from . import registry_history
         from .vocabulary import contract, instances, registry_spec
 
         try:
             spec = instances.select(
                 vault_root, registry_spec(str(subject["registry"])), subject.get("scope"),
             )
-            return contract.admission_refusal(vault_root, spec) is None
+            if contract.admission_refusal(vault_root, spec) is not None:
+                return False
+            if egress.caller_restricted(vault_root):
+                # Recycled storage cannot disclose a prior instance's private key.
+                version = str(subject.get("introduced_version") or "")
+                if not registry_history.VERSION_RE.fullmatch(version):
+                    return False
+                directory = registry_history.history_dir(vault_root, spec.stem).relative_to(vault_root).as_posix()
+                return registry_history.read_kept(
+                    vault_root, directory, f"{version}.yaml",
+                    _admit_raw=registry_history._require_snapshot_admission,
+                ) is not None
+            return True
         except Exception:  # noqa: BLE001 - an unavailable instance is withheld
             return False
-    return all(keep is None or keep(page) for page in subject_pages(kind, subject))
+    if not all(keep is None or keep(page) for page in subject_pages(kind, subject)):
+        return False
+    if egress.caller_restricted(vault_root):
+        from . import promotion_proof
+
+        try:
+            # A public replacement never releases the old page's private reference.
+            if kind == "entity" and subject.get("ref") is not None:
+                return promotion_proof._page(vault_root, subject["path"], subject["ref"], []) is not None
+            if kind == "edge" and subject.get("source_ref") is not None:
+                return all(promotion_proof._page(vault_root, path, ref, []) is not None for path, ref in (
+                    (subject["subject"], subject["source_ref"]),
+                    (subject["target"], subject.get("target_ref")),
+                ))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------- #

@@ -1080,7 +1080,7 @@ class ExistingPreflight:
     census_token: tuple | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
-    unit_target_guards: tuple[vault.PathGuard, ...] = ()
+    read_dependency_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     provenance_server_at: str | None = None
 
     @property
@@ -2502,7 +2502,7 @@ def _commit_existing_locked(
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
-                required_guards=(*required_guards, *origin_guards, *preflight.unit_target_guards),
+                required_guards=(*required_guards, *origin_guards, *preflight.read_dependency_guards),
                 index_reports=reports,
                 semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
                 _vocabulary_auxiliaries=manifest,
@@ -2573,7 +2573,7 @@ def _revalidate_existing_preflight(
             status_basis=status_basis,
         )
         return replace(
-            refreshed, unit_target_guards=preflight.unit_target_guards,
+            refreshed, read_dependency_guards=preflight.read_dependency_guards,
             provenance_server_at=preflight.provenance_server_at,
         )
 
@@ -2952,6 +2952,8 @@ def commit_existing(
         promotions.record_page_write(
             vault_root, preflight.path,
             before_source=preflight.before_source, after_source=preflight.after_source,
+            corpus=preflight.after_corpus,
+            transition_id=_existing_transition_id(preflight.transition_token),
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
@@ -4661,7 +4663,7 @@ def commit_creation(
         # A successor page is a new version of an entity, not a new entity.
         promotions.record_page_write(
             vault_root, preflight.destination, before_source=None, after_source=preflight.source,
-            origin=promotion_origin,
+            origin=promotion_origin, corpus=preflight.corpus,
         )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)

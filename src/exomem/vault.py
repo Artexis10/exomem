@@ -3609,6 +3609,7 @@ def _bounded_directory_entries(
     max_entries: int,
     ignored_names: frozenset[str] = frozenset(),
     admission: Callable[[str], bool] | None = None,
+    include_internal_state: bool = False,
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
     try:
@@ -3637,7 +3638,7 @@ def _bounded_directory_entries(
                 if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
                     raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
                 continue
-            if _is_registered_internal_state_artifact(entry_relative):
+            if not include_internal_state and _is_registered_internal_state_artifact(entry_relative):
                 continue
             if len(ordinary_names) <= max_entries:
                 ordinary_names.append(name)
@@ -3713,6 +3714,8 @@ class DirectoryCensusGuard:
     entries: tuple[PathIdentity, ...]
     max_entries: int
     admission: Callable[[str], bool] | None = None
+    # Destructive undo must bind retained internal history; ordinary scans still omit it.
+    include_internal_state: bool = False
 
     @classmethod
     def capture(
@@ -3722,6 +3725,7 @@ class DirectoryCensusGuard:
         *,
         max_entries: int,
         admission: Callable[[str], bool] | None = None,
+        include_internal_state: bool = False,
     ) -> DirectoryCensusGuard:
         parts = _safe_guard_target(target)
         if type(max_entries) is not int or max_entries < 0:
@@ -3765,6 +3769,7 @@ class DirectoryCensusGuard:
                 expected=directory_identity,
                 max_entries=max_entries,
                 admission=admission,
+                include_internal_state=include_internal_state,
             )
             guard = cls(
                 target,
@@ -3774,10 +3779,11 @@ class DirectoryCensusGuard:
                 entries,
                 max_entries,
                 admission,
+                include_internal_state,
             )
             guard.recheck(root)
             return guard
-        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries, admission)
+        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries, admission, include_internal_state)
         guard.recheck(root)
         return guard
 
@@ -3860,6 +3866,7 @@ class DirectoryCensusGuard:
                     max_entries=self.max_entries,
                     ignored_names=allowed_names,
                     admission=self.admission,
+                    include_internal_state=self.include_internal_state,
                 )
                 if current:
                     raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
@@ -3873,6 +3880,7 @@ class DirectoryCensusGuard:
             max_entries=self.max_entries,
             ignored_names=allowed_names,
             admission=self.admission,
+            include_internal_state=self.include_internal_state,
         )
         expected_entries = tuple(
             entry for entry in self.entries if Path(entry.relative_path).name not in allowed_names

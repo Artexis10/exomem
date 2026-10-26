@@ -36,7 +36,7 @@ import datetime as dt
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
@@ -56,6 +56,8 @@ from .kbdir import kb_page_target, kb_prefix
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
+    DirectoryCensusGuard,
+    PathGuard,
     PlannedWrite,
     WikilinkResolver,
     content_hash,
@@ -160,6 +162,7 @@ def edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    read_dependency_guards: tuple[PathGuard | DirectoryCensusGuard, ...] = (),
 ) -> EditResult | EditValidation:
     """Edit an existing page in place. Frontmatter pages bump `updated:`.
 
@@ -389,6 +392,7 @@ def edit(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        read_dependency_guards=read_dependency_guards,
     )
     return EditResult(
         path=rel_path,
@@ -877,6 +881,7 @@ def commit_edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    read_dependency_guards: tuple[PathGuard | DirectoryCensusGuard, ...] = (),
 ) -> CommitEditResult:
     """Stage page write + opportunistic index refresh + ONE log entry; commit atomically.
 
@@ -954,6 +959,7 @@ def commit_edit(
                 stamp=date_iso,
                 timings=timings,
             )
+            preflight = replace(preflight, read_dependency_guards=read_dependency_guards)
             try:
                 from .relation_census import operation_provenance
 

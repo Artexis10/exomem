@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import curation, promotions
+from . import curation, promotion_proof, promotions
 
 
 def _error_code(error: BaseException) -> str:
@@ -54,7 +54,8 @@ def _region_without(lines: list[str], doomed: set[int], body: str) -> tuple[str,
 
 
 def remove_relation(
-    vault_root: Path, *, subject: str, predicate: str, target: str, why: str
+    vault_root: Path, *, subject: str, predicate: str, target: str, why: str,
+    _promotion: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Remove every `## Relations` bullet of one (subject, predicate, target) triple.
 
@@ -63,37 +64,56 @@ def remove_relation(
     page survives: a stale hash is read again, never forced. A triple that is not
     there reports `absent`, which is also what a repeat sees.
     """
-    from . import commands, edit
+    from . import edit
 
     if not promotions.page_visible(vault_root, subject):
         raise ValueError(f"NOT_FOUND: file does not exist: {subject}")
     for _attempt in range(_STALE_RETRIES):
         editable = edit.load_editable(vault_root, subject)
+        guards = ()
+        if _promotion is not None:
+            binding = promotion_proof.metadata(_promotion)
+            _promotion_id, entry = promotions.find(vault_root, binding["ref"])
+            matches = [item for item in entry["subjects"] if (
+                entry["kind"] == "edge" and item.get("subject") == subject
+                and item.get("predicate") == predicate and item.get("target") == target
+            )]
+            if len(matches) != 1:
+                raise ValueError("PROMOTION_SUBJECT_UNVERIFIED: edge binding unavailable")
+            proof = promotion_proof.page(vault_root, "edge", matches[0])
+            promotion_proof.require_same([proof])
+            if proof.fingerprint != binding["expected_fingerprint"]:
+                raise ValueError("PROMOTION_SUBJECT_CHANGED: the edge proof changed")
+            for guard in proof.guards:
+                guard.recheck(vault_root)
+            # The editor's expected hash and primary guard own this write target.
+            guards = tuple(guard for guard in proof.guards if guard.target != subject)
         body = editable.body
+        from . import relation_registry
+        from .vault import parse_frontmatter
+
+        registry = relation_registry.load_for_page(vault_root, subject, parse_frontmatter(editable.original_text)[0])
+        canonical = registry.resolve(predicate).canonical or predicate
         doomed = {
             index
             for index, kind, resolved in promotions.authored_edges(vault_root, body)
-            if kind == predicate and resolved == target
+            if (registry.resolve(kind).canonical or kind) == canonical and resolved == target
         }
         if not doomed:
             return {"path": subject, "removed": 0, "outcome": "absent"}
         lines = body.splitlines(keepends=True)
         region, kept = _region_without(lines, doomed, body)
         try:
-            result = commands.op_edit_memory(
-                vault_root,
-                subject,
-                why,
-                operation={
-                    "kind": "replace_string",
-                    "old_string": region,
-                    "new_string": kept,
-                    "expected_hash": editable.raw_hash,
-                },
-            )
-        except ValueError as error:
-            if _error_code(error) == "STALE_EDIT":
+            result = edit.edit(
+                vault_root, path=subject, why=why, old_string=region, new_string=kept,
+                expected_hash=editable.raw_hash, read_dependency_guards=guards,
+            ).as_dict()
+        except (ValueError, edit.EditError) as error:
+            # These closed error codes identify retriable writer contention.
+            if _error_code(error) in {"STALE_EDIT", "STALE_SEMANTIC_WRITE", "PATH_GUARD_CHANGED"}:
                 continue
+            if isinstance(error, edit.EditError):
+                raise ValueError(f"{error.code}: {error.reason}") from error
             raise
         return {**result, "removed": len(doomed), "outcome": "removed"}
     raise ValueError(f"STALE_EDIT: {subject} kept changing while the edge was removed")
@@ -125,9 +145,21 @@ class RevertPlan:
     dying: tuple[str, ...]
     #: `curation.plan_fingerprint` of the revert plan; None when nothing is left to revert.
     fingerprint: str | None
+    #: The exact entity bytes whose identity and undo the caller reviewed.
+    trash_hashes: tuple[tuple[str, str], ...]
 
 
-def _edge_steps(subjects: list[dict[str, Any]], promotion_id: str) -> list[dict[str, Any]]:
+def _edge_steps(vault_root: Path, subjects: list[dict[str, Any]], promotion_id: str) -> list[dict[str, Any]]:
+    proofs = promotion_proof.subjects(vault_root, "edge", subjects)
+    promotion_proof.require_same(proofs)
+    ledger = promotions.ledger(vault_root)
+
+    def binding(subject: dict[str, Any], proof: promotion_proof.Proof) -> dict[str, Any]:
+        owner = promotion_id if subject in ledger[promotion_id]["subjects"] else next(
+            key for key, row in ledger.items() if row["kind"] == "edge" and subject in row["subjects"]
+        )
+        return {"ref": promotions.promotion_ref(owner), "expected_fingerprint": proof.fingerprint}
+
     return [
         {
             "step_id": f"remove-{ordinal}",
@@ -137,9 +169,10 @@ def _edge_steps(subjects: list[dict[str, Any]], promotion_id: str) -> list[dict[
                 "predicate": subject["predicate"],
                 "target": subject["target"],
                 "why": f"Revert recent promotion {promotions.promotion_ref(promotion_id)}",
+                "_promotion": binding(subject, proof),
             },
         }
-        for ordinal, subject in enumerate(subjects, 1)
+        for ordinal, (subject, proof) in enumerate(zip(subjects, proofs, strict=True), 1)
     ]
 
 
@@ -194,7 +227,8 @@ def _removed_edge_lines(
 
 def build(vault_root: Path, ref: str) -> RevertPlan:
     """The deterministic revert plan of an edge or entity entry, from current state. Read-only."""
-    from .vault import content_hash
+    from . import memory_refs
+    from .vault import content_hash, read_guarded_text
 
     promotion_id, entry = promotions.find(vault_root, ref)
     kind = str(entry["kind"])
@@ -203,11 +237,11 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
             "INVALID_REVIEW_ACTION: a registry addition reverts through schema_memory, "
             "not curation; read the item context for the call"
         )
+    proofs = promotion_proof.subjects(vault_root, kind, entry["subjects"])
+    if any(proof.status == "unverified" for proof in proofs):
+        raise ValueError("PROMOTION_SUBJECT_UNVERIFIED: original subject continuity is unavailable")
     resolve = promotions._Resolver(vault_root)
-    holding = [
-        subject for subject in entry["subjects"]
-        if promotions.subject_holds(vault_root, kind, subject, resolve)
-    ]
+    holding = [subject for subject, proof in zip(entry["subjects"], proofs, strict=True) if proof.status == "same"]
     trash: list[str] = []
     dependants: list[dict[str, Any]] = []
     dying: set[str] = set()
@@ -230,7 +264,7 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
         dying |= {origin} if origin else set()
         dependants.sort(key=lambda link: (link["path"], link["line"]))
     title = f"Revert recent promotion {promotions.promotion_ref(promotion_id)}"
-    steps = _edge_steps(edges, promotion_id)
+    steps = _edge_steps(vault_root, edges, promotion_id)
     prepared = (
         curation.prepare_proposal(
             vault_root, {"version": 1, "title": title, "steps": steps}, allow_records=True
@@ -241,14 +275,17 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
         {"step_id": f"trash-{ordinal}", "kind": TRASH_ENTITY_KIND, "args": {"path": path}}
         for ordinal, path in enumerate(trash, 1)
     ]
-    trash_manifest = [
-        {
+    trash_manifest = []
+    for step, path in zip(trash_steps, trash, strict=True):
+        source, _guard = read_guarded_text(vault_root, Path(vault_root) / path)
+        expected_ref = next(subject["ref"] for subject in holding if subject["path"] == path)
+        if memory_refs.ref_from_markdown(source) != expected_ref:
+            raise ValueError("PROMOTION_SUBJECT_CHANGED: the promoted entity changed during its preview")
+        trash_manifest.append({
             **step,
-            "page_hash": content_hash((Path(vault_root) / path).read_text(encoding="utf-8")),
+            "page_hash": content_hash(source),
             "dependants": [f"{link['path']}:{link['line']}" for link in dependants],
-        }
-        for step, path in zip(trash_steps, trash, strict=True)
-    ]
+        })
     if not steps and not trash:
         fingerprint = None
     else:
@@ -260,6 +297,7 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
     return RevertPlan(
         promotion_id, kind, title, prepared, tuple(trash), tuple(dependants),
         tuple(sorted(dying)), fingerprint,
+        tuple((path, manifest["page_hash"]) for path, manifest in zip(trash, trash_manifest, strict=True)),
     )
 
 
@@ -284,9 +322,10 @@ def revert(
             "the revert fingerprint is stale; read the item context again",
         )
     expected_dead = sorted({*plan.dying, *(link["path"] for link in plan.dependants)})
+    trash_hashes = dict(plan.trash_hashes)
     for path in plan.trash:
         # The trash leaf's own refusals (history, protected trees) surface before any edge is removed.
-        _trash(vault_root, path, expected_dead, validate_only=True)
+        _trash(vault_root, path, expected_dead, validate_only=True, expected_hash=trash_hashes[path])
     removed: list[dict[str, Any]] = []
     run_id = None
     if plan.prepared is not None:
@@ -304,7 +343,10 @@ def revert(
             {key: step["args"][key] for key in ("subject", "predicate", "target")}
             for step in plan.prepared.plan["steps"]
         ]
-    trashed = [_trash(vault_root, path, expected_dead) for path in plan.trash]
+    trashed = [
+        _trash(vault_root, path, expected_dead, expected_hash=trash_hashes[path])
+        for path in plan.trash
+    ]
     promotions.settle(vault_root, plan.promotion_id, "settled by revert")
     return {
         "action": "revert", "mutated": True, "ref": review_ref, "outcome": "reverted",
@@ -314,7 +356,8 @@ def revert(
 
 
 def _trash(
-    vault_root: Path, path: str, expected_dead: list[str], *, validate_only: bool = False
+    vault_root: Path, path: str, expected_dead: list[str], *, validate_only: bool = False,
+    expected_hash: str | None = None,
 ) -> Any:
     from . import delete_file as delete_module
 
@@ -322,6 +365,7 @@ def _trash(
         result = delete_module.delete_file(
             vault_root, path=path, confirm=True, expected_dead_inbound=expected_dead,
             validate_only=validate_only,
+            expected_hash=expected_hash,
         )
     except delete_module.DeleteFileError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
@@ -370,10 +414,15 @@ def _registry_context(vault_root: Path, ref: str, entry: dict[str, Any]) -> dict
     """
     from .vocabulary import contract, instances, registry_spec
 
-    live = [item for item in entry["subjects"] if promotions.registry_key_active(vault_root, item)]
+    proofs = promotion_proof.subjects(vault_root, "registry", entry["subjects"])
+    if any(proof.status == "unverified" for proof in proofs):
+        return {"findings": [{"code": "PROMOTION_SUBJECT_UNVERIFIED", "severity": "warning"}]}
+    live = [item for item, proof in zip(entry["subjects"], proofs, strict=True) if proof.status == "same"]
     if not live:
         return {}
     name, scope = str(live[0]["registry"]), live[0].get("scope")
+    if any(item["registry"] != name or item.get("scope") != scope for item in entry["subjects"]):
+        return {"findings": [{"code": "PROMOTION_SUBJECT_UNVERIFIED", "severity": "warning"}]}
     keys = [str(item["key"]) for item in live]
     try:
         spec = instances.select(vault_root, registry_spec(name), scope, authoring=True)
@@ -387,7 +436,9 @@ def _registry_context(vault_root: Path, ref: str, entry: dict[str, Any]) -> dict
     arguments: dict[str, Any] = {
         "subject": name,
         "operation": "save",
-        "proposal": {"remove": keys},
+        "proposal": {"remove": keys, "_promotion": {
+            "ref": ref, "expected_fingerprint": promotion_proof.fingerprint(proofs),
+        }},
         "expected_hash": current,
         "why": "<the reason the user gave>",
     }
@@ -431,7 +482,13 @@ def context(vault_root: Path, ref: str, *, expected_fingerprint: str | None = No
     if entry["kind"] == "registry":
         out.update(_registry_context(vault_root, ref, entry))
     if entry["kind"] in {"edge", "entity"}:
-        plan = build(vault_root, ref)
+        try:
+            plan = build(vault_root, ref)
+        except ValueError as error:
+            if _error_code(error) != "PROMOTION_SUBJECT_UNVERIFIED":
+                raise
+            out["findings"] = [{"code": "PROMOTION_SUBJECT_UNVERIFIED", "severity": "warning"}]
+            return out
         out["revert_fingerprint"] = plan.fingerprint
         out["dependants"] = list(plan.dependants)
         if plan.fingerprint is not None:
