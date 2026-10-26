@@ -1738,6 +1738,7 @@ def planned_destination(
         started=None,
         date_iso=date_iso or temporal.render_date(temporal.now()),
         create_parents=False,
+        home_set=homes_module.load(root),
     )
     return canonical_vault_rel(root, path.relative_to(root).as_posix())
 

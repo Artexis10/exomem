@@ -488,7 +488,7 @@ def test_a_homes_pages_are_counted_and_get_an_index_section(vault: Path) -> None
     top_index = vault / KB / "index.md"
     top_index.write_text(
         top_index.read_text(encoding="utf-8").replace(
-            "- Notes (insight): 4\n", "- Notes (insight): 4\n- Notes (equipment): 0\n"
+            "- Notes (insight): 4\n", "- Notes (insight): 4\n- Notes (home:equipment): 0\n"
         ),
         encoding="utf-8",
     )
@@ -501,7 +501,7 @@ def test_a_homes_pages_are_counted_and_get_an_index_section(vault: Path) -> None
     assert "### Equipment — Notes about the workshop equipment. (2)" in index
     assert "### Insights — distilled cross-cutting lessons (4)" in index
     top = top_index.read_text(encoding="utf-8")
-    assert "- Notes (equipment): 2" in top
+    assert "- Notes (home:equipment): 2" in top
     assert "- Notes (insight): 4" in top
     # 4 research + 4 insight + 2 failure + 5 pattern + 1 production + 2 in the home.
     assert "- Notes: 18" in top
@@ -513,7 +513,7 @@ def test_index_drift_reports_a_stale_home_count(vault: Path) -> None:
     top_index = vault / KB / "index.md"
     top_index.write_text(
         top_index.read_text(encoding="utf-8").replace(
-            "- Notes (insight): 4\n", "- Notes (insight): 4\n- Notes (equipment): 7\n"
+            "- Notes (insight): 4\n", "- Notes (insight): 4\n- Notes (home:equipment): 7\n"
         ),
         encoding="utf-8",
     )
@@ -525,7 +525,7 @@ def test_index_drift_reports_a_stale_home_count(vault: Path) -> None:
     with library_scope():
         details = [f.detail for f in audit.audit(vault, categories=["index_drift"]).findings]
 
-    assert any("notes:equipment" in detail and "actual is 1" in detail for detail in details), details
+    assert any("notes:home:equipment" in detail and "actual is 1" in detail for detail in details), details
 
 
 def test_a_pending_note_in_a_nested_home_does_not_reduce_the_parent_count(vault: Path) -> None:
@@ -560,8 +560,37 @@ def test_deep_home_counts_do_not_depend_on_registry_key_order(vault: Path) -> No
     _remember(vault, title="Pump seal", note_type="insight", topics=["seals"])
 
     counts = indexes._count_notes(vault / KB / "Notes", home_set=homes.load(vault))
-    assert counts["z-parent"] == counts["b-middle"] == 0
-    assert counts["a-child"] == 1
+    assert counts["home:z-parent"] == counts["home:b-middle"] == 0
+    assert counts["home:a-child"] == 1
     assert sum(counts.values()) == 17
     with library_scope():
         assert audit.audit(vault, categories=["index_drift"]).findings == []
+
+
+def test_a_home_key_matching_a_type_keeps_both_counts(vault: Path) -> None:
+    from exomem import homes, indexes
+
+    _save(vault, {"research": EQUIPMENT})
+    _remember(vault, title="Pump pressure", note_type="insight", topics=["equipment"])
+
+    counts = indexes._count_notes(vault / KB / "Notes", home_set=homes.load(vault))
+    assert counts["research"] == 4
+    assert counts["home:research"] == 1
+    assert sum(counts.values()) == 17
+
+
+def test_fenced_index_examples_do_not_hide_a_real_home_section(vault: Path) -> None:
+    notes_index = vault / KB / "Notes" / "index.md"
+    notes_index.write_text(
+        "# Notes\n\n````markdown\n## By type\n### Equipment (0)\n```\n````\n\n"
+        "## By type\n\n### Insights (4)\n\n## Reading\n\nKeep this section.\n",
+        encoding="utf-8",
+    )
+    _save(vault, {"equipment": EQUIPMENT})
+    _remember(vault, title="Pump pressure", note_type="insight", topics=["equipment"])
+
+    text = notes_index.read_text(encoding="utf-8")
+    real_section = text.rindex("## By type")
+    home_section = text.index("### Equipment — Notes about the workshop equipment. (1)")
+    assert real_section < home_section < text.index("## Reading")
+    assert "Keep this section." in text

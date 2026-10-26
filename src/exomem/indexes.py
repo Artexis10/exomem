@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path, PurePosixPath
 
-from . import call_spans, homes, note_types
+from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
@@ -257,7 +257,11 @@ def _notes_owners(home_set: homes.HomeSet | None) -> tuple[_NotesOwner, ...]:
     ]
     for home in home_set.homes if home_set is not None else ():
         owners.append(
-            _NotesOwner(home.parts, home.key, (home.label, home.parts[-1]), home.description, home.active)
+            # Count identities separate home keys from the shipped type-row protocol.
+            _NotesOwner(
+                home.parts, f"home:{home.key}", (home.label, home.parts[-1]),
+                home.description, home.active,
+            )
         )
     return tuple(owners)
 
@@ -456,7 +460,8 @@ def _prepend_recent_activity(
 SOURCES_COUNT_PATTERN = re.compile(r"^- Sources: .+$", re.MULTILINE)
 # Top-index Counts rows: `- Notes (research): 106` or `- Entities (person): 21`.
 _NOTES_COUNT_LINE = re.compile(
-    r"^(- Notes \()([a-z0-9-]+)(\): )(\d+)\s*$", re.MULTILINE
+    # Generated count-row format; the registry supplies each token's vocabulary.
+    r"^(- Notes \()([^)\n]+)(\): )(\d+)\s*$", re.MULTILINE
 )
 _ENTITIES_COUNT_LINE = re.compile(
     r"^(- Entities \()([a-z-]+)(\): )(\d+)\s*$", re.MULTILINE
@@ -705,10 +710,21 @@ def _add_home_sections(
     owner_titled: Callable[[str], _NotesOwner | None],
 ) -> str:
     """Give each home that has no section one, at the end of `## By type`."""
-    present = {match.group("name") for match in _NOTES_H3_COUNT.finditer(text)}
-    start = text.find(NOTES_BY_TYPE_HEADER)
-    if start == -1:
+    lines = text.splitlines(keepends=True)
+    headings = list(markdown_relations.iter_headings(lines))
+    start = next((
+        line for line, level, title in headings
+        if level == 2 and title == NOTES_BY_TYPE_HEADER.removeprefix("## ")
+    ), None)
+    if start is None:
         return text
+    end_line = next((line for line, level, _title in headings if line > start and level <= 2), len(lines))
+    # CommonMark owns spans; this regex checks only the generated count-header format.
+    present = {
+        match.group("name")
+        for line, level, title in headings if start < line < end_line and level == 3
+        if (match := _NOTES_H3_COUNT.fullmatch(f"### {title}")) is not None
+    }
     sections: list[str] = []
     for owner in owners:
         if owner.description is None or any(owner_titled(name) is owner for name in present):
@@ -726,8 +742,7 @@ def _add_home_sections(
                 break
     if not sections:
         return text
-    end = text.find("\n## ", start + len(NOTES_BY_TYPE_HEADER))
-    end = len(text) if end == -1 else end
+    end = sum(len(line) for line in lines[:end_line])
     head, tail = text[:end].rstrip("\n"), text[end:].lstrip("\n")
     joined = head + "\n\n" + "\n\n".join(sections) + "\n"
     return joined + ("\n" + tail if tail else "")

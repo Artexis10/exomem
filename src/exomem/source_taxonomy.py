@@ -1141,6 +1141,12 @@ def _domain_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> A
     return usage.catalogue_axis(vault_root, snapshot, column="domain")
 
 
+def _domain_removal_usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.domain_references(vault_root, snapshot)
+
+
 _LABEL_FIELDS = frozenset(
     {"label", "description", "aliases", "status", "replaced_by", "attributes"}
 )
@@ -1174,4 +1180,5 @@ DOMAIN_SPEC = vocabulary_registry.RegistrySpec(
     promotion="auto-register",
     cap=512,
     usage=_domain_usage,
+    removal_usage=_domain_removal_usage,
 )

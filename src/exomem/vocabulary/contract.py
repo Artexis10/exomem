@@ -353,15 +353,18 @@ def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | No
     return None
 
 
-def _usage(vault_root: Path, spec: RegistrySpec, snapshot: Snapshot) -> Any:
+def _usage(
+    vault_root: Path, spec: RegistrySpec, snapshot: Snapshot, *, for_removal: bool = False,
+) -> Any:
     from .usage import Usage
 
     if spec.binding_revision is not None:
         # Existing aggregate projections have no instance identity; never union their counts.
         return Usage(available=False, reason="instance_projection_unavailable")
-    if spec.usage is None:
+    read = spec.removal_usage if for_removal and spec.removal_usage is not None else spec.usage
+    if read is None:
         return Usage(available=False, reason="not_counted")
-    return spec.usage(vault_root, snapshot)
+    return read(vault_root, snapshot)
 
 
 def _ordered(snapshot: Snapshot, usage: Any) -> list[Entry]:
@@ -553,7 +556,7 @@ def _candidate(
 ) -> tuple[dict[str, Any], dict[str, Entry], Any, list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """The overlay document after a delta, its typed registry, blocking findings and removals."""
     removing = isinstance(delta, Mapping) and bool(delta.get("remove"))
-    usage = _usage(vault_root, spec, snapshot) if removing else None
+    usage = _usage(vault_root, spec, snapshot, for_removal=True) if removing else None
     document, touched = registry.apply_delta(spec, snapshot, delta, usage=usage)
     candidate = spec.adapter.parse_document(document)
     after_entries = spec.adapter.entries(candidate)

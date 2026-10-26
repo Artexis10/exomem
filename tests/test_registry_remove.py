@@ -290,3 +290,32 @@ def test_the_item_context_hands_over_the_registry_hash_and_the_call_that_reverts
     assert done["ok"] is True
     assert _entity_type_keys(call) == {"arena": "active"}, "the later save stays"
     assert commands.op_review_item_context(vault, ref)["revert_fingerprint"] is None, "settled"
+
+
+@pytest.mark.parametrize("use", ["topic", "home", "unused"])
+def test_domain_removal_counts_topic_and_home_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use: str,
+) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    _save(call, "domains", {"upsert": {"hydraulics": {
+        "label": "Hydraulics", "description": "Pressure systems.",
+        "attributes": {"path_label": "Hydraulics"},
+    }}}, "Create a topic")
+    if use == "topic":
+        page = call("create_note", {
+            "note_type": "insight", "title": "Seal pressure", "topics": ["hydraulics"],
+            "status": "draft", "content": "## Claim\n\nA pressure finding.\n",
+        })
+        assert page["ok"], page
+    elif use == "home":
+        _save(call, "homes", {"upsert": {"workshop": {
+            "label": "Workshop", "attributes": {
+                "folder": "Notes/Workshop", "topics": ["hydraulics"],
+            },
+        }}}, "Group pressure-system notes")
+
+    removed = _save(call, "domains", {"remove": ["hydraulics"]}, "Undo topic promotion")
+
+    assert removed["valid"], removed
+    expected = "removed" if use == "unused" else "deprecated"
+    assert removed["removal"]["hydraulics"]["action"] == expected

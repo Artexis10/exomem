@@ -2,8 +2,8 @@
 
 Counts come only from projections the indexer already keeps current: the
 published graph snapshot (entity types, note types, homes, relations, semantic
-categories) and the lexical catalogue (source kinds, domains). Nothing here
-parses Markdown.
+categories) and the lexical catalogue (source kinds, domains). Domain removal
+also reuses the semantic corpus to include topics and registry references.
 
 A projection that is absent, warming, stale or refused makes the registry's
 counts `unavailable` with a reason; a zero is only ever a counted zero. Under a
@@ -239,13 +239,14 @@ def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
 
 def catalogue_axis(vault_root: Path, snapshot: Snapshot, *, column: str) -> Usage:
     """Knowledge Base pages per source kind or domain, from the lexical catalogue."""
+    source = f"catalogue Knowledge Base pages by {column}"
 
     def read() -> Usage:
         from .. import lexstore
 
         rows = lexstore.get_store(Path(vault_root)).page_axis_counts(column)
         if rows is None:
-            return _unavailable("catalogue_unavailable", "catalogue Knowledge Base pages")
+            return _unavailable("catalogue_unavailable", source)
         aliases = (
             snapshot.typed.kind_aliases
             if column == "source_kind"
@@ -256,7 +257,63 @@ def catalogue_axis(vault_root: Path, snapshot: Snapshot, *, column: str) -> Usag
             _canonical_counts(
                 list(rows.items()), snapshot, lambda value: aliases.get(value, value)
             ),
-            source="catalogue Knowledge Base pages",
+            source=source,
         )
 
-    return _guarded(vault_root, "catalogue Knowledge Base pages", read)
+    return _guarded(vault_root, source, read)
+
+
+def domain_references(vault_root: Path, snapshot: Snapshot) -> Usage:
+    """Complete domain references for removal, including topics and home selectors."""
+    source = "pages and registry documents with domain references"
+
+    def read() -> Usage:
+        from .. import homes, semantic_contract, source_taxonomy
+        from ..kbdir import kb_prefix
+        from . import contract, instances, registry
+
+        root = Path(vault_root)
+        try:
+            home_spec = instances.select(root, homes.SPEC, snapshot.instance_id)
+            if contract.admission_refusal(root, home_spec) is not None:
+                return _unavailable("home_registry_unavailable", source)
+            home_snapshot = registry.load(home_spec, root)
+            if any(row.get("severity") == "error" for row in home_snapshot.findings):
+                return _unavailable("home_registry_invalid", source)
+            corpus = semantic_contract.build_corpus_context(root)
+            paths: dict[str, set[str]] = {}
+
+            def record(value: Any, path: str) -> None:
+                if not isinstance(value, str) or not value:
+                    return
+                try:
+                    key = snapshot.typed.resolve_domain(value).key
+                except source_taxonomy.TaxonomyError:
+                    return
+                if key in snapshot.entries:
+                    paths.setdefault(key, set()).add(path)
+
+            for page in corpus.pages.values():
+                if not page.path.startswith(kb_prefix()):
+                    continue
+                record(page.frontmatter.get("domain"), page.path)
+                topics = page.frontmatter.get("topics") or ()
+                for value in (topics,) if isinstance(topics, str) else topics:
+                    record(value, page.path)
+            home_path = home_spec.overlay(root).relative_to(root).as_posix()
+            for entry in home_snapshot.entries.values():
+                for value in entry.attributes.get("topics") or ():
+                    record(value, home_path)
+            domain_spec = instances.select(root, source_taxonomy.DOMAIN_SPEC, snapshot.instance_id)
+            domain_path = domain_spec.overlay(root).relative_to(root).as_posix()
+            for entry in snapshot.entries.values():
+                record(entry.replaced_by, domain_path)
+        except Exception:  # noqa: BLE001 - incomplete reference proof cannot establish non-use
+            return _unavailable("domain_reference_census_unavailable", source)
+        holders = {key: tuple(sorted(values)) for key, values in paths.items()}
+        return Usage(
+            True, MappingProxyType({key: len(values) for key, values in holders.items()}),
+            source=source, holders=lambda key, limit: holders.get(key, ())[:limit],
+        )
+
+    return _guarded(vault_root, source, read)

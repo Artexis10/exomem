@@ -82,6 +82,8 @@ The save SHALL take no `vocabulary_ref` or `vocabulary_fingerprint`.
 The server SHALL decide at save time from current usage: it SHALL remove the key when the key is vault-added and nothing uses it, and otherwise SHALL deprecate the key, to its parent for a relation, and list the dependants.
 The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check: entity types, relations, semantic categories, note types, homes, source kinds and domains.
 Every other registry SHALL refuse it, and unavailable usage SHALL refuse removal instead of reporting an unused key.
+Domain removal SHALL count page `domain` and `topics` fields, home topic selectors, and replacement references.
+Scalar-domain display counts alone SHALL NOT establish that a domain is unused.
 No revert SHALL land on `triage_memory` or `connect_memory`.
 A revert SHALL NOT restore an older registry version or drop a later save.
 A revert SHALL run only on the user's request, which is its confirmation, and history and logs SHALL keep both the promotion and its revert.
