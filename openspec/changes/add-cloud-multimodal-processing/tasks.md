@@ -34,7 +34,7 @@ Automatic ingestion is delivered. Manual `process_media` exposure is decided in 
 - [ ] 3.1 Select the image model from published multilingual retrieval results under design D5. Record CPU speed, peak memory and shareable weights before implementation.
 - [ ] 3.2 Ship its pinned offline runtime through the shared-model contract. Verify same-precision parity where the existing vector space is retained.
 - [ ] 3.3 Record model, width, precision and artifact identity in the image sidecar. Verify legacy-space reads, space-change backfill and refusal to mix spaces.
-- [ ] 3.4 Add the aligned multilingual query encoder. Verify supported-language retrieval and that a space-preserving encoder change keeps stored image vectors.
+- [x] 3.4 Add the aligned multilingual query encoder. Verify supported-language retrieval and that a space-preserving encoder change keeps stored image vectors.
 - [x] 3.5 Resolve HEIC decoder licensing before adding its dependency. Verify a real HEIC sample through the image gate and document the supported format.
 - [ ] 3.6 Record whether to ship optional frozen captions under design D5. If selected, verify their independent switch, default-off behavior and sidecar search.
 - [x] 3.7 Recheck disabled and empty image lanes without loading the query encoder. Verify neither state reports warming or degradation.
@@ -47,11 +47,16 @@ Image model selection and caption selection remain open decisions.
 
 ## 4. Speech
 
-- [ ] 4.1 Record the selected Whisper turbo default under design D6 and the shared-model contract. Separate diagnostic evidence from unfinished upgrade measurements.
-- [ ] 4.2 Ship the selected offline speech engine with measured budgets. Verify transcripts, silent-media markers and missing-engine recovery through the same worker path.
-- [ ] 4.3 Document the speech configuration and rollout procedure. Verify its switch and rollback leave existing sidecars readable and lexical recall serving.
+- [x] 4.1 Record the selected Whisper turbo default under design D6 and the shared-model contract. Separate diagnostic evidence from unfinished upgrade measurements.
+- [x] 4.2 Ship the selected offline speech engine with measured budgets. Verify transcripts, silent-media markers and missing-engine recovery through the same worker path.
+- [x] 4.3 Document the speech configuration and rollout procedure. Verify its switch and rollback leave existing sidecars readable and lexical recall serving.
 
 The selected default is the pinned ONNX Whisper large-v3-turbo int8 artifact.
+Delivery evidence: [#2142](https://github.com/Artexis10/exomem/pull/2142) contains the pinned artifacts, query parity, automatic transcript publication, speech budgets and offline image gates.
+The query path retains the trained 512-dimensional projection and existing image vectors.
+The real-model check covers normal and quiet speech, silence, fixed noise and corrupt input.
+Quiet speech retains word errors; the voice detector repair prevents omission without changing Whisper input.
+Cell-sized backlog acceptance and weight sharing across live cells remain tasks 5.1 and 5.2.
 The wider bake-off no longer blocks this delivery. Future model or routing changes require the frozen quality comparison and fresh confirmation in D6.
 
 - [ ] 4.4 Qualify later coverage or model upgrades on at least 100 languages and fresh confirmation, with the unchanged 2.0-point bound. This upgrade work does not gate the selected initial default.
