@@ -309,7 +309,7 @@
     }
   },
   "capture_source": {
-    "description": "Save raw text or file handles losslessly in Sources/.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
+    "description": "Save raw text or file handles losslessly in Sources/.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns an optional one-note scaffold for text, or read/preparation routes\nfor attachments. Semantic compilation remains unassessed. Capture alone\ndoes not require compilation; pending extraction does not prohibit original-media use.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -344,7 +344,7 @@
         },
         "compile_guidance": {
           "default": false,
-          "description": "Return a reusable proposal.",
+          "description": "Return optional compilation preparation guidance.",
           "type": "boolean"
         },
         "suggested_title": {

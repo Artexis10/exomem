@@ -313,24 +313,40 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    When a non-Latin title needs a readable portable filename, pass a separate
    explicit lowercase ASCII `slug`; never treat a transliterated filename as
    the page's title. Existing files are not renamed automatically.
-3. **Skill asks: "Compile a note from this? If yes, what type — research,
-   insight, failure, pattern, experiment, production-log? And what scope?"** Skip
-   if you already specified.
-4. **Skill drafts the compiled page** with frontmatter, a sources block linking
-   back to the source file, and a typed Relations section. **Run
-   `connect_memory(operation="suggest-links")` on the draft first** — and
-   `suggest-relations` when direction matters — to surface related existing
-   pages you'd otherwise miss.
-5. **Skill shows the draft, waits for confirmation.** You can revise inline.
-6. **On confirm: calls `create_note` to write the page**, updates the relevant
-   `index.md`, appends to `log.md`, and reports paths. The write result carries
-   any near-duplicate `warning`, and a `suggestions` block only when the call
-   asked for one with `suggestions=true` **and** `response_detail="full"` —
-   wire in the relevant links via **edit_note** (or, for a genuine duplicate,
-   prefer `supersede_note` over a parallel page).
+3. **Compile under the live request and engagement policy.** Follow the
+   [source compilation pass](#source-compilation-pass)
+   for inventory, prior knowledge, central identities and semantic coverage.
+   An optional `prepare_note` scaffold prepares one note; adjacent pages are
+   unreviewed candidates, and opening excerpts do not cover the full source.
+4. **Write reviewed outputs with `create_note`.** Carry original source references
+   and grounded accepted relations in the first write. Follow the live confirmation
+   ceiling and any existing batch authority.
+5. **Inspect results and close the source compilation pass.** Report custody,
+   extraction and citation linkage separately from semantic coverage. Counts do
+   not establish completeness; unread, unavailable and uncompiled portions remain explicit.
 
 When you approve a scope of multiple files upfront, the workflow collapses to a
 single batch write (see Write discipline § 3, batch waiver).
+
+## Source compilation pass
+
+The active conversation agent owns this judgment under the request and live engagement policy.
+Selected compilation needs no special user wording to trigger decomposition, central identity resolution or relation review.
+Raw capture remains valid without compilation.
+
+1. Read the available full source through its exposed routes; unread or unavailable portions remain explicit.
+2. Inventory reusable themes and central durable referents; the inventory reflects meaning, without output quotas.
+3. Retrieve prior conclusions, resolve central identities and inspect suitable filing homes; reuse and missing durable identities are distinguished.
+4. Compile independently useful outputs into suitable existing or new homes; attribution, observations, hypotheses and measurements remain distinct.
+   Keep coherent detail together and cite the preserved originals in the first write.
+   Handle durable entities through the live resolve-before-create and vocabulary routes.
+5. Review candidate relations against their meaning and evidence; author grounded specific relations, honest generic relations or no edge.
+   Resolve registered meaning before authoring, and inspect relation feedback after each write.
+   Generic connectivity does not establish typed specificity. Suggestions never establish meaning by themselves.
+6. Check the whole inventory once against the committed outputs; report any unread, unavailable or uncompiled portion honestly.
+   Custody, extraction and valid citations are separate from semantic coverage.
+   One live citing derivative clears the citation backlog only; the server reports semantic compilation as `unassessed`.
+   Do not add notes or edges to reach a count or repeat the same source warning indefinitely.
 
 ## Linking discipline
 
@@ -376,8 +392,9 @@ distinction, use `schema_memory(subject="relations", operation="propose-relation
 review the complete delta and duplicate evidence, then persist that exact delta
 with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
 immutable: corrections create a new canonical key and deprecate the old one.
-Registered labels become real typed edges everywhere — gate, graph, and review
-queues — while clean aliases remain the authoring labels.
+Registered relations become traversable edges while clean aliases remain authoring
+labels. A registry-marked generic relation establishes connectivity, not typed
+specificity; an all-generic advisory asks for meaning review without forcing an edge.
 
 **The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
@@ -430,8 +447,9 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
   list. An unresolved citation returns `UNRESOLVED_SOURCE_CITATION` and writes
   nothing. Brackets and the leading `Knowledge Base/` are tolerated in paths.
 - **Back-references.** Each cited source gets the new note's wikilink appended
-  to its `ingested_into:` frontmatter, atomically with the citation, which takes
-  it out of the unprocessed backlog. Omitting `sources` on a research-note,
+  to its `ingested_into:` frontmatter, atomically with the citation. A live citing
+  derivative clears the citation backlog only; semantic compilation remains unassessed.
+  Omitting `sources` on a research-note,
   insight, failure or pattern only warns.
 - **Edits.** A source-changing `edit_note` validates the complete final
   `sources` list and updates back-references atomically. An unrelated edit may
