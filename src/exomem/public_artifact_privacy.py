@@ -274,6 +274,14 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
             "sample.xlsx",
         )
     ),
+    # These two reviewed public recordings have immutable source and derivative hashes.
+    *(
+        BinaryProvenance(
+            f"tests/fixtures/media-samples/{name}",
+            "public CC BY 4.0 speech fixture; source and derivative provenance in tests/fixtures/MEDIA-SOURCES.md",
+        )
+        for name in ("sample.wav", "sample.mkv")
+    ),
 )
 
 #: Named in every refusal, because this gate historically only ran on Linux

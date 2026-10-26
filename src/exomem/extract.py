@@ -204,7 +204,12 @@ def dependencies_present(media_type: str | None) -> bool:
     from importlib.util import find_spec
 
     if media_type in ("audio", "video"):
-        return find_spec("faster_whisper") is not None or _mlx_available()
+        if (os.environ.get("EXOMEM_ASR_BACKEND") or "").strip().lower() == "onnx":
+            return find_spec("onnx_asr") is not None and find_spec("av") is not None
+        return (
+            find_spec("faster_whisper") is not None or _mlx_available()
+            or (find_spec("onnx_asr") is not None and find_spec("av") is not None)
+        )
     if media_type == "image":
         return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
     if media_type == "pdf":
@@ -496,12 +501,22 @@ def get_transcriber() -> TranscriptionBackend:
     else faster-whisper (CUDA/CPU). Force the choice with
     ``EXOMEM_ASR_BACKEND=mlx|faster-whisper``."""
     pref = (os.environ.get("EXOMEM_ASR_BACKEND") or "auto").strip().lower()
+    if pref == "onnx":
+        from .onnx_asr_runtime import get_backend
+
+        return get_backend()
     if pref == "mlx":
         return MlxWhisperBackend()
     if pref in ("faster-whisper", "faster_whisper", "ctranslate2"):
         return FasterWhisperBackend()
     if _mlx_available():  # auto
         return MlxWhisperBackend()
+    from importlib.util import find_spec
+
+    if find_spec("faster_whisper") is None and find_spec("onnx_asr") is not None:
+        from .onnx_asr_runtime import get_backend
+
+        return get_backend()
     return FasterWhisperBackend()
 
 

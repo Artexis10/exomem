@@ -96,3 +96,13 @@ def test_a_budget_outside_the_cell_falls_back_to_the_default(tmp_path: Path) -> 
     # A zero budget admits everything and one above memory.max can never be met.
     assert config.budget_for("ocr") == config.default_budget
     assert config.budget_for("documents") == config.default_budget
+
+
+def test_file_backed_speech_accepts_virtual_data_above_the_physical_cell_limit(tmp_path: Path) -> None:
+    cell = media_brakes.read_cell(**_cell(tmp_path, anon=_GIB, current=_GIB, high="max", pressure=None))
+    raw = '{"speech": {"anon_mib": 1024, "vmdata_mib": 4096}}'
+
+    config = media_brakes.settings({media_brakes.BUDGETS_ENV: raw}, cell)
+
+    assert config.budget_for("speech") == media_brakes.Budget(_GIB, 4 * _GIB)
+    assert media_brakes.admits(cell, config.budget_for("speech"), config)

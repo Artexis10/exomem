@@ -47,11 +47,14 @@ Image model selection and caption selection remain open decisions.
 
 ## 4. Speech
 
-- [ ] 4.1 Complete the selection record under design D6 and the shared-model contract. Verify benchmark comparability, language metrics and the required confidence bounds.
+- [ ] 4.1 Record the selected Whisper turbo default under design D6 and the shared-model contract. Separate diagnostic evidence from unfinished upgrade measurements.
 - [ ] 4.2 Ship the selected offline speech engine with measured budgets. Verify transcripts, silent-media markers and missing-engine recovery through the same worker path.
 - [ ] 4.3 Document the speech configuration and rollout procedure. Verify its switch and rollback leave existing sidecars readable and lexical recall serving.
 
-The selection record must precede speech implementation; no candidate is selected yet.
+The selected default is the pinned ONNX Whisper large-v3-turbo int8 artifact.
+The wider bake-off no longer blocks this delivery. Future model or routing changes require the frozen quality comparison and fresh confirmation in D6.
+
+- [ ] 4.4 Qualify later coverage or model upgrades on at least 100 languages and fresh confirmation, with the unchanged 2.0-point bound. This upgrade work does not gate the selected initial default.
 
 ## 5. Integration and closure
 

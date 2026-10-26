@@ -142,8 +142,8 @@ def _number(values: Mapping[str, str], name: str, default: float, *, low: float,
 def _budgets(raw: str, cell_max: int | None) -> dict[str, Budget]:
     """Parse EXOMEM_MEDIA_BUDGETS; an entry that cannot hold keeps its default.
 
-    A budget at or below zero admits nothing, and one above the cell's limit can
-    never be met, so neither is an operator's real intent.
+    Anonymous memory must fit the cell. VmData includes clean mapped weights,
+    so its virtual limit can exceed the cell's physical limit.
     """
     try:
         parsed = json.loads(raw)
@@ -164,9 +164,10 @@ def _budgets(raw: str, cell_max: int | None) -> dict[str, Budget]:
         except (TypeError, KeyError, ValueError):
             _warn_once(f"{BUDGETS_ENV}[{engine!r}] needs integer anon_mib and vmdata_mib; using the default")
             continue
-        if anon <= 0 or vmdata <= 0 or (cell_max is not None and max(anon, vmdata) > cell_max):
+        # VmData includes clean file mappings and can exceed physical memory.max.
+        if anon <= 0 or vmdata <= 0 or (cell_max is not None and anon > cell_max):
             _warn_once(
-                f"{BUDGETS_ENV}[{engine!r}] must be above 0 and within the cell's memory.max; using the default"
+                f"{BUDGETS_ENV}[{engine!r}] must be positive with anon within memory.max; using the default"
             )
             continue
         budgets[engine] = Budget(anon, vmdata)
@@ -178,7 +179,7 @@ def settings(env: Mapping[str, str] | None = None, cell: CellMemory | None = Non
 
     Falling back keeps media running under conservative values rather than stopping
     every job on an operator typo; the warning names the value. `cell`, when given,
-    bounds each budget by the cell's memory.max.
+    bounds the anonymous-memory budget by the cell's memory.max.
     """
     values = os.environ if env is None else env
     raw = (values.get(BUDGETS_ENV) or "").strip()

@@ -1,20 +1,56 @@
 <!-- authority:non-specification -->
 
-# Cloud media: documents and OCR
+# Cloud media: documents, OCR and speech
 
-**Status:** written with `add-cloud-multimodal-processing` slice 1 (documents, OCR, memory brakes, switches). The measurements below come from a local cell container built from the Cloud image and run with 2 CPUs and 3 GiB. Acceptance evidence from a live cell is not recorded here yet.
+**Status:** the Cloud image ships documents, OCR and speech behind the existing engine switches.
+It also carries the aligned multilingual image query artifact.
+The document and OCR measurements below used a local container with 2 CPUs and 3 GiB.
+Speech budgets remain provisional until integrated qualification and cell acceptance.
+This runbook records no completed owner-sized speech backlog or two-cell sharing acceptance.
 
-Media extraction makes uploaded files searchable. The Cloud image carries two engines:
+Media extraction makes uploaded files searchable. The Cloud image carries three engines:
 
 - `documents` reads PDF, Word, Excel, PowerPoint, HTML, EPUB, OpenDocument (text, spreadsheet, presentation) and RTF files.
 - `ocr` reads the text in images, and in PDF pages that carry no text layer.
+- `speech` transcribes audio and video through ONNX Runtime Whisper `large-v3-turbo`, using the published int8 weights.
 
-Plain text, email and calendar files need no engine and are always read. Image vectors (CLIP) and speech are not in the Cloud image.
+Plain text, email and calendar files need no engine and are always read.
+The Cloud image does not ship the CLIP image encoder.
 
 HEIC images use the maintained Pillow decoder shared by OCR and personal image embeddings.
 The Cloud image gate includes a real HEIC sample with known text and runs without networking.
 The decoder stays inside the existing media worker and its resource limits.
 The measurements below predate HEIC support; they do not qualify an owner-sized HEIC backlog.
+
+## Speech and image query artifacts
+
+With `speech` enabled, ingestion queues transcription through the existing serialized media worker.
+The worker publishes a transcript sidecar that search can read.
+No agent, per-file tool call or manual transcription step is required.
+Cloud sets `EXOMEM_ASR_BACKEND=onnx`; inference uses CPU execution providers without PyTorch or CUDA.
+The backend detects the language automatically and decodes audio in bounded chunks through PyAV.
+The `media-cpu` extra pins `onnx-asr[cpu]==0.12.0` and uses `av>=11,<19`.
+
+Whisper `large-v3-turbo` declares 100 language tokens, including Cantonese.
+That inventory is declared coverage, not a measured quality result across 100 languages.
+English, Japanese and Estonian supplied the current diagnostic verification set.
+The 30-case comparison preserved the upstream int8 outputs after conversion to external weight files.
+It establishes file-layout agreement, not fp32-to-int8 agreement.
+Further candidate selection uses a fresh held-out run and does not block the selected default.
+
+Image queries use `sentence-transformers/clip-ViT-B-32-multilingual-v1` at fp32.
+Its complete ONNX graph includes the transformer, masked mean and learned 512-dimensional projection.
+The runtime normalizes the result and searches the existing OpenAI ViT-B/32 image space.
+Image extraction, image tags and stored image vectors keep their existing encoder and values.
+The query artifact alone does not enable image extraction or change the existing CLIP switch.
+Cloud keeps image search disabled until its separate acceptance passes.
+
+The [media model manifest](../../src/exomem/media_models.json) records source revisions, recipe versions and artifact digests.
+The Cloud build fetches those pinned release artifacts before its offline load gates.
+Runtime loads file-backed weights with prepacking disabled and network access off.
+New media artifacts never build on a serving host when published bytes are missing or invalid.
+The existing `EXOMEM_MODEL_ARTIFACT_URL` selects the artifact publication or mirror.
+The existing `EXOMEM_MODEL_ARTIFACT_DIR` selects its local cache root.
 
 ## Check disk space before backfill
 
@@ -41,22 +77,27 @@ Every engine is off in a Cloud cell unless the platform values switch it on, for
 
 cellctl renders `EXOMEM_MEDIA_ENGINES` into the cells that `cellctl.mediaEngineCellIds` names, and into every cell for an engine in `cellctl.mediaEngineFleetDefault`. A change restarts only the cells whose engine set changed.
 
-1. Choose a time outside the nightly backup window, 02:00-05:00 UTC.
-2. Set the selection in the platform values: `mediaEngineCellIds: {documents: ["<cell id>"], ocr: ["<cell id>"]}`.
-3. Deploy the platform chart through its normal release path.
-4. Wait for the cell's pod to restart.
-5. Run `exomem status --resources --json` in the cell and check that `media_engines` shows `documents` and `ocr` as `enabled`.
-6. Check that `media_brakes` shows `"state": "on"`.
-7. Add a PDF and an image with text to the cell's vault, then search for a phrase from each.
-8. Check `media.memory_blocked_count` and `media.over_budget_count` in runtime status after the first day.
-
-Expect the search to find both files within a few minutes.
+1. Choose a time outside 02:00-05:00 UTC. Expect no overlap with the nightly backup window.
+2. Set the chosen engines under `cellctl.mediaEngineCellIds`, including `speech` for transcripts. Expect the intended per-cell selection.
+3. Deploy the platform chart through its normal release path. Expect only changed cells to restart.
+4. Wait for the selected cell's pod to restart. Expect its new engine selection.
+5. Run `exomem status --resources --json` in the cell. Expect the chosen engines under `media_engines` as `enabled`.
+6. Check `media_brakes`. Expect `"state": "on"`.
+7. Add public fixtures for each chosen engine. Expect the worker to publish searchable text automatically.
+8. For speech, search a known transcript phrase. Expect matching audio and video sidecars.
+9. Check `media.memory_blocked_count` and `media.over_budget_count` after the first day. Expect counts within the recorded acceptance limits.
 
 To switch an engine off, remove the cell ID from its list and deploy. At the next start the media supervisor drops each job that is blocked because that engine could not load. It first shows the job's sidecar as pending again, so no old install instruction stays. A queued job of a switched-off engine runs no extraction when its turn comes, and its sidecar stays pending. Switching the engine on again queues these files.
+
+Switch-off and image rollback preserve completed transcript sidecars and stored image vectors.
+A new model version alone does not rewrite completed transcripts.
+Use the existing platform release and rollback path for the engine selection and image.
 
 An engine in the fleet default has no per-cell opt-out. To switch it off in one cell, remove it from `mediaEngineFleetDefault` and name it in `mediaEngineCellIds` for every other cell, in the same deploy. Those cells keep their engine set and restart nothing.
 
 A job that waited on a missing engine returns to the queue at the next start, once the engine is switched on and its tools are present.
+For speech, restore the pinned artifact and runtime through the image release before that restart.
+Recovery uses the same queue and needs no per-file agent call.
 
 With `documents` on and `ocr` off, a PDF that has no text layer at all waits for OCR instead of completing with no text. Runtime status shows it as pending and counts it in `media.engine_waiting_count`. When OCR is switched on, the next start returns it to the queue. A PDF with some text pages completes with that text.
 
@@ -97,18 +138,28 @@ Each value is deployment configuration. Set it in the cell's environment.
 
 | Variable | Default | Reason for the default |
 |---|---|---|
-| `EXOMEM_MEDIA_BUDGETS` | 640 MiB anon, 1024 MiB VmData for every engine | VmData: about 3 times the largest measured need of a small sample (329 MiB). Anon: a child admitted at the ceiling that grows to its hard limit stays under a 3 GiB `memory.max` (0.80 × 3072 − 640 + 1024 + 128 = 2970 MiB). |
+| `EXOMEM_MEDIA_BUDGETS` | Fallback: 640 MiB anon, 1024 MiB VmData. Cloud speech override: 1024 MiB anon, 4096 MiB VmData. | Documents and OCR retain the earlier small-sample margin. Speech uses a provisional budget for its file-backed model; cell qualification remains open. |
 | `EXOMEM_MEDIA_VMDATA_MARGIN_MIB` | 128 | Covers the allocator's own arenas above the engine's budget. |
 | `EXOMEM_MEDIA_ADMISSION_FRACTION` | 0.80 | The service-v1 profile's 80% cgroup peak gate. |
 | `EXOMEM_MEDIA_PRESSURE_AVG10` | 10.0 | Sustained reclaim, well above an idle cell and below the stalls that come before an OOM kill. |
 | `EXOMEM_MEDIA_STOP_LIMIT` | 3 | Consecutive memory stops before a job leaves the stop cycle. Watchdog stops count apart, against the same limit. |
 | `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS` | 900 | Far above the samples' sub-second times, with room for a long scanned PDF. A file costs at most the stop limit times this before it is over budget. |
 
-`EXOMEM_MEDIA_BUDGETS` is a JSON object from engine to budget, for example `{"ocr": {"anon_mib": 640, "vmdata_mib": 1024}, "default": {"anon_mib": 512, "vmdata_mib": 768}}`. The `default` entry covers the kinds without an engine. An entry at or below zero, or above the cell's `memory.max`, keeps the default budget. An unknown engine name is ignored. Each of these cases, and any malformed value, logs one warning that names it.
+`EXOMEM_MEDIA_BUDGETS` maps each engine to its budget, for example `{"speech": {"anon_mib": 1024, "vmdata_mib": 4096}, "default": {"anon_mib": 640, "vmdata_mib": 1024}}`.
+The `default` entry covers kinds without an engine.
+An anonymous-memory budget above the cell's `memory.max`, or a nonpositive budget, keeps the default budget.
+VmData includes clean file mappings and can exceed the cell's physical limit.
+The 4096 MiB speech VmData budget therefore does not allocate 4 GiB of physical memory in a 3 GiB cell.
+Unknown engine names and malformed values retain the existing warning and fallback behavior.
+
+The speech override is a starting value, not completed capacity evidence.
+Qualification must measure anonymous memory, VmData, memory pressure and search behavior with speech active.
+Two cells on one node must also demonstrate shared weight mappings through Pss.
+The rollout still needs its owner-sized backlog and existing service capacity checks.
 
 Do not set a `documents` VmData budget below 384 MiB. MarkItDown loads an ONNX Runtime model to detect file types, and that session hangs, without failing, when the limit blocks its thread stacks. Probes hung at 203 and 265 MiB. The watchdog stops such a hang, and the file ends over budget without extracting.
 
-## Measurements
+## Document and OCR measurements
 
 Measured on 2026-10-10 with the Cloud image, the media child's `OPENBLAS_NUM_THREADS=1`, and the samples in `tests/fixtures/media-samples/`.
 
@@ -185,9 +236,23 @@ A script that OSD names differently from every script model has no route, and it
 
 ## Build-time gate
 
-The Cloud stage runs `scripts/check-media-samples.py` with the network off. The `EXOMEM_MEDIA_SHIPPED_ENGINES` build argument (default `documents,ocr`) names the engines the image claims. For every media kind in the registry whose engine the image claims, or which needs no engine, the gate needs a sample in `tests/fixtures/media-samples/`. It extracts each sample and checks the phrase in `expected.json`. A kind without a sample fails the build. The gate also fails when a CUDA wheel (`nvidia-*`) or torch is installed. `scripts/make-media-samples.py` regenerates the samples.
+The Cloud stage runs `scripts/check-media-samples.py` with the network off.
+The `EXOMEM_MEDIA_SHIPPED_ENGINES` build argument defaults to `documents,ocr,speech` and names the engines the image claims.
+The gate needs a public fixture for each media kind served by those engines, plus kinds that need no engine.
+It extracts each fixture and checks the phrase in `expected.json`.
+A missing fixture or phrase fails the build, as does an installed CUDA wheel (`nvidia-*`) or PyTorch.
 
-The stage installs the `media-cpu` extra at the versions in `uv.lock`. The media layers add 697 MB uncompressed to the Cloud image: 460 MB of system packages (353 MB of them Tesseract models) and 237 MB of Python packages.
+Speech coverage includes a public WAV recording and an MKV video containing the same lossless audio.
+[Fixture provenance](../../tests/fixtures/MEDIA-SOURCES.md) records the source, licence and expected phrase lineage.
+These exposed integration fixtures prove offline audio and video extraction, not held-out speech quality.
+A separate offline load gate checks that the selected image query encoder returns one 512-dimensional vector.
+That gate does not claim that the Cloud image encoder or image-search rollout has passed acceptance.
+
+The stage installs the `media-cpu` extra at the versions in `uv.lock`.
+The earlier document and OCR layers added 697 MB uncompressed: 460 MB of system packages and 237 MB of Python packages.
+That measurement excludes the speech runtime and the speech and image query artifacts.
+Record their image growth during qualification instead of reusing the earlier total.
+`scripts/make-media-samples.py` regenerates the document and OCR samples; preserve the attributed speech fixtures separately.
 
 ## HEIC photos
 

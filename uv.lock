@@ -644,7 +644,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.146.1" # x-release-please-version
+version = "0.146.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -703,14 +703,17 @@ media = [
     { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "odfdo" },
+    { name = "onnx-asr", extra = ["cpu"] },
     { name = "pillow" },
     { name = "pillow-heif" },
     { name = "pymupdf" },
     { name = "striprtf" },
 ]
 media-cpu = [
+    { name = "av" },
     { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
     { name = "odfdo" },
+    { name = "onnx-asr", extra = ["cpu"] },
     { name = "pillow" },
     { name = "pillow-heif" },
     { name = "pymupdf" },
@@ -751,6 +754,7 @@ tui-dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20,<2" },
     { name = "av", marker = "extra == 'media'", specifier = ">=11,<19" },
+    { name = "av", marker = "extra == 'media-cpu'", specifier = ">=11,<19" },
     { name = "ctranslate2", marker = "extra == 'media'", specifier = ">=4.6.3,<5" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'embeddings'" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'media-cpu'" },
@@ -772,6 +776,7 @@ requires-dist = [
     { name = "nvidia-cudnn-cu12", marker = "(sys_platform == 'linux' and extra == 'media') or (sys_platform == 'win32' and extra == 'media')", specifier = ">=9.5.0.50,<10" },
     { name = "odfdo", marker = "extra == 'media-cpu'", specifier = ">=3.26" },
     { name = "onnx", marker = "extra == 'embeddings'", specifier = ">=1.17" },
+    { name = "onnx-asr", extras = ["cpu"], marker = "extra == 'media-cpu'", specifier = "==0.12.0" },
     { name = "onnxruntime", marker = "extra == 'embeddings'", specifier = ">=1.20" },
     { name = "onnxruntime", marker = "extra == 'embeddings-onnx'", specifier = ">=1.20" },
     { name = "pathspec", specifier = ">=1.1.1,<2" },
@@ -2177,6 +2182,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/86/dd/03c1b211b935cf6bf3f96f0d18a0ea62a3ac522212af4277ac47fba02c47/onnx-1.23.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d6951c2ed343eb9dbc2b644507f9ed8d34c23558bae839b3726b5b8109d3ff8b", size = 8886389, upload-time = "2026-09-18T19:30:30.226Z" },
     { url = "https://files.pythonhosted.org/packages/b3/18/f4fe44070ffe4bb3a08898dac6c7a2eb78691025bce40bdaadfeba8795b3/onnx-1.23.0-cp314-cp314t-win_amd64.whl", hash = "sha256:3e9c9be1baebbc2b257c45937e4fb18f9e69a021d4207a909dc1f4407193fa21", size = 7910378, upload-time = "2026-09-18T19:30:32.962Z" },
     { url = "https://files.pythonhosted.org/packages/c4/92/b7e6f3a85f5ef39f012839cb77123544ada6e9cd69dadae4a66df5403b30/onnx-1.23.0-cp314-cp314t-win_arm64.whl", hash = "sha256:ae166bf343b95ee9d03bf023faac05216fe2c9eff44d1c9a4c01920657135c45", size = 8078741, upload-time = "2026-09-18T19:30:35.245Z" },
+]
+
+[[package]]
+name = "onnx-asr"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/11/136f556cda02ecc172674dcea79232e9e84e74b951bbcd2e2722117f633b/onnx_asr-0.12.0.tar.gz", hash = "sha256:c1fcacddbced392f9f769ed5c6223f4ce739a6e4549346de33b9b520d4ead713", size = 45991, upload-time = "2026-07-15T00:09:58.852Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/60/2fa469a2ee674c35ab48821a1039762ae7b9d0b88188ac1012e779477f76/onnx_asr-0.12.0-py3-none-any.whl", hash = "sha256:5e7ceca454609819ea7833f61e2302e0c8f6ece4f8a78b66c5daba53cb51de4a", size = 3980006, upload-time = "2026-07-15T00:09:57.322Z" },
+]
+
+[package.optional-dependencies]
+cpu = [
+    { name = "onnxruntime" },
 ]
 
 [[package]]

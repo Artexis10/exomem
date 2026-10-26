@@ -98,6 +98,7 @@ _MODEL_LOCK = threading.Lock()
 _RERANKER = None
 _RERANKER_LOCK = threading.Lock()
 _CLIP_MODEL = None
+_CLIP_QUERY_MODEL = None
 _CLIP_LOCK = threading.Lock()
 _ACTIVATION_MODEL = None
 _ACTIVATION_MODEL_LOCK = threading.Lock()
@@ -226,15 +227,22 @@ def unload_reranker() -> bool:
 
 
 def unload_clip_model() -> bool:
-    """Drop the CLIP singleton + release GPU cache. See `unload_model`."""
-    global _CLIP_MODEL
+    """Drop both CLIP towers while no image, query or tag encode is active."""
+    global _CLIP_MODEL, _CLIP_QUERY_MODEL
     with _CLIP_LOCK:
-        if _CLIP_MODEL is None or CLIP_GUARD.inflight() > 0:
+        if (_CLIP_MODEL is None and _CLIP_QUERY_MODEL is None) or CLIP_GUARD.inflight() > 0:
             return False
-        m, _CLIP_MODEL = _CLIP_MODEL, None
-    del m
+        image, _CLIP_MODEL = _CLIP_MODEL, None
+        query, _CLIP_QUERY_MODEL = _CLIP_QUERY_MODEL, None
+    had_image = image is not None
+    del image, query
     gc.collect()
-    accel.empty_cache()
+    if had_image:
+        accel.empty_cache()
+    else:
+        from . import process_memory
+
+        process_memory.trim_allocator()
     return True
 
 # Process-lifetime memo of the per-vault index objects. Sharing ONE instance per
@@ -422,7 +430,7 @@ def _clip_device() -> str:
 
 
 def get_clip_model():
-    """Lazy CLIP singleton (encodes BOTH images and text). Device via _clip_device()."""
+    """Lazy CLIP image and tag tower. Device via `_clip_device`."""
     global _CLIP_MODEL
     with runtime_resources.model_execution():
         if _CLIP_MODEL is not None:
@@ -446,6 +454,20 @@ def get_clip_model():
         return _CLIP_MODEL
 
 
+def get_clip_query_model():
+    """Lazy multilingual query tower aligned to the existing image vectors."""
+    global _CLIP_QUERY_MODEL
+    with runtime_resources.model_execution():
+        with _CLIP_LOCK:
+            if _CLIP_QUERY_MODEL is None:
+                from .clip_query import OnnxClipQueryEncoder
+
+                log.info("loading the multilingual CLIP query encoder on CPU")
+                _CLIP_QUERY_MODEL = OnnxClipQueryEncoder()
+        CLIP_GUARD.touch()
+        return _CLIP_QUERY_MODEL
+
+
 def embed_image(path: Path) -> np.ndarray:
     """Encode decoded pixels as an L2-normalized float32 visual vector."""
     from . import image_codecs
@@ -466,12 +488,12 @@ def embed_image(path: Path) -> np.ndarray:
 
 def embed_clip_text(query: str) -> np.ndarray:
     """Encode a text query into CLIP space → float32 (512,), L2-normalized."""
-    try:
-        model = get_clip_model()
-    except ImportError as e:
-        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
     with CLIP_GUARD.active(), runtime_resources.model_execution():
-        vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
+        try:
+            model = get_clip_query_model()
+        except (ImportError, embedding_backend.ModelFilesUnavailable) as error:
+            raise ClipUnavailable(f"multilingual image query encoder unavailable: {error}") from error
+        vec = model.encode([query])[0]
     return vec.astype(np.float32, copy=False)
 
 

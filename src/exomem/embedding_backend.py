@@ -228,6 +228,9 @@ class ServedArtifact:
     #: sha256 of the packed release asset itself, checked before it is unpacked;
     #: None when there is no asset to fetch.
     asset_digest: str | None = None
+    files: tuple[str, ...] = _ARTIFACT_FILES
+    # Only the recall encoder retains the established host-build exception.
+    allow_local_build: bool = False
 
 
 #: The one model a personal server serves for activation and recall alike, at
@@ -241,6 +244,7 @@ _SERVED: dict[str, ServedArtifact] = {
         file_format=ONNX_EXTERNAL_DATA,
         digest="7b9a0b3b0b292643752db19f9ae29113d632ac30393c9a56b97d4b075dc81c44",
         asset_digest="71e5f90fa019c2de0471b158e408da6ca7f43c93188308095242dfe46525ef76",
+        allow_local_build=True,
     ),
 }
 
@@ -711,12 +715,12 @@ def artifact_dir(model_name: str, served: ServedArtifact) -> Path:
     return root / model_cache.snapshot_dirname(model_name) / served.revision / served.quantization
 
 
-def artifact_sha256(target: Path) -> str | None:
+def artifact_sha256(target: Path, files: tuple[str, ...] = _ARTIFACT_FILES) -> str | None:
     """sha256 over the artefact's file names and bytes, or None when a file is
     missing. Its first 16 hex digits are the digest the fingerprint names."""
     digest = hashlib.sha256()
     try:
-        for name in _ARTIFACT_FILES:
+        for name in files:
             digest.update(name.encode("utf-8") + b"\0")
             with open(target / name, "rb") as fh:
                 while chunk := fh.read(8 << 20):
@@ -726,8 +730,8 @@ def artifact_sha256(target: Path) -> str | None:
     return digest.hexdigest()
 
 
-def _artifact_digest(target: Path) -> str | None:
-    full = artifact_sha256(target)
+def _artifact_digest(target: Path, files: tuple[str, ...] = _ARTIFACT_FILES) -> str | None:
+    full = artifact_sha256(target, files)
     return full[:16] if full else None
 
 
@@ -752,15 +756,15 @@ def artifact_url(model_name: str, served: ServedArtifact) -> str | None:
 
 def write_artifact_asset(model_name: str, served: ServedArtifact, out_dir: Path) -> Path:
     """Pack the built artefact as its release asset, byte for byte reproducible:
-    two regular files, fixed order, zero owner and time, no extended headers."""
+    declared regular files, fixed order, zero owner and time, no extended headers."""
     source = artifact_dir(model_name, served)
-    digest = artifact_sha256(source)
+    digest = artifact_sha256(source, served.files)
     if digest is None:
         raise ModelFilesUnavailable(f"{model_name}: no built artefact at {source}")
     out_dir.mkdir(parents=True, exist_ok=True)
     asset = out_dir / artifact_asset_name(model_name, served, digest)
     with tarfile.open(asset, "w", format=tarfile.USTAR_FORMAT) as tar:
-        for name in _ARTIFACT_FILES:
+        for name in served.files:
             info = tarfile.TarInfo(name)
             info.size = (source / name).stat().st_size
             info.mode = 0o644
@@ -778,12 +782,12 @@ def _read_manifest(target: Path) -> dict:
 
 
 def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
-    """The served ONNX graph's path and the digest of its bytes, built on first use.
+    """Return the pinned graph and digest, acquiring the artifact when absent.
 
     The bytes are hashed on every load (about 0.4 s for bge-m3's 0.55 GB), so the
     fingerprint names what actually runs. Bytes that no longer match the digest
-    they were built with are rebuilt; the build is deterministic, so a repaired
-    artefact has its old digest back and nothing stored under it is re-embedded.
+    they were built with are acquired again. Only the recall encoder retains its
+    existing local-build exception; new media models require published bytes.
 
     Acquiring it happens under a lock beside it (`_acquisition_lock`), so two
     loads, in one process or in two, never fetch or build it at once: the second
@@ -797,27 +801,29 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
         "quantization": served.quantization,
         "file_format": served.file_format,
     }
-    digest = _installed_digest(target, expected)
+    digest = _installed_digest(target, expected, served)
     if digest is not None:
-        return str(target / _ARTIFACT_FILES[0]), digest
+        return str(target / served.files[0]), digest
     key = (model_name, served.revision)
     _refuse_while_cooling(key)
     with _acquisition_lock(target):
         # Whoever held the lock before may have installed it meanwhile.
-        digest = _installed_digest(target, expected)
+        digest = _installed_digest(target, expected, served)
         if digest is not None:
-            return str(target / _ARTIFACT_FILES[0]), digest
+            return str(target / served.files[0]), digest
         _refuse_while_cooling(key)
         _sweep_stages(target)
         try:
             if not _fetch_artifact(model_name, served, target):
+                if not served.allow_local_build:
+                    raise ModelFilesUnavailable(f"{model_name}: the pinned published artifact is not available")
                 log.info("building %s %s artefact at %s", model_name, served.quantization, target)
                 _build_artifact(model_name, served, target)
         except ModelFilesUnavailable as error:
             _ACQUIRE_FAILED[key] = (time.monotonic(), str(error))
             raise
         _ACQUIRE_FAILED.pop(key, None)
-        digest = _artifact_digest(target)
+        digest = _artifact_digest(target, served.files)
         if digest is None:
             raise ModelFilesUnavailable(f"{model_name}: the built artefact at {target} is incomplete")
         if served.digest and not served.digest.startswith(digest):
@@ -825,12 +831,15 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
         (target / _ARTIFACT_MANIFEST).write_text(
             json.dumps({**expected, "digest": digest}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    return str(target / _ARTIFACT_FILES[0]), digest
+    return str(target / served.files[0]), digest
 
 
-def _installed_digest(target: Path, expected: dict[str, str]) -> str | None:
+def _installed_digest(target: Path, expected: dict[str, str], served: ServedArtifact) -> str | None:
     """The installed artefact's digest when its manifest vouches for exactly these bytes."""
-    digest = _artifact_digest(target)
+    full_digest = artifact_sha256(target, served.files)
+    if not served.allow_local_build and full_digest != served.digest:
+        return None
+    digest = full_digest[:16] if full_digest else None
     manifest = _read_manifest(target)
     if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
         return None
@@ -935,10 +944,9 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
     False, and nothing installed, when there is none to fetch, the download
     fails, or the asset is not exactly the pinned artefact. The downloaded file
     must hash to `served.asset_digest` before it is opened at all; then it is
-    read as a plain tar (no decompression) of exactly two regular files whose
+    read as a plain tar (no decompression) of the declared regular files whose
     sizes sum within the cap, and what they unpack to must hash to
-    `served.digest`. The caller then builds locally, which is always correct
-    and only costs memory and time.
+    `served.digest`. The caller decides whether its local-build exception applies.
     """
     url = artifact_url(model_name, served)
     if url is None:
@@ -954,15 +962,15 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
                 while chunk := response.read(8 << 20):
                     received += len(chunk)
                     if received > _MAX_ASSET_BYTES:
-                        log.warning("%s: %s is larger than any artefact; building locally", model_name, url)
+                        log.warning("%s: %s exceeds the artifact size bound", model_name, url)
                         return False
                     received_digest.update(chunk)
                     out.write(chunk)
         except (OSError, ValueError) as error:
-            log.info("%s: no published artefact at %s (%s); building locally", model_name, url, error)
+            log.info("%s: no published artefact at %s (%s)", model_name, url, error)
             return False
         if received_digest.hexdigest() != served.asset_digest:
-            log.warning("%s: %s is not the pinned asset; refused unopened, building locally", model_name, url)
+            log.warning("%s: %s is not the pinned asset; refused unopened", model_name, url)
             return False
         out_dir = stage / "out"
         out_dir.mkdir()
@@ -973,7 +981,7 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
             with tarfile.open(asset, "r:") as tar:
                 members = tar.getmembers()
                 if (
-                    sorted(m.name for m in members) != sorted(_ARTIFACT_FILES)
+                    sorted(m.name for m in members) != sorted(served.files)
                     or not all(m.type in (tarfile.REGTYPE, tarfile.AREGTYPE) for m in members)
                     or sum(m.size for m in members) > _MAX_UNPACKED_BYTES
                 ):
@@ -983,16 +991,18 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
                     src = tar.extractfile(member)
                     if src is None:
                         return False
+                    (out_dir / member.name).parent.mkdir(parents=True, exist_ok=True)
                     with src, open(out_dir / member.name, "wb") as dst:
                         shutil.copyfileobj(src, dst, 8 << 20)
         except (OSError, tarfile.TarError) as error:
             log.warning("%s: %s is not a readable artefact (%s); refused", model_name, url, error)
             return False
-        if artifact_sha256(out_dir) != served.digest:
-            log.warning("%s: %s does not match the pinned digest; refused, building locally", model_name, url)
+        if artifact_sha256(out_dir, served.files) != served.digest:
+            log.warning("%s: %s does not match the pinned digest; refused", model_name, url)
             return False
         target.mkdir(parents=True, exist_ok=True)
-        for name in reversed(_ARTIFACT_FILES):
+        for name in reversed(served.files):
+            (target / name).parent.mkdir(parents=True, exist_ok=True)
             os.replace(out_dir / name, target / name)
         log.info("installed the published %s artefact from %s", model_name, url)
         return True

@@ -116,7 +116,11 @@ Reuse wins where it fits.
   - `M-CLIP/XLM-Roberta-Large-Vit-B-32`, another multilingual text encoder aligned to the existing OpenAI ViT-B/32 image space;
   - a current multilingual image-text model of the SigLIP 2 class, which handles images and text in many languages in one model.
 
-  Task 3.4 compares the aligned text encoders and preserves stored image vectors.
+  Task 3.4 selects `clip-ViT-B-32-multilingual-v1` at fp32 for ordinary queries and preserves stored image vectors.
+  On the same 30 texts and two-CPU host, its p95 was 64.09 ms and peak RSS was 311,176 KiB.
+  M-CLIP Large measured 1,023.14 ms and 1,580,996 KiB, despite stronger published retrieval results.
+  Both reached minimum cosine 0.99999988 against their fp32 references.
+  Large remains an upgrade candidate; it is not a second query path in this delivery.
   It changes the query encoder only; image tags retain their existing text encoder and calibrated threshold.
   An image encoder or vector-space change remains separate work under the image tasks and D8.
   The selected query artifact must include its trained projection, not only the transformer backbone.
@@ -150,7 +154,8 @@ Reuse wins where it fits.
 
 Selection targets automatic transcription across the broadest viable language set.
 Japanese, English and Estonian verify quality; they do not limit supported languages.
-The comparison records declared coverage separately from measured quality in at least 100 languages.
+The record separates declared coverage from measured quality.
+The initial delivery uses the selected default; wider quality measurement informs later upgrades.
 A completed fixture alone does not establish usable recognition in its language.
 
 The candidate inventory includes:
@@ -166,25 +171,48 @@ It records an excluded candidate's concrete reason; exclusion is not a measured 
 The shipping image keeps the shared runtime's no-PyTorch contract.
 File-backed immutable weights remain the default; a private-copy runtime needs the shared contract's measured exception.
 
-Selection follows the general rule of the `shared-model-runtime` capability. The speech terms add only what speech needs, and the spec states them:
+The initial default is `onnx-community/whisper-large-v3-turbo` at int8 through `onnx-asr` 0.12.0 and ONNX Runtime.
+Its pinned tokenizer declares 100 language tokens, including Cantonese.
+Automatic language detection receives no language hint.
+The file-backed layout keeps the published int8 weights unchanged.
+On 30 additional validation clips, its output matched the upstream layout exactly after NFC and whitespace normalization.
+This proves the layout conversion, not fp32-to-int8 agreement.
 
-- **Metric per verification language.** WER for English and Estonian, which are written with spaces between words, and CER for Japanese, which is not.
-- **One benchmark.** Candidates are compared on the same published benchmark wherever one covers them all: the Open ASR Leaderboard, then FLEURS or Common Voice results from model cards and papers.
-- **Missing results.** When any candidate lacks a published result in a verification language, every candidate is measured for that language on the full FLEURS test split. That language is then judged on those measurements only. A measurement is never compared with a published number, because the two differ in normalisation and decoding.
-  - The full split costs only local CPU, and it is expected to give intervals narrower than the 2.0-point margin (to be confirmed by the first run).
-  - Each difference from the best candidate is reported with its 95% bootstrap confidence interval, resampling the utterances. On a measured language, a candidate passes the 2.0-point bound only when the upper end of its interval is within 2.0 points.
-  - The owner's amendment to the bake-off allows this measurement. That amendment is not recorded in this repository.
-- **Cost.** The int8 real-time factor at pinned CPU threads on the cell's CPU, peak memory, and whether the weights can be shared under D3.
-- **Sanity check.** Ten utterances per verification language catch a broken int8 or ONNX conversion.
-- **Pick.** Candidates first meet the 2.0-point bound in every verification language and the cell resource bounds. Among those candidates, prefer broader supported language coverage, then lower private memory. Report measured quality by language rather than treating the declared language count as equal quality. Shareable weights count once per node. Routing by language is allowed only if no single candidate passes, and only if the routed pair stays under 1.5 GB.
+The 30-clip quality diagnostic used ten public FLEURS validation clips per verification language.
+It used NFKC, case folding, Unicode punctuation removal and whitespace collapse.
+English and Estonian use WER; Japanese uses CER.
 
-Bake-off result: *pending; no speech engine is selected.*
+| Candidate | English WER | Japanese CER | Estonian WER | Completion |
+|---|---:|---:|---:|---|
+| ONNX Whisper turbo int8 | 6.50% | 3.27% | 20.51% | 30/30 |
+| CTranslate2 Whisper turbo int8 | 7.50% | 1.84% | 19.87% | 30/30 |
+| Omni CTC 300M v2 int8 | 26.00% | 22.09% | 22.44% | 30/30 |
+| Omni CTC 1B v2 int8 | 21.00% | 18.81% | 17.31% | 30/30 |
+| CTranslate2 Whisper large-v3 int8 | Partial | Partial | Partial | 16/30 before the 900-second bound |
 
-The validation round is an adapter diagnostic, not a selection or a conversion agreement pass.
-FLEURS test data informed earlier work, so new comparisons must call it an established benchmark rather than a fresh held-out set.
-Any fresh confirmation uses untouched source units reserved before generation.
-The final record includes artifact and recipe identities, raw run references, per-case differences and confidence intervals.
-Automatic ingest, silent-media markers and completed-sidecar preservation are part of runtime verification.
+Decoding configurations differ: CTranslate2 used beam five; ONNX Whisper used its maintained greedy adapter.
+These results are diagnostic evidence and do not establish a final confidence-bound winner.
+The initial default prioritizes demonstrated verification quality, automatic coverage and shared weights.
+A full FLEURS comparison and measured quality across at least 100 languages remain upgrade work, not initial-delivery gates.
+
+SenseVoice-Small covers five languages and excludes Estonian.
+MMS weights use CC-BY-NC-4.0, which does not fit commercial redistribution.
+Omni CTC offers broader declared coverage, but its English and Japanese diagnostic losses prevent selection as the sole default.
+No language router ships in this delivery.
+
+A later model or routing switch requires a frozen comparison and one fresh held-out confirmation.
+It must report per-case differences and 95% confidence intervals clustered by source sentence.
+The upper interval bound must stay within 2.0 percentage points of the best candidate in every verification language.
+Among candidates that meet quality and cell resource bounds, broader supported coverage wins, then lower private memory.
+A routing layer must also show a useful ablation against its component engines.
+Language mappings and admission thresholds remain deployment data.
+
+The worker decodes bounded 30-second buffers through PyAV and uses the maintained Whisper adapter.
+A pinned Silero VAD skips chunks with no detected speech; spoken chunks retain the measured Whisper input.
+The presence check prevents fabricated text on silent input; a false negative can omit quiet speech.
+The real-model workflow check must therefore include quiet speech and silence before release.
+The existing worker publishes the transcript automatically and preserves completed sidecars.
+Model identities and build recipes live in `src/exomem/media_models.json` and `scripts/build-media-artifacts.py`.
 
 ### D7. Off until proven, and the disabled state
 
