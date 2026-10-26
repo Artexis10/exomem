@@ -208,7 +208,13 @@ A ready source PR runs historical Full coverage in parallel with ordinary
 checks. This includes Python 3.11 and 3.13, every specialized Full job, and the
 latency gate. Draft PRs retain partial feedback. Becoming ready starts Full
 coverage; a later source or readiness change supersedes the prior PR run.
-Ready docs-only PRs also run the complete corpus. Release metadata keeps its
+Ready docs-only PRs also run the complete corpus. Paired recall uses four
+raw case shards per series and one complete-series comparison. Each shard
+retains the full corpus and both arms of every assigned case. Discovery pins
+the release baseline once; aggregation refuses incomplete or mixed fragments.
+The instrument check runs once before fan-out, and sampler elapsed records
+remain distinct from complete-series verdicts. New CI timing remains unverified.
+ Release metadata keeps its
 targeted checks backed by source evidence.
 
 One scope job selects the CI policy. Full CI also runs on schedule or dispatch.

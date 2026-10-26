@@ -6,6 +6,7 @@
 - [x] 1.2 Add the guarded merge command; reproduce failed current-main preflight and prove merge never runs.
 - [x] 1.3 Bind PR merge-tree receipts and inherited gate attempts; prove identical-tree reuse and partial/mismatched proof rejection.
 - [ ] 1.4 Balance K3s shards with measured case durations; prove complete disjoint collection and record actual CI job times.
+- [ ] 1.5 Partition paired recall sampling without changing its cases or statistics; prove complete provenance-bound aggregation and record actual CI job times.
 
 ## 2. Python qualification
 

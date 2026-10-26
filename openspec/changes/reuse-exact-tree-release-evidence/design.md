@@ -30,6 +30,14 @@ The [baseline Full run](https://github.com/Artexis10/exomem/actions/runs/4029403
 
 Keep pytest-split and the existing isolated cluster fixtures. Use four import shards and two platform shards, with a small duration snapshot derived from those JUnit records. Duration-aware grouping keeps the large platform case alone. Reuse the existing collection test to prove nonempty, disjoint, complete shard selection. Keep timing as an observed goal, not a new timeout gate that drops work during runner delays.
 
+### Partition paired sampling and compare complete series
+
+Newly merged paired recall jobs exceed the target. Their [source Full run](https://github.com/Artexis10/exomem/actions/runs/40332167885) records mixed sampling at 1193 seconds, unit at 817 seconds, and filtered sampling at 700 seconds.
+
+Reuse the existing paired runner and comparison. Add a case partition to that runner because test-level sharding cannot divide its sampling loop. Resolve the release tag and commit once before sampling. Build the complete reference corpus on each runner and warm the full selected series. Select four disjoint case subsets only after assigning the original case indices, so arm order stays unchanged. Each case retains both arms and every repeat on one runner.
+
+Upload raw fragments with no statistical verdict. Bind their case definitions, profile, source commits, locks, encoder, and corpus. An aggregation job verifies exact case, principal, arm, and repeat coverage before calling the existing comparison once per complete series. It rejects missing, duplicate, foreign, or mixed-provenance samples. It never averages shard verdicts or confidence intervals. Retain the raw fragments and their provenance with the final series evidence. No calibration or acceptance threshold changes.
+
 ### Stop the supported merge command on failure
 
 Keep current-base verification and `gh pr merge` in one checked process. Verify required checks and evidence, then reread the base and head immediately before merging with `--match-head-commit`. One regression drives a failed preflight through this command and proves that merge never runs.

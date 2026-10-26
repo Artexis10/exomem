@@ -19,6 +19,12 @@ CI SHALL run historical Full coverage alongside ordinary checks for each ready n
 - **WHEN** CI divides long-running Full work using measured case durations
 - **THEN** every collected case runs exactly once and the receipt retains observed timing, including queue time
 
+#### Scenario: Paired sampling spans runners
+- **WHEN** CI partitions paired recall cases across runners
+- **THEN** each case retains both arms and every repeat on one runner with its original arm order
+- **AND** aggregation verifies complete case coverage and common source, runtime, encoder, and corpus provenance before comparing the whole series once
+- **AND** raw fragments carry no statistical verdict and no shard confidence intervals are averaged
+
 ### Requirement: Reuse complete evidence for the actual tested tree
 
 Release acceptance SHALL reuse successful full CI when its actual tested tree equals the selected source tree. The evidence SHALL identify the repository, workflow, run, attempt, tested commit, tree, and full scope. Partial or unavailable evidence SHALL select a full run. Release metadata validation and a short integration check SHALL still run.

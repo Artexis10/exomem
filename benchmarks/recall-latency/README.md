@@ -4,7 +4,7 @@
 The packaged request latency contract owns every ceiling, target, stage budget,
 paired margin and sample minimum. This directory owns reference data and schemas.
 
-`--paired` compares the current checkout with the latest GitHub Release tag.
+`--paired` without baseline flags resolves the latest GitHub Release once.
 Both persistent workers use the same corpus, cases, encoder digest and two CPUs.
 The report keeps the resident profile's artifact digest, which has 16 hexadecimal characters.
 The encoder cache uses the separate full hash of the published artifact.
@@ -18,8 +18,12 @@ It checks the lock hash after preparation and verifies the worker's interpreter 
 Preparation stays outside request timers. Cleanup resumes owned workers before removing the scratch directory and the tag runtime.
 Each case runs three times per arm, with the first arm alternating between cases.
 The paired run samples only the principals that the contract's `paired.principals`
-lists, today the owner. Full CI runs one `recall-latency-paired` job per series of
-the case file (`--paired --series NAME`), so each comparison fits its job budget.
+lists, today the owner. CI resolves the release tag and its peeled commit once.
+Every sampler archives that pinned commit. `profile.json` sets four case shards
+per series. Each shard prepares the full corpus and warms the full selected
+series before sampling its contiguous subset. Original series indices keep
+arm order unchanged. Both arms and all repeats for one case stay on one runner.
+The unsharded `--paired --series NAME` command retains the original experiment.
 The inactive worker stops outside measurement so its native pool cannot slow the other arm.
 Each arm has its own index state and writer-lease directory.
 A paused worker therefore cannot retain the other arm's policy or mutation locks.
@@ -39,6 +43,32 @@ state before managed startup and sampling. A failed persistence refuses the
 benchmark fixture; normal advisory refreshes can still run during measurement.
 Explicit fork/join contexts retain each branch's complete lifetime, including gaps and waits.
 Anonymous work on different threads has an unknown critical path; shares include only known paths and show their sample count.
+
+Raw producers use `--paired --series NAME --base-tag TAG --base-commit SHA`
+with `--shard K --shards 4`. Their `paired_fragment` records claim only
+`collected` or `refused`; they never apply an allowance or compute a verdict.
+Fragments bind ordered case definitions, profile, prose, contract, source
+commits, worker locks, runtime recipes, encoder identity, and the stored corpus.
+The corpus digest folds each deterministic path and its raw-byte hash into
+the existing page-read loop. It adds no separate corpus scan.
+
+`--aggregate-paired DIR --series NAME --base-tag TAG --base-commit SHA` recomputes
+those identities from the current head and verifies the supplied tag's commit.
+It selects the latest producer attempt for each shard in the current run,
+then requires exactly every case, principal, arm, and repeat. A failed shard's
+replacement can join inherited successful shards. A latest refusal stays a
+refusal; aggregation never falls back to older samples. Missing, corrupt,
+same-attempt duplicates, foreign runs, future attempts, or mixed provenance
+produce a visible refusal. All raw versions remain in the artifact, and the
+report identifies the selected producers explicitly.
+The aggregate retains original fragments and their actual CPU IDs. Comparisons
+across runners use stable properties rather than CPU identifiers.
+
+The discovery job checks the instrument once before fan-out. Samplers retain
+elapsed workload records. The final `recall-latency-paired-SERIES` artifact
+contains the same-named complete JSON and all downloaded raw inputs. A retry
+replaces its current verdict while immutable raw attempts remain separate.
+The new wall-clock result remains unverified until CI runs this shape.
 
 The decision uses each case's ratio of median whole-call elapsed time.
 SciPy supplies the Student-t interval over log ratios.

@@ -21,6 +21,7 @@ FULL_CI_JOBS = {
     "retrieval-latency",
     "recall-latency-series",
     "recall-latency-paired",
+    "recall-latency-aggregate",
     "governance-projection-wire",
     "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
@@ -545,21 +546,36 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
-def test_paired_recall_runs_one_bounded_job_per_case_file_series() -> None:
-    """The paired comparison cannot finish in a 30-minute pytest shard, and a timeout blocks releases."""
-    workflow = _workflow()
-    jobs = workflow["jobs"]
-    paired = jobs["recall-latency-paired"]
-    assert paired["needs"] == "recall-latency-series"
-    assert paired["strategy"]["matrix"]["series"] == (
-        "${{ fromJSON(needs.recall-latency-series.outputs.series) }}"
-    )
-    assert "benchmarks/recall-latency/cases.json" in jobs["recall-latency-series"]["steps"][-1]["run"]
-    compare = next(step for step in paired["steps"] if "--paired" in step.get("run", ""))
-    assert '--series "$SERIES"' in compare["run"]
-    assert compare["timeout-minutes"] < paired["timeout-minutes"]
-    assert "recall-latency-paired" in jobs["gate"]["needs"]
-    assert not any("--paired" in step.get("run", "") for step in jobs["retrieval-latency"]["steps"])
+def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> None:
+    jobs = _workflow()["jobs"]
+    discovery, sampler, aggregate = (jobs[name] for name in (
+        "recall-latency-series", "recall-latency-paired", "recall-latency-aggregate",
+    ))
+    assert all(job["runs-on"] == "ubuntu-24.04" for job in (discovery, sampler, aggregate))
+    assert discovery["needs"] == "scope"
+    assert set(sampler["needs"]) == {"scope", "recall-latency-series"}
+    assert set(aggregate["needs"]) == {"scope", "recall-latency-series", "recall-latency-paired"}
+    assert "!cancelled()" in aggregate["if"]
+    assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
+    assert sampler["strategy"]["fail-fast"] is False
+    source = discovery["steps"][-1]["run"]
+    assert 'git rev-parse --verify "refs/tags/$tag^{commit}"' in source
+    assert "benchmarks/recall-latency/profile.json" in source
+    sample = next(step for step in sampler["steps"] if "--paired --series" in step.get("run", ""))
+    assert '--base-tag "$BASE_TAG" --base-commit "$BASE_COMMIT"' in sample["run"]
+    assert '--shard "$SHARD" --shards "$SHARDS"' in sample["run"]
+    assert sample["env"]["BASE_COMMIT"] == "${{ needs.recall-latency-series.outputs.base_commit }}"
+    assert sample["timeout-minutes"] < sampler["timeout-minutes"]
+    assert sampler["steps"][-1]["with"]["name"].endswith("${{ github.run_id }}-${{ github.run_attempt }}")
+    download = next(step for step in aggregate["steps"] if "download-artifact" in step.get("uses", ""))
+    assert download["with"]["merge-multiple"] is False
+    assert aggregate["steps"][-1]["with"]["name"] == "recall-latency-paired-${{ matrix.series }}"
+    for name in ("recall-latency-series", "recall-latency-paired", "recall-latency-aggregate"):
+        assert name in jobs["gate"]["needs"]
+    instrument_jobs = [name for name, job in jobs.items() if any(
+        "tests/test_recall_latency_gate.py" in step.get("run", "") for step in job.get("steps", [])
+    )]
+    assert instrument_jobs == ["recall-latency-series"]
 
 
 def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None:
@@ -668,8 +684,8 @@ def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() 
     assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
     assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
     for name in FULL_CI_JOBS:
-        assert jobs[name]["needs"] == "scope"
-        assert jobs[name]["if"] == "${{ needs.scope.outputs.full == 'true' }}"
+        assert "scope" in ([jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"])
+        assert "needs.scope.outputs.full == 'true'" in jobs[name]["if"]
     for name in RELEASE_PR_SKIPPED_JOBS:
         assert jobs[name]["needs"] == "scope"
         assert jobs[name]["if"] == "${{ needs.scope.outputs.release != 'true' }}"

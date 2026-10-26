@@ -46,8 +46,7 @@
       "maxLength": 200
     },
     "source_digest": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
+      "$ref": "#/$defs/sha256"
     },
     "environment": {
       "type": "object",
@@ -646,8 +645,15 @@
         "worker-bootstrap",
         "worker-startup",
         "worker-request",
-        "paired-measurement"
+        "paired-measurement",
+        "paired-aggregation"
       ]
+    },
+    "raw_fragments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/paired_fragment"
+      }
     }
   },
   "required": [
@@ -750,6 +756,9 @@
             "transcript_pages": {
               "type": "integer",
               "minimum": 0
+            },
+            "content_digest": {
+              "$ref": "#/$defs/sha256"
             }
           },
           "required": [
@@ -763,7 +772,8 @@
             "vocabulary_terms",
             "wikilinks_min",
             "wikilinks_max",
-            "transcript_pages"
+            "transcript_pages",
+            "content_digest"
           ]
         },
         "encoder_digest": {
@@ -791,8 +801,7 @@
           }
         },
         "runtime_lock_digest": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "$ref": "#/$defs/sha256"
         },
         "runtime_policy": {
           "enum": [
@@ -818,6 +827,144 @@
         "null"
       ],
       "minimum": 0
+    },
+    "paired_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "paired_fragment"
+        },
+        "state": {
+          "enum": [
+            "collected",
+            "refused"
+          ]
+        },
+        "series": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "shard": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shards": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "case_indices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "head_commit": {
+          "$ref": "#/$defs/git_commit"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/git_commit"
+        },
+        "tag": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "cases_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "profile_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contract_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/actions_run_number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/actions_run_number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "mode",
+        "state",
+        "contract_revision",
+        "series",
+        "shard",
+        "shards",
+        "samples",
+        "run_id",
+        "run_attempt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "collected"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "case_indices",
+              "head_commit",
+              "base_commit",
+              "tag",
+              "cases_digest",
+              "profile_digest",
+              "contract_digest",
+              "source_digest",
+              "run_id",
+              "run_attempt",
+              "environment"
+            ],
+            "properties": {
+              "environment": {
+                "required": [
+                  "base",
+                  "head"
+                ]
+              },
+              "run_id": {
+                "$ref": "#/$defs/actions_run_number"
+              },
+              "run_attempt": {
+                "$ref": "#/$defs/actions_run_number"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "git_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "actions_run_number": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
     }
   }
 }
