@@ -47,6 +47,12 @@ The served due-state block SHALL keep `total` and `categories` as the counts the
 - **WHEN** an agent dismisses three outstanding items of one category
 - **THEN** `categories` for that category falls by three and `outstanding` for it is unchanged
 
+#### Scenario: Dismissing every item keeps the backlog in view
+
+- **WHEN** an agent dismisses every outstanding item
+- **THEN** the served block remains, with `total` 0, no categories, and `outstanding_total` and `outstanding` unchanged
+- **AND** the block is absent only when nothing is outstanding
+
 ### Requirement: Unprocessed-source batches carry what an agent needs to act
 
 Each `unprocessed_source` finding SHALL carry the Source's title, a bounded excerpt, its recorded grouping metadata (`import_collection`, the folder of its `collection_path`, `source_kind`, `domain` and capture date, each only when recorded) and its derivatives with their states. `review_memory(mode="compilation", sources=[...])` SHALL return, beside its scaffold, a bounded excerpt of each Source within a total character bound. The server SHALL NOT group Sources by topic.
