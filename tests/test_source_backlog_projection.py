@@ -14,6 +14,7 @@ import pytest
 from exomem import commands, set_frontmatter_field
 from exomem import due_state as due_state_module
 from exomem import note as note_module
+from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 pytestmark = pytest.mark.usefixtures("obligations_only")
 
@@ -139,3 +140,37 @@ def test_dismissing_items_lowers_what_is_visible_and_keeps_outstanding(
     assert block["categories"] == {"unprocessed_source": 1}
     assert block["outstanding_total"] == 3
     assert block["outstanding"] == {"unprocessed_source": 3}
+
+
+def test_a_compact_bootstrap_points_at_the_next_batch_and_keeps_dismissals_outstanding(
+    imported: tuple[Path, list[str]],
+) -> None:
+    vault, _sources = imported
+    for row in due_state_module.served_entries(vault)[:2]:
+        commands.op_triage_memory(vault, ref=row["ref"], action="dismiss", why="grouped later")
+
+    summary = commands.op_bootstrap(vault)["due_state"]
+
+    assert summary["total"] == 1
+    assert summary["visible_outstanding"] == {"unprocessed_source": [1, 3]}
+    assert summary["next"] == (
+        "review_memory(mode='attention', categories=['unprocessed_source'], limit=10)"
+    )
+
+
+def test_a_surface_without_review_gets_the_counts_but_no_route_to_a_missing_tool(
+    imported: tuple[Path, list[str]],
+) -> None:
+    vault, _sources = imported
+    descriptor = ActiveSurfaceDescriptor(
+        surface="test",
+        profile="tier-one-only",
+        tier2_enabled=False,
+        product_commands=("bootstrap", "search_memory"),
+    )
+
+    with active_surface(descriptor):
+        summary = commands.op_bootstrap(vault)["due_state"]
+
+    assert summary["visible_outstanding"] == {"unprocessed_source": [3, 3]}
+    assert "next" not in summary

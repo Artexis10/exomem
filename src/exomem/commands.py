@@ -1862,14 +1862,20 @@ def op_bootstrap(
                     "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "
                     "Keep mentions through compaction and renewal; receipts are not mentions. "
                     "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
-                    "Absent advice proves nothing; prefer silence."
+                    "Absent advice proves nothing; prefer silence. "
+                    "Backlog: review a batch of the largest category, group it by topic, "
+                    "write each group with the usual writers, check outstanding fell. "
+                    "Dismissal is not completion."
                     if profile == "compact"
                     else
                     "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
                     "Raise at most one due item per maintained client conversation in the user's language. "
                     "Remember any due mention through hooks, MCP, REST, continuation, compaction and OAuth renewal; "
                     "receipt is not a mention. Dismissed or snoozed fingerprints stay quiet until state changes. "
-                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals."
+                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals. "
+                    "To work a backlog, review a batch of its largest category, group the batch by topic, "
+                    "write each group through the usual writers and confirm that the outstanding count fell. "
+                    "A dismissal is not completion: it lowers the visible count only."
                 ),
                 "relevant_due_handling": (
                     "Read review_item_context(ref, expected_fingerprint); refresh on REVIEW_ITEM_CHANGED. "
@@ -2308,6 +2314,11 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
+        if "due_state" in core_payload:
+            # The summary is built after the surface filter, so its `next` route needs the same pass.
+            core_payload["due_state"] = _filter_bootstrap_payload(
+                core_payload["due_state"], active_descriptor
+            )
     # Compact sections and session carry the calling client's retained-ring advisory;
     # the core carries only a pointer. The bootstrap contract fixes the full-detail
     # profiles below; session already normalizes to compact.

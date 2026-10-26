@@ -262,6 +262,7 @@ def test_exclusion_happens_before_fusion(vault: Path) -> None:
     assert FAMILY not in surviving[0]["categories"]
 
 
+@pytest.mark.usefixtures("obligations_only")
 def test_a_quiet_family_contributes_nothing_to_any_carrier(vault: Path) -> None:
     from exomem import due_state as due_state_module
 
@@ -275,6 +276,7 @@ def test_a_quiet_family_contributes_nothing_to_any_carrier(vault: Path) -> None:
     assert due_state_module.served(vault) is None
 
 
+@pytest.mark.usefixtures("obligations_only")
 @pytest.mark.parametrize(
     ("audience", "surface"), [("owner", "cli"), ("principal:external", "mcp")]
 )
@@ -566,6 +568,7 @@ def test_removing_the_attention_filter_puts_the_quiet_family_back(
     assert any("nag-backlog" in p for p in _default_union_paths(vault))
 
 
+@pytest.mark.usefixtures("obligations_only")
 def test_removing_the_carrier_filter_puts_the_quiet_family_back(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

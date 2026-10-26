@@ -300,6 +300,7 @@ def test_an_unreadable_store_makes_the_carrier_serve_nothing(vault: Path) -> Non
     assert isinstance(written, dict) and "due_state" not in written
 
 
+@pytest.mark.usefixtures("obligations_only")
 def test_a_readable_store_still_serves_the_open_item(vault: Path) -> None:
     """The other half of the pair: silence is the FAILURE path, not the normal one."""
     from exomem import due_state as due_state_module
