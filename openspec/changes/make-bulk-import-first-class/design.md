@@ -146,7 +146,7 @@ The existing receipts bind pending visibility and replay to the committed bytes.
 
 The flag retains its global behavior: `1` enables eligible writes, and every explicit value other than `1` restores synchronous fan-out. Other mutations keep their current default. Bulk apply retains its own request budget for canonical writes; this change makes no two-second bulk-call claim.
 
-Chunk and individual-note pacing retain the existing terminal reserve for mandatory custody proof and pending publication. An expired acknowledgement budget returns pending state without scanning every component. It retains the stable advisory reference when one applies. Operational checkpoint writes leave existing graph debt with its durable owner while the acknowledgement session is active. The explicit synchronous rollback can still drain that debt.
+Chunk and individual-note pacing retain the existing terminal reserve for mandatory custody proof and pending publication. An expired acknowledgement budget leaves unread required components pending without scanning them. The reply preserves observed completions, failures and diagnostics, and retains the stable advisory reference when one applies. Operational checkpoint writes leave existing graph debt with its durable owner while the acknowledgement session is active. The explicit synchronous rollback can still drain that debt.
 
 The boundary proof blocks sidecar fan-out and checks that default apply returns with bytes, a sidecar, an extraction job and pending recall intact. It also checks exact replay, convergence and the explicit synchronous rollback. The own-note benchmark repeats the existing seed with caller-supplied selection rules and checks every page after the rerun.
 

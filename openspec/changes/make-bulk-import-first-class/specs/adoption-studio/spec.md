@@ -43,7 +43,7 @@ When `EXOMEM_FAST_DURABLE_ACK` is absent, `adoption_studio(action="apply")` SHAL
 
 An explicit flag value other than `1` SHALL restore synchronous fan-out. The flag's global `1` behavior and other mutations' defaults SHALL remain unchanged. Bulk apply SHALL retain its request budget and continuation protocol for canonical writes.
 
-Both chunk and individual-note pacing SHALL leave headroom for mandatory custody proof and pending publication. When the acknowledgement observation budget expires, the reply SHALL report unproven work as pending without scanning the remaining component states. It SHALL retain any applicable stable advisory reference. Operational checkpoints SHALL NOT synchronously drain existing graph debt during the durable acknowledgement session.
+Both chunk and individual-note pacing SHALL leave headroom for mandatory custody proof and pending publication. When the acknowledgement observation budget expires, the reply SHALL report unproven work as pending without scanning the remaining component states. It SHALL preserve observed completions, failures and diagnostics, and retain any applicable stable advisory reference. Operational checkpoints SHALL NOT synchronously drain existing graph debt during the durable acknowledgement session.
 
 #### Scenario: A media import returns while graph work is slow
 
@@ -61,7 +61,12 @@ Both chunk and individual-note pacing SHALL leave headroom for mandatory custody
 - **WHEN** default apply needs a continuation to leave time for mandatory custody
 - **THEN** it returns that continuation within its request budget and keeps committed items recoverable
 - **AND** operational checkpoints preserve existing graph debt for the durable owner
-- **AND** an expired component observation budget leaves a pending reply with exact replay
+- **AND** an expired component observation budget leaves unread required work pending and preserves exact replay
+
+#### Scenario: A component fails before the observation budget expires
+
+- **WHEN** acknowledgement observes a component failure and then exhausts its budget before reading every component
+- **THEN** the reply retains that failure and its diagnostic, leaves unread required work pending, and excludes observed completions from unfinished work
 
 ### Requirement: A folder outside the vault imports through local staging
 
