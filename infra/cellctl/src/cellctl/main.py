@@ -110,6 +110,7 @@ def _retention_sources() -> tuple[object, ...]:
     raw = os.environ.get("CELLCTL_KEY_RETENTION_SOURCES", "[]")
     try:
         parsed = json.loads(raw)
+        json.dumps(parsed, allow_nan=False)
     except ValueError:
         return (raw,)
     return tuple(parsed) if isinstance(parsed, list) else (parsed,)

@@ -3308,3 +3308,28 @@ async def test_malformed_retention_is_retained_as_unknown_without_stopping_delet
         assert json.loads(row.key_retention_sources) == list(sources)
     finally:
         await connection.close()
+
+
+@pytest.mark.parametrize("raw", ["[NaN]", "[1e999]"], ids=["nonfinite-constant", "numeric-overflow"])
+async def test_nonfinite_retention_input_preserves_raw_evidence_and_completes_deletion(cell_db, monkeypatch, raw):
+    import json
+
+    from cellctl import main
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "raw-retention", desired_state="deleted")
+    monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
+    monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_KEY_RETENTION_SOURCES", raw)
+    config = main.build_cluster_config()
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
+            {"volume": "per-cell-key", "retained_volumes": []})})
+        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
+        row = (await db.select_all_rows(connection))[0]
+        assert row.observed_state == "deleted" and row.keys_expire_at is None
+        assert json.loads(row.key_retention_sources) == [raw]
+    finally:
+        await connection.close()

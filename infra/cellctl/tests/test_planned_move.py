@@ -501,3 +501,49 @@ async def test_a_second_move_and_acceptance_preserve_every_earlier_retained_copy
         assert (await db.select_all_rows(connection))[0].keys_expire_at is None
     finally:
         await connection.close()
+
+
+async def test_missing_acceptance_preserves_an_unidentified_retained_copy_through_deletion(cell_db, monkeypatch):
+    import json
+    from unittest.mock import Mock
+
+    from cellctl import db
+    from cellctl.storage.interface import VolumeInfo
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "unidentified-copy")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    provider = FakeHetznerVolumeProvider([VolumeInfo("vol-retained", "node", {})])
+    lookup = Mock(wraps=provider.get_volume)
+    monkeypatch.setattr(provider, "get_volume", lookup)
+    retained = [{"volume_id": None, "storage_class": STORAGE_CLASS}]
+    sources = tuple({"kind": kind, "source": "policy", "retention_seconds": 0, "observed_at": NOW.isoformat()}
+                    for kind in ("control_database", "cluster_datastore", "object_versions"))
+    config = ClusterConfig(object_storage_bucket="b", storage=StorageConfig(per_cell_class="per-cell"),
+                           key_retention_sources=sources)
+    try:
+        await db.write_observed(connection, cell_id, {
+            "observed_image": IMAGE_A, "observed_state": "running", "observed_generation": 1,
+            "ready": True, "volume_id": "vol-current", "custody_observation": json.dumps({
+                "volume": "per-cell-key", "retained_volumes": retained})})
+        cluster.observations[cell_id] = _bound("per-cell", pvc_exists=True, pvc_volume_id="vol-current")
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(), config, now=NOW)
+        row = (await db.select_all_rows(connection))[0]
+        assert json.loads(row.custody_observation)["retained_volumes"] == retained
+        assert all(call.args[0] is not None for call in lookup.call_args_list)
+        owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+        try:
+            await owner.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", cell_id)
+        finally:
+            await owner.close()
+        await db.write_observed(connection, cell_id, {"volume_id": None})
+        cluster.observations[cell_id] = ClusterObservation()
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(), config,
+                                       now=NOW + timedelta(minutes=1))
+        row = (await db.select_all_rows(connection))[0]
+        assert json.loads(row.custody_observation)["retained_volumes"] == retained
+        assert row.last_live_key_destroyed_at is None and row.keys_expire_at is None
+        assert provider.list_volumes()[0].volume_id == "vol-retained"
+    finally:
+        await connection.close()

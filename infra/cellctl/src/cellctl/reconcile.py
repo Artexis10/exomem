@@ -1738,7 +1738,8 @@ async def _reconcile_row(
     retained = _retained_volumes(row)
     accepted_volume = observation.namespace_move_accepted_volume
     # A volume-only mark cannot disambiguate conflicting original classes; keep custody unknown without blocking service.
-    unambiguous = sum(copy["volume_id"] == accepted_volume for copy in retained) == 1
+    unambiguous = (isinstance(accepted_volume, str) and bool(accepted_volume.strip())
+                   and sum(copy["volume_id"] == accepted_volume for copy in retained) == 1)
     for copy in list(retained):
         old_class = copy["storage_class"]
         old_is_hetzner = (old_class == LEGACY_CLASS or cluster_config.storage.per_cell_class is not None
