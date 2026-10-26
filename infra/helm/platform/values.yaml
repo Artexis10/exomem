@@ -151,6 +151,8 @@ traefik:
 # with their own StorageClass, separate from the `storage` block above.
 
 cellctl:
+  # Observed deployed retention policies; missing windows remain unknown.
+  keyRetentionSources: []
   enabled: false
   # Operator-selected cells reserve agents carrying their own cell ID.
   dedicatedCellIds: []
@@ -325,6 +327,7 @@ cloudGateway:
 
 cloudStorage:
   className: exomem-cloud-encrypted
+  perCellClassName: exomem-cloud-cell-key
   encryptionSecretName: exomem-cloud-volume-encryption
   encryptionSecretNamespace: exomem-platform
 
