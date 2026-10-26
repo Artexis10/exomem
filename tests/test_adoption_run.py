@@ -73,6 +73,75 @@ def _select_all(vault: Path, run_id: str) -> dict:
     return adoption_run.select(vault, run_id=run_id, include=["Old Notes"])
 
 
+def test_scoped_status_counts_distinct_filed_originals_across_intersecting_runs(tmp_path: Path) -> None:
+    store = adoption_run.AdoptionRunStore(tmp_path)
+    for run_id, source_root, outcomes in [
+        ("parent", "_Imports", {
+            "_Imports/batch/a.md": {"status": "applied"},
+            "_Imports/other/outside.md": {"status": "applied"},
+        }),
+        ("repeat", "_Imports/batch", {
+            "_Imports/batch/a.md": {"status": "already-applied"},
+            "_Imports/batch/child/b.md": {"status": "applied"},
+            "_Imports/batch/owed.md": {"status": "source-applied"},
+            "_Imports/batch/failed.md": {"status": "failed", "source": {"status": "applied"}},
+        }),
+        ("child", "_Imports/batch/child", {
+            "_Imports/batch/child/b.md": {"status": "already-applied"},
+            "_Imports/batch/child/c.md": {"status": "applied"},
+        }),
+        ("outside", "_Imports/batch-sibling", {"malformed": None}),
+    ]:
+        folder = store.run_dir(run_id)
+        folder.mkdir(parents=True)
+        (folder / "run.json").write_text(json.dumps({
+            "run_id": run_id, "source_root": source_root, "outcomes": outcomes,
+        }), encoding="utf-8")
+
+    scoped = adoption_run.status(tmp_path, path="_Imports/batch")
+    assert scoped["adopted_files"] == 3
+    assert scoped["complete"] is True
+    assert {row["source_root"] for row in scoped["runs"]} >= {"_Imports", "_Imports/batch"}
+    child = adoption_run.status(tmp_path, path="_Imports/batch/child/../child")
+    assert child["adopted_files"] == 2
+    assert child["complete"] is True
+    assert "adopted_files" not in adoption_run.status(tmp_path)
+    assert "complete" not in adoption_run.status(tmp_path, path="")
+
+
+@pytest.mark.parametrize("unreadable", [
+    "{", "[]", '{"outcomes": {}}',
+    '{"source_root": "../outside", "outcomes": {}}',
+    '{"source_root": "_Imports/batch", "outcomes": null}',
+    '{"source_root": "_Imports/batch", "outcomes": {"_Imports/batch/a.md": null}}',
+    None,
+])
+def test_scoped_status_never_reports_a_partial_count_as_zero(
+    tmp_path: Path, unreadable: str | None,
+) -> None:
+    store = adoption_run.AdoptionRunStore(tmp_path)
+    known = store.run_dir("known")
+    known.mkdir(parents=True)
+    (known / "run.json").write_text(json.dumps({
+        "source_root": "_Imports/batch",
+        "outcomes": {"_Imports/batch/known.md": {"status": "applied"}},
+    }), encoding="utf-8")
+    folder = store.run_dir("unreadable")
+    folder.mkdir(parents=True)
+    if unreadable is not None:
+        (folder / "run.json").write_text(unreadable, encoding="utf-8")
+
+    scoped = adoption_run.status(tmp_path, path="_Imports/batch")
+    assert scoped["adopted_files"] is None
+    assert scoped["complete"] is False
+
+
+def test_scoped_status_has_a_complete_zero_before_any_adoption(tmp_path: Path) -> None:
+    scoped = adoption_run.status(tmp_path, path=".")
+    assert scoped["adopted_files"] == 0
+    assert scoped["complete"] is True
+
+
 # --- 1 ---
 def test_start_requires_kb_and_initialize_kb_flag_bootstraps(tmp_path: Path) -> None:
     vault = _legacy_vault(tmp_path, kb=False)

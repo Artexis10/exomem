@@ -250,22 +250,74 @@ class AdoptionRunStore:
         )
 
     def list_runs(self) -> list[dict]:
-        if not self.base.exists():
-            return []
+        return self.listing()["runs"]
+
+    def listing(self, *, path: str = "") -> dict:
         rows: list[dict] = []
-        for d in sorted(self.base.iterdir()):
-            if not d.is_dir():
+        adopted: set[PurePosixPath] = set()
+        complete = True
+        scope = _status_path(path) if path else None
+        if path and scope is None:
+            raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", "status takes a vault-relative subtree")
+        try:
+            folders = sorted(self.base.iterdir())
+        except FileNotFoundError:
+            folders = []
+        except OSError:
+            folders, complete = [], False
+        for folder in folders:
+            try:
+                if not stat.S_ISDIR(folder.stat().st_mode):
+                    continue
+                run = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                complete = False
                 continue
-            f = d / "run.json"
-            if not f.exists():
+            if not isinstance(run, dict):
+                complete = False
                 continue
             try:
-                run = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                rows.append(_compact_row(run))
+            except (AttributeError, TypeError):
+                # Legacy listings skip malformed rows; scoped counts still inspect their scope.
+                pass
+            if scope is None:
                 continue
-            rows.append(_compact_row(run))
-        rows.sort(key=lambda r: r.get("created", ""), reverse=True)
-        return rows
+            source_root = _status_path(run.get("source_root"))
+            if source_root is None:
+                complete = False
+                continue
+            if not (source_root.is_relative_to(scope) or scope.is_relative_to(source_root)):
+                continue
+            outcomes = run.get("outcomes")
+            if not isinstance(outcomes, dict):
+                complete = False
+                continue
+            for original, outcome in outcomes.items():
+                original_path = _status_path(original)
+                if (
+                    original_path is None or not isinstance(outcome, dict)
+                    or not isinstance(outcome.get("status"), str)
+                ):
+                    complete = False
+                elif original_path.is_relative_to(scope) and outcome.get("status") in _APPLIED_STATUSES:
+                    adopted.add(original_path)
+        rows.sort(key=lambda r: r.get("created") if isinstance(r.get("created"), str) else "", reverse=True)
+        result = {"runs": rows}
+        if scope is not None:
+            result.update(adopted_files=len(adopted) if complete else None, complete=complete)
+        return result
+
+
+def _status_path(raw: object) -> PurePosixPath | None:
+    """Read historical vault-relative paths without requiring originals to remain on disk."""
+    if not isinstance(raw, str) or "\0" in raw:
+        return None
+    normalized = posixpath.normpath(raw.replace("\\", "/"))
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or PureWindowsPath(raw).anchor or normalized == ".." or normalized.startswith("../"):
+        return None
+    return path
 
 
 def _compact_row(run: dict) -> dict:
@@ -274,6 +326,7 @@ def _compact_row(run: dict) -> dict:
     return {
         "run_id": run.get("run_id"),
         "run_ref": run.get("run_ref"),
+        "source_root": run.get("source_root"),
         "phase": run.get("phase"),
         "created": run.get("created"),
         "counts": {
@@ -986,11 +1039,11 @@ def _pending(run: dict) -> list[dict]:
     ]
 
 
-def status(root: Path, *, run_id: str | None = None) -> dict:
+def status(root: Path, *, run_id: str | None = None, path: str = "") -> dict:
     root = Path(root)
     store = AdoptionRunStore(root)
     if not run_id:
-        return {"mode": "adoption", "mutated": False, "runs": store.list_runs()}
+        return {"mode": "adoption", "mutated": False, **store.listing(path=path)}
     run = store.load(run_id)
     extra: dict = {}
     if run.get("phase") == "applying":

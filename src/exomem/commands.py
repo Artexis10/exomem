@@ -10259,7 +10259,9 @@ def op_adoption_studio(
     Args:
         action: Lifecycle step.
         run_id: From `start`; required except for `start` and run-listing `status`.
-        path: For `start`, subtree to scan (default: vault root).
+        path: For `start`, subtree to scan (default: vault root). For run-listing
+            `status`, count distinct filed originals in this subtree; omit for
+            the legacy listing. An incomplete count is null; `complete` is false.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
@@ -10294,7 +10296,7 @@ def op_adoption_studio(
                 initialize_kb=initialize_kb, collection=collection,
             )
         if action == "status":
-            return adoption_run_module.status(vault_root, run_id=run_id)
+            return adoption_run_module.status(vault_root, run_id=run_id, path=path)
         if action == "select":
             return adoption_run_module.select(
                 vault_root,
