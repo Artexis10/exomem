@@ -250,12 +250,9 @@ spec:
               value: {{ int64 (required "observability contract alerts.pending_operation_warn_seconds is required" $contractAlerts.pending_operation_warn_seconds) | quote }}
             - name: CELLCTL_PVC_RESERVED_FREE_BYTES
               value: {{ int64 (required "observability contract alerts.pvc_reserved_free_bytes is required" $contractAlerts.pvc_reserved_free_bytes) | quote }}
-            {{- if $local }}
-            # move-cloud-cells-to-local-storage: the classes a cell volume may
-            # be on and the one new claims take (_cell-storage.tpl).
+            # Shared cap and optional local classes (_cell-storage.tpl).
             - name: CELLCTL_CELL_STORAGE
               value: {{ $storage | toJson | quote }}
-            {{- end }}
             {{- if .Values.artifactBroker.enabled }}
             - name: CELLCTL_ARTIFACT_BROKER_URL
               value: {{ .Values.artifactBroker.endpoint | quote }}
