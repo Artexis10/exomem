@@ -6,7 +6,7 @@
 - [ ] 1.4 Migrate existing cells one at a time, owner first, through the relocation path: stop under a hold, fresh backup, new volume under the cell's own passphrase, restore, verify, start. Delete the old volume after a soak. Remove the shared passphrase once no volume uses it. Evidence: per cell, the shared passphrase opens none of its volumes, recall, governance status and a governed write pass, and the measured downtime is recorded per size class.
 - [ ] 1.5 At cell deletion, destroy every live copy of the cell root key, its content keys and any infrastructure key. Record `keys_expire_at` from the longest platform backup retention, and report the keys destroyed only after it. Update `docs/runbooks/cloud-cell-deletion.md` with the date. Evidence: a rehearsal deletion shows no live copy at once, and its status names the platform backups that still hold copies until `keys_expire_at`.
 - [ ] 1.6 Report a cell on storage without a per-cell volume key as not meeting the requirement. Record in `move-cloud-cells-to-local-storage` that its cutover must first add a per-volume LUKS2 layer under the cell's volume passphrase, and name that integration's maintained basis or custom part and its owner. Evidence: the status field on a local-storage rehearsal cell, and that change's updated design.
-- [ ] 1.7 Inventory every content-bearing scratch path of a cell (the runtime's `TMPDIR`, media job scratch, import and export staging, and caches that hold content). Move each onto the cell's encrypted volume or into a memory-backed emptyDir within the memory limit, and report a cell whose scratch does not comply. Evidence: a canary written through capture, media processing and an owner export appears on no node path outside the cell's volume, and the memory and latency effect is recorded.
+- [ ] 1.7 Inventory every content-bearing scratch path of a cell (the runtime's `TMPDIR`, media job scratch, import and export staging, and caches that hold content). Move each onto the cell's encrypted volume or into a memory-backed emptyDir within the memory limit, and report a cell whose scratch does not comply. Stage an owner export one part at a time, not as a whole-vault archive. Disable core dumps for cell processes, keep node swap off or encrypted, and restart a crash-locked cell in a new pod. Evidence: a canary written through capture, media processing and an owner export appears on no node path outside the cell's volume, and the memory and latency effect is recorded.
 
 ## 2. Access record
 
@@ -37,10 +37,16 @@
   - service credentials inside the runtime (the CSI controller's provider token, the server's K3s token, cellctl's wrapping keys).
 
   Check that SOPS accepts a FIDO2 age plugin identity. Move the operator and recovery credentials into presence-gated custody, and remove every admin credential's plaintext from routine-agent environments and from secret stores that the routine or deploy identities can read. Evidence: the inventory, recorded in design D6; automation with routine credentials finds no plaintext copy; decrypting an operator credential fails without a touch; a release still publishes and the CSI driver still provisions.
-- [ ] 4.6 Add a tag ruleset under which only the release automation can create `v*` tags. Make the release workflow refuse a tag whose commit `main` does not contain. Give the GitHub credentials that agents hold no repository administration permission. Evidence:
-  - an agent credential cannot create a `v*` tag or change a ruleset;
-  - a workflow dispatch on a tag outside `main` builds nothing;
-  - a normal release still publishes and attests.
+- [ ] 4.6 Protect the release ref:
+  - add a tag ruleset whose only bypass actor for `v*` tags is the release App, never GitHub Actions;
+  - move the App's private key into a protected environment that admits only `main`;
+  - make the release workflow refuse a tag whose commit `main` does not contain, as a mistake guard;
+  - give the GitHub credentials that agents hold no repository administration permission.
+
+  Evidence:
+  - a workflow pushed on a branch cannot read the App key or create a `v*` tag;
+  - an agent credential cannot create a `v*` tag or change a ruleset or environment;
+  - a normal release from `main` still publishes and attests.
 
 ## 5. Tenant lock
 

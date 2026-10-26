@@ -96,7 +96,7 @@ The downtime is one backup plus one restore, measured per size class in task 1.4
 
 **Local storage.** `move-cloud-cells-to-local-storage` encrypts at the node level and calls per-tenant keys a non-goal (its D2). That non-goal is superseded. TopoLVM has no per-volume encryption, so a per-volume LUKS2 layer under the cell's passphrase needs its own integration. Task 1.6 names that integration, its maintained basis or custom part, and its owner before the cutover. Until it ships, a cell on local storage does not meet the per-cell key requirement, and the privacy copy may not claim it for that cell.
 
-**Content scratch.** Today a cell also writes content outside its volume. The runtime's `TMPDIR`, media job scratch (video frames, OCR images, transcripts) and import and export staging sit on disk-backed emptyDirs on the node, and Hetzner Cloud node disks carry no encryption. Every content-bearing scratch path therefore moves onto the cell's own encrypted volume, inside the inner layer when the cell is tenant-locked, or into a memory-backed emptyDir within the cell's memory limit. Until that holds for a cell, the per-cell encryption claim and the tenant-lock claim are not claimable for it. Task 1.7 inventories the paths and moves them.
+**Content scratch.** Today a cell also writes content outside its volume. The runtime's `TMPDIR`, media job scratch (video frames, OCR images, transcripts) and import and export staging sit on disk-backed emptyDirs on the node, and Hetzner Cloud node disks carry no encryption. Every content-bearing scratch path therefore moves onto the cell's own encrypted volume, inside the inner layer when the cell is tenant-locked, or into a memory-backed emptyDir within the cell's memory limit. The same rule covers core dumps and swap: cell processes write no core dumps, and node swap is off or encrypted. A memory-backed emptyDir survives a container crash, so a crash-locked cell restarts in a new pod. Until all of this holds for a cell, the per-cell encryption claim and the tenant-lock claim are not claimable for it. Task 1.7 inventories the paths and moves them.
 
 ### D2. Deleting a cell destroys its live keys; platform backup copies expire by a stated date
 
@@ -201,7 +201,12 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
 
    An admission rule compares the old and new objects and permits only image-field changes. A maintained verifier (Sigstore policy-controller or Kyverno, chosen in task 4.1) accepts an image only when it carries a GitHub artifact attestation. The attestation must be signed by this repository's release workflow on a release ref, for that workload's image family. The release workflow already produces these attestations for the Cloud and cellctl images. Registry write access alone cannot produce one, so a pushed image fails.
 
-   A **release ref** is a `v*` tag that only the release automation can create, on a commit that `main` contains. Today tags carry no rule, so a holder of repository write could tag an unreviewed commit and dispatch the release workflow on it, which would produce a genuine attestation. Task 4.6 adds a tag ruleset that admits only the release automation, and makes the release workflow refuse a tag whose commit `main` does not contain. `main` already accepts changes only through its required checks. Repository administration (rulesets, branch protection, Actions secrets) is admin-tier, so the GitHub credentials that agents hold carry no administration permission.
+   A **release ref** is a `v*` tag that only the release App can create, on a commit that `main` contains. Today neither holds. Tags carry no rule, and the App's private key is a repository-level Actions secret that any workflow on any branch can read. A holder of repository write could therefore push a branch workflow that mints the App's token, tag an unreviewed commit, and dispatch the release workflow on that tag. The dispatched run executes the tagged commit's own workflow file and attests with the genuine release identity. Task 4.6 closes the path:
+   - a tag ruleset admits only the release App as the bypass actor for `v*` tags, never GitHub Actions, whose token every workflow holds;
+   - the App's private key moves into a protected environment whose deployment policy admits only `main`, so only workflows running on `main` can mint its token;
+   - the release workflow also refuses a tag whose commit `main` does not contain. That check guards against mistakes only, because an attacker's dispatched run would execute the attacker's workflow file.
+
+   `main` already accepts changes only through its required checks. Repository administration (rulesets, branch protection, environments, Actions secrets) is admin-tier, so the GitHub credentials that agents hold carry no administration permission.
 
    The identity has no exec, attach, port-forward, proxy or ephemeral containers. It cannot read Secrets, or change RBAC, admission policy, volumes or Secrets. A full chart upgrade installs RBAC and admission policy, so no scoped identity can run it; it is an admin action.
 3. **Admin.** Every credential that can yield one of the following is admin-tier:
@@ -262,6 +267,7 @@ Disclosures, beside the claims:
 - A lost recovery code and passkey means lost data.
 - The edge and gateway see requests and responses in transit.
 - Code merged to the repository can reach a release, so an agent or attacker with merge rights could ship code that reads content; that path is public and permanent.
+- An owner export's archive sits in platform storage, readable by the operator, until its download link expires.
 
 No copy claims that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation.
 
