@@ -31,6 +31,7 @@ from . import (
 from . import compile_proposal as compile_proposal_module
 from . import overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
+from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
     PlannedWrite,
@@ -404,7 +405,7 @@ def render_text_source(
         f"- Bytes: {planned['original_bytes']}",
         "",
         *_links_section(planned),
-        "## Capture",
+        CAPTURE_HEADING,
         "",
     ]
     fence = _fence_for(text)

@@ -41,6 +41,7 @@ from . import (
     vocabulary_resolution,
 )
 from .kbdir import kb_prefix
+from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -1265,7 +1266,7 @@ def _render_source(
         for paragraph in why_captured.strip().splitlines():
             lines.append(f"> {paragraph}")
         lines.append("")
-    lines.append("## Capture")
+    lines.append(CAPTURE_HEADING)
     lines.append("")
     lines.append(content.strip())
     lines.append("")

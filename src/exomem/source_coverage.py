@@ -177,8 +177,8 @@ def _text(value: object) -> str | None:
 
 
 #: The heading that opens the captured text on a Source page. Both Source writers
-#: (capture and import) emit it, so it is part of the page shape, not a guess.
-_CAPTURE_HEADING = "## Capture"
+#: (capture and import) emit it from here, so it is part of the page shape, not a guess.
+CAPTURE_HEADING = "## Capture"
 #: Fence lines wrap the original text of an imported Source.
 _FENCES = ("```", "~~~")
 
@@ -191,13 +191,13 @@ def _captured_text(body: str) -> str:
     Without the heading the body's own opening stands in, minus the page title.
     A search for the heading, not a split of the body: a Source can run to megabytes.
     """
-    at = body.find(f"\n{_CAPTURE_HEADING}")
+    at = body.find(f"\n{CAPTURE_HEADING}")
     while at != -1:
-        end = at + 1 + len(_CAPTURE_HEADING)
+        end = at + 1 + len(CAPTURE_HEADING)
         if body[end : end + 1] in ("", "\n", "\r", " ", "\t"):
             window = body[end : end + _SCAN_CHARS]
             break
-        at = body.find(f"\n{_CAPTURE_HEADING}", end)
+        at = body.find(f"\n{CAPTURE_HEADING}", end)
     else:
         window = body[:_SCAN_CHARS]
         if window.startswith("# "):
