@@ -894,14 +894,23 @@ def _run_manifest_counts(summary: dict) -> list[str]:
         for outcome in outcomes.values()
         if isinstance(outcome, dict) and outcome.get("status") in _APPLIED_OUTCOME_STATUSES
     )
-    recall_ok = bool((summary.get("recall_check") or {}).get("ok"))
+    recall = summary.get("recall_check") or {}
+    if recall.get("ok") is not None:
+        recall_label = "ok" if recall["ok"] else "needs attention"
+    # Only fixed recall-result markers enter this count-only manifest.
+    elif recall.get("status") == "pending":
+        recall_label = "pending"
+    elif recall.get("status") == "failed":
+        recall_label = "failed"
+    else:
+        recall_label = "unknown"
     return [
         f"- Selected: {len(summary.get('selection') or [])}",
         f"- Applied: {applied}",
         f"- Not applied: {len(outcomes) - applied}",
         f"- Verified unchanged: {summary.get('verified_unchanged', 0)} of "
         f"{summary.get('verified_total', 0)}",
-        f"- Recall check: {'ok' if recall_ok else 'needs attention'}",
+        f"- Recall check: {recall_label}",
     ]
 
 

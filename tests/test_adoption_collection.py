@@ -450,6 +450,9 @@ def test_finish_does_not_report_incomplete_recall_as_missing(
     assert sample["sampled"] == 1 and sample["evaluated"] == 0
     assert sample["found"] is None and sample["missed"] == []
     assert sample[read_state] == 1
+    manifest = (vault / finished["finish"]["manifest_path"]).read_text(encoding="utf-8")
+    assert f"- Recall check: {read_state}" in manifest
+    assert "- Recall check: needs attention" not in manifest
     if read_state == "pending":
         assert recall["warming"]["components"] == ["pending_visibility"]
 

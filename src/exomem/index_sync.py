@@ -2302,9 +2302,10 @@ def converge_derived_component(
             if removed:
                 publications.append(delete_after_remove(root, removed))
             if written:
+                # Receipt-owned fan-out replays committed paths through the graph's currency proof.
                 publications.append(upsert_after_write(
                     root, written, created_paths=created,
-                    publish_corpus_change=True, semantic_edited=not service,
+                    publish_corpus_change=True, semantic_edited=not service, replayed=True,
                 ))
         reports = tuple(publications)
         if any(item.reconcile_required for item in reports):

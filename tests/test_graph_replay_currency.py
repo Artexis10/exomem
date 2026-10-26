@@ -16,6 +16,7 @@ fresh whole-vault rebuild.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -30,7 +31,7 @@ from test_graph_handoff_convergence import (
     _titled,
 )
 
-from exomem import deferred_index, epistemic_graph, freshness, index_sync
+from exomem import deferred_index, derived_receipts, epistemic_graph, freshness, index_sync
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 REPLAYED = f"{GENERATED}/generated-note-0003.md"
@@ -211,6 +212,32 @@ def test_a_replayed_full_index_receipt_the_graph_reflects_rebuilds_nothing(
 
     assert deferred_index.snapshot_full(root) == []
     assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_derived_receipt_does_not_rebuild_an_already_published_creation(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """Recovered derived custody must not rebuild every historical creation again."""
+    root = _built(vault, whole_vault_passes)
+    receipt = derived_receipts.prepare_batch(
+        root,
+        batch_id="historical-creation",
+        mutation_attempt_digest="a" * 64,
+        canonical_generation="already-published",
+        checkpoint_id="historical-checkpoint",
+        paths=(derived_receipts.DerivedBatchPath(
+            rel_path=REPLAYED, before_hash=None,
+            after_hash=hashlib.sha256((root / REPLAYED).read_bytes()).hexdigest(),
+        ),),
+        required_components={derived_receipts.DerivedComponent.FRESHNESS},
+    )
+
+    assert index_sync.converge_derived_component(
+        root, receipt, derived_receipts.DerivedComponent.FRESHNESS
+    ) is True
+
+    assert whole_vault_passes == [], "historical derived custody rebuilt a current graph"
     _assert_matches_a_fresh_rebuild(root)
 
 
