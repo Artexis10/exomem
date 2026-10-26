@@ -71,6 +71,19 @@
       "additionalProperties": false,
       "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
+        "keyRetentionSources": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "source", "retention_seconds", "observed_at"],
+            "properties": {
+              "kind": {"enum": ["control_database", "cluster_datastore", "object_versions"]},
+              "source": {"type": "string", "minLength": 1},
+              "retention_seconds": {"type": ["integer", "null"], "minimum": 0},
+              "observed_at": {"type": ["string", "null"]}
+            }
+          }
+        },
         "sharedWorker": {
           "type": "object",
           "additionalProperties": false,
@@ -323,6 +336,8 @@
       "required": ["className", "encryptionSecretName", "encryptionSecretNamespace"],
       "properties": {
         "className": {"const": "exomem-cloud-encrypted"},
+        "perCellClassName": {"type": "string", "minLength": 1, "maxLength": 253,
+          "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", "not": {"const": "exomem-cloud-encrypted"}},
         "encryptionSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "encryptionSecretNamespace": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
       }
@@ -332,7 +347,7 @@
       "additionalProperties": false,
       "required": ["domain", "local", "arrayExporter", "snapshotController"],
       "properties": {
-        "domain": {"enum": ["hetzner", "local"]},
+        "domain": {"enum": ["hetzner", "local", "per-cell"]},
         "maxCellGib": {"type": ["integer", "null"], "minimum": 4},
         "local": {
           "type": "object",
