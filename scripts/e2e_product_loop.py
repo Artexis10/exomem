@@ -1574,7 +1574,10 @@ async def _stdio_session(
                     client,
                     "capture_source",
                     {
-                        "content": f"Project Lantern uses governed references across restarts.\n{expected_fact}",
+                        "content": (
+                            "Project Lantern uses governed references across restarts.\n"
+                            f"{expected_fact}"
+                        ),
                         "source_type": "article",
                         "title": "Lantern architecture source",
                         "url": "https://example.com/lantern",
