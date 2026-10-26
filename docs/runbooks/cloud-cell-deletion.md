@@ -16,19 +16,33 @@ to set its row's `desired_state` to `deleted`.
 
 Confirm completion in this order:
 
-1. The cell namespace is absent.
-2. No PersistentVolume claims that namespace, and the recorded Hetzner volume
+1. Confirm that `content_keys_retired_at` is set and the database root and backup wraps are absent.
+2. Confirm that the child Secret and every cell workload are absent, including terminating Job Pods.
+3. Confirm that the cell namespace is absent.
+4. No PersistentVolume claims that namespace, and the recorded Hetzner volume
    is absent. Namespace deletion alone is not proof of volume deletion.
-3. Every B2 object version under the exact `cells/<cell_id>/` prefix is absent,
+5. Every B2 object version under the exact `cells/<cell_id>/` prefix is absent,
    including hidden versions. An empty current-object listing is insufficient.
-4. The per-cell B2 application key is absent by its recorded key ID.
-5. The row reports `observed_state = deleted`, with its B2 key ID and wrapped
+6. The per-cell B2 application key is absent by its recorded key ID.
+7. The row reports `observed_state = deleted`, with its B2 key ID and wrapped
    B2 and backup key material cleared.
 
 The controller retries incomplete steps. A failed provider observation is not
 proof of absence; leave the cell deleting and resolve that observation failure.
 Do not manually clear key columns, remove finalizers, or delete sibling prefixes
 to force completion.
+
+Database retirement runs before Kubernetes admission, capacity and provider reads.
+The controller deletes `cell-credentials` independently of provider cleanup.
+It keeps the separately wrapped B2 credential until object cleanup finishes.
+
+`last_live_key_destroyed_at` starts only after live Secret and workload absence is proven.
+Legacy shared keys and retained old volumes keep complete destruction unknown.
+Do not delete a fleet's shared Secret for one cell.
+
+`key_retention_sources` records each source, retention window and observation time from deployed policy.
+`keys_expire_at` stays unknown if any required window or absence proof is missing.
+Past deleted rows receive no invented destruction date.
 
 ### Retained etcd snapshots
 

@@ -106,6 +106,16 @@ def build_reconcile_config() -> ReconcileConfig:
     return ReconcileConfig(**kwargs)
 
 
+def _retention_sources() -> tuple[object, ...]:
+    raw = os.environ.get("CELLCTL_KEY_RETENTION_SOURCES", "[]")
+    try:
+        parsed = json.loads(raw)
+        json.dumps(parsed, allow_nan=False)
+    except ValueError:
+        return (raw,)
+    return tuple(parsed) if isinstance(parsed, list) else (parsed,)
+
+
 def build_storage_config() -> StorageConfig:
     """Read the shared cap and optional local class; accept the earlier nested cap."""
 
@@ -114,7 +124,7 @@ def build_storage_config() -> StorageConfig:
         return DEFAULT_STORAGE
     value = json.loads(raw)
     # These are the closed keys of the controller's storage configuration schema.
-    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "max_cell_gib"}:
+    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "max_cell_gib", "per_cell_class"}:
         raise ValueError("cell storage must be a JSON object with optional domain, local and max_cell_gib")
     local = value.get("local")
     if local is not None and not isinstance(local, dict):
@@ -125,7 +135,8 @@ def build_storage_config() -> StorageConfig:
     if legacy_cap is not None and cap != legacy_cap:
         raise ValueError("max_cell_gib and local.max_cell_gib must agree")
     return StorageConfig(domain=value.get("domain", LEGACY_CLASS),
-                         local=LocalStorage(**local) if local is not None else None, max_cell_gib=cap)
+                         local=LocalStorage(**local) if local is not None else None, max_cell_gib=cap,
+                         per_cell_class=value.get("per_cell_class"))
 
 
 def build_alert_delivery_secret() -> tuple[str, str, str] | None:
@@ -201,6 +212,7 @@ def build_cluster_config() -> ClusterConfig:
     return ClusterConfig(
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
+        key_retention_sources=_retention_sources(),
         resources=ResourceSettings(
             cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
             cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
