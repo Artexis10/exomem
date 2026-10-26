@@ -147,6 +147,11 @@ already injected this turn's working set. For a known information gap, use
 `search_memory`, then `read_memory` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
+When sensing is enabled, a page read or activation anchor may carry
+`epistemic_status`. It reports released refinement and contradiction evidence,
+with reading provenance and `evidence_complete`. Treat it as evidence for review;
+it never authorizes a write. When completeness is false, counts may be partial.
+
 A packet may instead carry a map: an index of what exists, with titles, refs,
 descriptions and current state when available. Read the map and pull by ref
 with `read_memory`, or query `search_memory`, before answering; cite the refs you use.

@@ -83,6 +83,8 @@ TEMPORAL_SHARED_TARGETS = 2
 COMPONENT_BOUND = 32
 CHAIN_BOUND = 8
 ITEMS_SHOWN = 8
+#: Non-neutral pair details loaded per request, shared by every traversal.
+REQUEST_EDGE_BOUND = 512
 #: Pages the projection may process per dreamer tick, inside the tick's budgets.
 PAGES_PER_TICK = 16
 #: Ledger rows ingested, and pairs reprojected, per tick.
@@ -125,6 +127,7 @@ _TABLES = (
     """,
     "CREATE INDEX IF NOT EXISTS pairs_a ON pairs(path_a)",
     "CREATE INDEX IF NOT EXISTS pairs_b ON pairs(path_b)",
+    "CREATE INDEX IF NOT EXISTS pairs_partner ON pairs(path_a, path_b, pair_key)",
     "CREATE INDEX IF NOT EXISTS pairs_input ON pairs(input_key)",
     "CREATE INDEX IF NOT EXISTS pairs_queue ON pairs(queued, priority, pair_key)",
 )
@@ -179,42 +182,54 @@ class ProjectionStore:
     def connect(self) -> sqlite3.Connection:
         sensing_ledger.private_dir(self.vault_root)
         sensing_ledger.private_file(self.path)
-        conn = self._open()
-        try:
-            row = None
-            with contextlib.suppress(sqlite3.Error):
-                row = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
-            if row is not None and row[0] != str(SCHEMA_VERSION):
-                conn.close()
+        retry = True
+        while True:
+            conn = None
+            try:
+                conn = self._open()
+                row = None
+                with contextlib.suppress(sqlite3.Error):
+                    row = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+                if row is not None and row[0] != str(SCHEMA_VERSION):
+                    conn.close()
+                    self.wipe()
+                    sensing_ledger.private_file(self.path)
+                    conn = self._open()
+                conn.execute("BEGIN IMMEDIATE")
+                for statement in _TABLES:
+                    conn.execute(statement)
+                fresh = conn.execute(
+                    "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
+                ).rowcount
+                conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
+                if fresh:
+                    _set_meta(conn, "seeding", "start")
+                conn.execute("COMMIT")
+                return conn
+            except sqlite3.DatabaseError as exc:
+                if conn is not None:
+                    conn.close()
+                code = getattr(exc, "sqlite_errorcode", None)
+                # SQLite fixes these corruption codes. Locks, permissions and I/O never justify a wipe.
+                if (
+                    isinstance(exc, sqlite3.OperationalError)
+                    or not retry
+                    or code is None
+                    or (code & 0xFF) not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB)
+                ):
+                    raise
+                retry = False
                 self.wipe()
                 sensing_ledger.private_file(self.path)
-                conn = self._open()
-            conn.execute("BEGIN IMMEDIATE")
-            for statement in _TABLES:
-                conn.execute(statement)
-            fresh = conn.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
-            ).rowcount
-            conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
-            if fresh:
-                _set_meta(conn, "seeding", "start")
-            conn.execute("COMMIT")
-        except sqlite3.DatabaseError:
-            conn.close()
-            self.wipe()
-            sensing_ledger.private_file(self.path)
-            conn = self._open()
-            for statement in _TABLES:
-                conn.execute(statement)
-            conn.execute("INSERT INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
-            conn.execute("INSERT INTO meta(key, value) VALUES ('generation', '0')")
-            _set_meta(conn, "seeding", "start")
-        return conn
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=5.0, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            conn.close()
+            raise
         return conn
 
     def wipe(self) -> None:
@@ -941,6 +956,7 @@ def run_tick(
     halt: Callable[[], str | None],
     now: float = 0.0,
     report: TickReport | None = None,
+    reseeding: bool = False,
 ) -> TickReport:
     """One bounded pass: ingest new readings, then follow changed pages. Never raises."""
     report = report if report is not None else TickReport()
@@ -951,6 +967,13 @@ def run_tick(
     ledger: sqlite3.Connection | None = None
     try:
         conn = store.connect()
+        if reseeding:
+            # The dreamer's seen map is partial; take its watermark only after it drains.
+            with store.write(conn):
+                _set_meta(conn, "seeding", "start")
+                conn.execute("DELETE FROM seeding")
+            report.stop = "reseeding"
+            return report
         ledger = sensing_ledger.open_readonly(vault_root)
         active = active_instruments()
         label_map_version = sensing.QUESTIONS[sensing.PAIR_RELATION].label_map_version
@@ -1460,6 +1483,9 @@ class _View:
         self._live: dict[str, bool] = {}
         self._edges: dict[str, list[_Edge]] = {}
         self._dropped: dict[str, int] = {}
+        self._loaded: dict[tuple[str, str], set[str]] = {}
+        self._remaining = REQUEST_EDGE_BOUND
+        self.truncated = False
 
     def visible(self, path: str) -> bool:
         return self.keep is None or bool(self.keep(path))
@@ -1501,44 +1527,67 @@ class _View:
         out: list[_Edge] = []
         dropped = 0
         if self.page(path) is not None:
-            for row in self.conn.execute(
-                "SELECT pair_key, path_a, unit_a, path_b, unit_b, state, verdict, direction, p, "
-                "reading_id, instrument_json, verdicts_json, instrument_key FROM pairs "
-                "WHERE (path_a=? OR path_b=?) AND selected=1 AND state IN (?, ?) ORDER BY pair_key",
-                (path, path, *_SERVED_STATES),
+            # The registry fixes neutral as a closed verdict. Keep its stale count,
+            # but never load its instrument or verdict detail into a request.
+            non_neutral = "(state!='current' OR verdict IS NOT 'neutral')"
+            for other, total, stale, details in self.conn.execute(
+                "SELECT CASE WHEN path_a=? THEN path_b ELSE path_a END AS other, count(*), "
+                "sum(instrument_key IS NOT ?), "
+                f"sum(instrument_key IS ? AND {non_neutral}) "
+                "FROM pairs WHERE (path_a=? OR path_b=?) AND selected=1 AND state IN (?, ?) "
+                "GROUP BY other ORDER BY other",
+                (path, self.instrument_key, self.instrument_key, path, path, *_SERVED_STATES),
             ):
-                (key, path_a, unit_a, path_b, unit_b, state, verdict, direction, p, reading, inst,
-                 verdicts, instrument_key) = row
-                mine_is_a = path_a == path
-                other = str(path_b if mine_is_a else path_a)
+                other = str(other)
                 if not self.visible(other) or self.page(other) is None:
                     continue
-                if (
-                    instrument_key != self.instrument_key
-                    or not self.live(path)
-                    or not self.live(other)
-                ):
-                    dropped += 1
+                if not self.live(path) or not self.live(other):
+                    dropped += int(total)
                     continue
-                other_refines = verdict == "refines" and (
-                    (direction == "ab" and not mine_is_a) or (direction == "ba" and mine_is_a)
-                )
-                out.append(
-                    _Edge(
-                        key=str(key),
-                        mine=path,
-                        other=other,
-                        my_unit=str(unit_a if mine_is_a else unit_b),
-                        other_unit=str(unit_b if mine_is_a else unit_a),
-                        state=str(state),
-                        verdict=None if verdict is None else str(verdict),
-                        other_refines=other_refines,
-                        p=p,
-                        reading=None if reading is None else str(reading),
-                        instrument=None if inst is None else json.loads(inst),
-                        verdicts=tuple(json.loads(verdicts)) if verdicts else (),
+                dropped += int(stale)
+                if not details:
+                    continue
+                page_pair = tuple(sorted((path, other)))
+                loaded = self._loaded.get(page_pair, set())
+                limit = min(int(details), self._remaining + len(loaded))
+                if int(details) > limit:
+                    self.truncated = True
+                if not limit:
+                    continue
+                self._loaded[page_pair] = loaded
+                for row in self.conn.execute(
+                    "SELECT pair_key, path_a, unit_a, unit_b, state, verdict, direction, p, "
+                    "reading_id, instrument_json, verdicts_json FROM pairs "
+                    "WHERE ((path_a=? AND path_b=?) OR (path_b=? AND path_a=?)) "
+                    "AND selected=1 AND state IN (?, ?) AND instrument_key=? "
+                    f"AND {non_neutral} ORDER BY pair_key LIMIT ?",
+                    (path, other, path, other, *_SERVED_STATES, self.instrument_key, limit),
+                ):
+                    (key, path_a, unit_a, unit_b, state, verdict, direction, p, reading, inst,
+                     verdicts) = row
+                    if key not in loaded:
+                        self._remaining -= 1
+                        loaded.add(key)
+                    mine_is_a = path_a == path
+                    other_refines = verdict == "refines" and (
+                        (direction == "ab" and not mine_is_a) or (direction == "ba" and mine_is_a)
                     )
-                )
+                    out.append(
+                        _Edge(
+                            key=str(key),
+                            mine=path,
+                            other=other,
+                            my_unit=str(unit_a if mine_is_a else unit_b),
+                            other_unit=str(unit_b if mine_is_a else unit_a),
+                            state=str(state),
+                            verdict=None if verdict is None else str(verdict),
+                            other_refines=other_refines,
+                            p=p,
+                            reading=None if reading is None else str(reading),
+                            instrument=None if inst is None else json.loads(inst),
+                            verdicts=tuple(json.loads(verdicts)) if verdicts else (),
+                        )
+                    )
         self._edges[path] = out
         self._dropped[path] = dropped
         return out
@@ -1565,11 +1614,11 @@ class _View:
     def complete(self, path: str) -> bool:
         """No edge of `path` was dropped as stale and none still needs a reading."""
         self.edges(path)
-        if self._dropped.get(path):
+        if self._dropped.get(path) or self.truncated:
             return False
         for path_a, path_b in self.conn.execute(
             "SELECT path_a, path_b FROM pairs WHERE (path_a=? OR path_b=?) AND selected=1 "
-            "AND (state IN (?, ?, ?) OR missing > 0)",
+            "AND (state IN (?, ?, ?) OR missing > 0) GROUP BY path_a, path_b",
             (path, path, *_OPEN_STATES),
         ):
             other = str(path_b if path_a == path else path_a)
@@ -1675,10 +1724,9 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
     )
     contradictions = sorted({e.other: e for e in edges if view.open_contradiction(e)}.items())
     if not refined and not contradictions:
-        # Nothing to say, unless edges to released partners were dropped as not
-        # live: then the page says its evidence is incomplete rather than going
-        # silent (D3). The drop count covers visible partners only.
-        if view.dropped(path):
+        # Dropped or budgeted-out released edges still report incomplete evidence,
+        # even when no count survives. Withheld partners cause neither state.
+        if view.dropped(path) or view.truncated:
             return {"refined_by_later": 0, "open_contradictions": 0, "evidence_complete": False}
         return None
     parts = []
@@ -1691,7 +1739,6 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
         "line": "; ".join(parts),
         "refined_by_later": len(refined),
         "open_contradictions": len(contradictions),
-        "evidence_complete": view.complete(path),
         "refined_by": [_item(edge) for _page, edge in refined[:ITEMS_SHOWN]],
         "contradicted_by": [_item(edge) for _page, edge in contradictions[:ITEMS_SHOWN]],
     }
@@ -1702,6 +1749,7 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
         status["chain"] = chain
     if contradictions:
         status["contradiction_component"] = _component(view, path)
+    status["evidence_complete"] = view.complete(path)
     return status
 
 
@@ -1711,13 +1759,40 @@ def _open_view(vault_root: Path) -> tuple[sqlite3.Connection, _View] | None:
     sees no status, never a partial one. Sensing off reads no file."""
     if not sensing.enabled():
         return None
+    from . import dreamer_delta, dreamer_store
+
+    dreamer_conn = dreamer_store.open_readonly(Path(vault_root))
+    if dreamer_conn is None:
+        return None
+    with contextlib.closing(dreamer_conn):
+        store = dreamer_store.DreamerStore(Path(vault_root))
+        if dreamer_delta.checkpoint(store, dreamer_conn) is None or (
+            store.get_meta(dreamer_conn, "reseeding") and store.pending_count(dreamer_conn) > 0
+        ):
+            # A partial seen map can hide missing evidence; optional status waits for its checkpoint.
+            return None
     conn = open_readonly(Path(vault_root))
     if conn is None:
         return None
-    if _get_meta(conn, "seeding") is not None:
+    try:
+        conn.execute("BEGIN")
+        if _get_meta(conn, "seeding") is not None or _get_meta(conn, "reproject_after") is not None:
+            conn.close()
+            return None
+        ledger = sensing_ledger.open_readonly(Path(vault_root))
+        try:
+            genesis = None if ledger is None else sensing_ledger.genesis(ledger)
+        finally:
+            if ledger is not None:
+                ledger.close()
+        if _get_meta(conn, "ledger_genesis") != genesis:
+            # Reading ids stop resolving as soon as a ledger is replaced, before the next tick.
+            conn.close()
+            return None
+        return conn, _View(Path(vault_root), conn, _keep(Path(vault_root)), _current_key())
+    except BaseException:
         conn.close()
-        return None
-    return conn, _View(Path(vault_root), conn, _keep(Path(vault_root)), _current_key())
+        raise
 
 
 def status_for(

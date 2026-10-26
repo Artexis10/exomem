@@ -245,3 +245,36 @@ def test_a_read_of_another_snapshot_carries_no_status(tmp_path: Path, monkeypatc
     path.write_text(path.read_text(encoding="utf-8") + "\nA new paragraph.\n", encoding="utf-8")
     fx.find_module.clear_cache()
     assert "epistemic_status" not in _read(vault, sf.SEAL)
+
+
+def test_a_withheld_partner_cannot_spend_the_status_budget(tmp_path: Path, monkeypatch) -> None:
+    """Withheld edges sort before the visible refinement and cannot truncate its twin."""
+    sf.enable(monkeypatch)
+    real, twin = _pair(tmp_path, "budget", build=_seal_vault(drop="denial"),
+                       withheld=sf.DENIAL, instrument=sf.StubInstrument(sf.default_table()))
+    monkeypatch.setattr(sensed_model, "REQUEST_EDGE_BOUND", 1)
+    status = _status_as(real, sf.SEAL, _external())
+    assert status == _status_as(twin, sf.SEAL, _external())
+    assert json.loads(status)["line"] == "refined by 1 later note"
+    assert json.loads(status)["evidence_complete"] is True
+    owner = json.loads(_status_as(real, sf.SEAL, owner_principal()))
+    assert owner["line"] == "1 open contradiction"
+    assert owner["evidence_complete"] is False
+
+
+def test_an_anchor_after_the_shared_budget_empties_still_reports_incomplete_evidence(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A later anchor with omitted evidence must not disappear as if it had none."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    monkeypatch.setattr(sensed_model, "REQUEST_EDGE_BOUND", 1)
+    packet = {"anchors": [
+        {"path": sf.DENIAL, "status": "resolved"},
+        {"path": sf.WINTER, "status": "resolved"},
+    ]}
+    sensed_model.for_packet(vault, packet)
+    assert packet["anchors"][1]["epistemic_status"] == {
+        "refined_by_later": 0, "open_contradictions": 0, "evidence_complete": False,
+    }

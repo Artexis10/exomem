@@ -6612,6 +6612,9 @@ def op_activate_context(
     Clarify unknown subjects first. Keep source identity and scope.
     Due items/refresh grant no writes.
     Packets may carry maps; pull refs with read_memory.
+    When sensing is enabled, anchors may carry epistemic_status: released
+    refinement/contradiction evidence with reading provenance and completeness,
+    for agent review. It never changes ranking or authorizes a write.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -7464,6 +7467,9 @@ def op_read_memory(
     status; never substituted. Without unit_ref, returns the page.
     Also reads the paged views exomem://map, exomem://map/topic/<domain key>
     and exomem://map/unfiled.
+    When sensing is enabled, a page may carry epistemic_status: released
+    refinement/contradiction evidence with reading provenance and completeness,
+    for agent review. Incomplete evidence is not an exhaustive count.
 
     Args:
         path: Vault-relative path or KB shorthand.
