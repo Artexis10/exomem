@@ -8,8 +8,8 @@ The product SHALL define a closed v1 set of envelope action classes —
 hard ceiling: `hygiene_writes` silent; `proactive_capture` silent-capable;
 `link_acceptance` confirm; `structural_suggestions` advisory (surface only);
 `restructure_execution` — covering restructure application, supersession
-commit, entity merge, deletion, and edge removal, which is an `edit_memory`
-`remove_relation` operation or the removal of an edge from a page that the
+commit, entity merge, deletion, and edge removal, which is a promotion
+revert's removal step or the removal of an edge from a page that the
 current write does not author — confirm-required; `disclosure` governed
 exclusively by the governance plane. On a personal vault, additive entity
 creation (a new identity through the entity writer's resolve-before-create
@@ -115,16 +115,15 @@ time, never refused — reading the envelope never breaks bootstrap.
 
 #### Scenario: An edge removal is confirmed by the user's request
 
-- **WHEN** the agent runs an `edit_memory` `remove_relation` operation, or a
+- **WHEN** the agent runs a promotion revert that removes an edge, or a
   write removes an edge from a page that the write does not author
 - **THEN** the action is `restructure_execution`, and a user's explicit revert
   request is its confirmation
 
 #### Scenario: An edit to the page it writes is not an edge removal
 
-- **WHEN** the agent's `edit_memory` call with an operation other than
-  `remove_relation` drops a `## Relations` bullet from the page that the call
-  writes
+- **WHEN** the agent's `edit_memory` call drops a `## Relations` bullet from
+  the page that the call writes
 - **THEN** the edit follows the class of that write and asks no edge-removal
   confirmation
 

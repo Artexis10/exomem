@@ -13,7 +13,7 @@ import re
 from collections.abc import Container, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -37,6 +37,11 @@ _ORIGINS = {
     "wikilink",
 }
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+#: Explicit spelling of a core relation: `core.<key>` names the core meaning of a
+#: bare label that a vault alias also uses.
+CORE_PREFIX = "core."
+#: Fields a vault extension may set. `generic` is deliberately absent: only the
+#: shipped core pack marks the generic relation, so an extension cannot claim it.
 _DEFINITION_FIELDS = {
     "description",
     "parent",
@@ -51,7 +56,13 @@ _DEFINITION_FIELDS = {
     "status",
     "replaced_by",
     "presentation_role",
+    "label",
 }
+#: Fields a shipped core relation may carry. This closed set is the pack's own schema
+#: (field names, not vocabulary); a pack with another field is a build defect.
+_CORE_FIELDS = frozenset(
+    {"description", "family", "direction", "inverse", "origins", "presentation_role", "generic"}
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,11 @@ class RelationDefinition:
     core: bool = False
     # Optional renderer metadata never changes the relation's meaning or display label.
     presentation_role: str | None = None
+    # A declared display label; absent, `display_label` reads the key (core) or its name.
+    label: str | None = None
+    # Marks the core pack's one relation for "related, with no specific meaning". An
+    # extension never carries it, so a specific refinement is never taken for it.
+    generic: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -88,9 +104,12 @@ class RelationDefinition:
             ("inverse", self.inverse),
             ("replaced_by", self.replaced_by),
             ("presentation_role", self.presentation_role),
+            ("label", self.label),
         ):
             if scalar_value:
                 out[key] = scalar_value
+        if self.generic:
+            out["generic"] = True
         for key, collection_value in (
             ("aliases", self.aliases),
             ("source_kinds", self.source_kinds),
@@ -134,6 +153,20 @@ class RelationRegistry:
     def families(self) -> frozenset[str]:
         return frozenset(item.family for item in (*self.core.values(), *self.extensions.values()))
 
+    @cached_property
+    def generic_key(self) -> str:
+        """The key of the one generic relation; the core pack guarantees exactly one."""
+        return next(key for key, definition in self.core.items() if definition.generic)
+
+    @cached_property
+    def active_keys_by_label(self) -> dict[str, tuple[str, ...]]:
+        """Each display label with the active entries that carry it."""
+        by_label: dict[str, list[str]] = {}
+        for definition in (*self.core.values(), *self.extensions.values()):
+            if definition.status == "active":
+                by_label.setdefault(_own_label(definition), []).append(definition.key)
+        return {label: tuple(keys) for label, keys in by_label.items()}
+
     def definition(self, key: str) -> RelationDefinition | None:
         return self.core.get(key) or self.extensions.get(key)
 
@@ -156,11 +189,21 @@ class RelationRegistry:
         label = normalize_relation(raw)
         canonical = self.aliases.get(label, label)
         definition = self.definition(canonical)
+        explicit_core = False
+        if definition is None and label.startswith(CORE_PREFIX):
+            # After every saved key and alias, so no saved label changes meaning.
+            canonical = label.removeprefix(CORE_PREFIX)
+            definition = self.core.get(canonical)
+            explicit_core = definition is not None
         if definition is None:
             return RelationResolution(
                 raw=raw, canonical=None, parent=None, status="unregistered", definition=None
             )
-        status = "alias" if canonical != label else ("core" if definition.core else "extension")
+        status = (
+            "alias"
+            if canonical != label and not explicit_core
+            else ("core" if definition.core else "extension")
+        )
         findings: list[dict[str, str]] = []
         if definition.status == "deprecated":
             status = "deprecated"
@@ -195,6 +238,37 @@ class RelationRegistry:
         )
 
 
+def _own_label(definition: RelationDefinition) -> str:
+    """A relation's label before any qualifier: declared, else the key (core) or its name."""
+    if definition.label:
+        return definition.label
+    # An extension key is `<namespace>.<name>` (`_KEY_RE`); the name is its default label.
+    return definition.key if definition.core else definition.key.partition(".")[2]
+
+
+def display_label(registry: RelationRegistry, key: str) -> str:
+    """How a relation reads to a person; the key stays the machine identity.
+
+    A core relation reads as its label and an extension as `<label> (a kind of
+    <parent label>)`. An extension whose label another active entry also carries
+    reads with its namespace (`<namespace>.<label>`), and a deprecated entry ends
+    in `(deprecated)`. A key the registry does not hold reads as itself.
+    """
+    definition = registry.definition(key)
+    if definition is None:
+        return key
+    label = _own_label(definition)
+    if not definition.core and any(
+        other != key for other in registry.active_keys_by_label.get(label, ())
+    ):
+        label = f"{definition.key.partition('.')[0]}.{label}"
+    if definition.parent:
+        label = f"{label} (a kind of {display_label(registry, definition.parent)})"
+    if definition.status == "deprecated":
+        label = f"{label} (deprecated)"
+    return label
+
+
 def traversable_resolution_status(status: str | None) -> bool:
     """Whether a selected relation resolution supplies an authored graph fact."""
     # Deprecated facts remain traversable; unregistered and out-of-scope ones do not.
@@ -212,10 +286,17 @@ def extension_registry_path(vault_root: Path) -> Path:
 
 @lru_cache(maxsize=1)
 def core_registry() -> RelationRegistry:
+    """The shipped core relations. A malformed pack is a build defect, so this raises."""
     data = yaml.safe_load(vocabulary_registry.pack_text("relations.yaml"))
     version = int(data["schema_version"])
     definitions: dict[str, RelationDefinition] = {}
     for key, value in data["relations"].items():
+        unknown = sorted(set(value) - _CORE_FIELDS)
+        if unknown or not isinstance(value.get("generic", False), bool):
+            raise RuntimeError(
+                f"shipped relations pack: {key!r} has unknown fields {unknown} "
+                "or a generic that is not a boolean"
+            )
         definitions[key] = RelationDefinition(
             key=key,
             description=str(value["description"]),
@@ -224,9 +305,20 @@ def core_registry() -> RelationRegistry:
             inverse=value.get("inverse"),
             origins=frozenset(value.get("origins") or ["semantic_relation"]),
             presentation_role=value.get("presentation_role"),
+            generic=value.get("generic", False),
             core=True,
         )
+    generic = sorted(key for key, definition in definitions.items() if definition.generic)
+    if len(generic) != 1:
+        raise RuntimeError(
+            f"shipped relations pack must mark exactly one generic relation, found {generic}"
+        )
     return RelationRegistry(version, "none", definitions)
+
+
+def generic_relation_key() -> str:
+    """The core pack's generic relation, for code that must not name it."""
+    return core_registry().generic_key
 
 
 class _EveryKey:
@@ -248,8 +340,9 @@ def load_registry(
     """Load the saved registry, or parse a proposal.
 
     With both a vault and a proposal, an extension already saved with the same
-    parent and declared family keeps any `family_mismatch` as a warning: a rule
-    added later never turns a saved registry into a refusal.
+    parent and declared family keeps any `family_mismatch` as a warning, and an
+    alias already saved keeps binding to its extension when it shadows a core key:
+    a rule or core key added later never turns a saved registry into a refusal.
     """
     core = core_registry()
     if proposal is not None:
@@ -257,8 +350,13 @@ def load_registry(
         grandfathered = (
             _unchanged_saved_extensions(vault_root, proposal) if vault_root is not None else ()
         )
+        saved_aliases = _alias_pairs(load_registry(vault_root)) if vault_root is not None else ()
         return _parse_extension_data(
-            proposal, _content_hash(raw), core, grandfathered=grandfathered
+            proposal,
+            _content_hash(raw),
+            core,
+            grandfathered=grandfathered,
+            saved_aliases=saved_aliases,
         )
     if vault_root is None:
         return core
@@ -266,6 +364,54 @@ def load_registry(
 
     selected = instances.select(Path(vault_root), SPEC, registry_scope)
     return vocabulary_registry.load(selected, Path(vault_root)).typed
+
+
+def load_admitted(
+    vault_root: Path, registry_scope: str | None = None
+) -> RelationRegistry | None:
+    """The registry of one instance, or None when this caller cannot admit it.
+
+    None is one answer for an instance that does not exist, a binding that is
+    ambiguous and an overlay the caller may not read, so a refusal never says
+    which of them it is.
+    """
+    from .vocabulary import contract, instances
+
+    root = Path(vault_root)
+    try:
+        selected = instances.select(root, SPEC, registry_scope)
+        if contract.admission_refusal(root, selected) is not None:
+            return None
+        return vocabulary_registry.load(selected, root).typed
+    except vocabulary_registry.RegistryError:
+        return None
+
+
+def load_for_page(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
+) -> RelationRegistry:
+    """The registry the page's instance defines; core meanings when this caller cannot admit it."""
+    from .vocabulary import instances
+
+    try:
+        scope = instances.page_scope(Path(vault_root), rel_path, dict(frontmatter))
+    except vocabulary_registry.RegistryError:
+        return core_registry()
+    return load_admitted(vault_root, scope) or core_registry()
+
+
+def authored_label(registry: RelationRegistry, requested: str, canonical: str) -> str:
+    """The spelling a page carries for `canonical`, chosen as `requested`.
+
+    The bare label stays when this registry resolves it to that one entry; the
+    namespaced key (or the explicit `core.` spelling of a shadowed core key)
+    stands in when it does not.
+    """
+    label = normalize_relation(requested)
+    for spelling in (label, canonical, f"{CORE_PREFIX}{canonical}"):
+        if registry.resolve(spelling).canonical == canonical:
+            return spelling
+    return canonical
 
 
 def clear_cache() -> None:
@@ -286,7 +432,16 @@ def _parse_overlay_text(raw: str | None, digest: str) -> RelationRegistry:
             core.core,
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
         )
-    return _parse_extension_data(data, digest, core, grandfathered=_EveryKey())
+    return _parse_extension_data(data, digest, core, saved=True)
+
+
+def _alias_pairs(registry: RelationRegistry) -> frozenset[tuple[str, str]]:
+    """Each (extension key, alias) binding a registry holds."""
+    return frozenset(
+        (key, alias)
+        for key, definition in registry.extensions.items()
+        for alias in definition.aliases
+    )
 
 
 def _unchanged_saved_extensions(vault_root: Path, proposal: dict[str, Any]) -> frozenset[str]:
@@ -433,6 +588,8 @@ def _definition_document(definition: RelationDefinition) -> dict[str, Any]:
         value["replaced_by"] = definition.replaced_by
     if definition.presentation_role is not None:
         value["presentation_role"] = definition.presentation_role
+    if definition.label is not None:
+        value["label"] = definition.label
     scope: dict[str, list[str]] = {}
     if definition.projects:
         scope["projects"] = sorted(definition.projects)
@@ -481,6 +638,8 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
         _content_hash(yaml.safe_dump(result, sort_keys=True)),
         core_registry(),
         grandfathered=frozenset(map(str, current.get("extensions") or {})),
+        # An alias this delta adds to an older extension is not grandfathered.
+        saved_aliases=_alias_pairs(_parse_extension_data(current, "", core_registry(), saved=True)),
     )
     if _blocking(registry):
         raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
@@ -488,8 +647,9 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
 
 
 def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> None:
-    if "presentation_role" in patch:
-        old["presentation_role"] = patch["presentation_role"]
+    for display_field in ("presentation_role", "label"):
+        if display_field in patch:
+            old[display_field] = patch[display_field]
     immutable = {
         "parent",
         "family",
@@ -529,8 +689,13 @@ def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> Non
 
 
 def _semantic_continuity_findings(
-    before: RelationRegistry, after: RelationRegistry
+    before: RelationRegistry, after: RelationRegistry, removed: Container[str] = ()
 ) -> list[dict[str, str]]:
+    """What a save changed that a registered definition forbids.
+
+    `removed` names keys a `remove` delta took out after counting that nothing
+    uses them: undoing a promotion is the one hard delete the definition allows.
+    """
     findings: list[dict[str, str]] = []
     fields = (
         "parent",
@@ -546,6 +711,8 @@ def _semantic_continuity_findings(
     )
     for key, old in before.extensions.items():
         new = after.extensions.get(key)
+        if new is None and key in removed:
+            continue
         if new is None:
             findings.append(
                 _finding(
@@ -666,7 +833,21 @@ def _parse_extension_data(
     digest: str,
     core: RelationRegistry,
     grandfathered: Container[str] = (),
+    saved_aliases: Container[tuple[str, str]] = (),
+    *,
+    saved: bool = False,
 ) -> RelationRegistry:
+    """Parse an overlay document into a registry and its findings.
+
+    `saved` marks the document as the vault's saved overlay: it is grandfathered
+    whole, and a field this release does not know is a warning, because a later
+    release may have written it. Otherwise `grandfathered` names the extension
+    keys and `saved_aliases` the (extension, alias) pairs that a saved overlay
+    already holds, so a rule or core key added later never refuses them.
+    """
+    if saved:
+        grandfathered = saved_aliases = _EveryKey()
+    unknown_severity = "warning" if saved else "error"
     findings: list[dict[str, str]] = []
     if not isinstance(data, dict):
         return RelationRegistry(
@@ -677,7 +858,9 @@ def _parse_extension_data(
         )
     allowed_root = {"schema_version", "extensions"}
     for key in sorted(set(data) - allowed_root):
-        findings.append(_finding("unknown_field", key, "unknown registry field"))
+        findings.append(
+            _finding("unknown_field", key, "unknown registry field", severity=unknown_severity)
+        )
     if data.get("schema_version") != EXTENSION_SCHEMA_VERSION:
         findings.append(
             _finding("invalid_version", "schema_version", f"must be {EXTENSION_SCHEMA_VERSION}")
@@ -688,7 +871,8 @@ def _parse_extension_data(
         raw_extensions = {}
     extensions: dict[str, RelationDefinition] = {}
     aliases: dict[str, str] = {}
-    occupied = set(core.core)
+    core_spellings = {f"{CORE_PREFIX}{key}" for key in core.core}
+    occupied = set(core.core) | core_spellings
     for raw_key, value in raw_extensions.items():
         key = str(raw_key)
         span = f"extensions.{key}"
@@ -708,6 +892,10 @@ def _parse_extension_data(
                     span,
                     "canonical key collides with an existing relation",
                     relation=key,
+                    # A saved key that already spells a core relation keeps its meaning.
+                    severity=(
+                        "warning" if key in core_spellings and key in grandfathered else "error"
+                    ),
                 )
             )
         occupied.add(key)
@@ -728,6 +916,7 @@ def _parse_extension_data(
                     f"{span}.{unknown}",
                     "unknown definition field",
                     relation=key,
+                    severity=unknown_severity,
                 )
             )
         parent = value.get("parent")
@@ -823,6 +1012,19 @@ def _parse_extension_data(
                 "must be an identifier or null", relation=key,
             ))
             presentation_role = None
+        label = value.get("label")
+        if label is not None:
+            label = normalize_relation(label) if isinstance(label, str) else ""
+            if not _LABEL_RE.fullmatch(label):
+                findings.append(
+                    _finding(
+                        "invalid_label",
+                        f"{span}.label",
+                        "must be a relation label, lowercase with underscores",
+                        relation=key,
+                    )
+                )
+                label = None
         definition = RelationDefinition(
             key=key,
             description=description,
@@ -876,6 +1078,7 @@ def _parse_extension_data(
             replaced_by=_optional(value.get("replaced_by")),
             core=False,
             presentation_role=presentation_role,
+            label=label,
         )
         extensions[key] = definition
     canonical = set(core.core) | set(extensions)
@@ -897,14 +1100,29 @@ def _parse_extension_data(
                 # resolved with `alias` standing, exactly as though it had
                 # passed the validation the registry claims to apply.
                 continue
-            if alias in occupied or alias in aliases:
+            if alias in aliases:
+                findings.append(
+                    _finding("collision", span, f"alias {alias!r} collides", relation=key)
+                )
+            elif alias in core.core or alias in core_spellings:
+                # The same code, path and detail serve the warning and the refusal, so a
+                # save that keeps a saved shadow is not a new finding to the generic gate.
+                kept = (key, alias) in saved_aliases
                 findings.append(
                     _finding(
-                        "collision",
+                        "core_shadowed",
                         span,
-                        f"alias {alias!r} collides",
+                        f"alias {alias!r} shadows a core relation; every core relation "
+                        f"stays reachable as {CORE_PREFIX}<key>",
                         relation=key,
+                        severity="warning" if kept else "error",
                     )
+                )
+                if kept:
+                    aliases[alias] = key
+            elif alias in occupied:
+                findings.append(
+                    _finding("collision", span, f"alias {alias!r} collides", relation=key)
                 )
             else:
                 aliases[alias] = key
@@ -968,6 +1186,19 @@ def _parse_extension_data(
                             relation=key,
                         )
                     )
+    for key, definition in extensions.items():
+        # A label a caller is shown must be one it can pass back: `aliases` holds the
+        # bindings that survived the collision checks above.
+        if definition.label and aliases.get(definition.label) != key:
+            findings.append(
+                _finding(
+                    "unresolved_label",
+                    f"extensions.{key}.label",
+                    f"label {definition.label!r} must also be one of the relation's aliases",
+                    relation=key,
+                    severity="warning" if key in grandfathered else "error",
+                )
+            )
     findings.extend(_cycle_findings(extensions, "replaced_by", allow_pair=False))
     findings.extend(_cycle_findings(extensions, "inverse", allow_pair=True))
     terminals, predecessors, replacement_findings = _replacement_closure(
@@ -1157,6 +1388,9 @@ class _Adapter:
                 attributes["inverse"] = definition.inverse
             if definition.presentation_role is not None:
                 attributes["presentation_role"] = definition.presentation_role
+            # Read-only: `SPEC.attributes` omits it, so no delta can set it on a vault entry.
+            if definition.generic:
+                attributes["generic"] = True
             for name in ("source_kinds", "target_kinds"):
                 if getattr(definition, name):
                     attributes[name] = sorted(getattr(definition, name))
@@ -1169,6 +1403,7 @@ class _Adapter:
                 attributes["scope"] = scope
             out[definition.key] = vocabulary_registry.Entry(
                 key=definition.key,
+                label=definition.label or "",
                 description=definition.description,
                 aliases=definition.aliases,
                 status=definition.status,
@@ -1227,8 +1462,12 @@ class _Adapter:
                 raw["replaced_by"] = entry.replaced_by
             if "presentation_role" in entry.attributes:
                 raw["presentation_role"] = entry.attributes["presentation_role"]
+            if entry.label:
+                raw["label"] = entry.label
             return
         row: dict[str, Any] = {"parent": entry.parent, "description": entry.description}
+        if entry.label:
+            row["label"] = entry.label
         attributes = entry.attributes
         for name in _ATTRIBUTE_FIELDS:
             if name in attributes and attributes[name] not in (None, "", []):
@@ -1241,6 +1480,9 @@ class _Adapter:
         if entry.replaced_by:
             row["replaced_by"] = entry.replaced_by
         extensions[key] = row
+
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document["extensions"].pop(key, None)
 
     def render(self, document: Mapping[str, Any]) -> str:
         return yaml.safe_dump(dict(document), sort_keys=False, allow_unicode=True)
@@ -1255,9 +1497,12 @@ class _Adapter:
         return key
 
     def continuity(
-        self, before: RelationRegistry, after: RelationRegistry
+        self,
+        before: RelationRegistry,
+        after: RelationRegistry,
+        removed: Container[str] = (),
     ) -> list[dict[str, str]]:
-        return _semantic_continuity_findings(before, after)
+        return _semantic_continuity_findings(before, after, removed)
 
 
 def _usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:
@@ -1271,7 +1516,9 @@ SPEC = vocabulary_registry.RegistrySpec(
     stem="relation-registry",
     overlay=extension_registry_path,
     adapter=_Adapter(),
-    fields=frozenset({"description", "aliases", "status", "replaced_by", "parent", "attributes"}),
+    fields=frozenset(
+        {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes"}
+    ),
     attributes=frozenset({*_ATTRIBUTE_FIELDS, "scope"}),
     # Relations keep their meaning fixed in place; a new meaning is a new key.
     immutable=frozenset(

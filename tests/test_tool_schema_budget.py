@@ -37,7 +37,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # the guidance the four tools carry over from the grouped descriptions (help pointer, originals,
 # propose-before-create, stale rereads).
 # Then by 450 for adoption_studio's collection, continuation and per-folder include rules.
-TOTAL_BUDGET = 103_080
+# Then by 9 for the `revert` value of maintain_memory's `curation_action` enum.
+TOTAL_BUDGET = 103_089
 
 #: Per-tool ceilings in bytes. The ceilings of the tools a surface lists stay within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
@@ -53,7 +54,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "search_memory": 4025,
     "schema_memory": 4200,
     "observe_memory": 4400,
-    "maintain_memory": 3725,
+    # +9 B for the `revert` value of `curation_action` (promote-referents-without-nudges 6.2).
+    "maintain_memory": 3734,
     "adoption_studio": 3775,
     "capture_source": 3325,
     "review_memory": 3475,

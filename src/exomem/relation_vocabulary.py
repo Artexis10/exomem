@@ -167,6 +167,7 @@ def _exact_matches(
             "match": "alias" if canonical != requested else "canonical",
             "requested_relation": requested,
             "canonical": canonical,
+            "relation_label": relation_registry.display_label(registry, canonical),
             "parent": definition.parent,
             "family": definition.family,
             "description": definition.description,
@@ -217,6 +218,7 @@ def _definition(
 ) -> dict[str, Any]:
     return {
         **_definition_metadata(definition),
+        "relation_label": relation_registry.display_label(registry, definition.key),
         "immediate_replacement": definition.replaced_by,
         "terminal_replacement": registry.terminal_replacement(definition.key),
         "predecessors": sorted(registry.predecessors(definition.key)),
