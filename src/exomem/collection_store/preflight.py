@@ -221,14 +221,15 @@ def capture_collection(root, manifest_path, *, audit, presentation_operation):
 def retried(root, audit, row, again) -> dict:
     """``row``, or ``again()`` when a write to the vault outran its capture or proof, as `capture_collection`.
 
-    Being outrun a second time, or a failed fresh scan, keeps the first row's SOURCE_CHANGED block.
+    Being outrun a second time keeps the SOURCE_CHANGED block; a fresh scan that fails blocks the
+    row with its own cause, so unusable input never reads as a concurrent edit.
     """
     if row.get("blocker", {}).get("code") != legacy.SOURCE_CHANGED:
         return row
     try:
         audit.refresh(root)
-    except _REFUSALS:
-        return row
+    except _REFUSALS as error:
+        return {**row, "blocker": _blocker(error)}
     return again()
 
 

@@ -944,14 +944,10 @@ def bind_vault(
                 if refusal is None:
                     raise
                 if returned_from_invoke and not invocation_read_only:
-                    # The mutation committed before the second pass over its result refused, so
-                    # the refusal (a store read that missed its deadline, say) must not read as
-                    # "not committed". The caller reconciles under the same identity.
-                    from .writer_lease import _PostCommitOutcomeUncertain
+                    # The mutation committed before this second pass over its result refused.
+                    from .writer_lease import post_commit_refusal
 
-                    committed = _PostCommitOutcomeUncertain()
-                    committed.details["post_commit_refusal"] = str(refusal.get("code") or "OP_ERROR")
-                    refusal = committed.as_public_dict()
+                    refusal = cli_ops.public_refusal(post_commit_refusal(error)) or refusal
                 _log_tool_failure(
                     tool=tool_name,
                     request_id=request_id,

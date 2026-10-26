@@ -1334,6 +1334,23 @@ class _PostCommitOutcomeUncertain(OpError):
         )
 
 
+def post_commit_refusal(error: BaseException) -> BaseException:
+    """Report a refusal raised after a mutation's leaf returned as committed.
+
+    A filter over the result, such as a store read that misses its deadline, runs after the
+    commit; its own refusal must not read as "nothing committed". The inner code stays in the
+    details. A fault without a public code is returned unchanged.
+    """
+    from .cli_ops import public_refusal
+
+    refusal = public_refusal(error) if isinstance(error, Exception) else None
+    if refusal is None:
+        return error
+    committed = _PostCommitOutcomeUncertain()
+    committed.details["post_commit_refusal"] = str(refusal.get("code") or "OP_ERROR")
+    return committed
+
+
 @dataclass
 class _ExecutionAttempt:
     """One bounded owner claim for a single canonical leaf execution."""
@@ -7695,7 +7712,13 @@ def invoke_command(
             with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
             with call_spans.span("command.terminal_filter"):
-                return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                try:
+                    return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                except Exception as error:
+                    converted = post_commit_refusal(error)
+                    if converted is error:
+                        raise
+                    raise converted from error
         except BaseException as error:
             with call_spans.span("command.terminal_filter"):
                 postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)

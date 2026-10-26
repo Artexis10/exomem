@@ -569,8 +569,9 @@ class LocalRuntimeActivation:
                 shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
         from . import service_standby, writer_lease
 
-        if not self._deferred:
-            # After every worker that writes has stopped, so the final flush cannot move the head.
+        if not self._deferred and shutdown_error is None:
+            # Only after every worker that writes has stopped, so the final flush cannot move the head.
+            # A writer still running keeps the lease until this process exits; it then expires on its TTL.
             try:
                 await anyio.to_thread.run_sync(writer_lease.stop_server_lifecycle)
             except Exception:  # noqa: BLE001 - an unreleased lease expires on its TTL; the rest of shutdown goes on
