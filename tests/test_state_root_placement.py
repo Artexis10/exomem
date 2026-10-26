@@ -161,6 +161,7 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "collection-replica",
     "consolidation-tree",
     "governance-tree",
+    "source-corrections",
 }
 
 #: Canonical data outside the vault: under the state root, but never rebuilt,
