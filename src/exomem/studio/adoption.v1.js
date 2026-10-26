@@ -1073,7 +1073,9 @@ async function doAsk() {
   replaceChildren(answers, [el("p", "Asking…", "section-note")]);
   try {
     const result = await adoptionApi.ask(query);
-    const hits = (result && (result.hits || result.items)) || [];
+    // Recall returns a bare hit list, or an envelope with `hits` when it carries more,
+    // such as the session's first due-state block.
+    const hits = Array.isArray(result) ? result : (result && (result.hits || result.items)) || [];
     if (!hits.length) {
       replaceChildren(answers, [el("p", "Nothing matched yet. Try different words — or give Exomem a minute to finish settling in, then ask again.", "section-note empty")]);
       return;
