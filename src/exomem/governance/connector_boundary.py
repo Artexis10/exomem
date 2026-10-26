@@ -239,16 +239,20 @@ def cache_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | 
 
 
 def admission_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | None = None) -> tuple:
-    """What the content floors read of a caller: the scopes denied to it, and the configuration revision.
+    """Name the denied scopes, configuration revision and registry assignment.
 
     `cache_identity` closes over the whole principal, one value per login. The
     floors read the principal only through `Snapshot.denied_scopes`, so callers
-    that are denied the same scopes share a published verdict set.
+    denied the same scopes share verdicts under the same assignment.
     """
     current = snapshot(root, compiled)
+    requirement = read_requirement(root)
+    # Registry assignments can move an unchanged page into a different scope.
+    assignment = json.dumps((requirement or {}).get("vocabulary"), sort_keys=True,
+                            separators=(",", ":"), ensure_ascii=False)
     if current is None:
-        return (frozenset(), None)
-    return (current.denied_scopes(who), current.revision)
+        return (frozenset(), None, assignment)
+    return (current.denied_scopes(who), current.revision, assignment)
 
 
 def unrestricted(root: Path, who: RequestPrincipal) -> bool:
