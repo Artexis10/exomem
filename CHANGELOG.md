@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.145.0](https://github.com/Artexis10/exomem/compare/v0.144.4...v0.145.0) (2026-10-26)
+
+
+### Features
+
+* **import:** stage outside folders and report Cloud import phases ([#2110](https://github.com/Artexis10/exomem/issues/2110)) ([69e8812](https://github.com/Artexis10/exomem/commit/69e88121a94ec700ea426287ba75404f3b22f1a9))
+
 ## [0.144.4](https://github.com/Artexis10/exomem/compare/v0.144.3...v0.144.4) (2026-10-25)
 
 
