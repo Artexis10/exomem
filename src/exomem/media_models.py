@@ -37,3 +37,9 @@ def ensure_media_model(kind: str) -> MediaModel:
     _, digest = embedding_backend.ensure_artifact(spec["model"], artifact)
     root = embedding_backend.artifact_dir(spec["model"], artifact)
     return MediaModel(root=root, spec=spec, digest=digest)
+
+
+def media_model_cached(kind: str) -> bool:
+    """Report whether all pinned bytes are installed, without acquiring them."""
+    spec = model_spec(kind)
+    return embedding_backend.artifact_cached(spec["model"], artifact_spec(spec))

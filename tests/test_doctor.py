@@ -1086,6 +1086,7 @@ def test_warm_exits_zero_when_only_the_withheld_torch_models_are_unavailable(
     monkeypatch.setattr(embeddings_module, "get_model", lambda: object())
     monkeypatch.setattr(embeddings_module, "get_reranker", _no_sentence_transformers)
     monkeypatch.setattr(embeddings_module, "get_clip_model", _no_sentence_transformers)
+    monkeypatch.setattr(embeddings_module, "get_clip_query_model", lambda: object())
     monkeypatch.setattr(embeddings_module, "clip_enabled", lambda: True)
 
     code, out, _err = _run(["warm"], capsys)
@@ -1783,3 +1784,53 @@ def test_a_platform_without_a_commit_figure_says_nothing_about_one(
     assert check is not None
     assert "private commit" not in check.message
     assert "about 300.0 MB RSS total" in check.message
+
+
+def test_warm_fails_when_the_multilingual_query_artifact_is_unavailable(monkeypatch, capsys):
+    """A warm success must prepare ordinary image queries for offline use."""
+    from exomem import embeddings
+    from exomem.embedding_backend import ModelFilesUnavailable
+
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
+    monkeypatch.setattr(embeddings, "get_clip_model", lambda: object())
+
+    def unavailable():
+        raise ModelFilesUnavailable("query artifact unavailable")
+
+    monkeypatch.setattr(embeddings, "get_clip_query_model", unavailable)
+    code, _out, err = _run(["warm"], capsys)
+
+    assert code == 1
+    assert "multilingual image queries: FAILED" in err
+
+
+def test_doctor_names_the_selected_onnx_speech_backend(monkeypatch):
+    """An ONNX-only deployment must not report an unavailable torch engine."""
+    from exomem import extract
+    from exomem.onnx_asr_runtime import OnnxWhisperBackend
+
+    monkeypatch.setattr(extract, "get_transcriber", OnnxWhisperBackend)
+
+    check = doctor_module._check_asr_backend()
+
+    assert check.status == "pass"
+    assert check.message == "ASR: ONNX Whisper (CPU)."
+
+
+def test_doctor_reports_a_missing_multilingual_query_artifact(monkeypatch):
+    """A populated HF cache alone no longer prepares ordinary image queries."""
+    from exomem import embeddings, media_models
+
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(doctor_module, "_model_cached", lambda *_: True)
+    monkeypatch.setattr(media_models, "media_model_cached", lambda _: False)
+
+    check = doctor_module._check_models_cache()
+
+    assert check.status == "warn"
+    assert media_models.model_spec("image-query")["model"] in check.message

@@ -1850,6 +1850,7 @@ def _warm_main(argv: list[str]) -> int:
         required=lane_serves_torch_models,
     )
     if embeddings.clip_enabled():
+        _step("multilingual image queries", embeddings.get_clip_query_model)
         _step(
             f"CLIP model {embeddings.CLIP_MODEL_NAME}",
             embeddings.get_clip_model,

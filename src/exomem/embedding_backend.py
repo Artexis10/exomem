@@ -754,10 +754,12 @@ def artifact_url(model_name: str, served: ServedArtifact) -> str | None:
     return f"{base.rstrip('/')}/{artifact_asset_name(model_name, served)}"
 
 
-def write_artifact_asset(model_name: str, served: ServedArtifact, out_dir: Path) -> Path:
+def write_artifact_asset(
+    model_name: str, served: ServedArtifact, out_dir: Path, *, source_dir: Path | None = None,
+) -> Path:
     """Pack the built artefact as its release asset, byte for byte reproducible:
     declared regular files, fixed order, zero owner and time, no extended headers."""
-    source = artifact_dir(model_name, served)
+    source = source_dir if source_dir is not None else artifact_dir(model_name, served)
     digest = artifact_sha256(source, served.files)
     if digest is None:
         raise ModelFilesUnavailable(f"{model_name}: no built artefact at {source}")
@@ -795,12 +797,7 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
     this process for `ACQUIRE_RETRY_SECONDS`.
     """
     target = artifact_dir(model_name, served)
-    expected = {
-        "model": model_name,
-        "revision": served.revision,
-        "quantization": served.quantization,
-        "file_format": served.file_format,
-    }
+    expected = _artifact_identity(model_name, served)
     digest = _installed_digest(target, expected, served)
     if digest is not None:
         return str(target / served.files[0]), digest
@@ -832,6 +829,22 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
             json.dumps({**expected, "digest": digest}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     return str(target / served.files[0]), digest
+
+
+def _artifact_identity(model_name: str, served: ServedArtifact) -> dict[str, str]:
+    return {
+        "model": model_name,
+        "revision": served.revision,
+        "quantization": served.quantization,
+        "file_format": served.file_format,
+    }
+
+
+def artifact_cached(model_name: str, served: ServedArtifact) -> bool:
+    """Check the installed pin without downloading or building anything."""
+    return _installed_digest(
+        artifact_dir(model_name, served), _artifact_identity(model_name, served), served,
+    ) is not None
 
 
 def _installed_digest(target: Path, expected: dict[str, str], served: ServedArtifact) -> str | None:

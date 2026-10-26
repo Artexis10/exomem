@@ -1769,6 +1769,8 @@ def _check_asr_backend() -> DoctorCheck:
         backend = type(extract.get_transcriber()).__name__
     except Exception as e:  # noqa: BLE001
         return _check("asr.backend", "warn", f"ASR backend probe failed: {e}")
+    if backend == "OnnxWhisperBackend":
+        return _check("asr.backend", "pass", "ASR: ONNX Whisper (CPU).")
     if backend == "MlxWhisperBackend":
         return _check("asr.backend", "pass", "ASR: mlx-whisper (Apple Silicon Metal GPU).")
     return _check(
@@ -2449,9 +2451,8 @@ def _check_model_residency() -> DoctorCheck:
 
 
 def _check_models_cache() -> DoctorCheck:
-    """Local HF-cache presence for the three search models. Read-only: this
-    inspects directories only — doctor never downloads anything."""
-    from . import embeddings, model_cache
+    """Check search model caches without downloading or loading a runtime."""
+    from . import embeddings, media_models, model_cache
 
     hub = _hf_hub_dir()
     backend = _resolved_embedding_backend()
@@ -2471,11 +2472,13 @@ def _check_models_cache() -> DoctorCheck:
         for name in expected
         if not _model_cached(hub, model_cache.snapshot_dirname(name))
     ]
+    if embeddings.clip_enabled() and not media_models.media_model_cached("image-query"):
+        missing.append(media_models.model_spec("image-query")["model"])
     if not missing:
         return _check(
             "models.cache",
             "pass",
-            f"Search models for the {backend} lane are present in the local HF cache.",
+            f"Search models for the {backend} lane are present in the local caches.",
         )
     # Only claim degraded recall when the bi-encoder itself is absent — with it
     # cached and serving, finds are semantic whatever else is still downloading.
@@ -2489,7 +2492,7 @@ def _check_models_cache() -> DoctorCheck:
     return _check(
         "models.cache",
         "warn",
-        f"Not yet in the local HF cache: {', '.join(missing)}.{consequence}",
+        f"Not yet in the local model caches: {', '.join(missing)}.{consequence}",
         "Run `exomem warm` to pre-download them now (~1-2 GB).",
     )
 

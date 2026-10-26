@@ -208,7 +208,8 @@ A routing layer must also show a useful ablation against its component engines.
 Language mappings and admission thresholds remain deployment data.
 
 The worker decodes bounded 30-second buffers through PyAV and uses the maintained Whisper adapter.
-A pinned Silero VAD skips chunks with no detected speech; spoken chunks retain the measured Whisper input.
+A pinned Silero VAD checks peak-normalized chunks and skips those with no detected speech.
+Whisper receives the original waveform, preserving the measured speech input.
 The presence check prevents fabricated text on silent input; a false negative can omit quiet speech.
 The real-model workflow check must therefore include quiet speech and silence before release.
 The existing worker publishes the transcript automatically and preserves completed sidecars.
@@ -305,7 +306,7 @@ Run on the owner-sized cell with that engine's backlog active:
 
 ## Open Questions
 
-- The speech engine: pending the bake-off (D6).
+- Later speech upgrades: broader coverage and fresh confirmation under D6.
 - D4 is delivered through MarkItDown, odfdo and striprtf. D5 records the selected HEIC decoder and its distribution terms.
   The offline image gate verifies HEIC format support; owner-sized acceptance and the live rollout remain separate.
 - Documents/OCR ship defaults for fallback OCR packs, consecutive memory stops and pressure stalls. Budgets for later engines still need their own acceptance.

@@ -67,7 +67,9 @@ class OnnxWhisperBackend:
         options.add_session_config_entry("session.intra_op.allow_spinning", "0")
         options.add_session_config_entry("session.inter_op.allow_spinning", "0")
         runtime = dict(sess_options=options, providers=["CPUExecutionProvider"])
-        model = onnx_asr.load_model("whisper", artifact.root, quantization="int8", **runtime)
+        model = onnx_asr.load_model(
+            "whisper", artifact.root, quantization=artifact.spec["artifact"]["quantization"], **runtime,
+        )
         vad = onnx_asr.load_vad("silero", artifact.root / "vad", **runtime)
         self._model, self._vad = model, vad
 
@@ -80,8 +82,14 @@ class OnnxWhisperBackend:
                 offset = 0
                 for waveform in audio_chunks(path, rate, chunk_samples):
                     length = len(waveform)
+                    # Normalize only VAD amplitude so quiet speech is not discarded;
+                    # Whisper retains the waveform used in the quality comparison.
+                    peak = float(np.max(np.abs(waveform)))
+                    if not np.isfinite(peak):
+                        raise ValueError("decoded audio contains non-finite samples")
+                    vad_waveform = waveform / peak if peak > 0 else waveform
                     # Silero's 16 kHz input needs one hop and its context samples.
-                    padded = np.pad(waveform, (0, max(0, self.spec["vad_min_samples"] - length)))
+                    padded = np.pad(vad_waveform, (0, max(0, self.spec["vad_min_samples"] - length)))
                     detected = next(self._vad.segment_batch(padded[None], np.array([len(padded)]), rate))
                     # The public Whisper adapter does not expose no-speech probability.
                     # VAD skips non-speech but leaves spoken chunks unchanged.

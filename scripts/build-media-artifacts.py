@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import shutil
-import tarfile
 from pathlib import Path
 
 
@@ -19,23 +18,13 @@ def sha256(path: Path) -> str:
 
 
 def pack(root: Path, spec: dict, destination: Path) -> dict:
-    names = spec["artifact"]["files"]
-    digest = hashlib.sha256()
-    for name in names:
-        digest.update(name.encode() + b"\0")
-        with (root / name).open("rb") as handle:
-            while block := handle.read(8 << 20):
-                digest.update(block)
-    identity = digest.hexdigest()
-    filename = f"{spec['model'].rsplit('/', 1)[-1].lower()}-{spec['precision']}-{identity[:8]}.onnx.tar"
-    asset = destination / filename
-    with tarfile.open(asset, "w", format=tarfile.USTAR_FORMAT) as archive:
-        for name in names:
-            info = tarfile.TarInfo(name)
-            info.size, info.mode = (root / name).stat().st_size, 0o644
-            with (root / name).open("rb") as handle:
-                archive.addfile(info, handle)
-    return {"digest": identity, "asset_digest": sha256(asset), "asset": filename}
+    from exomem.embedding_backend import artifact_sha256, write_artifact_asset
+    from exomem.media_models import artifact_spec
+
+    served = artifact_spec(spec)
+    identity = artifact_sha256(root, served.files)
+    asset = write_artifact_asset(spec["model"], served, destination, source_dir=root)
+    return {"digest": identity, "asset_digest": sha256(asset), "asset": asset.name}
 
 
 def main() -> None:
