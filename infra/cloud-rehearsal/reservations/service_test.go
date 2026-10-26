@@ -129,11 +129,11 @@ func TestReservationPhysicalRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("family_after_begin=%v", active)
-	snapshot, err := client.CreateLVSnapshot(ctx, &proto.CreateLVSnapshotRequest{DeviceClass: class, SourceVolume: "source", ImmediateSourceUuid: identity, FamilyToken: active.Token, Name: "snapshot", AccessType: "ro", SizeBytes: 32 * mib})
+	snapshot, err := client.CreateLVSnapshot(ctx, &proto.CreateLVSnapshotRequest{DeviceClass: class, SourceVolume: "source", ImmediateSourceUuid: identity, FamilyToken: active.Token, Name: "backup-child", AccessType: "ro", SizeBytes: 32 * mib})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.CreateLVSnapshot(ctx, &proto.CreateLVSnapshotRequest{DeviceClass: class, SourceVolume: "snapshot", ImmediateSourceUuid: snapshot.Snapshot.PhysicalUuid, FamilyToken: active.Token, Name: "clone", AccessType: "rw", SizeBytes: 32 * mib})
+	_, err = client.CreateLVSnapshot(ctx, &proto.CreateLVSnapshotRequest{DeviceClass: class, SourceVolume: "backup-child", ImmediateSourceUuid: snapshot.Snapshot.PhysicalUuid, FamilyToken: active.Token, Name: "clone", AccessType: "rw", SizeBytes: 32 * mib})
 	if err != nil {
 		t.Fatal(err)
 	}
