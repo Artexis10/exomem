@@ -1315,6 +1315,7 @@ def _delegated_paths(
     ))
     open_states = [(path, state) for path, state in zip(receipt.paths, path_states, strict=True)
                    if path.rel_path not in retired]
+    # nosemgrep: ep-word-membership -- _canonical_path_state fixes these exact receipt observations.
     if any(state not in {"after", "other", "before"} for _, state in open_states):
         return None
     moved = [
