@@ -178,6 +178,15 @@ class ClusterClient:
     def run_job(self, manifest: dict) -> None:
         self.apply(manifest)
 
+    def delete_cell_secrets(self, namespace: str) -> None:
+        """Retire the cell's children without waiting for namespace or provider cleanup."""
+        try:
+            self._core.delete_namespaced_secret("cell-credentials", namespace)
+        except ApiException as error:
+            if error.status != 404:
+                raise
+
+
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
         """D3: an hourly hold's clone claim and snapshot. Already gone is done."""
 
@@ -580,6 +589,7 @@ class ClusterClient:
             pv_node_absent=pv_node is not None and node_presence is not None and pv_node not in node_presence[0],
             namespace_volume_lost=namespace_volume_lost,
             namespace_move_volume=namespace_move_volume,
+            namespace_move_storage_class=namespace_annotations.get("exomem.io/move-storage-class"),
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,

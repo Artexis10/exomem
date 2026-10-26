@@ -157,6 +157,7 @@ class CellManifestSpec:
     bearer_current: str = ""
     bearer_previous: str | None = None
     backup_password: str = ""
+    volume_passphrase: str = ""
     b2_key_id: str = ""
     b2_key_secret: str = ""
 
@@ -397,6 +398,7 @@ def render_secret(spec: CellManifestSpec) -> dict:
     data = {
         "cell-token": _b64(spec.bearer_current),
         "backup-password": _b64(spec.backup_password),
+        "encryption-passphrase": _b64(spec.volume_passphrase),
         "b2-key-id": _b64(spec.b2_key_id),
         "b2-key-secret": _b64(spec.b2_key_secret),
     }

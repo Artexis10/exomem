@@ -39,6 +39,16 @@ OBSERVED_COLUMNS = (
     "last_backup_snapshot",
     "backup_key_wrapped",
     "backup_key_version",
+    "cell_root_key_wrapped",
+    "cell_root_key_version",
+    "content_keys_retired_at",
+    "last_live_key_destroyed_at",
+    "key_retention_sources",
+    "keys_expire_at",
+    "custody_observation",
+    "relocation_target_storage_class",
+    "relocation_old_volume_id",
+    "relocation_accepted_at",
     "b2_key_id",
     "b2_key_wrapped",
     "b2_key_version",
@@ -125,6 +135,24 @@ async def read_rollout(connection: asyncpg.Connection) -> RolloutRow:
     if record is None:
         raise RuntimeError("exomem_cloud_rollout has no row with id = 1")
     return _rollout_from_record(record)
+
+
+async def lock_cell(connection: asyncpg.Connection, cell_id: str) -> CellRow:
+    """Serialize key conversion with deletion and competing controller retries."""
+    record = await connection.fetchrow(
+        f"SELECT {', '.join(CELL_COLUMNS)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id)
+    if record is None:
+        raise ValueError("cell no longer exists")
+    return _row_from_record(record)
+
+
+async def retire_content_keys(connection: asyncpg.Connection, cell_id: str, now: datetime) -> None:
+    """Retire decryption material before any provider cleanup can block."""
+    await connection.execute(
+        "UPDATE exomem_cloud_cells SET cell_root_key_wrapped=NULL, cell_root_key_version=NULL, "
+        "backup_key_wrapped=NULL, backup_key_version=NULL, "
+        "content_keys_retired_at=COALESCE(content_keys_retired_at,$2) "
+        "WHERE cell_id=$1 AND desired_state='deleted'", cell_id, now)
 
 
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:

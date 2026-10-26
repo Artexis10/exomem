@@ -519,6 +519,7 @@ class ClusterGateway:
     ) -> dict[str, ClusterObservation | Exception]: ...  # pragma: no cover
     def apply_all(self, manifests: list[dict]) -> None: ...  # pragma: no cover
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
+    def delete_cell_secrets(self, namespace: str) -> bool: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
     def observe_export_job(self, namespace: str, export_id: str): ...  # pragma: no cover
@@ -666,51 +667,45 @@ async def _resolve_secret_material(
         else None
     )
 
-    backup_key_wrapped = row.backup_key_wrapped
-    backup_key_version = row.backup_key_version
-    if backup_key_wrapped is None:
-        from .secrets import generate_backup_data_key
+    from .secrets import CONTENT_KEY_VERSION, derive_volume_passphrase, generate_backup_data_key
 
-        candidate = generate_backup_data_key()
-        version = secrets_config.backup_master_key_current_version
-        wrapped = wrap_secret(
-            secrets_config.backup_master_keys[version],
-            candidate,
-            cell_id=row.cell_id,
-            column="backup_key_wrapped",
-            key_version=version,
-        )
-        # H5: written as one group so a crash between the two columns can
-        # never leave a half-written row that wedges every later pass.
-        won = await db.try_write_once_group(
-            connection,
-            row.cell_id,
-            {"backup_key_wrapped": wrapped, "backup_key_version": version},
-            first_column="backup_key_wrapped",
-        )
-        if won:
-            backup_key_wrapped = wrapped
-            backup_key_version = version
+    async with connection.transaction():
+        current = await db.lock_cell(connection, row.cell_id)
+        if current.desired_state == "deleted" or current.content_keys_retired_at is not None:
+            raise ValueError("content keys are retired")
+        if ((current.cell_root_key_wrapped is None) != (current.cell_root_key_version is None)
+                or (current.backup_key_wrapped is None) != (current.backup_key_version is None)):
+            raise ValueError("incomplete content key state")
+        if current.cell_root_key_wrapped is None:
+            # Preserve the repository password: conversion changes its wrap, never its plaintext.
+            password = (unwrap_secret(
+                secrets_config.backup_master_keys[current.backup_key_version], current.backup_key_wrapped,
+                cell_id=row.cell_id, column="backup_key_wrapped", key_version=current.backup_key_version)
+                if current.backup_key_wrapped is not None else generate_backup_data_key())
+            root = generate_backup_data_key()
+            version = secrets_config.backup_master_key_current_version
+            await db.write_observed(connection, row.cell_id, {
+                "cell_root_key_wrapped": wrap_secret(secrets_config.backup_master_keys[version], root,
+                    cell_id=row.cell_id, column="cell_root_key_wrapped", key_version=version),
+                "cell_root_key_version": version,
+                "backup_key_wrapped": wrap_secret(root, password, cell_id=row.cell_id,
+                    column="backup_key_wrapped", key_version=CONTENT_KEY_VERSION),
+                "backup_key_version": CONTENT_KEY_VERSION,
+            })
         else:
-            refreshed = await db.select_all_rows(connection)
-            current = next(r for r in refreshed if r.cell_id == row.cell_id)
-            backup_key_wrapped = current.backup_key_wrapped
-            backup_key_version = current.backup_key_version
-
-    backup_password_plaintext = unwrap_secret(
-        secrets_config.backup_master_keys[backup_key_version],
-        backup_key_wrapped,
-        cell_id=row.cell_id,
-        column="backup_key_wrapped",
-        key_version=backup_key_version,
-    ).hex()
-
-    material = {
+            root = unwrap_secret(secrets_config.backup_master_keys[current.cell_root_key_version],
+                current.cell_root_key_wrapped, cell_id=row.cell_id, column="cell_root_key_wrapped",
+                key_version=current.cell_root_key_version)
+            if current.backup_key_wrapped is None:
+                raise ValueError("root has no backup child")
+            password = unwrap_secret(root, current.backup_key_wrapped, cell_id=row.cell_id,
+                column="backup_key_wrapped", key_version=current.backup_key_version)
+    return {
         "bearer_current": bearer_current,
         "bearer_previous": bearer_previous,
-        "backup_password": backup_password_plaintext,
-    }
-    return material, backup_key_version
+        "backup_password": password.hex(),
+        "volume_passphrase": derive_volume_passphrase(root, cell_id=row.cell_id),
+    }, CONTENT_KEY_VERSION
 
 
 async def _resolve_object_storage_key(
@@ -918,9 +913,13 @@ def _compute_render_digest(
     return hashlib.sha256(blob).hexdigest()
 
 
-def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False) -> str:
+def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False,
+                 target: str | None = None) -> str:
     storage = cluster_config.storage
     new_claim = observation.pvc_storage_class not in storage.classes
+    destination = target or observation.namespace_move_storage_class
+    if new_claim and (relocating or observation.statefulset_relocation_volume) and destination in storage.classes:
+        return destination
     if new_claim and (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
         # D4: a relocated or moved cell's new claim is local, whatever the
         # domain. Its old claim keeps its own class until it is gone, since
@@ -1661,6 +1660,15 @@ async def _reconcile_row(
 
     from .imports import ImportStorage, decide_import, job_name
 
+    if row.desired_state == "deleted":
+        await db.retire_content_keys(connection, row.cell_id, now)
+        row = dataclass_replace(row, cell_root_key_wrapped=None, cell_root_key_version=None,
+                                backup_key_wrapped=None, backup_key_version=None,
+                                content_keys_retired_at=row.content_keys_retired_at or now)
+        # A failed provider read must never preserve live Kubernetes child keys.
+        if observation.namespace_exists:
+            cluster.delete_cell_secrets(namespace_name(row.cell_id))
+
     item = await db.read_import(connection, row.cell_id)
     import_decision = None
     if item is not None and not _identity_conflict(row, observation, cluster_config.storage):
@@ -1894,7 +1902,8 @@ async def _reconcile_row(
         # pass creates them, so the applied digest is computed from the
         # versions this pass resolved; hashing the row as read would change
         # the digest on the next pass and restart the pod for nothing.
-        storage_class = _claim_class(cluster_config, observation, relocating=decision.relocation_volume is not None)
+        storage_class = _claim_class(cluster_config, observation, relocating=decision.relocation_volume is not None,
+                                     target=row.relocation_target_storage_class)
         render_digest = _compute_render_digest(
             dataclass_replace(row, backup_key_version=backup_key_version, b2_key_version=b2_key_version),
             cluster_config,

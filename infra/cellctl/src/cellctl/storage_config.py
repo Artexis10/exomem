@@ -81,8 +81,12 @@ class StorageConfig:
     # D7: the one class new claims use and whose nodes publish capacity.
     domain: str = LEGACY_CLASS
     local: LocalStorage | None = None
+    per_cell_class: str | None = None
 
     def __post_init__(self) -> None:
+        if self.per_cell_class is not None and (not _NAME.fullmatch(self.per_cell_class)
+                                               or self.per_cell_class == LEGACY_CLASS):
+            raise ValueError("per-cell Hetzner class must be a distinct DNS name")
         if self.domain not in self.classes:
             raise ValueError("the cell storage domain must be a configured cell class")
 
@@ -90,7 +94,8 @@ class StorageConfig:
     def classes(self) -> frozenset[str]:
         """D7: every class a cell volume may be bound to while cells migrate."""
 
-        return frozenset({LEGACY_CLASS} | ({self.local.class_name} if self.local else set()))
+        return frozenset({LEGACY_CLASS} | ({self.local.class_name} if self.local else set())
+                         | ({self.per_cell_class} if self.per_cell_class else set()))
 
     @property
     def domain_is_local(self) -> bool:

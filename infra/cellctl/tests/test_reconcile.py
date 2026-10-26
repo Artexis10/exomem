@@ -86,6 +86,13 @@ class FakeClusterGateway:
     def delete_namespace(self, name: str) -> None:
         self.deleted_namespaces.add(name)
 
+    def delete_cell_secrets(self, namespace: str) -> bool:
+        for key in list(self.applied):
+            if key[0] == namespace and key[1] == "Secret":
+                del self.applied[key]
+        self.events.append(("delete_cell_secrets", namespace))
+        return True
+
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
 

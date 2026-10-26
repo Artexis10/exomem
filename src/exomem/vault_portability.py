@@ -19,11 +19,11 @@ import unicodedata
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 from . import __version__, reserved_paths, restore_journal, state_migration, state_paths
 from .governance import connector_boundary
@@ -385,7 +385,7 @@ class ExportResult:
 
 @dataclass(frozen=True, slots=True)
 class VerifiedArchive:
-    archive_path: Path
+    archive_path: Path | None
     archive_sha256: str
     archive_size: int
     archive_format: str
@@ -815,7 +815,7 @@ def _build_manifest(
 
 
 def _write_export_archive(
-    destination: Path,
+    destination: Path | BinaryIO,
     snapshots: Iterable[_SourceSnapshot],
     manifest: Mapping[str, Any],
 ) -> None:
@@ -970,6 +970,31 @@ def export_quiesced_vault(
         artifact_reference=f"exomem-export://sha256/{verified.archive_sha256}",
         manifest=verified.manifest,
     )
+
+
+def stream_quiesced_vault(
+    vault_root: Path, sink: BinaryIO, *, context: PortabilityContext,
+    limits: PortabilityLimits | None = None,
+) -> dict[str, Any]:
+    """Write the canonical ZIP to a bounded sink; publication requires independent verification."""
+    _validate_context(context, allowed_states={"quiesced"})
+    effective_limits = limits or PortabilityLimits()
+    _validate_limits(effective_limits)
+    source_root = Path(vault_root).absolute()
+    if not connector_boundary.unrestricted(source_root, effective_principal()):
+        _fail("EXPORT_UNAVAILABLE", "whole-vault export is unavailable")
+    _flush_collection_replica(source_root)
+    armed_requirement = connector_boundary.read_requirement(source_root)
+    if connector_boundary.snapshot(source_root) is not None:
+        state_migration.require_vault_state_ready(source_root)
+    snapshots = _enumerate_source(source_root, effective_limits)
+    manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
+    _write_export_archive(sink, snapshots, manifest)
+    repeated = _enumerate_source(source_root, effective_limits)
+    if [(item.path, item.size, item.sha256) for item in snapshots] != [
+            (item.path, item.size, item.sha256) for item in repeated]:
+        _fail("SOURCE_CHANGED_DURING_EXPORT", "vault contents changed during export")
+    return manifest
 
 
 def _json_no_duplicates(raw: bytes) -> Any:
@@ -1283,17 +1308,34 @@ def verify_export_archive(
     expected_vault_id: str | None = None,
     limits: PortabilityLimits | None = None,
 ) -> VerifiedArchive:
-    """Verify archive structure, manifest policy, and every payload byte."""
-
+    """Keep local path checks around the common canonical verifier."""
     path = Path(archive_path).absolute()
-    effective_limits = limits or PortabilityLimits()
-    _validate_limits(effective_limits)
     try:
         archive_stat = path.lstat()
         if stat.S_ISLNK(archive_stat.st_mode) or not stat.S_ISREG(archive_stat.st_mode):
             _fail("INVALID_ARCHIVE", "archive path must be a regular file")
-        archive_size = archive_stat.st_size
-        with zipfile.ZipFile(path, "r") as archive:
+        with path.open("rb") as stream:
+            verified = verify_export_stream(stream, archive_stat.st_size,
+                expected_cell_id=expected_cell_id, expected_vault_id=expected_vault_id, limits=limits)
+    except OSError:
+        _fail("INVALID_ARCHIVE", "archive is unavailable or malformed")
+    return replace(verified, archive_path=path)
+
+
+def verify_export_stream(
+    stream: BinaryIO,
+    archive_size: int,
+    *,
+    expected_cell_id: str | None = None,
+    expected_vault_id: str | None = None,
+    limits: PortabilityLimits | None = None,
+) -> VerifiedArchive:
+    """Verify archive structure, manifest policy, and every payload byte."""
+
+    effective_limits = limits or PortabilityLimits()
+    _validate_limits(effective_limits)
+    try:
+        with zipfile.ZipFile(stream, "r") as archive:
             if archive.comment:
                 _fail("UNSAFE_ARCHIVE_ENTRY", "archive comments are not part of the export format")
             entries = _preflight_entries(archive.infolist(), effective_limits)
@@ -1333,9 +1375,17 @@ def verify_export_archive(
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
         _fail("INVALID_ARCHIVE", "archive is unavailable or malformed")
 
+    stream.seek(0)
+    digest = hashlib.sha256()
+    read_size = 0
+    while chunk := stream.read(1024 * 1024):
+        digest.update(chunk)
+        read_size += len(chunk)
+    if read_size != archive_size:
+        _fail("ARCHIVE_SIZE_MISMATCH", "archive object has the wrong byte size")
     return VerifiedArchive(
-        archive_path=path,
-        archive_sha256=_hash_file(path),
+        archive_path=None,
+        archive_sha256=digest.hexdigest(),
         archive_size=archive_size,
         archive_format=ARCHIVE_FORMAT,
         manifest=manifest,

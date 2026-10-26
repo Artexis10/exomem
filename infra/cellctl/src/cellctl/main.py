@@ -113,9 +113,10 @@ def build_storage_config() -> StorageConfig:
     if not raw:
         return DEFAULT_STORAGE
     value = json.loads(raw)
-    if not isinstance(value, dict) or not set(value) <= {"domain", "local"} or not isinstance(value.get("local"), dict):
+    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "per_cell_class"} or not isinstance(value.get("local"), dict):
         raise ValueError("cell storage must be a JSON object with a local object and an optional domain")
-    return StorageConfig(domain=value.get("domain", LEGACY_CLASS), local=LocalStorage(**value["local"]))
+    return StorageConfig(domain=value.get("domain", LEGACY_CLASS), local=LocalStorage(**value["local"]),
+                         per_cell_class=value.get("per_cell_class"))
 
 
 def build_alert_delivery_secret() -> tuple[str, str, str] | None:

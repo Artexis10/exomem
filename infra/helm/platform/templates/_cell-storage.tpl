@@ -47,5 +47,8 @@ are this chart's own: templates/cell-array-exporter.yaml renders them.
     "array_selector" (include "exomem.labelSelector" $metrics.array.labels)
     "array_port" $metrics.array.port -}}
 {{- $domain := ternary $config.class_name .Values.cloudStorage.className (eq .Values.cellStorage.domain "local") -}}
-{{- dict "domain" $domain "local" $config | toJson -}}
+{{- if eq .Values.cellStorage.domain "per-cell" -}}
+{{- $domain = .Values.cloudStorage.perCellClassName -}}
+{{- end -}}
+{{- dict "domain" $domain "local" $config "per_cell_class" .Values.cloudStorage.perCellClassName | toJson -}}
 {{- end -}}

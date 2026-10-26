@@ -1,7 +1,8 @@
 {
   "repository": "substrate-systems/substrate",
-  "ref": "43c7b945ffeff821881178be25fb72702ee082c2",
+  "ref": "31a5668e1fdea37954fd94759a5d775af8fd101c",
   "migration": "migrations/0071_exomem_cloud_paid_storage.sql",
   "grants": "scripts/exomem-cloud-grants.sql",
-  "exports_migration": "migrations/0066_exomem_cloud_home_and_exports.sql"
+  "exports_migration": "migrations/0066_exomem_cloud_home_and_exports.sql",
+  "custody_migration": "migrations/0080_exomem_cloud_key_custody.sql"
 }

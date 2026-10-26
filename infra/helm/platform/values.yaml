@@ -325,6 +325,7 @@ cloudGateway:
 
 cloudStorage:
   className: exomem-cloud-encrypted
+  perCellClassName: exomem-cloud-cell-key
   encryptionSecretName: exomem-cloud-volume-encryption
   encryptionSecretNamespace: exomem-platform
 

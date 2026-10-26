@@ -323,3 +323,54 @@ async def test_capacity_snapshot_is_atomic_and_serializes_cutover_with_admission
         await controller.close()
         await admission.close()
         await reader.close()
+
+
+async def test_atomic_root_conversion_preserves_legacy_password_under_competing_retries(cell_db):
+    """A split or racing conversion must never strand an existing restic repository."""
+    import asyncio
+    from cellctl.reconcile import _resolve_secret_material
+    from .test_reconcile import _secrets_config
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "legacy-repository")
+    first = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    second = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        password = generate_backup_data_key()
+        wrapped = wrap_secret(b"m" * 32, password, cell_id=cell_id, column="backup_key_wrapped", key_version=1)
+        await db.write_observed(first, cell_id, {"backup_key_wrapped": wrapped, "backup_key_version": 1})
+        stale = (await db.select_all_rows(first))[0]
+        results = await asyncio.gather(*[_resolve_secret_material(c, stale, _secrets_config()) for c in (first, second)])
+        assert results[0] == results[1]
+        assert results[0][0]["backup_password"] == password.hex()
+        current = (await db.select_all_rows(first))[0]
+        root = unwrap_secret(b"m" * 32, current.cell_root_key_wrapped, cell_id=cell_id,
+                             column="cell_root_key_wrapped", key_version=1)
+        assert unwrap_secret(root, current.backup_key_wrapped, cell_id=cell_id,
+                             column="backup_key_wrapped", key_version=1) == password
+        from cryptography.exceptions import InvalidTag
+        with pytest.raises(InvalidTag):
+            unwrap_secret(b"m" * 32, current.backup_key_wrapped, cell_id=cell_id,
+                          column="backup_key_wrapped", key_version=1)
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_deleted_cell_cannot_mint_or_restore_content_keys(cell_db):
+    from cellctl.reconcile import _resolve_secret_material
+    from .test_reconcile import _secrets_config
+
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "retired-cell")
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        stale = (await db.select_all_rows(controller))[0]
+        await owner.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
+        with pytest.raises(ValueError, match="retired"):
+            await _resolve_secret_material(controller, stale, _secrets_config())
+        row = (await db.select_all_rows(controller))[0]
+        assert row.cell_root_key_wrapped is row.backup_key_wrapped is None
+    finally:
+        await controller.close()
+        await owner.close()
