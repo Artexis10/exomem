@@ -12,14 +12,14 @@ Strict end-to-end encryption does not fit, because the product is server-side se
 
 ## What Changes
 
-- **A per-cell key hierarchy.** Each cell gets one cell root key. The volume passphrase, the backup repository password and the media key bundle are wrapped by that key, not by a platform-wide key. Deleting a cell destroys its keys, so its backups and stored media become unreadable everywhere.
-- **An opt-in tenant lock.** A tenant can wrap their cell root key with their own key, from a recovery code and optionally a passkey. The platform then holds no copy of the key at rest. A crash or node failure locks the cell until the tenant unlocks it. A planned restart hands the key over without the tenant.
-- **A locked access record.** Access events go off the node into object storage that nobody can delete within the retention period. These events are exec, attach, port-forward, ephemeral containers, Secret reads, admission and RBAC changes, and node shell sessions. A heartbeat makes a stopped record visible as a gap.
-- **A tenant access log.** Each tenant sees every operator access that touches their cell, and every gap in the record.
-- **A three-way access split.**
+- **A per-cell key hierarchy.** Each cell gets one cell root key. The volume passphrase, the backup repository password and the media key bundle are wrapped by that key, not by a platform-wide key. Existing cells move to new volumes through the relocation path. Deleting a cell destroys its live keys at once; the copies in platform backups expire by a date the platform shows.
+- **An opt-in tenant lock.** A tenant can wrap their cell root key with their own key, from a recovery code and optionally a passkey. From then on, no platform copy of the cell's keys is written anywhere, so the key cannot travel through a Kubernetes Secret. An existing cell converts with new keys, and earlier platform copies expire with backup retention. A crash or node failure locks the cell until the tenant unlocks it. A planned restart hands the key over without the tenant. A locked cell never sleeps.
+- **An access record.** Access events go off the node into object storage where no user can delete them within the retention period. These events are exec, attach, port-forward, ephemeral containers, Secret reads, admission and RBAC changes, and node shell sessions. A heartbeat makes a stopped shipper visible as a gap. The record retains what its sources submit; root on a node can still suppress events before they leave it.
+- **A tenant access log.** Each tenant sees the operator access that the record received for their cell, and every gap in the record, served by the control plane even while the cell is locked.
+- **Three access tiers.**
   - Routine checks use a read-only identity from the operator's own machine, with no node login.
-  - Image rollouts use a deploy identity that can change only container images, and only to release-built digests.
-  - Content paths need a physical touch on an authenticator that the operator holds. Content paths are node shells, break-glass and structural platform changes.
+  - Image rollouts use a deploy identity that can change only container images, and only to images that the release workflow attested.
+  - Every admin capability needs a physical touch on an authenticator that the operator holds: node shells, break-glass, structural platform changes, and the provider, datastore, snapshot, Terraform, escrow and registry credentials.
 - **Truthful claims for each mode.** The privacy copy may claim only the properties in force for the cell's mode, and states each limit beside the claim.
 - **Confidential cells, parked.** The design records the direction for per-cell SEV-SNP cells, the trigger that starts that work, and an evidence task on rentable hardware.
 
@@ -27,27 +27,29 @@ Strict end-to-end encryption does not fit, because the product is server-side se
 
 ### New Capabilities
 
-- `cloud-cell-key-custody`: the per-cell key hierarchy, key destruction on deletion, and the opt-in tenant lock.
+- `cloud-cell-key-custody`: the per-cell key hierarchy, key expiry on deletion, and the opt-in tenant lock.
 
 ### Modified Capabilities
 
 - `cloud-operator-access`:
   - routine access is off-node;
-  - break-glass and node shells need the operator's presence and land in the locked access record;
-  - new requirements for the locked record, the tenant access log and the deploy identity;
+  - every admin-tier credential, node shells and break-glass included, needs the operator's presence, and break-glass use goes to the access record;
+  - new requirements for the access record, the tenant access log and the deploy identity;
   - the privacy-copy requirement gains per-mode claims and disclosures.
 
 ## Impact
 
-- **cellctl:** cell root key minting, wrapping and destruction; per-cell volume Secrets; the transient unlock Secret and the key handover; the deploy identity's admission rule; the tenant access log feed.
-- **Cell runtime:** the locked state, with a coded `CELL_LOCKED` answer; the paused background work that reports `locked`; the handover endpoint.
-- **Platform chart:** the per-cell StorageClass Secret template; the audit shipper; RBAC for the routine and deploy identities; the admission rule for image-only updates.
-- **Ansible:** node SSH through short-lived certificates or FIDO2 keys, node session events, and the audit policy.
+- **cellctl:** cell root key minting, wrapping and expiry; per-cell volume Secrets; relocation for migration and lock conversion; the tenant-lock key channel and handover; the tenant access log derivation.
+- **Gateway:** the `CELL_LOCKED` answer from recorded cell state.
+- **Cell runtime:** the locked state; paused background work that reports `locked`; its half of the handover.
+- **Platform chart:** the per-cell StorageClass Secret template; the audit shipper; RBAC for the routine and deploy identities; the image-only admission rule and the release-attestation verifier.
+- **Ansible:** node SSH through FIDO2 `-sk` keys, node session events, and the audit policy.
 - **Terraform:** one B2 bucket with Object Lock in compliance mode.
+- **Admin credential custody:** presence-gated encryption of the provider, datastore, snapshot, Terraform, escrow and registry credentials.
 - **Control plane (separate repository):** the tenant unlock flow and recovery code, the tenant access log view, and the privacy copy.
 - **Other changes:**
   - `add-cloud-media-store` wraps its media key bundle under the backup master key. This change re-roots that bundle under the cell root key.
-  - `move-cloud-cells-to-local-storage` encrypts at the node level and lists per-tenant keys as a non-goal. Its cutover must adopt per-volume LUKS2 first.
-  - `add-cloud-cell-sleep` lets idle cells sleep. A tenant-locked cell does not sleep unless its tenant accepts waking locked.
+  - `move-cloud-cells-to-local-storage` encrypts at the node level and lists per-tenant keys as a non-goal. Its cutover must add a per-volume LUKS2 layer first.
+  - `add-cloud-cell-sleep` lets idle cells sleep. A tenant-locked cell never sleeps.
 
 **Not changed:** tenant authentication, cell isolation between tenants, the backup format, and the hosting provider.

@@ -42,17 +42,35 @@ It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or
 
 ### Requirement: Break-glass access is deliberate and audited
 
-Access beyond the everyday and deploy identities SHALL require the admin tier. The admin tier covers:
-- a node shell;
+Every credential that can yield any of the following SHALL be an admin-tier credential:
+- node root;
+- cluster administration;
+- the cluster datastore or its snapshots;
+- provider control of a node, through its API, rescue system or console;
+- escrow decryption;
+- registry write.
+
+That covers:
+- node SSH keys;
 - the break-glass identity;
-- applying Secrets;
-- a platform change outside an image-only update.
+- the K3s server token and CA material;
+- snapshot restore credentials;
+- the provider API token;
+- Terraform state and its backend credentials;
+- the escrow identity;
+- registry and package write tokens;
+- every secret-store entry that holds one of these.
 
-Every admin-tier session SHALL require a presence check, a touch on a FIDO2 authenticator that the operator holds. Node SSH SHALL accept only such keys, or short-lived certificates issued from such a session.
+Admin-tier custody SHALL require the operator's physical presence:
+- Node SSH SHALL accept only FIDO2 security-key logins that need a touch for each login. A certificate SHALL certify only such a key.
+- Every other admin-tier credential SHALL be encrypted at rest to an identity that needs a touch for each decryption, or SHALL sit behind the operator's own provider-account login with a hardware second factor.
+- No automation environment and no machine-accessible secret store SHALL hold an admin-tier credential in plaintext.
 
-The break-glass credential SHALL be issued on demand through an audited certificate request, only from an admin-tier session. It SHALL expire within about one hour, and SHALL NOT be the default in any operator procedure.
+The provider account owner can still regain control of a server through the provider console. Descriptions SHALL state that limit, not claim to gate it.
 
-The issuing request, the approval, every API request made with the credential, and every node session SHALL appear in the locked access record. Each entry carries user or certificate, verb or command class, resource, namespace and time. No entry SHALL record Secret values or vault content. Request and response bodies are recorded only for namespaces, PersistentVolumeClaims and StatefulSets, which carry neither.
+The break-glass credential SHALL be issued on demand, through an audited certificate request, only inside a presence-checked node session. It SHALL expire within about one hour, and SHALL NOT be the default in any operator procedure.
+
+The issuing request, the approval, every API request made with the credential, and every node session SHALL be submitted to the access record. Each entry carries user or key identity, verb or command class, resource, namespace and time. No entry SHALL record Secret values or vault content. Request URIs SHALL lose their query parameters before they leave the node. Request and response bodies are recorded only for namespaces, PersistentVolumeClaims and StatefulSets, and the shipped fields SHALL be checked to carry no Secret values or content.
 
 Where the cluster can enforce it at admission, exec, attach, port-forward and ephemeral containers in cell namespaces SHALL be denied to every identity outside the break-glass group.
 
@@ -64,7 +82,7 @@ Where the cluster can enforce it at admission, exec, attach, port-forward and ep
 #### Scenario: Break-glass exec into a cell
 
 - **WHEN** the break-glass identity opens an exec session in a cell namespace
-- **THEN** the locked access record holds who, which pod and when, without the session's content
+- **THEN** the access record receives who, which pod and when, without the command line or the session's content
 
 #### Scenario: Admission enforcement for other identities
 
@@ -76,6 +94,11 @@ Where the cluster can enforce it at admission, exec, attach, port-forward and ep
 - **WHEN** a process holding the operator's SSH configuration and routine credentials, but not the operator's authenticator, tries to open a node shell
 - **THEN** the node refuses the login
 
+#### Scenario: Automation reaches for an admin credential
+
+- **WHEN** automation with the operator's routine credentials tries to obtain the provider API token, the K3s server token or a snapshot restore credential
+- **THEN** it finds no plaintext copy, and decrypting the stored copy needs the operator's touch
+
 ### Requirement: The product states its privacy boundary truthfully
 
 User-facing descriptions of Exomem Cloud privacy SHALL claim, for a given cell, only the properties whose requirements are in force in production for that cell and its mode.
@@ -86,51 +109,61 @@ For every cell, the claimable properties are:
 - the operator cannot see content by accident, and deliberate access leaves an audit trail;
 - data at rest and in backups is encrypted.
 
-Once the per-cell key hierarchy, the locked access record, the tenant access log and the admin-tier presence check are in force for the cell, these become claimable:
-- every deliberate access path is recorded where the operator cannot erase it, and is shown to the tenant;
-- the cell's data is encrypted under keys for that cell alone, and deleting the cell destroys them.
+Once the per-cell key hierarchy, the access record, the tenant access log and the admin tier are in force for the cell, these become claimable:
+- routine and deploy credentials cannot reach content;
+- reaching content needs the operator's physical presence;
+- access through the cluster API and node logins is recorded off the server, where received events cannot be erased, and is shown to the tenant;
+- the cell's data is encrypted under keys for that cell alone;
+- deleting the cell destroys those keys, and copies in platform backups expire by the date shown.
 
-For a cell in tenant-locked mode, this also becomes claimable: stored data and backups cannot be decrypted without the tenant's key.
+For a cell in tenant-locked mode, this becomes claimable from `lock_complete_at`: stored data and backups cannot be decrypted without the tenant's key.
 
 The descriptions SHALL also disclose that:
 - the edge and the gateway see requests and responses in transit;
 - in standard mode, the operator holds the cell's keys on the serving infrastructure and could deliberately read content;
+- root on a node can suppress or forge events before they leave it, so the record shows what it received, not everything that happened;
+- the provider account owner can regain control of a server through the provider console;
 - in tenant-locked mode, while the cell is unlocked, a deliberate attack on the node that runs it can still reach its content;
 - in tenant-locked mode, losing both the recovery code and every passkey loses the vault.
 
-They SHALL NOT claim that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation.
+They SHALL NOT claim:
+- that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation;
+- that the access record is complete.
 
 #### Scenario: Privacy copy review
 
 - **WHEN** Cloud privacy copy is published or changed
-- **THEN** every claim maps to a property in force for the cells it describes, every disclosure for those cells' modes is present, and none says the operator cannot access tenant data
+- **THEN** every claim maps to a property in force for the cells it describes, and every disclosure for those cells' modes is present
+- **AND** no claim says that the operator cannot access tenant data, or that the record holds every access
 
 #### Scenario: Claim made before its mechanism ships
 
-- **WHEN** copy claims that every access is shown to the tenant, while the tenant access log does not yet run in production
+- **WHEN** copy claims that access is shown to the tenant, while the tenant access log does not yet run in production
 - **THEN** the copy review rejects the claim
 
 ## ADDED Requirements
 
-### Requirement: Operator access is recorded where the operator cannot erase it
+### Requirement: The access record retains what its sources submit
 
-The platform SHALL ship these events off the serving node to a locked access record within five minutes:
+The platform SHALL ship these events off the serving node to an access record within five minutes:
 - the cluster audit events for exec, attach, port-forward, proxy and ephemeral containers;
 - Secret reads;
 - every create, update or delete of RBAC objects, admission policies and their bindings;
 - certificate signing requests;
 - node session events: logins with their key or certificate identity, privilege escalation and session end.
 
-The locked access record SHALL be object storage whose object versions nobody can delete or shorten before a configured retention of at least one year. The credential on the nodes SHALL be able to write to it, but not to delete. The shipper SHALL write a heartbeat at a configured interval, and a missing heartbeat SHALL count as a gap. The record SHALL NOT contain Secret values or vault content.
+The access record SHALL be object storage whose object versions no user can delete or shorten before a configured retention of at least one year. The credential on the nodes SHALL be able to write to it, but not to delete. The shipper SHALL write a heartbeat at a configured interval, and a missing heartbeat SHALL count as a gap. The record SHALL NOT contain Secret values or vault content.
+
+The record proves that a received event exists and when the shipper went silent. It SHALL NOT be described as complete. Root on a node can omit, alter or forge events before they leave it.
 
 #### Scenario: Break-glass use is recorded off the node
 
 - **WHEN** the break-glass identity reads a Secret
-- **THEN** the event is in the locked access record within five minutes
+- **THEN** the event is in the access record within five minutes
 
 #### Scenario: Erasing the record
 
-- **WHEN** any credential, including the account owner's, tries to delete or shorten a record object within its retention
+- **WHEN** any user credential, including the account owner's, tries to delete or shorten a record object within its retention
 - **THEN** the storage provider refuses
 
 #### Scenario: Shipper stopped
@@ -138,24 +171,30 @@ The locked access record SHALL be object storage whose object versions nobody ca
 - **WHEN** the shipper stops for longer than its heartbeat interval
 - **THEN** the record shows a gap for that period
 
-### Requirement: Tenants see every operator access to their cell
+### Requirement: Tenants see the operator access the record received
 
-Each cell SHALL show its tenant an access log derived from the locked access record, within ten minutes of each event. The log SHALL list:
-- every connect-subresource or Secret event in the cell's namespace;
-- every node session on the node that hosts the cell;
+The platform SHALL derive each cell's access log from the access record into the control database. The control plane SHALL serve it, including while the cell is locked or stopped. Entries SHALL appear within ten minutes of receipt. The log SHALL list:
+- every received connect-subresource or Secret event in the cell's namespace;
+- every received node session on the node that hosted the cell at that time;
 - every break-glass credential issued while the cell ran;
+- every image or configuration change to the component that derives the log;
 - every gap in the record.
 
-Each entry SHALL give time, identity tier, action, target and any stated reason, and SHALL NOT contain vault content.
+Each entry SHALL give time, identity tier, action, target and any stated reason. It SHALL NOT contain vault content, and it SHALL render every field as text. The log SHALL state that it lists what the record received.
 
 #### Scenario: Break-glass exec into a tenant's cell
 
 - **WHEN** the operator opens a break-glass exec session in a tenant's cell namespace
-- **THEN** that tenant's access log shows the session within ten minutes, with time, tier, target and reason
+- **THEN** that tenant's access log shows the session within ten minutes, with time, tier, target and reason, and another tenant's log does not show it
+
+#### Scenario: Locked cell's access log
+
+- **WHEN** a tenant opens the access log of their locked or stopped cell
+- **THEN** the control plane serves it
 
 #### Scenario: Record gap
 
-- **WHEN** the locked access record has a gap while a cell runs
+- **WHEN** the access record has a gap while a cell runs
 - **THEN** that cell's access log shows the gap as a gap, not as an access
 
 ### Requirement: Deploys cannot reach tenant content
@@ -164,12 +203,17 @@ A deploy identity SHALL be able to change only container image fields:
 - of cells, through cellctl release attempts;
 - of named platform workloads.
 
-Each image SHALL be a digest in the release registry. Admission SHALL deny any other change by this identity. The identity SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers. It SHALL NOT be able to change RBAC, admission policies, volumes or Secrets. A platform change outside an image-only update SHALL require the admin tier.
+Admission SHALL accept an image only when it carries a GitHub artifact attestation signed by this repository's release workflow on a release ref, for that workload's image family. Admission SHALL deny any other change by this identity. The identity SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers. It SHALL NOT be able to change RBAC, admission policies, volumes or Secrets. A platform change outside an attested image-only update SHALL require the admin tier.
 
-#### Scenario: Image rollout
+#### Scenario: Attested image rollout
 
-- **WHEN** the deploy identity sets a named platform workload's image to a release-registry digest
+- **WHEN** the deploy identity sets a named platform workload's image to a digest that the release workflow attested for that workload's image family
 - **THEN** admission permits the change
+
+#### Scenario: Image pushed outside the release workflow
+
+- **WHEN** the deploy identity sets a workload's image to a registry digest with no release-workflow attestation, or to an attestation for another image family
+- **THEN** admission denies the change
 
 #### Scenario: Deploy identity widens its access
 
