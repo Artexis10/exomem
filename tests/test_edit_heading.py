@@ -192,6 +192,19 @@ def test_a_heading_inside_a_code_fence_is_not_a_section(
     assert text.index("```\n## Relations\n```") < text.rindex("## Relations")
 
 
+def test_section_edit_keeps_a_shorter_fence_inside_a_longer_fence(vault) -> None:
+    """A fenced heading cannot take the edit intended for the visible section."""
+    body = (
+        "# Page\n\n````markdown\n```\n## Relations\ncode content\n````\n\n"
+        "## Relations\n\nvisible content\n"
+    )
+    changed, _warnings = edit_module.apply_section_edit(
+        body, "Relations", "append", "Added content.", vault, create_missing=False,
+    )
+    assert "## Relations\ncode content\n````" in changed
+    assert changed.index("visible content") < changed.index("Added content.")
+
+
 def test_a_fenced_hash_line_does_not_end_the_section_it_sits_in(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

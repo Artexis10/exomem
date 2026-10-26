@@ -1078,23 +1078,14 @@ def _missing_semantic_unit_finding(page: SemanticPageState) -> ContractFinding |
 def _copy_definition(
     definition: relation_registry.RelationDefinition,
 ) -> relation_registry.RelationDefinition:
-    return relation_registry.RelationDefinition(
-        key=definition.key,
-        description=definition.description,
-        family=definition.family,
-        direction=definition.direction,
-        parent=definition.parent,
-        inverse=definition.inverse,
+    return replace(
+        definition,
         origins=frozenset(definition.origins),
         aliases=tuple(definition.aliases),
         source_kinds=frozenset(definition.source_kinds),
         target_kinds=frozenset(definition.target_kinds),
         projects=frozenset(definition.projects),
         page_types=frozenset(definition.page_types),
-        status=definition.status,
-        replaced_by=definition.replaced_by,
-        core=definition.core,
-        generic=definition.generic,
     )
 
 

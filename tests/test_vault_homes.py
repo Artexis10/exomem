@@ -526,3 +526,42 @@ def test_index_drift_reports_a_stale_home_count(vault: Path) -> None:
         details = [f.detail for f in audit.audit(vault, categories=["index_drift"]).findings]
 
     assert any("notes:equipment" in detail and "actual is 1" in detail for detail in details), details
+
+
+def test_a_pending_note_in_a_nested_home_does_not_reduce_the_parent_count(vault: Path) -> None:
+    _save(vault, {"workshop": {
+        "label": "Workshop", "attributes": {
+            "folder": "Notes/Research/Workshop", "topics": ["equipment"],
+        },
+    }})
+    _remember(vault, title="Nested pump", note_type="insight", topics=["equipment"])
+
+    top = (vault / KB / "index.md").read_text(encoding="utf-8")
+    assert "- Notes (research): 4\n" in top
+    assert "- Notes: 17\n" in top
+    with library_scope():
+        assert audit.audit(vault, categories=["index_drift"]).findings == []
+
+
+def test_deep_home_counts_do_not_depend_on_registry_key_order(vault: Path) -> None:
+    from exomem import homes, indexes
+
+    _save(vault, {
+        "z-parent": {"label": "Workshop", "attributes": {
+            "folder": "Notes/Workshop", "topics": ["equipment"],
+        }},
+        "b-middle": {"label": "Pumps", "attributes": {
+            "folder": "Notes/Workshop/Pumps", "topics": ["pumps"],
+        }},
+        "a-child": {"label": "Seals", "attributes": {
+            "folder": "Notes/Workshop/Pumps/Seals", "topics": ["seals"],
+        }},
+    })
+    _remember(vault, title="Pump seal", note_type="insight", topics=["seals"])
+
+    counts = indexes._count_notes(vault / KB / "Notes", home_set=homes.load(vault))
+    assert counts["z-parent"] == counts["b-middle"] == 0
+    assert counts["a-child"] == 1
+    assert sum(counts.values()) == 17
+    with library_scope():
+        assert audit.audit(vault, categories=["index_drift"]).findings == []

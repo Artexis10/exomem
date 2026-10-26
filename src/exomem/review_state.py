@@ -7,7 +7,8 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -558,6 +559,20 @@ class ReviewStateStore:
         self.vault_root = Path(vault_root)
         self.path = state_path(vault_root)
 
+    @contextmanager
+    def locked(self, *, timeout_seconds: float = 5.0) -> Iterator[None]:
+        """Serialize whole-file updates across processes with the existing coordinator."""
+        from . import mutation_lock, state_paths
+
+        coordinator = mutation_lock.VaultMutationCoordinator(
+            state_paths.state_store_root(), f"review-state:{self.path}",
+        )
+        with coordinator.hold(
+            timeout_seconds=timeout_seconds, operation="review-state", holder_kind="reserved-state",
+            publish_holder_metadata=False,
+        ), _LOCK:
+            yield
+
     def load(self, *, read_limit: int | None = None) -> dict[str, Any]:
         """The store, or an empty one when the file is absent.
 
@@ -664,7 +679,7 @@ class ReviewStateStore:
         moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
         timestamp = _stamp(moment)
         reason, verbatim = parse_reason(why)
-        with _LOCK:
+        with self.locked():
             payload = self.load()
             records = payload["records"]
             if action == "reopen":
@@ -713,12 +728,10 @@ class ReviewStateStore:
     def edit_promotions(self, edit: Callable[[dict[str, Any]], Any]) -> Any:
         """Run `edit` on the promotions ledger under the store lock and publish the result.
 
-        The ledger is one section of this file, so a ledger write rewrites the
-        whole file exactly as a decision write does and carries the same
-        cross-process caveat (`record_surfaced`).  `edit` must not call back
-        into the store.
+        The lock spans loading and publication, so another process cannot erase
+        source facts or standing decisions. `edit` must not call back into the store.
         """
-        with _LOCK:
+        with self.locked():
             payload = self.load()
             result = edit(payload["promotions"])
             self._write(payload, vocabulary_refs=(), vocabulary_families=())
@@ -757,7 +770,7 @@ class ReviewStateStore:
             )
         moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
         timestamp = _stamp(moment)
-        with _LOCK:
+        with self.locked():
             payload = self.load()
             dispositions = payload["dispositions"]
             from .vocabulary_notifications import PROJECTION_FAMILIES
@@ -838,7 +851,7 @@ class ReviewStateStore:
             return None
         moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
         timestamp = _stamp(moment)
-        with _LOCK:
+        with self.locked():
             payload = self.load()
             if not _quiet_offer_due(payload, family):
                 return None
@@ -894,7 +907,7 @@ class ReviewStateStore:
         and a ledger entry nothing is waiting on.
         """
         moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
-        with _LOCK:
+        with self.locked():
             payload = self.load(read_limit=read_limit)
             report = _compact_payload(payload, now=moment)
             if force or any(report["dropped"].values()) or any(report.get("updated", {}).values()):
@@ -1307,15 +1320,10 @@ def record_surfaced(
     caller still gets a value to annotate with — the timestamp is what this
     pass observed, which is the honest answer when nothing can be persisted.
 
-    Concurrency, stated rather than implied. `_LOCK` is in-process; the file is
-    a whole-file rewrite, so two PROCESSES writing it in the same instant can
-    lose one of the writes. That race is the pre-existing one every decision
-    write has always had, and this function does not close it. What it does do
-    is stay out of it: `known=` makes the steady state — a signal that keeps
-    resurfacing — cost no write at all, so the window is opened only by a
-    genuine first surfacing, and what is at risk is one ledger row that the
-    next surfacing re-adds. A file lock here would put cross-process contention
-    on a read surface's latency budget to protect a best-effort measurement.
+    Whole-file publication shares the process lock with standing decisions and
+    promotions. This best-effort measurement never waits for that lock: a busy
+    writer leaves it for a later surfacing. `known=` avoids even an acquisition
+    when every signal is already recorded.
     """
     if surface not in SURFACES:
         raise ValueError(f"INVALID_SURFACE: surface must be one of {list(SURFACES)}")
@@ -1343,8 +1351,10 @@ def record_surfaced(
         if cached is not None and families_current:
             return (cached, True) if return_success else cached
     store = ReviewStateStore(vault_root)
+    from .cli_ops import OpError
+
     try:
-        with _LOCK:
+        with store.locked(timeout_seconds=0):
             payload = store.load()
             ledger = payload["surfaced"]
             added = False
@@ -1371,7 +1381,7 @@ def record_surfaced(
                 added = True
             if added:
                 store._write(payload, vocabulary_refs=(), vocabulary_families=())
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, OpError) as error:
         log.debug("first-surfaced ledger not recorded: %s", error)
         for review_id, fingerprint in pairs:
             stamps.setdefault(_record_key(review_id, fingerprint), timestamp)

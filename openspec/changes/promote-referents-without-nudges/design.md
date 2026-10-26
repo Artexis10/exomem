@@ -335,7 +335,10 @@ Note-to-note edges have no target, and no metric refuses a write.
 2. File the revised amendment and independent source-derived cases before building PR B; preserve the held-out set.
 3. Run the permitted development rounds, then the acknowledged final comparison; record the decision and release only an accepted batch.
 4. Deliver the remaining note-type, root and Studio work in the approved order; keep the sensor follow-on gated on its readings ledger.
-5. For rollback, reinstall the previous release; retained history and overlay tolerance preserve existing pages and registry additions.
+5. Before rollback, move homed pages to their type folders if the previous writer must edit them.
+6. Reinstall the previous release; retained history and overlay tolerance preserve pages and registry additions.
+
+The previous writer can move a homed page to its type folder, but it refuses edits while the page remains in the home.
 
 ## Rulings (owner delegate, 2026-10-10)
 

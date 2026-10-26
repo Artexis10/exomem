@@ -146,7 +146,7 @@ class VocabularyState:
     ) -> Any:
         # Use the owner's existing lock and publication gate; a parallel review
         # disposition must not be overwritten by a vocabulary update.
-        with review_state._LOCK:
+        with self.store.locked():
             payload = self.store.load()
             if validator is not None:
                 validator(payload)
@@ -567,7 +567,7 @@ class VocabularyState:
         from .vocabulary_notifications import reconcile_legacy
 
         notifications = reconcile_legacy(self.store.vault_root)
-        with review_state._LOCK:
+        with self.store.locked():
             payload = self.store.load(
                 read_limit=review_state.recovery_read_limit() if read_limit is None else read_limit
             )

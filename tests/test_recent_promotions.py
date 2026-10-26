@@ -96,6 +96,31 @@ def test_the_creating_session_does_not_spend_its_own_notice(
     assert _count(vault) == 1
 
 
+@pytest.mark.parametrize("obligation_kind", ["source-backlog", "authored"])
+def test_obligations_cannot_starve_the_once_delivered_promotion_notice(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, obligation_kind: str,
+) -> None:
+    from test_due_state_projection import _prediction
+    from test_source_backlog_projection import _import_sources
+
+    if obligation_kind == "source-backlog":
+        _import_sources(vault, due_state_module.TOP_LIMIT)
+    else:
+        for ordinal in range(due_state_module.TOP_LIMIT):
+            _prediction(vault, f"forecast-{ordinal}", check_by="2026-01-01")
+    due_state_module.reconcile(vault)
+    _as(monkeypatch, "creator")
+    _create_entity(vault)
+
+    _as(monkeypatch, "reader")
+    block = due_state_module.served(vault)
+    assert block is not None
+    assert any(row["category"] == CATEGORY for row in block["top"])
+    due_state_module.mark_emitted(block, vault_root=vault)
+    _as(monkeypatch, "later-reader")
+    assert _count(vault) == 0, "the visible notice was delivered despite the outstanding work"
+
+
 # --------------------------------------------------------------------------- #
 # What counts as a promotion
 # --------------------------------------------------------------------------- #
@@ -170,6 +195,71 @@ def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
 
     _as(monkeypatch, "session-b")
     assert _count(vault) == 1
+
+
+def _record_after_loading(vault: Path, loaded, finish) -> None:
+    from exomem import review_state
+    from exomem.governance.principal import library_scope
+
+    original = review_state.ReviewStateStore.load
+
+    def paused_load(store, **kwargs):
+        payload = original(store, **kwargs)
+        loaded.set()
+        assert finish.wait(10)
+        return payload
+
+    review_state.ReviewStateStore.load = paused_load
+    with library_scope():
+        assert promotions.record(vault, "entity", [{"path": "second.md"}], write="second")
+
+
+def _settle_from_another_process(vault: Path, promotion_id: str, started, finished) -> None:
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        started.set()
+        promotions.settle(vault, promotion_id, "settled by delivery")
+        finished.set()
+
+
+def test_another_process_record_cannot_erase_a_persisted_settlement(vault: Path) -> None:
+    """Concurrent source recording must preserve the user's existing dismissal."""
+    import multiprocessing
+
+    from exomem import review_state
+
+    first = promotions.record(vault, "entity", [{"path": "first.md"}], write="first")
+    assert first is not None
+    context = multiprocessing.get_context("spawn")
+    loaded, finish, started, finished = (context.Event() for _ in range(4))
+    recorder = context.Process(target=_record_after_loading, args=(vault, loaded, finish))
+    settler = context.Process(
+        target=_settle_from_another_process, args=(vault, first, started, finished),
+    )
+    recorder.start()
+    try:
+        assert loaded.wait(10)
+        settler.start()
+        assert started.wait(10)
+        # Reproduce the old overwrite if settlement can commit against the paused preimage.
+        finished.wait(1)
+        finish.set()
+        recorder.join(10)
+        settler.join(10)
+        assert recorder.exitcode == settler.exitcode == 0
+        store = review_state.ReviewStateStore(vault)
+        assert len(store.load()["promotions"]) == 2
+        state, _decision = store.effective_state(first, promotions.identity_fingerprint(first))
+        assert state == "dismissed"
+    finally:
+        finish.set()
+        for process in (recorder, settler):
+            if process.pid is not None:
+                process.join(10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join()
 
 
 def test_a_vault_that_withholds_the_pages_counts_nothing_for_a_restricted_audience(

@@ -32,14 +32,12 @@ class GraphProvenance:
     relation_label: str | None = None
 
     def as_dict(self) -> dict[str, str | None]:
-        out = {
+        return {
             "relation_type": self.relation_type,
+            "relation_label": self.relation_label,
             "direction": self.direction,
             "seed": self.seed,
         }
-        if self.relation_label is not None:
-            out["relation_label"] = self.relation_label
-        return out
 
 
 @dataclass

@@ -121,7 +121,7 @@ class RevertPlan:
     trash: tuple[str, ...]
     #: Inbound links from pages the revert does not change, named in the fingerprint.
     dependants: tuple[dict[str, Any], ...]
-    #: Pages whose links die with the revert: not dependants, and not a reason to refuse the trash.
+    #: Pages with removed own-write links, plus the origin; admitted by the trash preflight.
     dying: tuple[str, ...]
     #: `curation.plan_fingerprint` of the revert plan; None when nothing is left to revert.
     fingerprint: str | None
@@ -177,6 +177,21 @@ def _inbound(vault_root: Path, path: str) -> list[dict[str, Any]]:
     ]
 
 
+def _removed_edge_lines(
+    vault_root: Path, edges: list[dict[str, Any]], resolve: Any,
+) -> set[tuple[str, int]]:
+    """Only the relation bullet lines the revert removes, in full-page coordinates."""
+    selected = {(edge["subject"], edge["predicate"], edge["target"]) for edge in edges}
+    return {
+        (path, line + 1)
+        for path in {edge["subject"] for edge in edges}
+        for line, predicate, target in promotions.authored_edges(
+            vault_root, (Path(vault_root) / path).read_text(encoding="utf-8"), resolve,
+        )
+        if (path, predicate, target) in selected
+    }
+
+
 def build(vault_root: Path, ref: str) -> RevertPlan:
     """The deterministic revert plan of an edge or entity entry, from current state. Read-only."""
     from .vault import content_hash
@@ -202,12 +217,13 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
         trash = sorted(subject["path"] for subject in holding)
         edges = _own_edges(vault_root, entry, set(trash), resolve)
         dying = {edge["subject"] for edge in edges}
+        removed_lines = _removed_edge_lines(vault_root, edges, resolve)
         origin = (entry.get("origin") or {}).get("path")
         seen: set[tuple[str, int]] = set()
         for path in trash:
             for link in _inbound(vault_root, path):
                 key = (link["path"], link["line"])
-                if link["path"] in {*trash, *dying, origin} or key in seen:
+                if link["path"] in {*trash, origin} or key in removed_lines or key in seen:
                     continue
                 seen.add(key)
                 dependants.append(link)

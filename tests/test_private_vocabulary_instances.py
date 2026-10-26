@@ -44,6 +44,67 @@ def private_instances(configured_boundary, vault):
     return authenticate
 
 
+@pytest.mark.parametrize("include_public_subject", [False, True])
+def test_private_promotion_is_admitted_before_count_read_or_settlement(
+    private_instances, vault, monkeypatch, include_public_subject,
+):
+    """A limited client cannot discover or consume a private registry notice."""
+    from exomem import command_surface, commands, due_state, promotions, review_state
+    from exomem.governance.principal import request_scope
+
+    monkeypatch.setattr(command_surface, "mcp_caller_identity", lambda: {"session_id": "creator"})
+    monkeypatch.setattr(promotions, "write_token", lambda: "one-originating-bulk-write")
+    with request_scope(private_instances("full")):
+        inspected = commands.op_schema_memory(
+            vault, "inspect", subject="entity-types", registry_scope=SCOPE,
+        )
+        saved = commands.op_schema_memory(
+            vault, "save", subject="entity-types", registry_scope=SCOPE,
+            expected_hash=inspected["content_hash"], why="Add a private meeting place type.",
+            proposal={"upsert": {"venue": {
+                "label": "Venue", "guidance": "A meeting place.", "parent": "concept",
+                "attributes": {"folder": "Venues"},
+            }}},
+        )
+        assert saved["valid"], saved
+        if include_public_subject:
+            inspected_public = commands.op_schema_memory(vault, "inspect", subject="entity-types")
+            saved_public = commands.op_schema_memory(
+                vault, "save", subject="entity-types", expected_hash=inspected_public["content_hash"],
+                why="Add a public meeting place type in the same write.",
+                proposal={"upsert": {"venue": {
+                    "label": "Venue", "guidance": "A meeting place.", "parent": "concept",
+                    "attributes": {"folder": "Venues"},
+                }}},
+            )
+            assert saved_public["valid"], saved_public
+        promotion_id = next(
+            key for key, row in review_state.ReviewStateStore(vault).load()["promotions"].items()
+            if row["kind"] == "registry"
+        )
+        ref = promotions.promotion_ref(promotion_id)
+        assert promotions.served_rows(vault, principal=private_instances("limited")) == []
+
+    monkeypatch.setattr(command_surface, "mcp_caller_identity", lambda: {"session_id": "reader"})
+    with request_scope(private_instances("limited")):
+        block = due_state.served(vault)
+        assert ((block or {}).get("categories") or {}).get(promotions.FAMILY, 0) == 0
+        with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+            commands.op_review_item_context(vault, ref)
+        with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+            commands.op_triage_memory(
+                vault, ref=ref, action="dismiss",
+                expected_fingerprint=promotions.identity_fingerprint(promotion_id),
+            )
+        promotions.settle_delivered(vault, [{"category": promotions.FAMILY, "ref": ref}])
+
+    with request_scope(private_instances("full")):
+        assert [row["ref"] for row in promotions.served_rows(vault)] == [ref]
+        assert commands.op_review_item_context(vault, ref)["ref"] == ref
+        promotions.settle_delivered(vault, [{"category": promotions.FAMILY, "ref": ref}])
+        assert promotions.served_rows(vault) == []
+
+
 def test_catalogue_ranking_keeps_the_page_selected_status_instance(
     private_instances, vault, warm_managed_cell, monkeypatch
 ):

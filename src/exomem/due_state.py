@@ -4046,10 +4046,13 @@ def served(
     promoted = promotions_module.served_rows(
         vault_root, principal=principal, purpose=purpose, today=today
     )
-    # A new family leads; other notices follow authored obligations.
+    # Reserve one bounded display slot for promotion delivery; backlog cannot starve it.
     leading = [row for row in promoted if row.get("new_family")]
     trailing = [row for row in promoted if not row.get("new_family")]
-    rows = [*leading, *rows, *trailing]
+    authored = [row for row in rows if row["category"] != SOURCE_BACKLOG]
+    backlog = [row for row in rows if row["category"] == SOURCE_BACKLOG]
+    before_notice = max(0, TOP_LIMIT - len(leading) - bool(trailing))
+    rows = [*leading, *authored[:before_notice], *trailing, *authored[before_notice:], *backlog]
     if not rows:
         return None
     result = block(rows) or {"total": 0, "categories": {}, "top": []}

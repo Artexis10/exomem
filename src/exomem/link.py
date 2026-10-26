@@ -28,6 +28,7 @@ from . import (
     origin_bindings,
     promotions,
     provenance,
+    relation_registry,
     semantic_writes,
     tag_variants,
     temporal,
@@ -890,7 +891,8 @@ def link(
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
     connections_norm, connection_warnings = _normalize_connections(
-        connections, vault_root=vault_root, resolver=resolver, bullet_kind="relates_to"
+        connections, vault_root=vault_root, resolver=resolver,
+        bullet_kind=relation_registry.generic_relation_key(),
     )
     relation_pairs, relation_warnings = _normalize_relations(
         relations, vault_root=vault_root, resolver=resolver

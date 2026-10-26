@@ -285,22 +285,13 @@ def _count_notes(notes_dir: Path, *, home_set: homes.HomeSet | None = None) -> d
     if not notes_dir.is_dir():
         return out
     owners = _notes_owners(home_set)
-    by_name = {owner.parts[0].casefold(): owner for owner in owners if len(owner.parts) == 1}
-    for sub in notes_dir.iterdir():
-        if not sub.is_dir() or sub.name.startswith("_"):
-            continue
-        owner = by_name.get(sub.name.casefold())
-        if owner is None:
-            continue  # unknown top-level folder under Notes/; ignore
-        out[owner.token] = _count_markdown_pages(sub)
-    for owner in owners:
-        if len(owner.parts) < 2:
-            continue
-        nested = notes_dir.joinpath(*owner.parts)
-        if not nested.is_dir():
-            continue
-        pages = _count_markdown_pages(nested)
-        out[owner.token] = out.get(owner.token, 0) + pages
+    inclusive = [
+        (owner, _count_markdown_pages(notes_dir.joinpath(*owner.parts)))
+        for owner in owners
+        if notes_dir.joinpath(*owner.parts).is_dir()
+    ]
+    out = {owner.token: pages for owner, pages in inclusive}
+    for owner, pages in inclusive:
         enclosing = _owner_of(tuple(o for o in owners if o is not owner), owner.parts[:-1])
         if enclosing is not None and enclosing.token in out:
             out[enclosing.token] -= pages
@@ -872,11 +863,6 @@ def compute_subindex_writes(
             owner = _owner_of(notes_owners, tuple(parts[1:-1]))
             if owner is not None:
                 notes_counts[owner.token] = notes_counts.get(owner.token, 0) + 1
-                enclosing = _owner_of(
-                    tuple(o for o in notes_owners if o is not owner), tuple(owner.parts[:-1])
-                )
-                if enclosing is not None and enclosing.token in notes_counts:
-                    notes_counts[enclosing.token] -= 1
             # A folder with sub-folders counts a page under its own; a flat one under "".
             inner = notes_by_subfolder.setdefault(type_folder, {})
             sub = parts[2] if len(parts) >= 4 else ""

@@ -7,6 +7,8 @@ When the label is absent, a core relation's label SHALL be its key, and an exten
 One registry formatter SHALL render a core relation as its label and an extension as `<label> (a kind of <parent label>)`.
 It SHALL add the namespace only when two active entries share a label, and SHALL mark a deprecated entry.
 Every response that emits a relation key SHALL also emit `relation_label` from that formatter, and prose renderings SHALL use the label.
+When a stored projection lacks admitted presentation evidence for an extension, `relation_label` SHALL be null.
+The producer SHALL NOT load an unrelated registry overlay to guess that label.
 Every existing key field SHALL keep the namespaced key as the machine identity, and a label SHALL resolve as an alias in calls.
 
 #### Scenario: An extension reads as a kind of its parent

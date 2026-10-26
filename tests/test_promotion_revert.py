@@ -222,8 +222,17 @@ def test_an_entity_revert_removes_the_edges_of_its_own_write_and_no_other_edge(
     _as(monkeypatch, "session-b")
     context = _context(vault, entity_ref)
     assert [link["path"] for link in context["dependants"]] == [other], "only the other write's edge is named"
+    _link_from(vault, kept, entity)
+    with pytest.raises(ValueError, match="CURATION_PLAN_IDENTITY_MISMATCH"):
+        _revert(vault, entity_ref, context["revert_fingerprint"])
+    context = _context(vault, entity_ref)
+    assert [link["path"] for link in context["dependants"]] == [kept, other], (
+        "the prose link survives removing the own-write edge and must be reviewed"
+    )
     _revert(vault, entity_ref, context["revert_fingerprint"])
 
     assert not (vault / entity).exists()
-    assert f"[[{stem}]]" not in (vault / kept).read_text(encoding="utf-8"), "the write's own edge went"
+    kept_text = (vault / kept).read_text(encoding="utf-8")
+    assert f"- supports [[{stem}]]" not in kept_text, "the write's own edge went"
+    assert f"See also [[{stem}]]" in kept_text, "the reviewed prose link stayed"
     assert f"[[{stem}]]" in (vault / other).read_text(encoding="utf-8"), "another write's edge stayed"

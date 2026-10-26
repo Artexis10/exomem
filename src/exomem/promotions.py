@@ -392,6 +392,24 @@ def subject_pages(kind: str, subject: Mapping[str, Any]) -> list[str]:
     return []
 
 
+def subject_visible(
+    vault_root: Path, kind: str, subject: Mapping[str, Any],
+    keep: Callable[[str], bool] | None,
+) -> bool:
+    """Admit registry definitions or page endpoints before examining a promotion."""
+    if kind == "registry":
+        from .vocabulary import contract, instances, registry_spec
+
+        try:
+            spec = instances.select(
+                vault_root, registry_spec(str(subject["registry"])), subject.get("scope"),
+            )
+            return contract.admission_refusal(vault_root, spec) is None
+        except Exception:  # noqa: BLE001 - an unavailable instance is withheld
+            return False
+    return all(keep is None or keep(page) for page in subject_pages(kind, subject))
+
+
 # --------------------------------------------------------------------------- #
 # Serving
 # --------------------------------------------------------------------------- #
@@ -438,7 +456,7 @@ def ledger(vault_root: Path) -> dict[str, dict[str, Any]]:
 
 
 def find(vault_root: Path, ref: str) -> tuple[str, dict[str, Any]]:
-    """The entry for `ref` with only the subjects this caller may see.
+    """The entry for `ref` only when this caller may see all its subjects.
 
     An entry that never existed and one every page of which is withheld raise
     the same `REVIEW_ITEM_NOT_FOUND`, so the refusal says nothing about a page.
@@ -447,13 +465,14 @@ def find(vault_root: Path, ref: str) -> tuple[str, dict[str, Any]]:
     payload = _view(vault_root)
     entry = dict(payload.get("promotions", {}).get(promotion_id) or {}) if payload else {}
     kind = str(entry.get("kind") or "")
-    visible = [
-        subject for subject in entry.get("subjects") or []
-        if all(page_visible(vault_root, page) for page in subject_pages(kind, subject))
-    ]
-    if not visible:
+    subjects = entry.get("subjects") or []
+    # A notice is one write: a partial view must not let a client settle unseen subjects.
+    if not subjects or not all(
+        subject_visible(vault_root, kind, subject, lambda page: page_visible(vault_root, page))
+        for subject in subjects
+    ):
         raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no recent promotion for {ref}")
-    return promotion_id, {**entry, "subjects": visible}
+    return promotion_id, entry
 
 
 def settle(vault_root: Path, promotion_id: str, why: str) -> None:
@@ -501,6 +520,7 @@ def served_rows(
     if not open_entries:
         return []
     from .governance import egress as egress_module
+    from .governance.principal import effective_principal, request_scope
 
     try:
         keep = egress_module.release_walk_filter(
@@ -513,15 +533,15 @@ def served_rows(
     rows: list[dict[str, Any]] = []
     for promotion_id, entry in open_entries:
         kind = str(entry.get("kind") or "")
-        holding = [s for s in entry["subjects"] if subject_holds(vault_root, kind, s, resolve)]
+        with request_scope((principal or effective_principal()).with_purpose(purpose)):
+            visible = [
+                s for s in entry["subjects"] if subject_visible(vault_root, kind, s, keep)
+            ]
+        if len(visible) != len(entry["subjects"]) or not visible:
+            continue
+        holding = [s for s in visible if subject_holds(vault_root, kind, s, resolve)]
         if not holding:
             settle(vault_root, promotion_id, "settled by state: the promotion no longer holds")
-            continue
-        visible = [
-            s for s in holding
-            if keep is None or all(keep(page) for page in subject_pages(kind, s))
-        ]
-        if not visible:
             continue
         rows.append({
             "category": FAMILY,
@@ -546,12 +566,17 @@ def settle_delivered(vault_root: Path, delivered: list[Mapping[str, Any]]) -> No
     payload = _view(vault_root)
     if payload is None:
         return
-    created = {key: row.get("creator") for key, row in _entries(payload)}
+    entries = dict(_entries(payload))
     for row in delivered:
         if row.get("category") != FAMILY:
             continue
         promotion_id = str(row.get("ref") or "").rsplit("/", 1)[-1]
-        if promotion_id in created and created[promotion_id] != me:
+        entry = entries.get(promotion_id)
+        if entry is not None and entry.get("creator") != me:
+            try:
+                find(vault_root, promotion_ref(promotion_id))
+            except ValueError:
+                continue
             settle(vault_root, promotion_id, "settled by delivery to another conversation")
 
 
@@ -575,7 +600,7 @@ def triage(
         raise ValueError(
             "INVALID_REVIEW_ACTION: a recent promotion accepts dismiss, snooze, or reopen"
         )
-    promotion_id = parse_promotion_ref(ref)
+    promotion_id, _entry = find(vault_root, ref)
     if normalized != "reopen" and not expected_fingerprint:
         raise ValueError(
             "INVALID_REVIEW_ACTION: a recent promotion's dismiss or snooze requires the "
