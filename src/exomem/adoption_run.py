@@ -264,6 +264,8 @@ class AdoptionRunStore:
         except FileNotFoundError:
             folders = []
         except OSError:
+            if scope is None:
+                raise
             folders, complete = [], False
         for folder in folders:
             try:
@@ -295,9 +297,10 @@ class AdoptionRunStore:
                 continue
             for original, outcome in outcomes.items():
                 original_path = _status_path(original)
+                # Apply's writers define these fixed protocol states, not vault vocabulary.
                 if (
                     original_path is None or not isinstance(outcome, dict)
-                    or not isinstance(outcome.get("status"), str)
+                    or outcome.get("status") not in (*_APPLIED_STATUSES, _SOURCE_ONLY, "failed")
                 ):
                     complete = False
                 elif original_path.is_relative_to(scope) and outcome.get("status") in _APPLIED_STATUSES:

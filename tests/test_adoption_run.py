@@ -114,6 +114,7 @@ def test_scoped_status_counts_distinct_filed_originals_across_intersecting_runs(
     '{"source_root": "../outside", "outcomes": {}}',
     '{"source_root": "_Imports/batch", "outcomes": null}',
     '{"source_root": "_Imports/batch", "outcomes": {"_Imports/batch/a.md": null}}',
+    '{"source_root": "_Imports/batch", "outcomes": {"_Imports/batch/a.md": {"status": "unknown"}}}',
     None,
 ])
 def test_scoped_status_never_reports_a_partial_count_as_zero(
@@ -140,6 +141,26 @@ def test_scoped_status_has_a_complete_zero_before_any_adoption(tmp_path: Path) -
     scoped = adoption_run.status(tmp_path, path=".")
     assert scoped["adopted_files"] == 0
     assert scoped["complete"] is True
+
+
+def test_run_directory_read_failure_stays_visible_to_legacy_and_scoped_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = adoption_run.AdoptionRunStore(tmp_path)
+    store.base.mkdir(parents=True)
+    iterdir = Path.iterdir
+
+    def unreadable(folder: Path):
+        if folder == store.base:
+            raise PermissionError("cannot read adoption runs")
+        return iterdir(folder)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable)
+    with pytest.raises(PermissionError, match="cannot read adoption runs"):
+        adoption_run.status(tmp_path)
+    scoped = adoption_run.status(tmp_path, path="_Imports/batch")
+    assert scoped["adopted_files"] is None
+    assert scoped["complete"] is False
 
 
 # --- 1 ---
