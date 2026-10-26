@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
+from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
 from test_governance_egress import (
     EXTERNAL,
     SCOPE_ID,
@@ -30,6 +31,7 @@ from test_governance_egress import (
     write_rule,
     write_scope,
 )
+from test_private_vocabulary_instances import private_instances as private_instances  # noqa: F401
 from test_working_set_carry import _write, seed_ordinary_notes
 
 from exomem import (
@@ -399,6 +401,55 @@ def test_a_boundary_change_decides_afresh_in_both_directions(vault: Path, bounda
 
     _write_boundary(boundary, denied=[DENIED_SCOPE])
     assert PRIVATE_PAGE not in _published(vault), "a stale allowed verdict kept it"
+
+
+@pytest.mark.parametrize("filter_kind", ["content", "page-release", "walk-release"])
+def test_registry_reassignment_retires_verdicts_without_a_page_or_host_config_edit(
+    vault: Path, private_instances, configured_boundary, warm_managed_cell, filter_kind: str,
+) -> None:
+    """An unchanged page can enter a denied scope through the arming record alone."""
+    import copy
+    from dataclasses import replace
+
+    from test_connector_boundary import PUBLIC, SCOPE
+
+    from exomem.governance import connector_boundary, policy
+    from exomem.published_admission import admission_of
+    from exomem.vocabulary import instances
+
+    who = private_instances("limited")
+    config, _authenticate = configured_boundary
+    config_before = config.read_bytes()
+    page_before = (vault / PUBLIC).read_bytes()
+    warm_managed_cell(vault)
+    store = lexstore.get_store(vault)
+
+    def published():
+        with request_scope(who), state_paths.resolution_scope():
+            if filter_kind == "content":
+                keep = egress.content_admission(vault, who)
+            else:
+                factory = (egress.page_release_filter if filter_kind == "page-release"
+                           else egress.release_walk_filter)
+                keep = factory(vault, principal=who)
+            admission = admission_of(keep)
+            assert admission is not None
+            checkpoint = store.published_recall_checkpoint("kb")
+            return store.published_admitted_paths("kb", checkpoint, admission, {PUBLIC})
+
+    assert published() == {PUBLIC}
+    current = connector_boundary.snapshot(vault)
+    assignment = copy.deepcopy(current.vocabulary)
+    assignment["private"][SCOPE]["namespace"] = PUBLIC
+    instances.validate(assignment, policy.load(vault))
+    connector_boundary.publish_requirement(vault, replace(current, vocabulary=assignment))
+
+    assert published() == set(), "the older allowed verdict survived a scope reassignment"
+    assert (vault / PUBLIC).read_bytes() == page_before
+    assert config.read_bytes() == config_before
+
+    connector_boundary.publish_requirement(vault, current)
+    assert published() == {PUBLIC}, "the withheld verdict survived the restored assignment"
 
 
 def test_a_page_under_pending_custody_is_decided_on_its_current_bytes(
