@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -1310,6 +1310,52 @@ def test_a_fan_out_scope_that_cannot_be_established_still_fences_everything(
     assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
         "an unreadable marker is an unknown scope"
     )
+
+
+def _the_queue_owns_the_repair(root: Path) -> None:
+    """Receipts for the batch are queued, and nothing else is owed."""
+
+
+def _a_standing_marker_owns_the_repair(root: Path) -> None:
+    deferred_index.mark_graph_full_rebuild(
+        root, generation=int(graph_sync.status(root).get("generation") or 0)
+    )
+
+
+@pytest.mark.parametrize(
+    "owned_by",
+    [_the_queue_owns_the_repair, _a_standing_marker_owns_the_repair],
+    ids=["queued_receipt", "standing_marker"],
+)
+def test_a_fan_out_whose_repair_is_owned_marks_nothing(
+    handoff_vault: Path, owned_by: Callable[[Path], None]
+) -> None:
+    """The watcher marks an incomplete fan-out only when nothing else owns its repair.
+
+    A receipt-owned write reaches the watcher as an outside edit, and a freshly
+    started worker has no resident resolver, so the watcher's refresh queues
+    the batch instead of deriving it. Queued receipts for the batch, or a
+    standing whole-vault marker, already owe the graph its repair. A mark on
+    top fenced later writes to those paths, or, unscoped, every write, until
+    the watcher acknowledged it.
+    """
+    root = handoff_vault
+    page = root / GENERATED / "generated-note-0004.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(page, page.read_text(encoding="utf-8") + "\n- owned\n")],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    owned_by(root)
+    find_module.unload_ram_caches()
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
+
+    watcher._record(page, deleted=False)
+    watcher._flush()
+
+    assert not EpistemicGraphIndex(root).available(), "the fan-out converged; nothing to own"
+    assert deferred_index.list_graph_paths(root), "the batch's repair is not queued"
+    assert not freshness.external_pending(root), "an owned repair was marked as unknown"
 
 
 def test_an_unrelated_external_edit_does_not_fence_a_write(

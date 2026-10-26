@@ -904,6 +904,55 @@ def test_cold_recovery_rebuilds_unqueued_recall_content_before_advertising_curre
         connection.close()
 
 
+@pytest.mark.parametrize("scoped_mark", [False, True], ids=["unmarked", "scoped_mark"])
+def test_a_barrier_behind_queued_repair_waits_for_the_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+    scoped_mark: bool,
+) -> None:
+    """Queued per-path repair owns the barrier; recovery waits instead of rebuilding.
+
+    The page's receipt is queued, but the registry has not recorded its bytes
+    yet, so the drain leaves it queued and the queue does not shrink. Recovery
+    then ran a whole-vault pass, or, with the page's own scoped mark, queued
+    the full marker. Once the page is recorded the queued receipt converges
+    the graph by itself.
+    """
+    vault = _published_vault(tmp_path)
+    page = vault / "Knowledge Base/Notes/Insights/c.md"
+    rel = page.relative_to(vault).as_posix()
+    page.write_text(_page("C", "C links to [[a]] before the registry saw it."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [rel])
+    EpistemicGraphIndex(vault).suspend_reads()
+    epoch = freshness.mark_external_pending(vault, paths=[page]) if scoped_mark else 0
+    passes: list[str] = []
+    real_pass = EpistemicGraphIndex._rebuild_all_off_boundary
+
+    def counted(self: EpistemicGraphIndex, **kwargs: Any) -> Any:
+        passes.append("pass")
+        return real_pass(self, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_off_boundary", counted)
+
+    graph_drain._work_once(vault)
+
+    assert passes == [], "barrier recovery rebuilt the vault behind queued repair"
+    assert deferred_index.graph_full_rebuild_pending(vault) is None, (
+        "barrier recovery queued whole-vault debt behind queued repair"
+    )
+    assert deferred_index.list_graph_paths(vault) == [rel]
+
+    freshness.on_files_changed(vault, changed=[page])
+    if scoped_mark:
+        freshness.clear_external_pending(vault, through=epoch)
+    graph_drain._work_once(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert passes == []
+
+
 def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
