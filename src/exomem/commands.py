@@ -85,6 +85,7 @@ from . import (
     retrieval_models,
     semantic_census,
     source_capture,
+    source_corrections,
     upload_tokens,
     vault,
     vocabulary_resolution,
@@ -612,11 +613,8 @@ _OptionalClientArtifactFiles = Annotated[
     Field(
         max_length=8,
         description=(
-            "Up to eight temporary client file handles (raw material such as a "
-            "transcript, article, screenshot or recording), captured as Sources "
-            "instead of `content`. Each needs `download_url` and `file_id`; "
-            "Exomem fetches it server-side. Proof-bearing artifacts go to "
-            "`preserve_artifacts`."
+            "Up to eight original handles with download_url and file_id; "
+            "Exomem retrieves their bytes. Proof uses preserve_artifacts."
         ),
     ),
 ]
@@ -3745,6 +3743,8 @@ def _add_source(
     projects: list[str] | None,
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
+    expected_sha256: str | None = None,
+    correction: source_corrections.SourceCorrection | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind."""
     try:
@@ -3753,7 +3753,7 @@ def _add_source(
         guard = active_manager().mutation_guard(
             vault_root, request_id=active_mutation_request_id(),
             operation="capture_source_identity", holder_kind="command",
-        ) if source_identity is not None else nullcontext()
+        ) if source_identity is not None or correction is not None else nullcontext()
         with guard:
             result = add_module.add(
                 vault_root,
@@ -3769,6 +3769,8 @@ def _add_source(
                 projects=projects,
                 raw_protection=raw_protection,
                 source_identity=source_identity,
+                expected_sha256=expected_sha256,
+                correction=correction,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -4288,6 +4290,7 @@ def op_get(
     links: bool = False,
     include_raw: bool = False,
     max_body_chars: int | None = None,
+    follow_corrections: bool = True,
 ) -> GetResponse:
     """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).
 
@@ -4336,6 +4339,7 @@ def op_get(
         max_body_chars: Optional cap for the returned `body`. Use this when a
             client wants bounded content instead of an arbitrary full-page read.
             Values above 12000 are capped server-side; negative values are rejected.
+        follow_corrections: Follow a Source's immutable correction chain. False reads its exact historical page.
 
     Returns:
         {path, frontmatter, body, content_hash, mtime}.
@@ -4496,6 +4500,19 @@ def op_get(
         )
         if status is not None:
             out["epistemic_status"] = status
+    if follow_corrections and note_types.Basis(vault_root).selects(result.frontmatter.get("type"), note_types.raw):
+        try:
+            if source_corrections.has_correction(vault_root, result.frontmatter):
+                resolution = source_corrections.resolve_current(vault_root, result.path)
+                current = op_get(
+                    vault_root, path=resolution.selected_path, frontmatter_only=frontmatter_only,
+                    include_history=include_history, links=links, include_raw=include_raw,
+                    max_body_chars=max_body_chars, follow_corrections=False,
+                )
+                current["source_resolution"] = resolution.as_dict()
+                return current
+        except source_corrections.SourceCorrectionUnavailable:
+            raise ValueError("NOT_FOUND: memory identifier is unavailable") from None
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
@@ -7485,14 +7502,12 @@ def op_read_memory(
     history_limit: int | None = None,
     history_continuation: str | None = None,
     continuation: _OptionalViewContinuation = None,
+    follow_corrections: bool = True,
 ) -> dict:
-    """Read a page, semantic unit, or map.
+    """Read a page, exact unit, or exomem://map view.
 
-    unit_ref: exact current unit, parent citation/lifecycle, up to 2,400 context chars.
-    Missing/stale/ambiguous/superseded is explicit; no substitution. Omit for page.
-    Maps: exomem://map, /topic/<domain key>, /unfiled.
-    Sensing on: epistemic_status gives released items/reading provenance;
-    incomplete counts are partial.
+    Missing/stale units report status; never substituted.
+    Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
 
     Args:
         path: Vault-relative path or KB shorthand.
@@ -7505,6 +7520,7 @@ def op_read_memory(
         history_limit: Retained revisions per page, from 1 to 50.
         history_continuation: Position from the previous revision_history envelope.
         continuation: Next-page token of a view.
+        follow_corrections: False reads the historical Source; unit reads stay exact.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
@@ -7533,6 +7549,7 @@ def op_read_memory(
                 history_limit=history_limit,
                 history_continuation=history_continuation,
                 continuation=continuation,
+                follow_corrections=follow_corrections,
             )
     if continuation is not None:
         raise context_views_module.invalid_continuation()
@@ -7625,6 +7642,7 @@ def op_read_memory(
         include_history=include_history,
         links=links,
         include_raw=include_raw,
+        follow_corrections=follow_corrections,
     )
     if include_history and "content_hash" in result:
         from . import compiled_history
@@ -8172,29 +8190,44 @@ def op_capture_source(
     adoption: _OptionalArtifactAdoption = None,
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
+    expected_sha256: str | None = None,
+    correction: source_corrections.SourceCorrection | None = None,
 ) -> dict:
-    """Save raw text or file handles losslessly in Sources/.
+    """Save Source text or original files.
 
-    Proof: preserve_evidence or preserve_artifacts. source_kind is
-    required; domain is optional. Capture leaves semantic
-    compilation unassessed. Pending extraction permits original-media use.
+    Never retype originals: use files, or transfer_artifact(upload, lane=source,
+    hold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.
+    Cloud needs handles; stdio needs HTTP MCP. source_kind is required.
 
     Args:
-        content: Raw text. Supply this or `files`, not both.
-        source_type: Alias of source_kind; conflicts are refused.
-        url: Required when the source kind declares it.
-        tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Optional text scaffold or attachment read/preparation routes.
-        suggested_title: Optional outline title.
-        source_kind: Kind; open lowercase slug.
-        domain: Topic; open lowercase slug.
-        projects: Project keys; does not affect storage.
-        files: Client file handles, captured instead of `content`.
-        adoption: Selects exactly one supplied handle. Establishes eligibility,
-            not write consent; agent-initiated use obeys proactive_capture.
-        raw_protection: Keep the original owner-only until a whole-artifact release.
-        source_identity: Opaque text identity; identical inputs reuse the Source indefinitely.
+        content: Authored text, or supply files.
+        source_type: source_kind alias.
+        url: Source URL.
+        tags: Labels.
+        compile_guidance: Optional scaffold or source read routes.
+        suggested_title: Proposal title.
+        source_kind: What it is; open slug.
+        domain: Subject slug.
+        projects: Projects.
+        files: Original handles.
+        adoption: Select one handle; not write consent.
+        raw_protection: Owner-only original.
+        source_identity: Durable text-capture identity.
+        expected_sha256: Original SHA-256 (UTF-8 for content).
+        correction: Correct a Source; expected_hash is its page hash.
     """
+    if correction is not None:
+        correction = source_corrections.validate_correction(correction)
+        if source_identity is not None or adoption is not None or files and len(files) != 1:
+            raise ValueError("INVALID_SOURCE_CORRECTION: correction requires one original and cannot combine with identity or adoption")
+    if expected_sha256 is not None:
+        source_capture.validate_sha256(expected_sha256)
+        if files and len(files) != 1:
+            raise ValueError("SOURCE_HASH_REQUIRES_ONE_FILE: expected_sha256 binds exactly one original file")
+        if not files:
+            source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
+    if files and content:
+        raise ValueError("INVALID_SOURCE: supply content or files, not both")
     if source_identity is not None:
         if files or adoption is not None:
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
@@ -8220,6 +8253,8 @@ def op_capture_source(
             projects=projects,
             adoption=adoption,
             raw_protection=raw_protection,
+            expected_sha256=expected_sha256,
+            correction=correction,
         )
         _note_committed_artifact_targets(captured)
         out = captured
@@ -8243,6 +8278,8 @@ def op_capture_source(
             projects=projects,
             raw_protection=raw_protection,
             source_identity=source_identity,
+            expected_sha256=expected_sha256,
+            correction=correction,
         )
         out = {"source": source}
         if source_identity is not None:
@@ -8609,20 +8646,26 @@ def op_preserve_artifacts(
 def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
+    hold: bool = False,
 ) -> dict:
-    """Prepare binary transfer when client file handles are unavailable.
+    """Prepare an original upload or download; a handoff does not prove custody.
 
-    Returns a short-lived handoff; issuance does not prove consumption.
-    For a stored original, download with artifact and optional expected_sha256.
-    Use the bounded native MCP resource where supported, or open the HTTPS link.
-    Note reads and exports remain separate.
+    Upload: hold=true with expected_sha256, then exomem attach --handoff-file.
+    Capture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
-        expected_sha256: Optional assertion of the original version to recover.
+        expected_sha256: Intended original SHA-256.
+        hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
+    if hold:
+        if operation != "upload" or artifact is not None or expected_sha256 is None:
+            raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
+        from . import upload_handoff
+
+        return upload_handoff.prepare_upload(vault_root, lane=lane, expected_sha256=expected_sha256)
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:
             raise ValueError("INVALID_MODE: original recovery needs download and artifact")

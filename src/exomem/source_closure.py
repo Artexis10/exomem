@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
-from . import memory_refs, note_types, vault
+from . import memory_refs, note_types, source_corrections, vault
 from .kbdir import kb_prefix
 
 PUBLIC_UNRESOLVED_LIMIT = 8
@@ -33,6 +33,7 @@ class ResolvedSource:
     source: str
     guard: vault.PathGuard
     supports_backref: bool
+    resolution_guards: tuple[vault.PathGuard, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,7 @@ class SourceClosurePlan:
     prior_inspection: SourceClosureInspection
     backref_writes: tuple[vault.PlannedWrite, ...]
     fingerprint: str
+    required_guards: tuple[vault.PathGuard, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +86,9 @@ def _fingerprint(
     for item in inspection.resolved:
         digest.update(b"path\0" + item.path.encode("utf-8") + b"\0")
         digest.update(vault.content_hash(item.source).encode("ascii"))
+        for guard in item.resolution_guards:
+            digest.update(guard.target.encode("utf-8") + b"\0")
+            digest.update((guard.expected_content_hash or guard.leaf_policy).encode("ascii"))
     for write in writes:
         digest.update(write.path.as_posix().encode("utf-8") + b"\0")
         digest.update(vault.content_hash(write.content).encode("ascii"))
@@ -203,11 +208,12 @@ def _resolve_one(
     type_basis: note_types.Basis,
 ) -> ResolvedSource | None:
     relative = resolve_reference(root, supplied, resolver=resolver)
-    if relative is None or not authorize_path(relative):
+    if relative is None:
         return None
     try:
-        source, guard = vault.read_guarded_text(root, root / relative)
-    except (OSError, UnicodeError, vault.PathGuardError):
+        current = source_corrections.resolve_current(root, relative, authorize_path=authorize_path)
+        relative, source, guard = current.selected_path, current.source, current.guard
+    except (OSError, UnicodeError, vault.PathGuardError, source_corrections.SourceCorrectionUnavailable):
         return None
     frontmatter, _body, frontmatter_text = vault.parse_frontmatter(source)
     if frontmatter_text is None or not type_basis.selects(frontmatter.get("type"), note_types.raw):
@@ -218,6 +224,7 @@ def _resolve_one(
         source,
         guard,
         "ingested_into" in frontmatter,
+        tuple(retained for retained in current.guards if retained is not guard),
     )
 
 
@@ -338,6 +345,11 @@ def prepare_source_closure(
         prior,
         writes,
         _fingerprint(inspection, writes),
+        tuple(
+            guard for item in (*inspection.resolved, *prior.resolved)
+            for guard in item.resolution_guards
+            if guard.target not in {write.path.relative_to(root).as_posix() for write in writes}
+        ),
     )
 
 

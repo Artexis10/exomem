@@ -35,6 +35,7 @@ from . import (
     project_keys,
     schema,
     source_capture,
+    source_corrections,
     source_taxonomy,
     tag_variants,
     temporal,
@@ -45,7 +46,9 @@ from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
+    CreateOnlyConflict,
     InvalidSlugError,
+    PathGuardError,
     PlannedWrite,
     PreparedBinaryContent,
     batch_atomic_write,
@@ -169,8 +172,10 @@ class SourceArtifact:
     content_type: str | None = None
 
 
-def _artifact_pair(folder: Path, stem: str, suffix: str, *, vault_root: Path) -> tuple[Path, Path]:
-    """A free `<stem><suffix>` / `<stem><suffix>.md` pair under `folder`.
+def _artifact_pair(
+    folder: Path, stem: str, suffix: str, *, vault_root: Path, protected: bool = False
+) -> tuple[Path, Path]:
+    """A free artifact and its canonical companion under `folder`.
 
     `unique_path` guarantees one free name; a captured artifact needs two, and
     an orphaned binary with no page would otherwise be silently overwritten.
@@ -178,11 +183,13 @@ def _artifact_pair(folder: Path, stem: str, suffix: str, *, vault_root: Path) ->
     case-insensitive collision test rather than a second copy of it here, and
     keeps `add`'s uniquify semantics rather than introducing a refusal.
     """
+    from .preserve import _sidecar_path
+
     for attempt in range(1, 51):
         seed = stem if attempt == 1 else f"{stem}-{attempt}"
-        page = unique_path(folder, seed, suffix=f"{suffix}.md", vault_root=vault_root)
-        artifact = page.with_name(page.name[:-3])
-        if not artifact.exists():
+        artifact = unique_path(folder, seed, suffix=suffix, vault_root=vault_root)
+        page = _sidecar_path(artifact, protected=protected)
+        if unique_path(folder, page.stem, suffix=page.suffix, vault_root=vault_root) == page:
             return artifact, page
     raise AddError(
         code="INVALID_SOURCE",
@@ -271,6 +278,8 @@ def add(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    expected_sha256: str | None = None,
+    correction: source_corrections.SourceCorrection | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -298,6 +307,13 @@ def add(
     """
     from .governance import raw_protection as raw_guard
 
+    if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
+        raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
+    correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    if expected_sha256 is not None:
+        source_capture.validate_sha256(expected_sha256)
+        if artifact is None:
+            source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
     if source_identity is not None:
         # The command holds the mutation guard across lookup and this write.
         source_identity = source_capture.validate_identity(source_identity)
@@ -320,6 +336,8 @@ def add(
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
                 raw_protection=True,
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
+                expected_sha256=expected_sha256,
+                correction=correction,
             )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
@@ -338,7 +356,11 @@ def add(
                 reason="artifact filename is empty or only invalid characters",
             )
         artifact_suffix = Path(safe_name).suffix
+        if artifact_suffix.lower() == ".md":
+            # Original Markdown bytes are not governed UTF-8 pages, including during a full index rebuild.
+            artifact_suffix = ".md.bin"
         artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
+        source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
 
@@ -508,10 +530,9 @@ def add(
         artifact_path: Path | None = None
         source_path = unique_path(folder_path, stem, vault_root=vault_root)
     else:
-        # The page is `<stem><ext>.md` beside `<stem><ext>`, the same convention
-        # Evidence uses, so the media pipeline addresses both lanes with no
-        # change and the citation resolver is fixed once rather than per layout.
-        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix, vault_root=vault_root)
+        artifact_path, source_path = _artifact_pair(
+            folder_path, stem, artifact_suffix, vault_root=vault_root, protected=raw_protection
+        )
 
     adoption_receipt: dict[str, object] | None = None
     if adoption_seed is not None:
@@ -557,10 +578,13 @@ def add(
         ),
         artifact_digest=artifact_digest,
         artifact_size=artifact_size,
+        artifact_content_type=artifact.content_type if artifact is not None else None,
         adoption_receipt=adoption_receipt,
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
-        extra_lines=episode_lines or (),
+        extra_lines=(*(episode_lines or ()), *(
+            (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
+        )),
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
@@ -643,6 +667,13 @@ def add(
     if raw_protection:
         # Global index/log prose cannot carry the protected title or byte identity.
         writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
+    if correction_plan is not None:
+        writes[0].create_only = True
+        writes[0].expected_hash = MISSING_CONTENT_HASH
+        writes.append(correction_plan.receipt(
+            vault_root, new_ref=memory_refs.memory_ref(exomem_id),
+            new_path=source_path.relative_to(vault_root).as_posix(), timestamp=stamp_iso,
+        ))
 
     warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
@@ -672,11 +703,15 @@ def add(
         if domain_binding is not None and not taxonomy_plan.writes
         else ()
     )
+    if correction_plan is not None:
+        required_guards = (*required_guards, correction_plan.guards[0])
     try:
         def validate_bindings() -> None:
             taxonomy_plan.recheck_bindings(vault_root)
             if source_identity is not None:
                 source_capture.require_authority(vault_root)
+            if correction_plan is not None:
+                correction_plan.require_authority(vault_root)
 
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
@@ -693,6 +728,10 @@ def add(
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
                                _validate_prepared_bindings=validate_bindings)
     except source_capture.SourceCaptureError:
+        raise
+    except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError):
+        if correction_plan is not None:
+            raise ValueError("SOURCE_CORRECTION_STALE: correction inputs changed before commit; read the current Source and retry") from None
         raise
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
@@ -1199,6 +1238,7 @@ def _render_source(
     artifact_rel: str | None = None,
     artifact_digest: str | None = None,
     artifact_size: int | None = None,
+    artifact_content_type: str | None = None,
     adoption_receipt: Mapping[str, object] | None = None,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
@@ -1243,6 +1283,8 @@ def _render_source(
             lines.append("extracted_by: pending")
         if artifact_name:
             lines.append(f"original_filename: {yaml_scalar(artifact_name)}")
+        if artifact_content_type:
+            lines.append(f"original_content_type: {yaml_scalar(artifact_content_type)}")
         if artifact_digest:
             lines.append(f"binary_sha256: {artifact_digest}")
         if artifact_size is not None:

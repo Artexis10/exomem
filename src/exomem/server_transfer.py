@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -27,6 +28,7 @@ from . import (
     cf_access,
     local_ingress,
     reserved_paths,
+    upload_handoff,
     upload_sessions,
     upload_tokens,
 )
@@ -507,8 +509,65 @@ def register_transfer_routes(
                 return True
         return False
 
+    async def _ticket_upload(request: Request, ticket: dict) -> JSONResponse:
+        from . import held_uploads
+
+        maximum = ticket["max_bytes"]
+        received = 0
+        receive = request.receive
+
+        async def bounded_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > maximum + _FORM_OVERHEAD_BYTES:
+                    # MultiPartException makes Starlette close any partial spool files.
+                    raise MultiPartException("upload body exceeds the handoff limit")
+            return message
+
+        bounded = Request(request.scope, receive=bounded_receive)
+        declared = _header_count(request.headers.get("content-length", ""))
+        if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
+            return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}, status_code=413)
+        try:
+            async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
+                # The ticket-upload protocol fixes these fields; none can select a commit target.
+                if (str(form.get("lane") or "") != ticket["lane"]
+                        or _flag(str(form.get("hold") or "")) is not True
+                        or set(form) - {"file", "lane", "hold", "filename"}
+                        or any(len(form.getlist(key)) != 1 for key in form)):
+                    return JSONResponse({"code": "INVALID_UPLOAD", "reason": "handoff fields cannot change its lane or hold mode"}, status_code=400)
+                upload = form.get("file")
+                if not hasattr(upload, "file"):
+                    return JSONResponse({"code": "INVALID_UPLOAD", "reason": "multipart field `file` is required"}, status_code=400)
+                if not await upload_handoff._active(vault_root, ticket["principal"]):
+                    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+                with principal_module.request_scope(ticket["principal"]):
+                    held = await run_in_threadpool(
+                        held_uploads.hold, vault_root, upload.file,
+                        lane=ticket["lane"],
+                        filename=str(form.get("filename") or upload.filename or ""),
+                        content_type=upload.content_type, max_bytes=maximum,
+                        expected_sha256=ticket["expected_sha256"],
+                    )
+            return JSONResponse(held, status_code=201)
+        except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
+            return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}, status_code=413)
+        except held_uploads.HeldUploadError as exc:
+            return JSONResponse({"code": exc.code, "reason": exc.reason},
+                status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400))
+
     @mcp_app.custom_route("/upload", methods=["POST"])
     async def _upload(request: Request) -> JSONResponse:
+        header = request.headers.get("authorization", "")
+        presented = header[len("Bearer "):].strip() if header.startswith("Bearer ") else ""
+        if presented.startswith(upload_handoff.TOKEN_PREFIX):
+            try:
+                ticket = await upload_handoff.claim_upload(vault_root, presented)
+            except ValueError:
+                return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+            return await _ticket_upload(request, ticket)
         if not config.enabled and local_ingress.current_grant() is None:
             return JSONResponse(
                 {
