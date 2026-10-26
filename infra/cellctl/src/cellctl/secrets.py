@@ -11,10 +11,14 @@ import hashlib
 import hmac
 import os
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 BEARER_PREFIX = "exomem-cloud-cell-token-v1:"
 _NONCE_LEN = 12
+# This version fixes the content-key protocol, independently of master-key rotation.
+CONTENT_KEY_VERSION = 1
 
 
 def derive_cell_bearer(key: bytes, cell_id: str) -> str:
@@ -33,9 +37,15 @@ def bearer_matches(presented: str, *, key: bytes, cell_id: str) -> bool:
 
 
 def generate_backup_data_key() -> bytes:
-    """A fresh random 32-byte per-cell restic/backup data key."""
+    """A fresh random 32-byte key for cell roots and restic secrets."""
 
     return os.urandom(32)
+
+
+def derive_volume_passphrase(root: bytes, *, cell_id: str, key_version: int = CONTENT_KEY_VERSION) -> str:
+    """Derive only this cell's volume child; the root never enters Kubernetes."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=_aad(cell_id=cell_id, column="volume-passphrase", key_version=key_version)).derive(root).hex()
 
 
 def _aad(*, cell_id: str, column: str, key_version: int) -> bytes:

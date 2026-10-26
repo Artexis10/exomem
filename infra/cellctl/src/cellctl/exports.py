@@ -11,6 +11,7 @@ deletes every version at expiry or supersede.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ class ExportRow:
     archive_bytes: int | None = None
     archive_sha256: str | None = None
     archive_version_id: str | None = None
+    packing_report: str | None = None
     upload_id: str | None = None
     ready_at: datetime | None = None
     expires_at: datetime | None = None
@@ -91,8 +93,12 @@ class ExportJob:
         return self.exists or self.active or self.pods_present
 
 
-def job_name(export_id: str) -> str:
-    return f"export-{uuid.UUID(export_id).hex}"
+def job_name(export_id: str, *, verify: bool = False) -> str:
+    return f"export-{uuid.UUID(export_id).hex}" + ("-verify" if verify else "")
+
+
+def verification_secret_name(export_id: str) -> str:
+    return job_name(export_id, verify=True) + "-get"
 
 
 def etag_digest(etags: list[str]) -> str:
@@ -224,12 +230,20 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
         return hold(export_transport="create", export_updates={"observed_state": "packing"})
 
     if job.succeeded:
+        if item.archive_version_id is not None:
+            report = job.report
+            if (report.get("verified") is not True or report.get("bytes") != item.archive_bytes
+                    or report.get("sha256") != item.archive_sha256
+                    or report.get("version") != item.archive_version_id):
+                return end("failed", EXPORT_FAILED)
+            return hold(export_updates={"observed_state": "ready", "error_code": None,
+                        "ready_at": now, "expires_at": now + config.export_ttl, "upload_id": None})
         report = accepted_report(job.report)
         if report is None:
             return end("failed", EXPORT_FAILED)
         decision = hold(export_transport="complete", export_updates={
-            "observed_state": "ready", "error_code": None, "archive_bytes": report["bytes"],
-            "archive_sha256": report["sha256"], "ready_at": now, "expires_at": now + config.export_ttl,
+            "observed_state": "packing", "error_code": None, "archive_bytes": report["bytes"],
+            "archive_sha256": report["sha256"], "packing_report": json.dumps(report),
         })
         decision.row_updates.update(report_usage(job.report, job.finished_at or now))
         return decision
@@ -260,7 +274,7 @@ def settle_step(row: CellRow, item: ExportRow, *, now: datetime,
                 item.link_issued_at is None or item.link_issued_at < item.link_requested_at):
             return "link", {"download_url_expires_at": now + config.export_link_ttl}
         return None
-    if item.observed_state in ("failed", "expired") and item.upload_id is not None:
+    if item.observed_state in ("failed", "expired") and (item.upload_id is not None or item.archive_version_id is not None):
         return "remove", {}
     return None
 
@@ -318,6 +332,9 @@ class ExportStorage:
                 raise ValueError("export completion refused") from None
             raise
         version = completed.get("VersionId")
+        # Immutable versions bind remote verification to this packing report.
+        if not version:
+            raise ValueError("export object has no immutable version")
         head = self.client.head_object(Bucket=self.bucket, Key=item.key, **({"VersionId": version} if version else {}))
         if head["ContentLength"] != report["bytes"]:
             raise ValueError("export size mismatch")

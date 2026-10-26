@@ -82,7 +82,8 @@ def test_a_stopped_cells_export_never_asks_for_a_replica():
     assert passes[0].export_transport == "create" and passes[0].hold_kind == "export"
     assert passes[1].run_export_job
     assert passes[2].export_transport == "complete"
-    assert passes[2].export_updates["expires_at"] == NOW + timedelta(hours=24)
+    assert passes[2].export_updates["observed_state"] == "packing"
+    assert "expires_at" not in passes[2].export_updates
     assert passes[3].stop_export_job and passes[3].hold_kind == "export"
     assert passes[4].hold_kind is None and passes[4].row_updates["hold_kind"] is None
 
@@ -195,9 +196,9 @@ def test_the_export_job_carries_part_urls_but_no_storage_credential():
     assert {env["name"]: set(env) for env in container["env"]} == {
         name: {"name", "value"} for name in ("EXOMEM_CLOUD_CELL", "EXOMEM_CLOUD_CELL_ID", "TMPDIR", "EXOMEM_LOG_DIR")}
     assert "envFrom" not in container
-    assert container["resources"]["requests"]["ephemeral-storage"] == str(327 * 64 * MIB)
-    assert container["resources"]["limits"]["ephemeral-storage"] == str(327 * 64 * MIB)
-    assert {"name": "staging", "emptyDir": {"sizeLimit": str(327 * 64 * MIB)}} in pod["volumes"]
+    assert "ephemeral-storage" not in container["resources"]["requests"]
+    assert all(volume.get("emptyDir", {}).get("medium") == "Memory"
+               for volume in pod["volumes"] if "emptyDir" in volume)
     assert job["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] == "export"
 
 
@@ -313,7 +314,8 @@ class Harness:
         self.b2 = FakeB2()
         self.s3 = FakeS3(self.b2)
         self.jobs: dict[str, ExportJob] = {}
-        self.cluster.observe_export_job = lambda namespace, export_id: self.jobs.get(export_id, ExportJob())
+        self.cluster.observe_export_job = lambda namespace, export_id, verify=False: self.jobs.get(
+            export_id + ("-verify" if verify else ""), ExportJob())
         monkeypatch.setattr(reconcile, "_cell_s3_client", self.s3.client)
 
     async def __aenter__(self) -> Harness:
@@ -351,13 +353,23 @@ class Harness:
     async def cell(self, cell_id: str) -> CellRow:
         return next(row for row in await db.select_all_rows(self.cellctl) if row.cell_id == cell_id)
 
+    async def verify(self, export_id: str) -> None:
+        item = await self.export(export_id)
+        assert item["observed_state"] == "packing" and item["archive_version_id"]
+        assert item["ready_at"] is None and item["download_url"] is None
+        self.jobs[export_id + "-verify"] = ExportJob(exists=True, succeeded=True,
+            report={"verified": True, "bytes": item["archive_bytes"], "sha256": item["archive_sha256"],
+                    "version": item["archive_version_id"]})
+        await self.run()
+
     async def pack(self, cell_id: str, export_id: str, archive: bytes) -> dict:
         """Hold the cell, release its volume, then act as the export Job: upload
         the archive to the rendered part URLs and report it."""
         await self.run()
         self.cluster.observations[cell_id] = _observed_from_applied(self.cluster, cell_id)
         await self.run()
-        job = self.cluster.jobs[-1]
+        name = f"export-{uuid.UUID(export_id).hex}"
+        job = next(job for job in reversed(self.cluster.jobs) if job["metadata"]["name"] == name)
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         urls = [command[index + 1] for index, arg in enumerate(command) if arg == "--part-url"]
         part_bytes = int(command[command.index("--part-bytes") + 1])
@@ -386,6 +398,7 @@ async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_d
         packed = await harness.pack(CELL, export_id, archive)
         assert packed["job"]["metadata"]["name"] == f"export-{uuid.UUID(export_id).hex}"
         await harness.run()
+        await harness.verify(export_id)
         ready = await harness.export(export_id)
         assert ready["observed_state"] == "ready" and ready["archive_bytes"] == len(archive)
         assert ready["expires_at"] == NOW + timedelta(hours=24) and ready["archive_version_id"]
@@ -393,6 +406,7 @@ async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_d
         assert (usage.used_bytes, usage.filesystem_bytes, usage.usage_observed_at) == (3 * MIB, 10 * 1024 * MIB, NOW)
 
         harness.jobs[export_id] = ExportJob()  # the deleted Job is gone
+        harness.jobs[export_id + "-verify"] = ExportJob()
         await harness.run()
         assert (await harness.cell(CELL)).hold_kind is None
         assert harness.cluster.events[-1] == ("apply_statefulset", namespace_name(CELL), 1)
@@ -423,7 +437,9 @@ async def test_a_stopped_cell_is_exported_without_its_runtime_starting(cell_db, 
         export_id = await harness.request(CELL)
         await harness.pack(CELL, export_id, b"PK archive of a stopped cell")
         await harness.run()
+        await harness.verify(export_id)
         harness.jobs[export_id] = ExportJob()
+        harness.jobs[export_id + "-verify"] = ExportJob()
         await harness.run()
         assert (await harness.export(export_id))["observed_state"] == "ready"
         assert (await harness.cell(CELL)).hold_kind is None
@@ -514,6 +530,7 @@ async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkey
             await harness.pack(cell_id, export_id, f"PK archive of {cell_id}".encode())
         await harness.run()
         for export_id in exports.values():
+            await harness.verify(export_id)
             await harness.app.execute("UPDATE exomem_cloud_exports SET link_requested_at=now() WHERE export_id=$1",
                                       uuid.UUID(export_id))
         await harness.run()
@@ -544,7 +561,7 @@ async def test_each_role_holds_exactly_its_c6_columns(cell_db):
     for row in rows:
         granted[(row["grantee"], row["privilege_type"])].add(row["column_name"])
     observation = {"observed_state", "error_code", "archive_bytes", "archive_sha256", "archive_version_id", "upload_id",
-                   "ready_at", "expires_at", "download_url", "download_url_expires_at", "link_issued_at"}
+                   "ready_at", "expires_at", "download_url", "download_url_expires_at", "link_issued_at", "packing_report"}
     assert granted[("substrate_app", "INSERT")] == {"export_id", "cell_id", "requested_state", "link_requested_at"}
     assert granted[("substrate_app", "UPDATE")] == {"requested_state", "link_requested_at"}
     assert granted[("exomem_cellctl", "UPDATE")] == observation
@@ -574,3 +591,42 @@ async def test_a_request_and_a_link_request_wake_cellctl_but_its_own_writes_do_n
     finally:
         await app.close()
         await controller.close()
+
+
+async def test_verification_get_capability_stays_in_its_secret_and_failure_removes_only_that_export(cell_db, monkeypatch):
+    """Routine Pod readers must never receive the completed archive's GET capability."""
+    import base64
+    import json
+
+    from cellctl.exports import verification_secret_name
+
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        export_id = await harness.request(CELL)
+        await harness.pack(CELL, export_id, b"PK private completed archive")
+        await harness.run()
+        item = await harness.export(export_id)
+        assert item["observed_state"] == "packing"
+        await harness.run()
+        secret_name = verification_secret_name(export_id)
+        secret_key = (namespace_name(CELL), "Secret", secret_name)
+        secret = harness.cluster.applied[secret_key]
+        capability = base64.b64decode(secret["data"]["get-url"]).decode()
+        job = harness.cluster.jobs[-1]
+        encoded_job = json.dumps(job)
+        assert capability not in encoded_job and secret["data"]["get-url"] not in encoded_job
+        container = job["spec"]["template"]["spec"]["containers"][0]
+        assert {entry["name"]: entry.get("value") for entry in container["env"]}["EXOMEM_CLOUD_CELL"] == "1"
+        reference = next(entry for entry in container["env"] if entry["name"] == "EXOMEM_EXPORT_VERIFY_URL")
+        assert reference["valueFrom"]["secretKeyRef"] == {"name": secret_name, "key": "get-url"}
+        assert all("persistentVolumeClaim" not in volume for volume in job["spec"]["template"]["spec"]["volumes"])
+        unrelated = (namespace_name(CELL), "Secret", verification_secret_name(EXPORT_ID))
+        harness.cluster.applied[unrelated] = {"unrelated": True}
+        harness.jobs[export_id + "-verify"] = ExportJob(exists=True, succeeded=True,
+            report={"verified": True, "bytes": item["archive_bytes"], "sha256": item["archive_sha256"],
+                    "version": "wrong-version"})
+        await harness.run()
+        failed = await harness.export(export_id)
+        assert failed["observed_state"] == "failed" and failed["download_url"] is None
+        assert secret_key not in harness.cluster.applied and unrelated in harness.cluster.applied
+        assert harness.s3.versions == {}

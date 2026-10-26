@@ -1258,12 +1258,14 @@ def test_with_local_storage_off_production_renders_no_part_of_it(monkeypatch: py
     from cellctl.storage_config import DEFAULT_STORAGE
 
     documents = _helm_template("--set", "cellStorage.local.enabled=false", *SNAPSHOT_CLASS_API)
-    assert _cellctl_storage(documents, monkeypatch) == DEFAULT_STORAGE
+    storage = _cellctl_storage(documents, monkeypatch)
+    assert storage.domain == DEFAULT_STORAGE.domain and storage.local is None
+    assert storage.per_cell_class in {doc["metadata"]["name"] for doc in documents if doc["kind"] == "StorageClass"}
     names = {doc["metadata"]["name"] for doc in documents}
-    assert not {name for name in names if any(part in name for part in ("topolvm", "snapshot", "retained-delete", "array-exporter"))}
+    assert not {name for name in names if any(part in name for part in ("topolvm", "snapshot", "array-exporter"))}
     scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     assert "snapshot.storage.k8s.io" not in scope["spec"]["matchConstraints"]["resourceRules"][0]["apiGroups"]
-    assert not any("'persistentvolumes'" in rule["expression"] for rule in scope["spec"]["validations"])
+    _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-retained-delete")
     # Tasks 5.5 and 5.6: no egress opens to a metrics port nothing serves.
     assert _ports(_find(documents, "NetworkPolicy", "cellctl")["spec"]["egress"]) == {443, 6443, 5432, 53}
 

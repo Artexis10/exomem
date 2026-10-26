@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from http.client import IncompleteRead
 from pathlib import Path
 
 import pytest
@@ -875,3 +876,694 @@ def _report(
             ),
         },
     }
+
+
+# The paired instrument uses independent cases, never repeat-level pseudo-cases.
+def _paired_samples(scale: float = 1.0, *, series: str = "hybrid") -> list[dict]:
+    return [
+        {"case": f"case-{case:02d}", "series": series, "principal": "owner",
+         "arm": arm, "repeat": repeat, "state": "ok",
+         "elapsed_ms": (100 + case) * (scale if arm == "head" else 1),
+         "stages": {"governed-stage-vector.embed": {"ms": 30 * (scale if arm == "head" else 1)}}}
+        for case in range(40) for repeat in range(3) for arm in ("base", "head")
+    ]
+
+
+def _accept_record(series: str = "hybrid", maximum: float = 1.35) -> dict:
+    return {"tag": "v1.0.0", "series": [{"name": series, "maximum_ratio": maximum}],
+            "full_ci_run": "https://github.com/example/project/actions/runs/123",
+            "reason": "A reviewed correctness repair adds work.",
+            "pull_request": "https://github.com/example/project/pull/456"}
+
+
+def test_self_pairs_pass_and_repeats_do_not_inflate_the_case_count() -> None:
+    pytest.importorskip("scipy")
+    report, = gate.compare_pairs(_paired_samples(), tag="v1.0.0")
+    assert report["state"] == "passed"
+    assert report["cases"] == 40
+    assert report["ratio"] == report["lower"] == report["upper"] == 1.0
+
+
+@pytest.mark.parametrize("allowance,expected", [
+    (None, "failed"), (_accept_record(), "accepted"),
+    (_accept_record("keyword"), "failed"), (_accept_record(maximum=1.20), "failed"),
+    ({**_accept_record(), "tag": "v0.9.0"}, "failed"),
+])
+def test_a_thirty_percent_slowdown_needs_the_current_series_allowance(allowance, expected) -> None:
+    pytest.importorskip("scipy")
+    report, = gate.compare_pairs(_paired_samples(1.3), tag="v1.0.0", accept=allowance)
+    assert report["state"] == expected
+    assert report["ratio"] == pytest.approx(1.3)
+
+
+@pytest.mark.parametrize("damage", ["missing-repeat", "missing-arm", "nan", "unknown"])
+def test_a_broken_sample_cannot_be_averaged_into_a_passing_pair(damage: str) -> None:
+    pytest.importorskip("scipy")
+    samples = _paired_samples()
+    if damage == "missing-repeat":
+        samples.pop()
+    elif damage == "missing-arm":
+        samples = [row for row in samples if not (row["case"] == "case-00" and row["arm"] == "base")]
+    elif damage == "nan":
+        samples[0]["elapsed_ms"] = float("nan")
+    else:
+        samples[0]["state"] = "unknown"
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == "failed"
+
+
+def test_a_missing_tag_stage_is_not_comparable_and_stages_never_gate() -> None:
+    pytest.importorskip("scipy")
+    samples = _paired_samples()
+    for row in samples:
+        row["stages"] = ({"governed-stage-parent_hints": {"ms": 200.0}}
+                         if row["arm"] == "head" else {})
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == "passed"
+    assert report["stages"]["governed-stage-parent_hints"]["state"] == "not comparable"
+
+
+def test_three_repeats_of_nineteen_cases_stay_insufficient() -> None:
+    samples = [row for row in _paired_samples() if int(row["case"].split("-")[1]) < 19]
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == "insufficient samples"
+    assert report["cases"] == 19
+
+
+@pytest.mark.parametrize("warming,expected", [(1, "passed"), (2, "failed")])
+def test_paired_warming_is_excluded_and_keeps_the_contract_bound(warming, expected) -> None:
+    pytest.importorskip("scipy")
+    samples = _paired_samples()
+    for row in samples[:warming]:
+        row["state"] = "warming"
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == expected
+    assert report["warming"] == warming
+    assert report["unknown_samples"] == 0
+    assert report["cases"] == 39
+
+
+def test_expired_accept_record_is_visible_and_has_no_allowance(tmp_path: Path) -> None:
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps(_accept_record()))
+    allowance, state = gate.read_accept("v1.0.1", path)
+    assert allowance is None and state == "expired"
+
+
+def test_accept_record_shape_and_rounding_cannot_silently_widen_it(tmp_path: Path) -> None:
+    from jsonschema import ValidationError
+
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps({**_accept_record(), "dispatch_waiver": True}))
+    with pytest.raises(ValidationError):
+        gate.read_accept("v1.0.0", path)
+    path.write_text(json.dumps(_accept_record(maximum=1.31)))
+    with pytest.raises(ValueError, match="rounding"):
+        gate.read_accept("v1.0.0", path)
+
+
+def test_accept_margin_resolves_from_the_canonical_contract(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gate, "PAIRING", {**gate.PAIRING, "margin": 1.5})
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps(_accept_record(maximum=1.35)))
+    with pytest.raises(gate.MeasurementRefused):
+        gate.read_accept("v1.0.0", path)
+
+
+@pytest.mark.parametrize("maximum", [float("inf"), float("nan"), 1e308])
+def test_accept_ratios_must_support_finite_contract_rounding(tmp_path: Path, maximum) -> None:
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps(_accept_record(maximum=maximum)))
+    with pytest.raises(gate.MeasurementRefused):
+        gate.read_accept("v1.0.0", path)
+
+
+def _absolute_samples(*, delay: float | None = 0.0) -> list[dict]:
+    return [{"principal": "owner", "series": "hybrid", "state": "ok", "elapsed_ms": 90.0,
+             "runqueue_ms": delay, "stages": {}, "critical_path": [], "load": 1.0}
+            for _ in range(40)]
+
+
+def test_sqlite_outside_the_reference_cannot_receive_a_ceiling_verdict() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    state, summaries = gate.summarize_absolute(_absolute_samples(),
+        environment={"sqlite_version": "3.53.0"}, profile=profile)
+    assert state == "not measured"
+    assert summaries[0]["ceiling_met"] is None
+
+
+def test_reference_run_keeps_its_own_pool_contention_and_live_run_discloses_exclusions() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    samples[0].update(elapsed_ms=800.0, runqueue_ms=100.0)
+    _, reference = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    _, live = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile, live=True)
+    assert reference[0]["contended"] == 0
+    assert reference[0]["samples"] == 40
+    assert live[0]["contended"] == 1
+    assert live[0]["samples"] == 39
+    assert live[0]["p95_including_contention_ms"] >= live[0]["p95_ms"]
+
+
+def test_more_than_ten_percent_live_contention_refuses_ceiling_comparisons() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    for sample in samples[:5]:
+        sample["runqueue_ms"] = 20.0
+    state, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile, live=True)
+    assert state == "refused"
+    assert summaries[0]["p95_ms"] is None
+    assert summaries[0]["ceiling_met"] is None
+
+
+def test_unknown_live_runqueue_is_visible_and_cannot_claim_uncontended() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    state, summaries = gate.summarize_absolute(_absolute_samples(delay=None),
+        environment={"sqlite_version": "3.45.1"}, profile=profile, live=True)
+    assert state == "refused"
+    assert summaries[0]["unknown_contention"] == 40
+    assert summaries[0]["ceiling_met"] is summaries[0]["p95_ms"] is None
+
+
+def test_hydration_tail_and_unbudgeted_work_reach_the_stage_report() -> None:
+    from exomem.recall_timing import Interval, Trace
+
+    trace = Trace(known_serial=True)
+    trace.started, trace.ended = 0, 44_000_000
+    trace.edges = [(n * 1_000_000, n * 1_000_000) for n in (0, 1, 21, 41, 44)]
+    trace.intervals = [Interval(name, 1, None, start * 1_000_000, end * 1_000_000)
+                       for name, start, end in (("filter_hits", 0, 1), ("release_gate", 1, 21),
+                                                ("serialize", 21, 41), ("matched_units", 41, 44))]
+    accounting = trace.result(gate.REFERENCE["stage_rows"])
+    samples = [{**sample, "stages": accounting["stages"]} for sample in _absolute_samples()]
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    state, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    assert state == "passed"
+    hydration = summaries[0]["stages"]["governed-stage-hydration"]
+    assert hydration["p95_ms"] == 41.0 and hydration["state"] == "failed"
+    unbudgeted = summaries[0]["stages"]["unbudgeted:matched_units"]
+    assert unbudgeted["state"] == "unbudgeted"
+    assert unbudgeted["p50_ms"] == unbudgeted["p95_ms"] == 3.0
+    assert unbudgeted["budget_ms"] is None
+
+
+def test_encode_floor_is_measured_without_applying_the_twice_budget_rule() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    for sample in samples:
+        sample["stages"] = {name: {"ms": duration, "cpu_ms": duration} for name, duration in
+                            (("governed-stage-vector.embed", 100.0),
+                             ("governed-stage-bm25", 20.0), ("governed-stage-keyword", 20.0))}
+    state, summaries = gate.summarize_absolute(samples,
+        environment={"sqlite_version": "3.45.1", "cpus": [0, 1]}, profile=profile)
+    assert state == "passed"
+    for row in samples[0]["stages"]:
+        assert summaries[0]["stages"][row]["state"] == "passed"
+        assert summaries[0]["stages"][row]["target_met"] is False
+        assert summaries[0]["stages"][row]["twice_budget_applied"] is False
+    assert summaries[0]["encode_floor"] == {
+        "state": "measured", "p95_ms": 100.0, "budget_ms": 40.0,
+        "samples": 40, "source": "retained-reference-series"}
+    _, live = gate.summarize_absolute(samples,
+        environment={"sqlite_version": "3.45.1", "cpus": [0, 1]}, profile=profile, live=True)
+    assert live[0]["encode_floor"]["state"] == "not measured"
+    assert live[0]["encode_floor"]["p95_ms"] is None
+
+
+def test_unknown_paths_do_not_dilute_the_known_path_share() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    for index, sample in enumerate(samples):
+        sample["stages"] = {"governed-stage-graph": {"ms": 2.0, "cpu_ms": 1.0}}
+        sample["critical_path"] = ["governed-stage-graph"] if index == 0 else None
+    _, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    graph = summaries[0]["stages"]["governed-stage-graph"]
+    assert graph["critical_path_share"] == 1.0 and graph["critical_path_samples"] == 1
+    samples[0]["critical_path"] = None
+    _, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    assert summaries[0]["stages"]["governed-stage-graph"]["critical_path_share"] is None
+
+
+def test_paired_path_shares_also_exclude_unknown_paths() -> None:
+    samples = [row for row in _paired_samples() if row["case"] == "case-00"]
+    for sample in samples:
+        sample["critical_path"] = (["governed-stage-vector.embed"]
+                                   if sample["arm"] == "head" and sample["repeat"] == 0 else None)
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    encode = report["stages"]["governed-stage-vector.embed"]
+    assert encode["head_critical_path_samples"] == 1 and encode["head_critical_path_share"] == 1.0
+    assert encode["base_critical_path_samples"] == 0 and encode["base_critical_path_share"] is None
+
+
+def test_repeat_validation_uses_the_canonical_contract(monkeypatch) -> None:
+    monkeypatch.setattr(gate, "PAIRING", {**gate.PAIRING, "repeats": 5})
+    sample = {"case": "case-00", "series": "hybrid", "principal": "owner", "arm": "head",
+              "repeat": 4, "load": 1.0, "elapsed_ms": None, "state": "unknown", "cpu_ms": None,
+              "cpu_source": "unknown", "runqueue_ms": None, "unattributed_ms": None,
+              "overlap_cpu_ms": None, "unattributed_cpu_ms": None, "unbudgeted": [],
+              "critical_path": None, "stages": {}}
+    report = {"schema_version": 1, "mode": "paired", "state": "failed",
+              "contract_revision": gate.CONTRACT.revision, "series": [], "samples": [sample]}
+    gate.validate_document(report, "summary.schema.json")
+    sample["repeat"] = 5
+    with pytest.raises(gate.MeasurementRefused, match="repeat-outside-contract"):
+        gate.validate_document(report, "summary.schema.json")
+
+
+def _live_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    cases = [{"series": series, "query": "neutral query"}
+             for series in {row["series"] for row in json.loads((gate.BENCHMARK / "cases.json").read_text())}
+             for _ in range(gate.REFERENCE["queries_min"])]
+    cases_path, corpus_path = tmp_path / "cases.json", tmp_path / "corpus.json"
+    cases_path.write_text(json.dumps(cases))
+    corpus_path.write_text(json.dumps({"source": "served-state-read-only-sql", "bucket_width": 500,
+        "sqlite_version": "3.45.1", "pages": gate.REFERENCE["pages_min"],
+        "chunks": gate.REFERENCE["chunks_min"], "units": gate.REFERENCE["units_min"]}))
+    return cases_path, corpus_path
+
+
+@pytest.mark.parametrize("damage", [None, "degraded", "stage-error"])
+def test_live_inner_timings_preserve_failures_without_certifying_the_bound_call(
+    tmp_path: Path, monkeypatch, damage,
+) -> None:
+    cases, corpus = _live_inputs(tmp_path)
+    monkeypatch.setattr(gate, "one_minute_load", lambda: 1.0)
+    timing = {"total_ms": 90.0, "runqueue_ms": 0.0, "sqlite_version": "3.45.1",
+              "stage_rows": {"governed-stage-keyword": {"ms": 5.0, "cpu_ms": None}},
+              "stages": {"vector": {"error": "ImportError"}} if damage == "stage-error" else {}}
+    envelope = {"hits": [{"title": "private result"}], "timings": timing}
+    if damage == "degraded":
+        envelope["degraded"] = ["vector"]
+    transport = gate.ServedTransport("https://example.invalid", "private credential")
+    monkeypatch.setattr(transport, "_post", lambda arguments: envelope)
+    output = tmp_path / "summary.json"
+    assert gate.live_cli(transport, cases_path=cases, corpus_path=corpus, output=output, quiescence_bound=0) == 0
+    report = json.loads(output.read_text())
+    assert report["state"] == ("failed" if damage else "not measured")
+    assert report["boundary"] == "response-inner-timings-v1"
+    assert all(row["ceiling_met"] is None and row["p95_target_met"] is None
+               and row["p50_target_met"] is None for row in report["series"])
+    assert all(row["unknown_samples"] == (gate.REFERENCE["queries_min"] if damage else 0)
+               for row in report["series"])
+    assert all(sample["state"] == ("unknown" if damage else "ok") for sample in report["samples"])
+    assert "private" not in output.read_text() and "ImportError" not in output.read_text()
+
+
+@pytest.mark.parametrize("failure, expected, reason", [
+    (None, "refused", "served-read-refused"),
+    (TimeoutError("private URL and credential"), "failed", "served-timeout"),
+    (IncompleteRead(b"private response body", 100), "failed", "served-network-error"),
+    (ConnectionResetError("private URL and credential"), "failed", "served-network-error"),
+])
+def test_live_transport_failures_write_valid_content_free_attempts(
+    tmp_path: Path, monkeypatch, failure, expected, reason,
+) -> None:
+    import io
+    import urllib.request
+
+    cases, corpus = _live_inputs(tmp_path)
+    monkeypatch.setattr(gate, "one_minute_load", lambda: 1.0)
+    class Response(io.BytesIO):
+        def read(self, *args, **kwargs):
+            if failure is not None:
+                raise failure
+            return super().read(*args, **kwargs)
+
+    def response(*args, **kwargs):
+        return Response(json.dumps({"success": False, "error": "private refusal"}).encode())
+    monkeypatch.setattr(urllib.request, "urlopen", response)
+    output = tmp_path / "summary.json"
+    transport = gate.ServedTransport("https://example.invalid", "private credential")
+    assert gate.live_cli(transport, cases_path=cases, corpus_path=corpus, output=output, quiescence_bound=0) == 0
+    report = json.loads(output.read_text())
+    gate.validate_document(report, "summary.schema.json")
+    assert report["state"] == expected
+    assert len(report["samples"]) == 1
+    sample, = report["samples"]
+    assert sample["state"] == "unknown" and sample["elapsed_ms"] is None
+    assert sample["read_error"] == reason
+    assert "private" not in output.read_text() and "https://" not in output.read_text()
+
+
+def test_content_free_summary_schema_rejects_raw_queries_and_paths() -> None:
+    from jsonschema import ValidationError
+
+    report = {"schema_version": 1, "mode": "live", "state": "not measured",
+              "contract_revision": gate.CONTRACT.revision, "series": [], "samples": []}
+    gate.validate_document(report, "summary.schema.json")
+    for key in ("query", "path", "title", "excerpt", "credential"):
+        with pytest.raises(ValidationError):
+            gate.validate_document({**report, key: "private text"}, "summary.schema.json")
+
+
+def test_missing_prose_refuses_before_a_worker_or_encoder_starts(tmp_path: Path, monkeypatch) -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    profile["source"]["sha256"] = None
+    (tmp_path / "profile.json").write_text(json.dumps(profile))
+    with pytest.raises(gate.MeasurementRefused, match="reference-prose"):
+        gate.reference_cases(profile, tmp_path)
+
+    reference_cases = gate.reference_cases
+    monkeypatch.setattr(gate, "reference_cases", lambda _profile: reference_cases(profile, tmp_path))
+    output = tmp_path / "absolute.json"
+    assert gate.absolute_cli(output, quiescence_bound=0) == 0
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused"
+    assert report["reason"] == "reference-prose-unavailable"
+
+
+def test_worker_sample_includes_bound_command_logging(tmp_path: Path, monkeypatch, warm_managed_cell) -> None:
+    from types import SimpleNamespace
+
+    from synth_vault import gen_dense_vault
+
+    from exomem import command_surface, commands
+
+    gen_dense_vault(tmp_path, 3)
+    warm_managed_cell(tmp_path)
+    command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
+    ask_memory = command_surface.bind_vault(command.leaf, tmp_path, command=command)
+    clock = [0]
+
+    def log_success(**_kwargs):
+        clock[0] += 25_000_000
+
+    monkeypatch.setattr(command_surface, "_log_tool_success", log_success)
+    monkeypatch.setattr(gate, "time", SimpleNamespace(perf_counter_ns=lambda: clock[0]))
+    sample = gate._worker_sample(ask_memory, {
+        "principal": "owner", "query": "topic", "arguments": {"mode": "keyword"},
+        "rows": {"keyword": ["keyword"]},
+    })
+    assert sample["state"] == "ok"
+    assert sample["elapsed_ms"] == 25.0
+
+
+def test_reference_admitted_principal_receives_the_owners_released_hits(
+    tmp_path: Path, warm_managed_cell,
+) -> None:
+    """A withheld-only admitted series times notices and empty unit results."""
+    from synth_vault import gen_reference_vault, reference_source
+
+    from exomem import command_surface, commands
+    from exomem.governance import principal
+
+    profile = {**json.loads((gate.BENCHMARK / "profile.json").read_text()), "pages": 40}
+    words, _digest = reference_source(profile, gate.BENCHMARK)
+    with principal.library_scope():
+        gen_reference_vault(tmp_path, profile, words)
+    warm_managed_cell(tmp_path)
+    command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
+    ask_memory = command_surface.bind_vault(command.leaf, tmp_path, command=command)
+    unit_page = next(tmp_path.glob("Knowledge Base/**/sample-00000.md")).read_text()
+    unit_text = next(line for line in unit_page.splitlines() if line.startswith("- ["))
+    query = max(unit_text.split("] ", 1)[1].split()[:6], key=len).strip(".,;:!?()")
+    callers = {"owner": principal.owner_principal(surface="library"),
+               "admitted": principal.RequestPrincipal(audience_id="benchmark-admitted", surface="mcp")}
+    for level in ("unit", "mixed"):
+        hits = {}
+        for name, caller in callers.items():
+            with principal.request_scope(caller), principal.invocation_scope():
+                hits[name] = ask_memory(query=query, include_timings=False, limit=gate.DEFAULT_LIMIT,
+                                        rerank=False, mode="keyword", result_level=level)
+        assert any(hit.get("result_type") == "semantic_unit" for hit in hits["owner"])
+        assert hits["admitted"] == hits["owner"]
+
+
+@pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
+@pytest.mark.parametrize("persisted", [False, True])
+def test_worker_prepares_persisted_advisory_before_managed_admission(
+    tmp_path: Path, monkeypatch, persisted: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    import managed_recall
+    import numpy as np
+    import synth_vault
+
+    from exomem import due_state, embedding_backend, embeddings, recall_space
+
+    (tmp_path / "Knowledge Base").mkdir()
+    identity = recall_space.SpaceIdentity(recall_space.LEGACY_MODEL, "reference-space", 2)
+    monkeypatch.setattr(recall_space, "current_identity", lambda _dim: identity)
+    rel = "Knowledge Base/reference.md"
+    (tmp_path / rel).write_text("---\ntitle: Reference\n---\nReference passage.\n")
+    vector = np.asarray([[1.0, 0.0]], dtype=np.float32)
+    artifact_root = tmp_path / "artifact"
+    artifact_root.mkdir()
+    for name in embedding_backend._ARTIFACT_FILES:
+        (artifact_root / name).write_bytes(b"small test artifact")
+    artifact = SimpleNamespace(
+        artifact_digest=embedding_backend._artifact_digest(artifact_root),
+        fingerprint=lambda: identity.fingerprint,
+    )
+    index = embeddings.EmbeddingIndex(tmp_path)
+    index.upsert_file(rel, ["Reference passage."], vector, 1.0)
+    monkeypatch.setattr(index, "rebuild_all", lambda: None)
+    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(profile=artifact))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: vector)
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: index)
+    monkeypatch.setattr(synth_vault, "reference_source", lambda *_args: (["reference"], "source-digest"))
+    monkeypatch.setattr(synth_vault, "gen_reference_vault", lambda *_args: [rel])
+    # This preparation fixture has one real page and one stored vector.
+    census = {
+        "pages": 1, "chunks": 1, "units": 0, "unit_pages": 0,
+        "vector_units": 0, "median_page_bytes": (tmp_path / rel).stat().st_size, "spot_checks": 1,
+        "vocabulary_terms": 1, "wikilinks_min": 0, "wikilinks_max": 0,
+        "transcript_pages": 0,
+    }
+    monkeypatch.setattr(gate, "_stored_corpus", lambda *_args: census)
+    if not persisted:
+        monkeypatch.setattr(due_state, "save", lambda *_args: None)
+    admitted = []
+
+    def enter_managed(root, *, full_startup):
+        assert due_state.load(root) is not None
+        admitted.append(full_startup)
+
+    monkeypatch.setattr(managed_recall, "enter_managed_recall", enter_managed)
+    if persisted:
+        environment = gate._prepare_worker(tmp_path, {"profile": {}})
+        assert admitted == [True]
+        try:
+            # The first managed selection must use the prepared dense lane.
+            selected = index.select_chunks(
+                vector[0], 1, allowed_paths={rel}, encoded_for=identity, defer_cold_load=True,
+            )
+        finally:
+            loading = index._matrix_loading()
+            if loading is not None:
+                loading.join(timeout=30)
+        assert [row[0] for row in selected] == [rel]
+        startup = {
+            "runtime_prefix": sys.prefix,
+            "runtime_lock_digest": gate._runtime_lock_digest(ROOT),
+            "runtime_policy": "parent-benchmark",
+        }
+        environment.update(gate._runtime_provenance(ROOT, startup))
+        report = {
+            "schema_version": 1, "mode": "absolute", "state": "not measured",
+            "contract_revision": gate.CONTRACT.revision, "series": [], "samples": [],
+            "environment": {"head": environment},
+        }
+        gate.validate_document(json.loads(json.dumps(report, allow_nan=False)), "summary.schema.json")
+    else:
+        with pytest.raises(gate.MeasurementRefused, match="advisory-projection-unavailable"):
+            gate._prepare_worker(tmp_path, {"profile": {}})
+        assert admitted == []
+
+
+@pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
+@pytest.mark.parametrize("invalid_cpus", [False, True])
+def test_actual_worker_bootstrap_reports_failures_before_model_preparation(tmp_path: Path, invalid_cpus) -> None:
+    import subprocess
+
+    environment = {key: gate.os.environ[key] for key in ("PATH", "HOME") if key in gate.os.environ}
+    environment.update(EXOMEM_STATE_ROOT=str(tmp_path / "state"), EXOMEM_VAULT_PATH=str(tmp_path / "vault"))
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "recall_latency_gate.py"), "--worker-source", str(ROOT),
+         "--worker-cpus", "{" if invalid_cpus else json.dumps(
+             sorted(gate.os.sched_getaffinity(0))[:gate.REFERENCE["reference_cpus"]]),
+         "--worker-vault", str(tmp_path / "vault")],
+        input="{", env=environment, cwd=tmp_path, text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 1
+    response = json.loads(result.stdout)
+    assert response["state"] == "worker-error"
+    assert response["error_class"] == "JSONDecodeError"
+    assert response["phase"] == ("worker-bootstrap" if invalid_cpus else "worker-startup")
+    if invalid_cpus:
+        assert response["reason"] == "benchmark-worker-bootstrap-failed"
+
+
+@pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
+def test_worker_uses_the_selected_runtime_and_preserves_closed_failures(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+    import types
+    import venv
+
+    runtime = tmp_path / "tag-runtime"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime)
+    python = runtime / "bin" / "python"
+    site = Path(subprocess.check_output(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"], text=True,
+    ).strip())
+    (site / "benchmark_dependency.py").write_text("VERSION = 'tag'\n")
+    parent_dependency = types.ModuleType("benchmark_dependency")
+    parent_dependency.VERSION = "parent"
+    monkeypatch.setitem(sys.modules, "benchmark_dependency", parent_dependency)
+    source = tmp_path / "tag"
+    source.mkdir()
+    (source / "uv.lock").write_text("tag dependency snapshot\n")
+    script = tmp_path / "worker.py"
+    script.write_text(
+        "import json, sys\n"
+        "from benchmark_dependency import VERSION\n"
+        "json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'state': 'ready', 'runtime_prefix': sys.prefix, "
+        "'environment': {'dependency': VERSION}}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    print(json.dumps({'state': 'worker-error', 'error_class': 'MeasurementRefused', "
+        "'reason': 'stored-vector-invalid', 'phase': 'worker-request'}), flush=True)\n"
+    )
+    monkeypatch.setattr(gate, "__file__", str(script))
+    profile = {"worker_environment": ["PATH"]}
+    worker = gate._Worker(source, tmp_path / "vault", tmp_path / "state", [], profile,
+                          python=python, runtime_prefix=runtime, runtime_policy="frozen-tag-runtime")
+    try:
+        assert parent_dependency.VERSION == "parent"
+        assert worker.environment["dependency"] == "tag"
+        assert worker.environment["runtime_policy"] == "frozen-tag-runtime"
+        assert worker.environment["runtime_lock_digest"] == gate._runtime_lock_digest(source)
+        with pytest.raises(gate.MeasurementRefused, match="stored-vector-invalid") as refused:
+            worker.exchange({"measure": True})
+        assert refused.value.phase == "worker-request"
+    finally:
+        worker.close()
+    with pytest.raises(gate.MeasurementRefused, match="runtime-prefix-mismatch"):
+        gate._Worker(source, tmp_path / "vault", tmp_path / "other-state", [], profile,
+                     python=python, runtime_prefix=tmp_path / "incorrect-runtime",
+                     runtime_policy="frozen-tag-runtime")
+
+
+@pytest.mark.skipif(gate.os.name != "posix", reason="The paired runtime uses the Linux reference profile")
+def test_a_paused_arm_cannot_hold_the_other_arms_governance_guard(tmp_path: Path, monkeypatch) -> None:
+    """A background read frozen in one arm must not refuse the other arm's next recall."""
+    (tmp_path / "home").mkdir()
+    (tmp_path / "vault").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.2")
+    script = tmp_path / "worker.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT / 'src')!r})\n"
+        "from exomem.writer_lease import LeaseConfig, LeaseManager, OpError\n"
+        "json.loads(sys.stdin.readline())\n"
+        "root = Path(sys.argv[sys.argv.index('--worker-vault') + 1])\n"
+        "try:\n"
+        "    manager = LeaseManager(LeaseConfig.from_env())\n"
+        "    with manager.reserved_identity_guard(root, domains=('governance-store',), "
+        "exclusive=False, advance_generation=False):\n"
+        "        print(json.dumps({'state': 'ready', 'runtime_prefix': sys.prefix, "
+        "'environment': {}}), flush=True)\n"
+        "        for line in sys.stdin:\n"
+        "            print(json.dumps({'state': 'held'}), flush=True)\n"
+        "except OpError as error:\n"
+        "    print(json.dumps({'state': 'worker-error', 'error_class': type(error).__name__, "
+        "'reason': error.code}), flush=True)\n"
+    )
+    monkeypatch.setattr(gate, "__file__", str(script))
+    profile = {"worker_environment": ["PATH", "HOME", "EXOMEM_MUTATION_TIMEOUT"]}
+    workers = []
+    try:
+        for arm in ("base", "head"):
+            workers.append(gate._Worker(ROOT, tmp_path / "vault", tmp_path / arm, [], profile))
+        # Each worker can run while its paused peer retains its own policy guard.
+        for worker in workers:
+            try:
+                assert worker.exchange({})["state"] == "held"
+            finally:
+                worker.pause()
+    finally:
+        for worker in workers:
+            worker.close()
+
+
+@pytest.mark.skipif(gate.os.name != "posix", reason="The paired runtime uses the Linux reference profile")
+def test_tag_runtime_ignores_the_callers_project_and_operation_settings(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+    import subprocess
+
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("The runtime installation boundary requires uv")
+    base = tmp_path / "tag"
+    base.mkdir()
+    (base / "pyproject.toml").write_text(
+        '[project]\nname = "reference-runtime"\nversion = "0.0.0"\n'
+        'requires-python = ">=3.11"\ndependencies = []\n'
+        '[project.optional-dependencies]\nembeddings-onnx = []\n'
+    )
+    cache = tmp_path / "cache"
+    subprocess.run(
+        [uv, "--no-config", "lock", "--project", str(base), "--offline",
+         "--no-python-downloads", "--python", sys.executable],
+        env={"PATH": gate.os.environ["PATH"], "UV_CACHE_DIR": str(cache)},
+        check=True, capture_output=True, text=True, timeout=20,
+    )
+    before = (base / "uv.lock").read_bytes()
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "pyproject.toml").write_text((base / "pyproject.toml").read_text())
+    # The caller has no lock and must not replace the archived tag's project.
+    monkeypatch.setenv("UV_PROJECT", str(caller))
+    monkeypatch.setenv("UV_CONFIG_FILE", str(tmp_path / "caller-config.toml"))
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+
+    python = gate._prepare_tag_runtime(base, tmp_path / "measurement")
+
+    assert python.is_file()
+    assert (base / "uv.lock").read_bytes() == before
+    assert not (caller / "uv.lock").exists()
+
+
+def test_a_paired_series_the_case_file_lacks_refuses_before_any_runtime(tmp_path: Path, monkeypatch) -> None:
+    """A renamed or mistyped CI series must not measure nothing and report green."""
+    monkeypatch.setattr(gate, "_prepare_tag_runtime", lambda *args: pytest.fail("prepared a runtime"))
+    with pytest.raises(gate.MeasurementRefused, match="paired-series-unknown"):
+        gate.paired_run(base=tmp_path, tag="v1.0.0", scratch=tmp_path, profile={},
+                        cases=[{"id": "hybrid-00", "series": "hybrid"}], series="hybird")
+
+
+@pytest.mark.parametrize("changed_lock, reason", [
+    (False, "tag-runtime-install-failed"), (True, "tag-runtime-lock-changed"),
+])
+def test_tag_runtime_failure_writes_a_refusal_without_head_fallback(tmp_path: Path, monkeypatch,
+                                                                  changed_lock, reason) -> None:
+    import subprocess
+
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "uv.lock").write_text("tag dependency snapshot\n")
+    def install(*args, **kwargs):
+        if changed_lock:
+            (base / "uv.lock").write_text("changed snapshot\n")
+        return subprocess.CompletedProcess([], 0 if changed_lock else 1)
+    monkeypatch.setattr(subprocess, "run", install)
+    monkeypatch.setattr(gate.os, "sched_getaffinity", lambda pid: {0, 1}, raising=False)
+    monkeypatch.setattr(gate, "_Worker", lambda *args, **kwargs: pytest.fail("A failed tag runtime started a worker"))
+    with pytest.raises(gate.MeasurementRefused, match=reason) as refused:
+        gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile={}, cases=[])
+    assert refused.value.phase == "tag-runtime-preparation"
+
+    def incomplete_run(**kwargs):
+        raise refused.value
+    monkeypatch.setattr(gate, "paired_run", incomplete_run)
+    monkeypatch.setattr(gate, "reference_cases", lambda profile: ([], "0" * 64))
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "v1.0.0")
+    output = tmp_path / "summary.json"
+    assert gate.paired_cli(output) == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["samples"] == []
+    assert report["reason"] == reason and report["phase"] == "tag-runtime-preparation"
+    assert "snapshot" not in output.read_text()
