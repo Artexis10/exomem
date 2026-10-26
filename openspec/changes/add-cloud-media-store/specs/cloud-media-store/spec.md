@@ -77,7 +77,7 @@ The cell SHALL hydrate an evicted original by fetching its stored object through
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
-The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload, and SHALL name each stored object with HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. cellctl SHALL mint the media key bundle (identity and name key) per cell. It SHALL store the bundle once on the cell row, wrapped with AES-GCM under the same master key that wraps the backup key, with cell ID, purpose and version as additional data. It SHALL render the bundle into the cell's Secret. Only the cell runtime and the cell's export and restore Jobs SHALL mount the bundle. The media edge, the gateway and the provider SHALL NOT receive it.
+The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload, and SHALL name each stored object with HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. cellctl SHALL mint the media key bundle (identity and name key) per cell. It SHALL store the bundle once on the cell row, wrapped with AES-GCM under the same master key that wraps the backup key, with cell ID, purpose and version as additional data. It SHALL render the bundle into the cell's Secret. Only the cell runtime and the cell's export Job SHALL mount the bundle. A restore needs no media key, because evicted originals stay in the store. The media edge, the gateway and the provider SHALL NOT receive it.
 
 #### Scenario: The bucket is listed
 
@@ -91,7 +91,7 @@ The cell SHALL encrypt each original with `age` to its own X25519 recipient befo
 
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size, ranged read, head and hide, and nothing else. It SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify it with cellctl's public key only. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request. A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export and restore Jobs SHALL reach it on the same terms.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size, ranged read, head and hide, and nothing else. It SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify it with cellctl's public key only. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request. A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export Job SHALL reach it on the same terms.
 
 #### Scenario: A cell asks for another cell's object
 

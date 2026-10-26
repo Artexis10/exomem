@@ -93,7 +93,7 @@ The edge and the provider see only ciphertext.
 
 cellctl mints a per-cell media key bundle: the `age` identity and the name key. It stores the bundle wrapped with AES-GCM under the same master key that wraps the backup key, with the cell ID, purpose and version bound as additional data. It renders the bundle into the cell's Secret.
 
-Only the runtime and the cell's export and restore Jobs mount the bundle. The edge never receives it.
+Only the runtime and the cell's export Job mount the bundle. A restore needs no media key, because evicted originals stay in the store. The edge never receives it.
 
 This makes the media key one more per-cell data key. A later change that re-roots per-cell keys moves it with the backup and volume keys, for example by wrapping it under a key the user holds. The operator holds the master key today, so the operator can deliberately decrypt stored originals. The privacy copy says so (`cloud-operator-access`).
 
@@ -101,7 +101,7 @@ This makes the media key one more per-cell data key. A later change that re-root
 
 A new in-cluster service, the media edge, moves ciphertext between cells and the media bucket. It follows the artifact broker's shape: its own Deployment and Service on a literal ClusterIP, Recreate rollout, and a canary list plus a fleet switch.
 
-- **Network.** A selected cell's runtime gains one egress edge, to the edge's ClusterIP and port, with no DNS. Export and restore Jobs reach it on the same terms.
+- **Network.** A selected cell's runtime gains one egress edge, to the edge's ClusterIP and port, with no DNS. The cell's export Job reaches it on the same terms.
 - **Authentication.** cells carry no ServiceAccount token. cellctl signs a per-cell edge credential with its own signing key, binding audience, cell ID and version, and renders it into the cell's Secret. The edge holds only the public key. It maps the credential's cell ID to that cell's object prefix and accepts no prefix from the request.
 - **Operations.** Multipart upload with declared size, ranged read, head, and hide. The edge's bucket key cannot delete file versions. Only cellctl's key-management authority destroys versions, at cell deletion (D9).
 - **Quota.** The edge refuses an upload whose declared size exceeds the cell's remaining media allowance (D10).
