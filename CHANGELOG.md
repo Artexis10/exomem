@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.145.1](https://github.com/Artexis10/exomem/compare/v0.145.0...v0.145.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **graph:** key file rows by exact path and replay stale watcher batches ([#2112](https://github.com/Artexis10/exomem/issues/2112)) ([0de47b1](https://github.com/Artexis10/exomem/commit/0de47b1f6fe7033aa6953bb6b6ef56fd9f84a5ba))
+
 ## [0.145.0](https://github.com/Artexis10/exomem/compare/v0.144.4...v0.145.0) (2026-10-26)
 
 
