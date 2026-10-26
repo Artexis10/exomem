@@ -2,7 +2,11 @@
 
 ### Requirement: Each cell has its own key hierarchy
 
-Each Cloud cell SHALL have one cell root key, generated for that cell and used by no other cell. Every key that encrypts the cell's data SHALL be derived from that cell root key or wrapped by it. That covers the volume passphrase, the backup repository password, the media key bundle and any later data key. No data key SHALL be shared between cells. No data key SHALL be wrapped only by a platform-wide key.
+Each Cloud cell SHALL have one cell root key, generated for that cell and used by no other cell.
+
+A content key is a key that decrypts the cell's content without any other tenant-held key. Every content key SHALL be derived from the cell root key or wrapped by it. That covers the volume passphrase in standard mode, the inner-layer key in tenant-locked mode, the backup repository password, the media key bundle and any later key that decrypts content. No content key SHALL be wrapped only by a platform-wide key.
+
+An infrastructure key is a per-cell key that decrypts only the ciphertext of a tenant-held inner layer. A tenant-locked cell's outer volume passphrase is one, and it MAY be wrapped under the platform master key. No key of either kind SHALL be shared between cells.
 
 In standard mode, the platform SHALL store the cell root key wrapped under the platform master key, with the cell ID, purpose and version bound as additional data.
 
@@ -13,7 +17,7 @@ A cell whose volume was created under a shared passphrase SHALL count as migrate
 - **WHEN** the volume passphrases of two cells are compared
 - **THEN** they differ, and neither opens the other cell's volume
 
-#### Scenario: A data key leaks
+#### Scenario: A content key leaks
 
 - **WHEN** one cell's volume passphrase or backup repository password becomes known
 - **THEN** no other cell's volume, backups or stored media decrypt with it
@@ -36,14 +40,14 @@ A cell whose volume was created under a shared passphrase SHALL count as migrate
 
 ### Requirement: Deleting a cell expires its keys by a stated date
 
-When a cell is deleted, the platform SHALL destroy every live copy of its cell root key and of the data keys under it. That covers control-database rows, Secrets and the tenant's wraps.
+When a cell is deleted, the platform SHALL destroy every live copy of its cell root key, of the content keys under it and of any infrastructure key. That covers control-database rows, Secrets and the tenant's wraps.
 
 Copies inside platform backups SHALL expire with those backups' retention. Platform backups include control-database backups, cluster datastore snapshots and backup object versions. The deletion record SHALL carry `keys_expire_at`, the deletion time plus the longest of those retentions. The platform SHALL report the cell's keys destroyed only after that time. Until then, the platform SHALL say which platform backups still hold copies.
 
 #### Scenario: Live copies at deletion
 
 - **WHEN** cellctl deletes a cell
-- **THEN** the live control database and the cluster hold no copy of its cell root key or data keys, and the deletion record shows `keys_expire_at`
+- **THEN** the live control database and the cluster hold no copy of its cell root key, content keys or infrastructure key, and the deletion record shows `keys_expire_at`
 
 #### Scenario: Keys reported destroyed
 
@@ -54,9 +58,9 @@ Copies inside platform backups SHALL expire with those backups' retention. Platf
 
 A tenant SHALL be able to opt in to a tenant-locked mode, in which the tenant's key wraps the cell root key.
 
-- **No platform copy.** For a tenant-locked cell, no copy of its cell root key or of any data key under it SHALL be written to the cluster datastore (including Secrets), the control database (except the tenant's own wraps), a log, or any platform backup. A mount mechanism that passes a data key through a Kubernetes Secret does not meet this requirement.
+- **No platform copy of a content key.** For a tenant-locked cell, no copy of its cell root key or of any content key SHALL be written to the cluster datastore (including Secrets), the control database (except the tenant's own wraps), a log, or any platform backup. A mount mechanism that passes a content key through a Kubernetes Secret does not meet this requirement. The cell's infrastructure key MAY be held as in standard mode, because it alone yields only inner-layer ciphertext.
 - **Keys.** The tenant's key SHALL come from a recovery code that is always issued, and MAY also come from a passkey. The platform-wrapped copy SHALL be destroyed only after the tenant confirms that the recovery code was saved. Before the tenant enables the lock, the product SHALL state that losing both the recovery code and every passkey loses the vault, and that the operator cannot recover it.
-- **Conversion.** Enabling the lock on an existing cell SHALL replace its cell root key and every data key. Its data, backups and stored media SHALL move under the new keys, and the old backup repository and media objects SHALL be deleted once the new ones verify. Earlier keys left in platform backups SHALL expire with their retention, and the cell's status SHALL show `lock_complete_at`, the date after which no platform copy remains.
+- **Conversion.** Enabling the lock on an existing cell SHALL replace its cell root key, every content key and its infrastructure key. Its data, backups and stored media SHALL move under the new keys, and the old backup repository and media objects SHALL be deleted once the new ones verify. Earlier keys left in platform backups SHALL expire with their retention, and the cell's status SHALL show `lock_complete_at`, the date after which no platform copy remains.
 - **Unlock and handover.** An unlock or handover SHALL be bound to the cell, the operation, a one-use attempt and an expiry. A handover SHALL be bound to the replacement instance's ephemeral key, and only one SHALL run per cell at a time. A handover that expires or fails SHALL leave the cell locked.
 - **Planned restarts.** An upgrade, rollout or stopping hold SHALL hand the key from the running cell to its replacement without the tenant.
 - **Unplanned stops.** After a crash, eviction or node failure, the cell SHALL be locked until the tenant unlocks it.
@@ -67,12 +71,13 @@ A tenant SHALL be able to opt in to a tenant-locked mode, in which the tenant's 
 #### Scenario: Enabling the lock on a new cell
 
 - **WHEN** a tenant creates a tenant-locked cell, confirms the saved recovery code, and the cell unlocks and serves
-- **THEN** no data key or cell root key that the platform can unwrap appears in the cluster datastore, the control database, the logs, or any platform backup taken from then on
+- **THEN** no content key or cell root key that the platform can unwrap appears in the cluster datastore, the control database, the logs, or any platform backup taken from then on
+- **AND** the infrastructure key that does appear opens only the inner layer's ciphertext
 
 #### Scenario: Converting an existing cell
 
 - **WHEN** a tenant enables the lock on an existing cell
-- **THEN** the cell serves under a new cell root key and new data keys, its old backup repository is deleted after the new one verifies, and its status shows `lock_complete_at`
+- **THEN** the cell serves under a new cell root key and new content keys, its old backup repository is deleted after the new one verifies, and its status shows `lock_complete_at`
 
 #### Scenario: Crash while tenant-locked
 

@@ -54,7 +54,7 @@ What each mechanism stops:
 
 | Mechanism | Stops | Does not stop |
 |---|---|---|
-| Per-cell keys (D1) | One leaked data key exposing every cell; a deleted cell's keys surviving past platform backup retention (D2) | Anyone holding the platform master key in standard mode |
+| Per-cell keys (D1) | One leaked content key exposing every cell; a deleted cell's keys surviving past platform backup retention (D2) | Anyone holding the platform master key in standard mode |
 | Tenant lock (D3) | Reading a locked, stopped or deleted cell; decrypting its backups or stored media offline, once earlier platform copies have expired; compelled disclosure of stored data | Root on the node while the cell is unlocked, through the decrypted mount, a memory read, or code that captures the key |
 | Access record (D4) | Erasing events after the record received them; an unnoticed shipper outage | Root on a node omitting, altering or forging events before they leave it while heartbeats continue; reads inside a session that the record shows only as a session |
 | Tenant access log (D5) | Access that the record received but the tenant never hears about | Events the record never received |
@@ -65,21 +65,24 @@ What each mechanism stops:
 
 ## Decisions
 
-### D1. One cell root key per cell; every data key hangs under it
+### D1. One cell root key per cell; every content key hangs under it
 
-cellctl mints a 256-bit cell root key for each cell. Every key that encrypts that cell's data is derived from it or wrapped by it:
+A **content key** is a key that decrypts the cell's content without any other tenant-held key. A per-cell **infrastructure key** decrypts only the ciphertext of a tenant-held inner layer, so it alone opens no content. Only a tenant-locked cell has an infrastructure key (D3).
 
-- the volume passphrase;
+cellctl mints a 256-bit cell root key for each cell. Every content key is derived from it or wrapped by it:
+
+- the volume passphrase, in standard mode;
+- the inner-layer key, in tenant-locked mode;
 - the restic repository password;
 - the media key bundle of `add-cloud-media-store`;
-- any later data key.
+- any later key that decrypts content.
 
-Wrapping uses AES-256-GCM, with the cell ID, purpose and version as additional data. This is the shape that backup keys already use.
+Wrapping uses AES-256-GCM, with the cell ID, purpose and version as additional data. This is the shape that backup keys already use. A tenant-locked cell's outer volume passphrase is an infrastructure key; cellctl keeps it per cell, wrapped under the platform master key, as in standard mode.
 
 **Standard mode.** cellctl stores the cell root key wrapped under the platform master key in the control database. The operator can therefore unwrap it, and the privacy copy says so (D7). Per-cell keys still bring three gains:
 - one leaked volume passphrase or restic password exposes one cell;
 - deletion expires a key that only one cell used (D2);
-- the tenant lock (D3) and a later TEE (D8) re-root one key per cell, not every data key.
+- the tenant lock (D3) and a later TEE (D8) re-root one key per cell, not every content key.
 
 **Hetzner volumes.** The StorageClass names the volume Secret through the external provisioner's templated node-publish parameters, so each cell's volume reads a Secret in its own namespace. The pinned hcloud CSI driver reads `encryption-passphrase` from the NodePublish Secret (`infra/helm/platform/HCLOUD_CSI_PROVENANCE.md`). A real-volume create, mount and remount drill must pass before any cell moves, as that file requires.
 
@@ -95,7 +98,7 @@ The downtime is one backup plus one restore, measured per size class in task 1.4
 
 ### D2. Deleting a cell destroys its live keys; platform backup copies expire by a stated date
 
-Cell deletion destroys every live copy of the cell root key and of the data keys under it: control-database rows, cell Secrets and the tenant's wraps.
+Cell deletion destroys every live copy of the cell root key, of the content keys under it and of any infrastructure key: control-database rows, cell Secrets and the tenant's wraps.
 
 Platform backups still hold earlier copies:
 - control-database backups hold the platform-wrapped cell root key;
@@ -108,27 +111,27 @@ A shorter window needs master-key epoch rotation: re-wrap every live root key un
 
 ### D3. The tenant lock is opt-in and leaves no platform copy of its keys
 
-**The invariant.** For a tenant-locked cell, no copy of its cell root key or any data key under it is written to:
+**The invariant.** For a tenant-locked cell, no copy of its cell root key or of any content key (D1) is written to:
 - the cluster datastore, which includes every Secret;
 - the control database, except the tenant's own wraps;
 - a log;
 - any platform backup.
 
-The CSI node-publish Secret therefore cannot carry its volume key. A Secret deleted right after the mount still reaches datastore history and snapshots.
+The CSI node-publish Secret therefore cannot carry a content key. A Secret deleted right after the mount still reaches datastore history and snapshots. The outer volume passphrase is an infrastructure key: it stays in the node-publish Secret as in standard mode, because it alone yields only the inner layer's ciphertext.
 
-**The key channel** is chosen by task 5.1 from two candidates. Both keep the outer CSI LUKS layer under the cell's per-cell platform passphrase, and add an inner layer under a tenant-held key:
+**The key channel** is chosen by task 5.1 from two candidates. Both keep the outer CSI LUKS layer under the cell's per-cell infrastructure key, and add an inner layer under a content key that only the tenant's wrap releases:
 
 1. A **node-local unlock agent** receives the key wrapped to its own ephemeral key, over a channel outside the Kubernetes API. It opens an inner LUKS2 layer on the cell's volume and keeps the key only in kernel dm-crypt state and its own memory, until the open completes.
 2. An **in-pod FUSE encryption layer** (for example, gocryptfs) holds the key in the runtime's memory.
 
-The criteria are the privileges each needs, the SQLite write latency measured on a real cell, and maintenance cost. cellctl does not connect to cells (the `cloud-cell` contract), so the key reaches a cell through the gateway's existing cell route or through the node agent.
+The criteria are the privileges each needs, the SQLite write latency measured on a real cell, and maintenance cost. cellctl does not connect to cells (the `cloud-cell` contract), so the key reaches a cell through the gateway's existing cell route or through the node agent. Backups and media jobs of an unlocked tenant-locked cell get their content keys through the same channel, never a Secret; task 5.1 covers that path too.
 
 **Enabling the lock**
 - The tenant's client generates a recovery code. A passkey adds a second wrap where the platform supports the WebAuthn PRF extension. Each derives a key-encryption key through HKDF, and the cell root key is wrapped under each.
 - The tenant confirms that they saved the recovery code. Only then does cellctl destroy the platform-wrapped copy.
 - The recovery code is mandatory, because PRF support across browsers and password managers is uneven (task 5.1).
 - A new cell can start tenant-locked.
-- **An existing cell converts with new keys.** It gets a new cell root key and new data keys. Its data moves into the new inner layer through the restore path, a new backup repository starts, and stored media is re-encrypted under the new media key. The old repository and old media objects are deleted after the new ones verify.
+- **An existing cell converts with new keys.** It gets a new cell root key, new content keys and a new infrastructure key. Its data moves into the new inner layer through the restore path, a new backup repository starts, and stored media is re-encrypted under the new media key. The old repository and old media objects are deleted after the new ones verify.
 
   Earlier keys still sit in platform backups (D2). Status therefore shows `lock_complete_at`: the conversion time plus the longest platform backup retention. The privacy copy for that cell states the date.
 
@@ -216,17 +219,22 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
    - registry and package write tokens;
    - any machine-accessible secret store entry that holds one of these.
 
-   **Custody of the admin tier**
+   **Custody of the admin tier.** The presence check covers the operator and recovery credentials that sit outside the running services: SSH keys, the operator's provider API token, Terraform state and its backend credentials, snapshot restore credentials, escrowed copies of the K3s server token and CA material, and the escrow identity.
    - Node SSH accepts only OpenSSH `-sk` keys whose every login needs a touch. A certificate, if used, certifies an `-sk` key, so its lifetime never replaces the touch.
    - Break-glass is minted only inside such a session.
-   - The other admin credentials are encrypted at rest to a presence-gated age identity, for example a FIDO2 age plugin, which needs a touch for each decryption.
+   - The other operator and recovery credentials are encrypted at rest to a presence-gated age identity, for example a FIDO2 age plugin, which needs a touch for each decryption.
    - The provider account itself sits behind the operator's own login with a hardware second factor.
-   - No agent environment and no machine-accessible store holds an admin credential in plaintext.
-   - Task 4.5 inventories them and proves the move.
+   - No routine-agent environment and no secret store that the routine or deploy identities can read holds an admin credential in plaintext.
+
+   **Two bounded exemptions.** Some admin capabilities must run unattended, so the rule names them instead of breaking them:
+   - **The release publisher.** The repository's release workflow pushes images with its run-scoped token, which carries package write. It runs only on release refs, the token expires with the run, and the release attestation records every image it publishes. That provenance is exactly what the deploy tier checks.
+   - **Service credentials inside the runtime.** Running services keep the credentials they need: the CSI controller's provider token, the K3s server token on the server node, and cellctl's wrapping keys. Each stays in the runtime, reachable only through node root or cluster administration, which are themselves admin-tier.
+
+   Task 4.5 inventories every admin credential, its permissions, and which side of this boundary it sits on, and proves the move.
 
    **Limits.** The provider account owner can always regain control of the servers through the provider console. That path is the operator's own login, outside the reach of agents, and the design states it rather than claim to gate it. Passwordless sudo stays, but only behind a presence-checked login.
 
-This is the one mechanism that stops adversary 1 before the fact. A presence check needs a human by design: its purpose is to keep automation that holds the operator's credentials away from content. A wrongly firing check costs the operator one touch. A skipped check would cost an unrecorded read of a tenant's vault.
+This is the one mechanism that stops adversary 1 before the fact. A presence check needs a human by design: its purpose is to keep automation that holds the operator's credentials away from content. A wrongly firing check costs the operator a touch for each admin session, Terraform run or escrow decryption. A missing or incompatible authenticator blocks administration until it is available, and the operator pays that delay. A skipped check would cost an unrecorded read of a tenant's vault. The exemptions keep releases and running services out of that cost.
 
 The remaining agent path is code. An agent that can merge and release could ship code that leaks content. That path needs review, leaves a public release, and is a stated limit.
 

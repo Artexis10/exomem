@@ -61,10 +61,16 @@ That covers:
 - registry and package write tokens;
 - every secret-store entry that holds one of these.
 
-Admin-tier custody SHALL require the operator's physical presence:
+Admin-tier custody SHALL require the operator's physical presence for the operator and recovery credentials that sit outside the running services:
 - Node SSH SHALL accept only FIDO2 security-key logins that need a touch for each login. A certificate SHALL certify only such a key.
-- Every other admin-tier credential SHALL be encrypted at rest to an identity that needs a touch for each decryption, or SHALL sit behind the operator's own provider-account login with a hardware second factor.
-- No automation environment and no machine-accessible secret store SHALL hold an admin-tier credential in plaintext.
+- Every other operator or recovery credential SHALL be encrypted at rest to an identity that needs a touch for each decryption, or SHALL sit behind the operator's own provider-account login with a hardware second factor.
+- No routine-agent environment, and no secret store that the routine or deploy identities can read, SHALL hold an admin-tier credential in plaintext.
+
+Two kinds of admin-tier credential are exempt from the presence check, each within its stated boundary:
+- the release publisher: the repository's release workflow MAY publish images with its run-scoped token, only on release refs; the token expires with the run, and the release attestation records each image it publishes;
+- service credentials inside the runtime: a running service MAY hold the credential it needs, such as the CSI controller's provider token or the K3s server token on the server node, where only node root or cluster administration can reach it.
+
+The inventory of admin-tier credentials SHALL record each exemption with its permissions and access boundary.
 
 The provider account owner can still regain control of a server through the provider console. Descriptions SHALL state that limit, not claim to gate it.
 
@@ -97,7 +103,12 @@ Where the cluster can enforce it at admission, exec, attach, port-forward and ep
 #### Scenario: Automation reaches for an admin credential
 
 - **WHEN** automation with the operator's routine credentials tries to obtain the provider API token, the K3s server token or a snapshot restore credential
-- **THEN** it finds no plaintext copy, and decrypting the stored copy needs the operator's touch
+- **THEN** it finds no plaintext copy in any environment or store it can read, and decrypting the operator's copy needs the operator's touch
+
+#### Scenario: Release publishing stays unattended
+
+- **WHEN** the release workflow publishes an image on a release ref
+- **THEN** it authenticates with its run-scoped token and needs no touch, and the image carries the release attestation
 
 ### Requirement: The product states its privacy boundary truthfully
 
