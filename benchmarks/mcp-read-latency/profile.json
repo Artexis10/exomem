@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "seed": 4207,
+  "shards": 1,
+  "reference_profile": "../recall-latency/profile.json",
+  "records": {
+    "collections": 30,
+    "rows": 540,
+    "skew": 1.1,
+    "minimum_rows": 6,
+    "title": "Ledger",
+    "fields": [
+      {
+        "name": "slug",
+        "type": "string",
+        "key": true
+      },
+      {
+        "name": "category",
+        "type": "string",
+        "distinct": 6
+      },
+      {
+        "name": "amount",
+        "type": "integer",
+        "range": [
+          1,
+          500
+        ]
+      },
+      {
+        "name": "logged_on",
+        "type": "date",
+        "span_days": 365,
+        "from": "2026-01-01"
+      }
+    ]
+  },
+  "planning": {
+    "collections": 24,
+    "rows": 360,
+    "skew": 1.1,
+    "minimum_rows": 6,
+    "title": "Plan",
+    "governed_fields": [
+      "status",
+      "commitment",
+      "horizon",
+      "priority"
+    ],
+    "free_fields": [
+      "area",
+      "parent"
+    ]
+  },
+  "legacy_trackers": {
+    "count": 3,
+    "rows": 40
+  },
+  "cases": {
+    "per_group": 24,
+    "list_cases": 3,
+    "passage_words": 12
+  }
+}

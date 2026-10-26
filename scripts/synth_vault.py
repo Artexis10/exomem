@@ -249,3 +249,185 @@ def gen_reference_vault(root: Path, profile: dict, words: list[str]) -> list[str
         # JSON is a YAML subset; use its maintained serializer for fixture syntax.
         path.write_text(json.dumps(document), encoding="utf-8")
     return rels
+
+
+# --- MCP read latency fixture --------------------------------------------------
+#
+# `gen_collection_fixture` and the two case builders turn
+# benchmarks/mcp-read-latency/profile.json into Records and Planning collections
+# and the canary cases that read them. A case's expected values come from the
+# generator's own input (row counts, keys, titles, passages), never from a
+# measured response.
+
+#: Namespace of the collection ids; changing it changes every id in the fixture.
+_COLLECTION_NAMESPACE = uuid.UUID("5b1c0d3e-7a42-4f6b-9c18-2e3d4a5b6c7d")
+
+
+def _skewed_sizes(spec: dict, rng: random.Random) -> list[int]:
+    """Row counts that fall off as a power law, so a few collections hold most rows."""
+    weights = [(rank + 1) ** -spec["skew"] for rank in range(spec["collections"])]
+    sizes = [max(spec["minimum_rows"], round(spec["rows"] * weight / sum(weights))) for weight in weights]
+    rng.shuffle(sizes)
+    return sizes
+
+
+def _manifest_text(profile_name: str, identity: str, title: str, fields: dict, key: str, source: str) -> str:
+    import yaml
+
+    frontmatter = {
+        # These tokens are the collection manifest contract's fixed values, not vault vocabulary.
+        "type": "collection", "exomem_id": identity, "title": title, "semantic_profile": profile_name,
+        "collection_version": 1, "schema_version": 1, "lifecycle": "active",
+        "storage": {"strategy": "markdown-items", "source": source, "format_version": 1},
+        "item_schema": {"natural_key": [key], "fields": fields},
+    }
+    return "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + title + ".\n"
+
+
+def _record_item(fields: list[dict], rng: random.Random, ordinal: str) -> dict:
+    import datetime
+
+    item: dict = {}
+    for field in fields:
+        if field.get("key"):
+            item[field["name"]] = ordinal
+        elif "distinct" in field:
+            item[field["name"]] = f"{field['name']}-{rng.randrange(field['distinct'])}"
+        elif "range" in field:
+            item[field["name"]] = rng.randint(*field["range"])
+        else:
+            start = datetime.date.fromisoformat(field["from"])
+            item[field["name"]] = (start + datetime.timedelta(days=rng.randrange(field["span_days"]))).isoformat()
+    return item
+
+
+def gen_collection_fixture(profile: dict) -> dict:
+    """Records and Planning collections with skewed row counts, plus manifest-less trackers.
+
+    Planning values (status, commitment, horizon, priority) come from the shipped
+    planning-values registry at run time. Only statuses of the registry's `open`
+    class are used, so every row stays in the default query view.
+    """
+    from exomem.planning_values import PlanningValues
+
+    rng = random.Random(f"{profile['seed']}:collections")
+    registry = PlanningValues(None)
+    records_spec, planning_spec = profile["records"], profile["planning"]
+    records = []
+    for index, size in enumerate(_skewed_sizes(records_spec, rng)):
+        title = f"{records_spec['title']} {index:02d}"
+        identity = str(uuid.uuid5(_COLLECTION_NAMESPACE, f"{profile['seed']}:records:{index}"))
+        key = next(field["name"] for field in records_spec["fields"] if field.get("key"))
+        fields = {field["name"]: {"type": field["type"], **({"required": True} if field.get("key") else {})}
+                  for field in records_spec["fields"]}
+        records.append({
+            "id": identity, "title": title, "manifest_path": f"Knowledge Base/Records/{title}/_collection.md",
+            "manifest_text": _manifest_text("records", identity, title, fields, key, "Entries"),
+            "items": [_record_item(records_spec["fields"], rng, f"{index:02d}-{row:04d}") for row in range(size)],
+        })
+    governed = planning_spec["governed_fields"]
+    if set(governed) - set(registry.fields()):
+        raise ValueError("planning-field-unregistered")
+    values = {name: [value for value in registry.values(name)
+                     if name != "status" or registry.planning_class(value) == "open"] for name in governed}
+    planning = []
+    for index, size in enumerate(_skewed_sizes(planning_spec, rng)):
+        title = f"{planning_spec['title']} {index:02d}"
+        identity = str(uuid.uuid5(_COLLECTION_NAMESPACE, f"{profile['seed']}:planning:{index}"))
+        fields = {name: {"type": "string", **({"required": True} if name == "title" else {})}
+                  for name in ("title", *registry.fields(), *planning_spec["free_fields"])}
+        planning.append({
+            "id": identity, "title": title, "manifest_path": f"Knowledge Base/Planning/{title}/_collection.md",
+            "manifest_text": _manifest_text("planning", identity, title, fields, "title", "Items"),
+            "items": [{"title": f"{title} item {row:04d}", **{name: rng.choice(values[name]) for name in governed}}
+                      for row in range(size)],
+        })
+    trackers = []
+    for index in range(profile["legacy_trackers"]["count"]):
+        rows = "\n".join(f"| 2026-02-{row % 28 + 1:02d} | note {index}-{row} |"
+                         for row in range(profile["legacy_trackers"]["rows"]))
+        trackers.append({"path": f"Knowledge Base/Records/Legacy/tracker-{index}.md",
+                         # `tracker` is the frontmatter type the legacy reader accepts.
+                         "text": f"---\ntype: tracker\ntitle: Legacy tracker {index}\n---\n\n"
+                                 f"| date | note |\n| --- | --- |\n{rows}\n"})
+    return {"records": records, "planning": planning, "legacy_trackers": trackers}
+
+
+def _case(group: str, number: int, tool: str, arguments: dict, *, state_path: list, state,
+          references: list[tuple[list, str]], material: list[list]) -> dict:
+    return {"id": f"{group}-{number:02d}", "group": group, "tool": tool, "arguments": arguments,
+            "expected": {"state_path": state_path, "state": state,
+                         "references": [{"path": path, "value": value} for path, value in references],
+                         "material_paths": material}}
+
+
+def gen_collection_cases(fixture: dict, profile: dict) -> list[dict]:
+    """Query, read and list cases whose answers follow from the fixture's own rows."""
+    spec = profile["cases"]
+    cases = []
+    # Filter on the key (one row) and on each low-cardinality field (many rows).
+    record_columns = [field["name"] for field in profile["records"]["fields"]
+                      if field.get("key") or "distinct" in field]
+    for kind, tool, name, filter_names in (
+        ("records", "read_records", "records", record_columns),
+        ("planning", "read_plans", "planning", profile["planning"]["governed_fields"]),
+    ):
+        rng = random.Random(f"{profile['seed']}:{kind}-cases")
+        chosen = rng.sample(fixture[kind], min(spec["per_group"], len(fixture[kind])))
+        for number, collection in enumerate(chosen):
+            row = rng.choice(collection["items"])
+            column = filter_names[number % len(filter_names)]
+            matched = sum(1 for item in collection["items"] if item[column] == row[column])
+            query = {"kind": "query", "collection": collection["manifest_path"],
+                     "filters": [{"column": column, "op": "eq", "value": row[column]}]}
+            cases.append(_case(f"{name}-query", number, tool, {"operation": query},
+                               state_path=["total_matched"], state=matched,
+                               references=[(["collection_id"], collection["id"])], material=[["snapshot"]]))
+        for number, collection in enumerate(chosen):
+            inspect = {"kind": "inspect", "collection": collection["manifest_path"]}
+            cases.append(_case(f"{name}-read", number, tool, {"operation": inspect},
+                               state_path=["contract", "collection_id"], state=collection["id"],
+                               references=[(["contract", "title"], collection["title"])],
+                               material=[["snapshot"]]))
+        for number in range(spec["list_cases"]):
+            listing = {"collections": {"type": "array", "minItems": len(fixture[kind])}}
+            if kind == "records":
+                listing["legacy_trackers"] = {"type": "array", "minItems": len(fixture["legacy_trackers"])}
+            cases.append({"id": f"{name}-list-{number:02d}", "group": f"{name}-list", "tool": tool,
+                          "arguments": {"operation": {"kind": "inspect"}},
+                          "expected": {"response_schema": {"type": "object", "required": list(listing),
+                                                           "properties": listing}}})
+    return cases
+
+
+def gen_note_cases(root: Path, rels: list[str], profile: dict) -> list[dict]:
+    """Read, search and recall cases for pages drawn from the generated vault.
+
+    The shared synthetic prose repeats across pages, so no query names one page.
+    Only the read case pins the exact page; the search and recall cases require
+    a non-empty ranked answer, which both arms must give for the same input.
+    """
+    from exomem import vault
+
+    spec = profile["cases"]
+    size = spec["per_group"]
+    chosen = random.Random(f"{profile['seed']}:notes").sample(rels, size * 3)
+    pages = []
+    for rel in chosen:
+        frontmatter, body, _ = vault.parse_frontmatter((root / rel).read_text(encoding="utf-8"))
+        pages.append((rel, frontmatter["title"], " ".join(body.split("\n\n")[0].split()[: spec["passage_words"]])))
+    search_schema = {"type": "array", "minItems": 1,
+                     "items": {"type": "object", "required": ["path", "title"]}}
+    recall_schema = {"type": "object", "required": ["anchors"],
+                     "properties": {"anchors": {"type": "array", "minItems": 1}}}
+    cases = []
+    for number, (rel, title, _passage) in enumerate(pages[:size]):
+        cases.append(_case("note-read", number, "read_memory", {"path": rel}, state_path=["path"], state=rel,
+                           references=[(["frontmatter", "title"], title)], material=[["body"]]))
+    for number, (_rel, _title, passage) in enumerate(pages[size:2 * size]):
+        cases.append({"id": f"search-{number:02d}", "group": "search", "tool": "search_memory",
+                      "arguments": {"query": passage}, "expected": {"response_schema": search_schema}})
+    for number, (_rel, title, passage) in enumerate(pages[2 * size:]):
+        cases.append({"id": f"recall-{number:02d}", "group": "recall", "tool": "recall_context",
+                      "arguments": {"turn": f"{title}: {passage}"}, "expected": {"response_schema": recall_schema}})
+    return cases
