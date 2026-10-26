@@ -906,6 +906,15 @@ class DraftToken:
         return decoded
 
 
+def _new_provenance_time(vault_root: Path) -> str | None:
+    from . import vocabulary_gate
+
+    if vocabulary_gate.requires_stable_provenance(vault_root):
+        # Approval digests have no durable timestamp preimage; omit optional metrics.
+        return None
+    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+
+
 @dataclass(frozen=True, slots=True)
 class CreationPreflight:
     applicability: Literal["full", "structural", "not_semantic"]
@@ -934,6 +943,7 @@ class CreationPreflight:
     )
     #: Where the typed writer filed the page and why; absent for writers that do not place pages.
     placement: dict[str, Any] | None = None
+    provenance_server_at: str | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -1071,6 +1081,7 @@ class ExistingPreflight:
     source_closure_plan: source_closure.SourceClosurePlan | None = None
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
     unit_target_guards: tuple[vault.PathGuard, ...] = ()
+    provenance_server_at: str | None = None
 
     @property
     def before_hash(self) -> str:
@@ -2103,6 +2114,22 @@ def _preflight_existing(
             "transition token does not match the exact before and after state",
         )
     transition_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    provenance_server_at = _new_provenance_time(root)
+    if transition_token is not None and applicability == "full" and after.identity_kind == "exomem_id":
+        prepared = relation_review.load_lifecycle_prepared(root, after.identity, admission=admission)
+        if (
+            prepared is not None
+            and prepared.transition_id == token_value["transition_id"]
+            and prepared.operation == operation
+            and prepared.page_identity == after.identity
+            and prepared.before_path == path
+            and prepared.before_source_hash == token_value["before_hash"]
+            and prepared.after_path == path
+            and prepared.after_source_hash == after.source_hash
+            and prepared.after_fingerprint == after.review_fingerprint
+            and prepared.transition_token_hash == transition_hash
+        ):
+            provenance_server_at = prepared.provenance_server_at
     requested_decision: relation_review.LifecycleDecision | None = None
     if relation_disposition == "reviewed_none":
         if applicability != "full":
@@ -2213,6 +2240,7 @@ def _preflight_existing(
         census_token,
         closure_plan,
         origin_inputs,
+        provenance_server_at=provenance_server_at,
     )
 
 
@@ -2382,6 +2410,7 @@ def _commit_existing_locked(
                 decision=preflight.requested_decision,
                 transition_token=preflight.transition_token,
                 auxiliary_hash=relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
+                provenance_server_at=preflight.provenance_server_at,
             )
             current = relation_review.LifecyclePrimaryBinding(
                 preflight.before.path,
@@ -2543,7 +2572,10 @@ def _revalidate_existing_preflight(
             relation_review_reason=relation_review_reason,
             status_basis=status_basis,
         )
-        return replace(refreshed, unit_target_guards=preflight.unit_target_guards)
+        return replace(
+            refreshed, unit_target_guards=preflight.unit_target_guards,
+            provenance_server_at=preflight.provenance_server_at,
+        )
 
 
 def _prepare_markdown_catalog_publication(
@@ -4432,6 +4464,21 @@ def _preflight_creation(
         finally:
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
         validation = attempt.validation
+        artifact = attempt.artifact
+        provenance_server_at = _new_provenance_time(root)
+        if (
+            artifact is not None
+            and artifact.schema_version == 2
+            and artifact.page_identity == draft_id
+            and artifact.page_path_at_review == path
+            and artifact.content_fingerprint == validation.content_fingerprint
+            and artifact.draft_hash == validation.draft_hash
+            and artifact.operation == operation
+            and artifact.draft_token_hash == relation_review.draft_token_hash(draft_token)
+            and artifact.predecessor_path == predecessor_path
+            and artifact.predecessor_content_hash == predecessor_content_hash
+        ):
+            provenance_server_at = artifact.provenance_server_at
         # This stamp also guards the relation-review verdict: both evaluations
         # read this page's definitions and the status basis after the entry
         # generation, so a change between or after them leaves it stale.
@@ -4464,6 +4511,7 @@ def _preflight_creation(
             ) if vocabulary_binding is not None else (),
             origin_inputs,
             relation_review.prevalidated_attempt(attempt, census_token),
+            provenance_server_at=provenance_server_at,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4498,6 +4546,7 @@ def _preflight_creation(
             vocabulary_binding.parent_guard,
         ) if vocabulary_binding is not None else (),
         origin_inputs,
+        provenance_server_at=_new_provenance_time(root),
     )
 
 
@@ -4773,6 +4822,7 @@ def _commit_creation(
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
                 prevalidated=preflight.relation_attempt,
+                provenance_server_at=preflight.provenance_server_at,
             )
             measured[prepared.preliminary_outcome] = 1
     with call_spans.span("commit.embedding_prewarm"):

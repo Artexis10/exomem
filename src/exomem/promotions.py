@@ -596,6 +596,7 @@ def triage(
 ) -> dict[str, Any]:
     """Dismiss, snooze or reopen one promotion notice. No revert lands here."""
     normalized = str(action or "").strip().lower()
+    # nosemgrep: ep-word-membership -- the promotion triage protocol defines these action tokens.
     if normalized not in {"dismiss", "snooze", "reopen"}:
         raise ValueError(
             "INVALID_REVIEW_ACTION: a recent promotion accepts dismiss, snooze, or reopen"

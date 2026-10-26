@@ -102,10 +102,12 @@ def operation_provenance(
     *,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Retain authored additions from a writer's exact semantic before/after images."""
     from . import note_types, semantic_writes, vault
 
+    if preflight.provenance_server_at is None:
+        return None
     if isinstance(preflight, semantic_writes.ExistingPreflight):
         before = preflight.before_corpus
         after = preflight.after_corpus
@@ -263,7 +265,7 @@ def operation_provenance(
     # The v1 log schema fixes mutation kinds; note-type keys stay in their registry.
     return {
         "path": state.path,
-        "server_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        "server_at": preflight.provenance_server_at,
         "mutation_kind": "edit"
         if isinstance(preflight, semantic_writes.ExistingPreflight)
         else "creation",
@@ -329,10 +331,8 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         timestamp = instant(data.get("server_at")) if data else None
         if timestamp is None:
             # Legacy dates describe author intent, never a known server write instant.
-            legacy_day = _origin_date(entry["date"])
-            if legacy_day is None or start.date() <= legacy_day <= now.date():
-                unknown_time += 1
-                uninstrumented += 1
+            unknown_time += 1
+            uninstrumented += 1
             continue
         if start <= timestamp <= now:
             observed += 1
@@ -380,7 +380,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "unknown_server_time_entries": unknown_time,
         "unlogged_operations": None,
         "window_complete": False,
-        "limitation": "Logs do not prove coverage of unlogged writes or pre-instrumentation history.",
+        "limitation": "Unlogged, legacy and unbound approval writes have incomplete server-time coverage.",
     }
     recorded_edges = [edge for event in events.values() for edge in event["added_edges"]]
     unknown_identity = sum(
@@ -488,6 +488,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
     return {
         "window": window,
         "source": source,
+        "time_basis": "first_server_commit_preparation",
         "coverage": coverage,
         "authored_edges": metric(
             len(edges) if events and (edges or not unknown_identity) else None,

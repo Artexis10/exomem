@@ -22,6 +22,59 @@ from exomem import vault as vault_module
 from exomem.governance.principal import owner_principal, request_scope
 
 
+def test_edit_recovery_keeps_the_first_committing_attempts_server_time(vault, monkeypatch) -> None:
+    """A crash before the primary write cannot change the log bytes bound to recovery."""
+    from exomem import edit, relation_review
+
+    arguments = {
+        "content": "## Claim\n\nA retained conclusion.\n",
+        "note_type": "insight", "title": "Recoverable conclusion",
+    }
+    draft = note.note(vault, validate_only=True, **arguments)
+    created = note.note(
+        vault, **arguments, draft_id=draft.draft_id, draft_hash=draft.draft_hash,
+        draft_token=draft.draft_token, relation_disposition="reviewed_none",
+        relation_review_hash=draft.draft_hash, relation_review_reason="No honest relation applies.",
+    )
+    change = {
+        "path": created.path, "why": "Correct the conclusion.",
+        "new_body": "## Claim\n\nA corrected conclusion.\n",
+        "relation_disposition": "reviewed_none", "relation_review_reason": "No honest relation applies.",
+    }
+    validation = edit.edit(vault, validate_only=True, **change)
+    retry = {
+        "semantic_transition_token": validation.semantic["transition_token"],
+        "relation_review_hash": validation.semantic["relation_review_hash"],
+    }
+    prepared_path = relation_review.lifecycle_prepared_path(vault, draft.draft_id)
+    before = (vault / created.path).read_bytes()
+    publish = vault_module._after_batch_destination_published
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    def die_after_prepared(path):
+        publish(path)
+        if path == prepared_path:
+            raise SimulatedProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_module, "_after_batch_destination_published", die_after_prepared)
+        with pytest.raises(SimulatedProcessDeath):
+            edit.edit(vault, **change, **retry)
+    prepared = prepared_path.read_bytes()
+    assert (vault / created.path).read_bytes() == before
+
+    edit.edit(vault, **change, **retry)
+
+    assert prepared_path.read_bytes() == prepared
+    assert "A corrected conclusion." in (vault / created.path).read_text()
+    events = [entry["provenance"] for entry in vault_module.read_operation_log(vault)["entries"]
+              if entry.get("provenance", {}).get("mutation_kind") == "edit"]
+    assert len(events) == 1
+    assert events[0]["server_at"] == json.loads(prepared)["provenance_server_at"]
+
+
 def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,

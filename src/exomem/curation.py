@@ -31,6 +31,7 @@ from .vault import (
 )
 from .vault import content_hash as text_content_hash
 
+# nosemgrep: ep-word-set -- maintain_memory defines these closed curation action tokens.
 CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "work-item",
     "propose",
@@ -174,6 +175,7 @@ _CREATE_ENTITY_FIELDS = frozenset(
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})
+# nosemgrep: ep-word-set -- remove_relation defines these closed request fields.
 _REMOVE_RELATION_FIELDS = frozenset({"subject", "predicate", "target", "why"})
 _APPEND_RECORD_FIELDS = frozenset(
     {"collection", "item", "item_key", "body", "why", "expected_container_hash"}
