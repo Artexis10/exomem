@@ -58,7 +58,7 @@ What each mechanism stops:
 | Tenant lock (D3) | Reading a locked, stopped or deleted cell; decrypting its backups or stored media offline, once earlier platform copies have expired; compelled disclosure of stored data | Root on the node while the cell is unlocked, through the decrypted mount, a memory read, or code that captures the key |
 | Access record (D4) | Erasing events after the record received them; an unnoticed shipper outage | Root on a node omitting, altering or forging events before they leave it while heartbeats continue; reads inside a session that the record shows only as a session |
 | Tenant access log (D5) | Access that the record received but the tenant never hears about | Events the record never received |
-| Access tiers and presence check (D6) | Adversary 1 reaching any content path or admin credential; a deploy of an image that the release workflow did not build | Adversary 1 merging and releasing code that leaks content, which needs review and is public; adversary 2 |
+| Access tiers and presence check (D6) | Adversary 1 reaching any content path or admin credential; a deploy of an image that the release workflow did not build from `main` | Adversary 1 merging code to `main` through a pull request and the required checks, then releasing it. That path is public and permanent, but on this repository no second person reviews it. Also adversary 2 |
 | Truthful claims (D7) | Users trusting a property that is not in force | — |
 
 **Core truth.** Without hardware memory encryption, whoever controls the node that runs an unlocked cell can read it. This change keeps automation and routine credentials away from that path. It makes the act need the operator's presence, records what passes through the cluster API and node logins, and ends stored platform copies of a locked cell's keys. Only a confidential cell (D8) removes the live path.
@@ -96,6 +96,8 @@ The downtime is one backup plus one restore, measured per size class in task 1.4
 
 **Local storage.** `move-cloud-cells-to-local-storage` encrypts at the node level and calls per-tenant keys a non-goal (its D2). That non-goal is superseded. TopoLVM has no per-volume encryption, so a per-volume LUKS2 layer under the cell's passphrase needs its own integration. Task 1.6 names that integration, its maintained basis or custom part, and its owner before the cutover. Until it ships, a cell on local storage does not meet the per-cell key requirement, and the privacy copy may not claim it for that cell.
 
+**Content scratch.** Today a cell also writes content outside its volume. The runtime's `TMPDIR`, media job scratch (video frames, OCR images, transcripts) and import and export staging sit on disk-backed emptyDirs on the node, and Hetzner Cloud node disks carry no encryption. Every content-bearing scratch path therefore moves onto the cell's own encrypted volume, inside the inner layer when the cell is tenant-locked, or into a memory-backed emptyDir within the cell's memory limit. Until that holds for a cell, the per-cell encryption claim and the tenant-lock claim are not claimable for it. Task 1.7 inventories the paths and moves them.
+
 ### D2. Deleting a cell destroys its live keys; platform backup copies expire by a stated date
 
 Cell deletion destroys every live copy of the cell root key, of the content keys under it and of any infrastructure key: control-database rows, cell Secrets and the tenant's wraps.
@@ -117,7 +119,7 @@ A shorter window needs master-key epoch rotation: re-wrap every live root key un
 - a log;
 - any platform backup.
 
-The CSI node-publish Secret therefore cannot carry a content key. A Secret deleted right after the mount still reaches datastore history and snapshots. The outer volume passphrase is an infrastructure key: it stays in the node-publish Secret as in standard mode, because it alone yields only the inner layer's ciphertext.
+The CSI node-publish Secret therefore cannot carry a content key. A Secret deleted right after the mount still reaches datastore history and snapshots. The outer volume passphrase is an infrastructure key: it stays in the node-publish Secret as in standard mode, because it alone yields only the inner layer's ciphertext. The cell's content scratch lives inside the inner layer or in memory (D1, "Content scratch").
 
 **The key channel** is chosen by task 5.1 from two candidates. Both keep the outer CSI LUKS layer under the cell's per-cell infrastructure key, and add an inner layer under a content key that only the tenant's wrap releases:
 
@@ -133,7 +135,7 @@ The criteria are the privileges each needs, the SQLite write latency measured on
 - A new cell can start tenant-locked.
 - **An existing cell converts with new keys.** It gets a new cell root key, new content keys and a new infrastructure key. Its data moves into the new inner layer through the restore path, a new backup repository starts, and stored media is re-encrypted under the new media key. The old repository and old media objects are deleted after the new ones verify.
 
-  Earlier keys still sit in platform backups (D2). Status therefore shows `lock_complete_at`: the conversion time plus the longest platform backup retention. The privacy copy for that cell states the date.
+  Earlier keys still sit in platform backups (D2). So does the platform-wrapped copy that every cell holds until its tenant confirms the recovery code, a new cell included. Status therefore shows `lock_complete_at` for every tenant-locked cell: the time the last platform copy was destroyed, plus the longest platform backup retention. The privacy copy for that cell states the date.
 
 **Unlocking.** The control plane serves the tenant's client the wrapped cell root key. The client unwraps it locally and wraps it to the chosen channel's ephemeral key. That ephemeral key is bound to the cell, the operation, a one-use attempt ID and an expiry. Because TLS ends on the operator's node, this flow protects the key against storage, logs and automation. It does not protect against root on that node, and the threat model says so.
 
@@ -188,7 +190,7 @@ cellctl derives each cell's access log from the record into the control database
 - an image or configuration change to cellctl, which derives this log;
 - a gap in the heartbeat.
 
-Entries appear within ten minutes of receipt. An entry shows time, identity tier (routine, deploy or admin), action, target and, where given, the stated reason. It shows no content, and renders every field as text. The view states the D4 limit: it lists what the record received.
+Entries appear within ten minutes of receipt. An entry shows time, identity tier (routine, deploy, admin, or service for a credential that a running service holds, such as cellctl's or the CSI driver's), action, target and, where given, the stated reason. It shows no content, and renders every field as text. The view states the D4 limit: it lists what the record received.
 
 ### D6. Three access tiers; admin capabilities need the operator's presence
 
@@ -198,6 +200,8 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
    - of named platform workloads, through an image-only patch.
 
    An admission rule compares the old and new objects and permits only image-field changes. A maintained verifier (Sigstore policy-controller or Kyverno, chosen in task 4.1) accepts an image only when it carries a GitHub artifact attestation. The attestation must be signed by this repository's release workflow on a release ref, for that workload's image family. The release workflow already produces these attestations for the Cloud and cellctl images. Registry write access alone cannot produce one, so a pushed image fails.
+
+   A **release ref** is a `v*` tag that only the release automation can create, on a commit that `main` contains. Today tags carry no rule, so a holder of repository write could tag an unreviewed commit and dispatch the release workflow on it, which would produce a genuine attestation. Task 4.6 adds a tag ruleset that admits only the release automation, and makes the release workflow refuse a tag whose commit `main` does not contain. `main` already accepts changes only through its required checks. Repository administration (rulesets, branch protection, Actions secrets) is admin-tier, so the GitHub credentials that agents hold carry no administration permission.
 
    The identity has no exec, attach, port-forward, proxy or ephemeral containers. It cannot read Secrets, or change RBAC, admission policy, volumes or Secrets. A full chart upgrade installs RBAC and admission policy, so no scoped identity can run it; it is an admin action.
 3. **Admin.** Every credential that can yield one of the following is admin-tier:
@@ -236,7 +240,7 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
 
 This is the one mechanism that stops adversary 1 before the fact. A presence check needs a human by design: its purpose is to keep automation that holds the operator's credentials away from content. A wrongly firing check costs the operator a touch for each admin session, Terraform run or escrow decryption. A missing or incompatible authenticator blocks administration until it is available, and the operator pays that delay. A skipped check would cost an unrecorded read of a tenant's vault. The exemptions keep releases and running services out of that cost.
 
-The remaining agent path is code. An agent that can merge and release could ship code that leaks content. That path needs review, leaves a public release, and is a stated limit.
+The remaining agent path is code. An agent that can merge to `main` can ship code that leaks content in the next release. That path leaves a public pull request, commit and release, and the required checks run on it, but on this solo-maintained repository no second person reviews it. It is a stated limit, disclosed beside the claims (D7).
 
 ### D7. Claims follow the mechanisms in force, per mode
 
@@ -257,6 +261,7 @@ Disclosures, beside the claims:
 - In tenant-locked mode, while your cell is unlocked, a deliberate attack on the node that runs it can still reach content.
 - A lost recovery code and passkey means lost data.
 - The edge and gateway see requests and responses in transit.
+- Code merged to the repository can reach a release, so an agent or attacker with merge rights could ship code that reads content; that path is public and permanent.
 
 No copy claims that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation.
 

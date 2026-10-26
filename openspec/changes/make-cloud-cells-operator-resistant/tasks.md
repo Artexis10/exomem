@@ -6,6 +6,7 @@
 - [ ] 1.4 Migrate existing cells one at a time, owner first, through the relocation path: stop under a hold, fresh backup, new volume under the cell's own passphrase, restore, verify, start. Delete the old volume after a soak. Remove the shared passphrase once no volume uses it. Evidence: per cell, the shared passphrase opens none of its volumes, recall, governance status and a governed write pass, and the measured downtime is recorded per size class.
 - [ ] 1.5 At cell deletion, destroy every live copy of the cell root key, its content keys and any infrastructure key. Record `keys_expire_at` from the longest platform backup retention, and report the keys destroyed only after it. Update `docs/runbooks/cloud-cell-deletion.md` with the date. Evidence: a rehearsal deletion shows no live copy at once, and its status names the platform backups that still hold copies until `keys_expire_at`.
 - [ ] 1.6 Report a cell on storage without a per-cell volume key as not meeting the requirement. Record in `move-cloud-cells-to-local-storage` that its cutover must first add a per-volume LUKS2 layer under the cell's volume passphrase, and name that integration's maintained basis or custom part and its owner. Evidence: the status field on a local-storage rehearsal cell, and that change's updated design.
+- [ ] 1.7 Inventory every content-bearing scratch path of a cell (the runtime's `TMPDIR`, media job scratch, import and export staging, and caches that hold content). Move each onto the cell's encrypted volume or into a memory-backed emptyDir within the memory limit, and report a cell whose scratch does not comply. Evidence: a canary written through capture, media processing and an owner export appears on no node path outside the cell's volume, and the memory and latency effect is recorded.
 
 ## 2. Access record
 
@@ -36,6 +37,10 @@
   - service credentials inside the runtime (the CSI controller's provider token, the server's K3s token, cellctl's wrapping keys).
 
   Check that SOPS accepts a FIDO2 age plugin identity. Move the operator and recovery credentials into presence-gated custody, and remove every admin credential's plaintext from routine-agent environments and from secret stores that the routine or deploy identities can read. Evidence: the inventory, recorded in design D6; automation with routine credentials finds no plaintext copy; decrypting an operator credential fails without a touch; a release still publishes and the CSI driver still provisions.
+- [ ] 4.6 Add a tag ruleset under which only the release automation can create `v*` tags. Make the release workflow refuse a tag whose commit `main` does not contain. Give the GitHub credentials that agents hold no repository administration permission. Evidence:
+  - an agent credential cannot create a `v*` tag or change a ruleset;
+  - a workflow dispatch on a tag outside `main` builds nothing;
+  - a normal release still publishes and attests.
 
 ## 5. Tenant lock
 
@@ -49,7 +54,7 @@
   - restore and relocation waiting for unlock;
   - return to standard mode.
 
-  Evidence: rehearsal tests that cover each scenario in `cloud-cell-key-custody`. After an unlock and a handover, a search of the cluster datastore, a datastore snapshot taken during the unlock, the control database and the logs finds no content key or platform-unwrappable root key, and the infrastructure key found there opens only inner-layer ciphertext.
+  Evidence: rehearsal tests that cover each scenario in `cloud-cell-key-custody`. After an unlock and a handover, a search of the cluster datastore, a datastore snapshot taken during the unlock, the control database and the logs finds no content key or platform-unwrappable root key, and the infrastructure key found there opens only inner-layer ciphertext. A content canary written while unlocked appears on no node path outside the inner layer or memory after a crash.
 - [ ] 5.3 Implement the control plane's flow (separate repository): the opt-in warning, recovery code generation and saved-code check, passkey wrapping, unlock and leaving the lock. Evidence: an end-to-end rehearsal of enabling the lock, crashing, unlocking with the recovery code and upgrading without a second unlock.
 - [ ] 5.4 Reconcile sleep with `add-cloud-cell-sleep`, whichever change becomes canonical first. A tenant-locked cell is set never to sleep, capacity counts it as awake, and `CELL_LOCKED` stays distinct from `CELL_WAKING`. Evidence: strict OpenSpec validation of the reconciled requirements, and a rehearsal in which an idle tenant-locked cell stays awake.
 - [ ] 5.5 When `add-cloud-media-store`'s privacy-copy requirement is canonical, change it to say that the media key bundle is under the cell root key, and is tenant-held in tenant-locked mode. Evidence: strict OpenSpec validation of that update.

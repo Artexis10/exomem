@@ -48,7 +48,8 @@ Every credential that can yield any of the following SHALL be an admin-tier cred
 - the cluster datastore or its snapshots;
 - provider control of a node, through its API, rescue system or console;
 - escrow decryption;
-- registry write.
+- registry write;
+- repository administration: rulesets, branch protection and Actions secrets.
 
 That covers:
 - node SSH keys;
@@ -59,6 +60,7 @@ That covers:
 - Terraform state and its backend credentials;
 - the escrow identity;
 - registry and package write tokens;
+- GitHub credentials with repository administration permission;
 - every secret-store entry that holds one of these.
 
 Admin-tier custody SHALL require the operator's physical presence for the operator and recovery credentials that sit outside the running services:
@@ -118,9 +120,9 @@ For every cell, the claimable properties are:
 - tenants cannot reach one another's data;
 - the internet-facing edge cannot read durable tenant keys;
 - the operator cannot see content by accident, and deliberate access leaves an audit trail;
-- data at rest and in backups is encrypted.
+- data on the cell's volume and in backups is encrypted at rest.
 
-Once the per-cell key hierarchy, the access record, the tenant access log and the admin tier are in force for the cell, these become claimable:
+Once the per-cell key hierarchy, its content-scratch rule, the access record, the tenant access log and the admin tier are in force for the cell, these become claimable:
 - routine and deploy credentials cannot reach content;
 - reaching content needs the operator's physical presence;
 - access through the cluster API and node logins is recorded off the server, where received events cannot be erased, and is shown to the tenant;
@@ -135,7 +137,8 @@ The descriptions SHALL also disclose that:
 - root on a node can suppress or forge events before they leave it, so the record shows what it received, not everything that happened;
 - the provider account owner can regain control of a server through the provider console;
 - in tenant-locked mode, while the cell is unlocked, a deliberate attack on the node that runs it can still reach its content;
-- in tenant-locked mode, losing both the recovery code and every passkey loses the vault.
+- in tenant-locked mode, losing both the recovery code and every passkey loses the vault;
+- code merged to the repository can reach a release, so anyone with merge rights could ship code that reads content, through a path that is public and permanent.
 
 They SHALL NOT claim:
 - that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation;
@@ -191,7 +194,7 @@ The platform SHALL derive each cell's access log from the access record into the
 - every image or configuration change to the component that derives the log;
 - every gap in the record.
 
-Each entry SHALL give time, identity tier, action, target and any stated reason. It SHALL NOT contain vault content, and it SHALL render every field as text. The log SHALL state that it lists what the record received.
+Each entry SHALL give time, identity tier (routine, deploy, admin, or service for a credential that a running service holds), action, target and any stated reason. It SHALL NOT contain vault content, and it SHALL render every field as text. The log SHALL state that it lists what the record received.
 
 #### Scenario: Break-glass exec into a tenant's cell
 
@@ -214,7 +217,7 @@ A deploy identity SHALL be able to change only container image fields:
 - of cells, through cellctl release attempts;
 - of named platform workloads.
 
-Admission SHALL accept an image only when it carries a GitHub artifact attestation signed by this repository's release workflow on a release ref, for that workload's image family. Admission SHALL deny any other change by this identity. The identity SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers. It SHALL NOT be able to change RBAC, admission policies, volumes or Secrets. A platform change outside an attested image-only update SHALL require the admin tier.
+Admission SHALL accept an image only when it carries a GitHub artifact attestation signed by this repository's release workflow on a release ref, for that workload's image family. A release ref SHALL be a `v*` tag that only the release automation can create, on a commit that `main` contains. The release workflow SHALL refuse to build from any other tag. Admission SHALL deny any other change by this identity. The identity SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers. It SHALL NOT be able to change RBAC, admission policies, volumes or Secrets. A platform change outside an attested image-only update SHALL require the admin tier.
 
 #### Scenario: Attested image rollout
 
@@ -225,6 +228,11 @@ Admission SHALL accept an image only when it carries a GitHub artifact attestati
 
 - **WHEN** the deploy identity sets a workload's image to a registry digest with no release-workflow attestation, or to an attestation for another image family
 - **THEN** admission denies the change
+
+#### Scenario: Tag outside the release automation
+
+- **WHEN** a credential other than the release automation creates a `v*` tag, or a tag points at a commit that `main` does not contain
+- **THEN** the repository refuses the tag or the release workflow refuses to build it, so no release attestation exists for that commit
 
 #### Scenario: Deploy identity widens its access
 
