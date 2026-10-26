@@ -139,7 +139,7 @@ The descriptions SHALL also disclose that:
 - in tenant-locked mode, while the cell is unlocked, a deliberate attack on the node that runs it can still reach its content;
 - in tenant-locked mode, losing both the recovery code and every passkey loses the vault;
 - code merged to the repository can reach a release, so anyone with merge rights could ship code that reads content, through a path that is public and permanent;
-- an owner export's archive sits in platform storage, readable by the operator, until its download link expires.
+- an owner export's archive sits in platform storage, readable by the operator, until the export expires (its configured retention, 24 hours by default) or a newer export replaces it.
 
 They SHALL NOT claim:
 - that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation;
@@ -218,7 +218,7 @@ A deploy identity SHALL be able to change only container image fields:
 - of cells, through cellctl release attempts;
 - of named platform workloads.
 
-Admission SHALL accept an image only when it carries a GitHub artifact attestation signed by this repository's release workflow on a release ref, for that workload's image family. A release ref SHALL be a `v*` tag that only the release App can create, on a commit that `main` contains. The App's signing key SHALL be readable only by workflows running on `main`, and GitHub Actions' own token SHALL NOT be able to create `v*` tags. The release workflow SHALL also refuse to build from a tag whose commit `main` does not contain, as a guard against mistakes. Admission SHALL deny any other change by this identity. The identity SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers. It SHALL NOT be able to change RBAC, admission policies, volumes or Secrets. A platform change outside an attested image-only update SHALL require the admin tier.
+Admission SHALL accept an image only when it carries a GitHub artifact attestation signed by this repository's release workflow on a release ref, for that workload's image family. A release ref SHALL be a `v*` tag that only the release App can create, move or delete, on a commit that `main` contains. The App's signing key SHALL be readable only by workflows running on `main`, and GitHub Actions' own token SHALL NOT be able to create `v*` tags. The release workflow SHALL also refuse to build from a tag whose commit `main` does not contain, as a guard against mistakes. Admission SHALL deny any other change by this identity. The identity SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers. It SHALL NOT be able to change RBAC, admission policies, volumes or Secrets. A platform change outside an attested image-only update SHALL require the admin tier.
 
 #### Scenario: Attested image rollout
 
@@ -232,7 +232,7 @@ Admission SHALL accept an image only when it carries a GitHub artifact attestati
 
 #### Scenario: Tag outside the release automation
 
-- **WHEN** a workflow on a branch other than `main` tries to read the release App's key, or any credential other than the release App creates a `v*` tag
+- **WHEN** a workflow on a branch other than `main` tries to read the release App's key, or any credential other than the release App creates, moves or deletes a `v*` tag
 - **THEN** the environment withholds the key or the repository refuses the tag, so no release attestation exists for an unmerged commit
 
 #### Scenario: Deploy identity widens its access

@@ -201,8 +201,8 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
 
    An admission rule compares the old and new objects and permits only image-field changes. A maintained verifier (Sigstore policy-controller or Kyverno, chosen in task 4.1) accepts an image only when it carries a GitHub artifact attestation. The attestation must be signed by this repository's release workflow on a release ref, for that workload's image family. The release workflow already produces these attestations for the Cloud and cellctl images. Registry write access alone cannot produce one, so a pushed image fails.
 
-   A **release ref** is a `v*` tag that only the release App can create, on a commit that `main` contains. Today neither holds. Tags carry no rule, and the App's private key is a repository-level Actions secret that any workflow on any branch can read. A holder of repository write could therefore push a branch workflow that mints the App's token, tag an unreviewed commit, and dispatch the release workflow on that tag. The dispatched run executes the tagged commit's own workflow file and attests with the genuine release identity. Task 4.6 closes the path:
-   - a tag ruleset admits only the release App as the bypass actor for `v*` tags, never GitHub Actions, whose token every workflow holds;
+   A **release ref** is a `v*` tag that only the release App can create, move or delete, on a commit that `main` contains. Today neither holds. Tags carry no rule, and the App's private key is a repository-level Actions secret that any workflow on any branch can read. A holder of repository write could therefore push a branch workflow that mints the App's token, tag an unreviewed commit, and dispatch the release workflow on that tag. The dispatched run executes the tagged commit's own workflow file and attests with the genuine release identity. Task 4.6 closes the path:
+   - a tag ruleset restricts creation, updates and deletion of `v*` tags, and admits only the release App as the bypass actor, never GitHub Actions, whose token every workflow holds. Restricting updates matters: otherwise a writer could move an old tag to its own commit;
    - the App's private key moves into a protected environment whose deployment policy admits only `main`, so only workflows running on `main` can mint its token;
    - the release workflow also refuses a tag whose commit `main` does not contain. That check guards against mistakes only, because an attacker's dispatched run would execute the attacker's workflow file.
 
@@ -267,7 +267,7 @@ Disclosures, beside the claims:
 - A lost recovery code and passkey means lost data.
 - The edge and gateway see requests and responses in transit.
 - Code merged to the repository can reach a release, so an agent or attacker with merge rights could ship code that reads content; that path is public and permanent.
-- An owner export's archive sits in platform storage, readable by the operator, until its download link expires.
+- An owner export's archive sits in platform storage, readable by the operator, until the export expires (its configured retention, 24 hours by default) or a newer export replaces it.
 
 No copy claims that the operator is technically unable to access tenant data while cells run without hardware memory encryption and attestation.
 

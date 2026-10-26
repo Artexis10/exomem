@@ -38,14 +38,15 @@
 
   Check that SOPS accepts a FIDO2 age plugin identity. Move the operator and recovery credentials into presence-gated custody, and remove every admin credential's plaintext from routine-agent environments and from secret stores that the routine or deploy identities can read. Evidence: the inventory, recorded in design D6; automation with routine credentials finds no plaintext copy; decrypting an operator credential fails without a touch; a release still publishes and the CSI driver still provisions.
 - [ ] 4.6 Protect the release ref:
-  - add a tag ruleset whose only bypass actor for `v*` tags is the release App, never GitHub Actions;
+  - add a tag ruleset that restricts creation, updates and deletion of `v*` tags, with the release App as its only bypass actor, never GitHub Actions;
+  - remove the release workflow's fallback to the workflow token for tagging (`|| secrets.GITHUB_TOKEN`), which the ruleset makes useless;
   - move the App's private key into a protected environment that admits only `main`;
   - make the release workflow refuse a tag whose commit `main` does not contain, as a mistake guard;
   - give the GitHub credentials that agents hold no repository administration permission.
 
   Evidence:
   - a workflow pushed on a branch cannot read the App key or create a `v*` tag;
-  - an agent credential cannot create a `v*` tag or change a ruleset or environment;
+  - an agent credential cannot create, move or delete a `v*` tag, or change a ruleset or environment;
   - a normal release from `main` still publishes and attests.
 
 ## 5. Tenant lock

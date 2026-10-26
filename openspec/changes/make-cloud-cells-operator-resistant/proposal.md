@@ -18,7 +18,7 @@ Strict end-to-end encryption does not fit, because the product is server-side se
 - **A tenant access log.** Each tenant sees the operator access that the record received for their cell, and every gap in the record, served by the control plane even while the cell is locked.
 - **Three access tiers.**
   - Routine checks use a read-only identity from the operator's own machine, with no node login.
-  - Image rollouts use a deploy identity that can change only container images, and only to images that the release workflow attested from a release tag on `main`, which only the release automation can create.
+  - Image rollouts use a deploy identity that can change only container images, and only to images that the release workflow attested from a release tag on `main`, which only the release App can create, move or delete.
   - Every operator and recovery credential with admin capability needs a physical touch on an authenticator that the operator holds: node shells, break-glass, structural platform changes, and the provider, datastore, snapshot, Terraform and escrow credentials. The release publisher's run-scoped token and the credentials that running services hold are exempt within stated boundaries.
 - **Truthful claims for each mode.** The privacy copy may claim only the properties in force for the cell's mode, and states each limit beside the claim.
 - **Confidential cells, parked.** The design records the direction for per-cell SEV-SNP cells, the trigger that starts that work, and an evidence task on rentable hardware.
