@@ -826,9 +826,10 @@ def _attach_handoff(args, *, transport=None) -> int:
             raise ValueError("handoff descriptor is too large")
         descriptor = json.loads(serialized)
         # These are the fields of the upload handoff protocol, not caller-defined vocabulary.
+        # Only they are read: after an earlier write, the result also carries `graph_sync`.
         fields = {"token", "upload_url", "ttl_seconds", "hold", "lane", "expected_sha256",
                   "max_bytes", "handoff_status", "committed"}
-        if not isinstance(descriptor, dict) or set(descriptor) != fields:
+        if not isinstance(descriptor, dict) or not fields <= set(descriptor):
             raise ValueError("expected an upload handoff descriptor")
         token = descriptor["token"]
         if (upload_handoff.parse_handoff_token(token) is None

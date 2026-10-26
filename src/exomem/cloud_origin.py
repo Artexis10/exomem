@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from functools import lru_cache
 from typing import Any
 
@@ -42,10 +42,6 @@ _PROOF_LIFETIME = 60
 _ROUTE_LIFETIME = 900
 # Gateway and cell clocks are separate hosts in one cluster.
 _LEEWAY_SECONDS = 5
-_ORIGIN_FIELDS = ("tenant_id", "cell_id", "client_id", "grant_id", "family_id", "resource")
-_SIGNED_FIELDS = ("v", "iss", "aud", "iat", "exp", "jti")
-_PROOF_FIELDS = frozenset((*_ORIGIN_FIELDS, *_SIGNED_FIELDS, "purpose"))
-_ROUTE_FIELDS = frozenset((*_ORIGIN_FIELDS, *_SIGNED_FIELDS, "upload_url"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +67,13 @@ class Origin:
         return OriginSessionBinding(
             session_id=self.grant_id, generation=self.family_id, audience=self.resource
         )
+
+
+# Each signed object carries exactly the login's fields, the version and the RFC 7519 claims.
+_ORIGIN_FIELDS = tuple(field.name for field in fields(Origin))
+_SIGNED_FIELDS = ("v", "iss", "aud", "iat", "exp", "jti")
+_PROOF_FIELDS = frozenset((*_ORIGIN_FIELDS, *_SIGNED_FIELDS, "purpose"))
+_ROUTE_FIELDS = frozenset((*_ORIGIN_FIELDS, *_SIGNED_FIELDS, "upload_url"))
 
 
 @dataclass(frozen=True, slots=True)
