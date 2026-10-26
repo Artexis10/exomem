@@ -1225,9 +1225,10 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
 
 def render_backup_family_secret(spec: CellManifestSpec, *, namespace: str, token: str, physical_uuid: str) -> dict:
     """The provider reads only immutable family capabilities in its dedicated namespace."""
+    # Secret data keys allow only [-._a-zA-Z0-9], so the provider's keys carry no domain prefix.
     request = FamilyRequest.parse(spec.backup_family_request)
     return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "immutable": True,
             "metadata": {"name": _job_name_for_hold(spec, SNAPSHOT_NAME), "namespace": namespace,
                          "labels": {"exomem.io/cell": spec.cell_id, BACKUP_FAMILY_ANNOTATION: request.request_id}},
-            "data": {"topolvm.io/backup-family-token": _b64(token),
-                     "topolvm.io/immediate-source-uuid": _b64(physical_uuid)}}
+            "data": {"backup-family-token": _b64(token),
+                     "immediate-source-uuid": _b64(physical_uuid)}}

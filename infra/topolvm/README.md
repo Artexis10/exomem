@@ -65,7 +65,7 @@ The caller waits for an acknowledgement of that exact request before rendering a
 Kubernetes spec and status use nonnegative signed integers; checked conversion preserves unsigned provider accounting.
 The node reconciler observes missing physical identities once and reads the provider family when no request is pending.
 
-Snapshot Secret data uses `topolvm.io/backup-family-token` and `topolvm.io/immediate-source-uuid`.
+Snapshot Secret data uses `backup-family-token` and `immediate-source-uuid`.
 The controller copies these submitted values into immutable child `spec.familyToken` and `spec.immediateSourceUUID`.
 A clone copies the token from its specific snapshot and uses that snapshot's `status.physicalUUID`.
 It never reads the serving source's current family. Existing opaque volume and snapshot handles do not change.

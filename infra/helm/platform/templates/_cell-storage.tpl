@@ -75,8 +75,8 @@ variables.target.metadata.name == 'cell-snapshot-' + variables.target.metadata.l
   variables.target.metadata.labels['exomem.io/backup-family-request'] &&
 variables.target.metadata.?ownerReferences.orValue([]).size() == 0 &&
 variables.target.data.size() == 2 &&
-variables.target.data['topolvm.io/backup-family-token'].size() > 0 &&
-variables.target.data['topolvm.io/immediate-source-uuid'].size() > 0
+variables.target.data['backup-family-token'].size() > 0 &&
+variables.target.data['immediate-source-uuid'].size() > 0
 {{- end -}}
 {{- define "exomem.familySecretScope" -}}
 (request.resource.resource == 'secrets' && request.namespace == '{{ .Values.cellStorage.local.reservationNamespace }}' &&

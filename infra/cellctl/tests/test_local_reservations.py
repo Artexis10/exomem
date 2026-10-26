@@ -181,7 +181,7 @@ async def test_two_cells_keep_their_requests_across_restart_and_cancel_before_be
         secret_name = snapshot_backup_name(SNAPSHOT_NAME, cells[0], None, first)
         secret = cluster.applied[(LOCAL.reservation_namespace, "Secret", secret_name)]
         assert len(secret_name) == 63 and secret["immutable"] is True
-        assert base64.b64decode(secret["data"]["topolvm.io/backup-family-token"]) == b"first-family"
+        assert base64.b64decode(secret["data"]["backup-family-token"]) == b"first-family"
         assert any(job["kind"] == "VolumeSnapshot" for job in cluster.jobs)
         cluster.volumes[second.volume_name]["status"]["backupFamily"] = {
             **second.spec("End"), "epoch": 1, "closedEpoch": 1, "state": "closed"}

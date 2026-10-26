@@ -277,7 +277,7 @@ index 8116e87..d203c14 100644
  	currentSize := sourceVol.Status.CurrentSize
 -	snapshot, err := s.lvService.CreateSnapshot(ctx, node, deviceClass, sourceVolName, name, accessType, *currentSize)
 +	// Secret data belongs to this immutable snapshot request, not the serving LV.
-+	binding := k8s.FamilyBinding{Token: req.GetSecrets()["topolvm.io/backup-family-token"], ImmediateSourceUUID: req.GetSecrets()["topolvm.io/immediate-source-uuid"]}
++	binding := k8s.FamilyBinding{Token: req.GetSecrets()["backup-family-token"], ImmediateSourceUUID: req.GetSecrets()["immediate-source-uuid"]}
 +	if binding.Token != "" && binding.ImmediateSourceUUID == "" {
 +		return nil, status.Error(codes.InvalidArgument, "family snapshot requires its submitted immediate source UUID")
 +	}
