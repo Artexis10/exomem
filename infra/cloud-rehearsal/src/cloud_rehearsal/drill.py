@@ -36,6 +36,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import asyncpg
@@ -62,6 +63,7 @@ from cellctl.manifests import (
     SNAPSHOT_NAME,
     hold_job_name,
     namespace_name,
+    render_backup_family_secret,
     snapshot_backup_name,
 )
 from cellctl.state import (
@@ -699,16 +701,29 @@ def check_reservation_permissions(drill: Drill, cell: Cell) -> dict[str, Any]:
                              "--type=merge", "--dry-run=server", "--as", identity,
                              "--patch", json.dumps({"spec": changes}), check=False)
 
+    # cellctl's own renderer builds the family capability it would write for a backup of this volume.
+    family = FamilyRequest(volume["metadata"]["name"], physical_uuid, 0, uuid.uuid4().hex)
+    probe_spec = SimpleNamespace(cell_id=cell.cell_id, hold_started_at=dt.datetime.now(dt.UTC).isoformat(),
+                                 backup_family_request=family.annotation())
+    family_secret = render_backup_family_secret(probe_spec, namespace=LOCAL.reservation_namespace,
+                                                token="drill-probe-token", physical_uuid=physical_uuid)
+
     def ready() -> dict[str, Any] | None:
         allowed = patch({"reservationTargetBytes": LOCAL.default_cell_gib * drill_cluster.GIB,
                          "reservationTargetPhysicalUUID": physical_uuid})
         forbidden = patch({"nodeName": "invented-other-node"})
-        if allowed.returncode == 0 and forbidden.returncode != 0 and policy_name in forbidden.stderr:
+        secret = drill.kubectl("apply", "--server-side", "--field-manager=cellctl", "--force-conflicts",
+                               "--dry-run=server", "--as", identity, "--filename=-",
+                               input_text=json.dumps(family_secret), check=False)
+        if (allowed.returncode == 0 and forbidden.returncode != 0 and policy_name in forbidden.stderr
+                and secret.returncode == 0):
             return {"source_physical_uuid": physical_uuid, "target_request": "allowed",
-                    "node_rewrite": "denied", "source": "Kubernetes server dry-runs as the cellctl service account"}
+                    "node_rewrite": "denied", "family_secret_write": "allowed",
+                    "source": "Kubernetes server dry-runs as the cellctl service account"}
         # The timeout reports the last attempt, so a failure names which case the server decided wrongly.
         raise RuntimeError(f"target request exit {allowed.returncode}: {allowed.stderr.strip()[-400:]}; "
-                           f"node rewrite exit {forbidden.returncode}: {forbidden.stderr.strip()[-400:]}")
+                           f"node rewrite exit {forbidden.returncode}: {forbidden.stderr.strip()[-400:]}; "
+                           f"family Secret exit {secret.returncode}: {secret.stderr.strip()[-600:]}")
 
     return wait_for(ready, timeout=60, interval=2, description="the request-only admission policy to enforce both cases")
 
