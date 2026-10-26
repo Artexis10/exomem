@@ -379,7 +379,7 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
   - **Research vs experiment:** synthesizing secondary sources (research) vs running a protocol with primary data (experiment).
   - **Research vs production-log:** secondary synthesis (research) vs documenting the making of a primary creative artifact (production-log).
   - **Experiment vs production-log:** hypothesis → finding (experiment) vs artifact → engagement metrics (production-log).
-- For research notes: scope (a registered project key — see SKILL.md § Research scope keys). Ask if not stated.
+- For research notes: scope (a registered project key — see SKILL.md § Research scope keys). Resolve it from source, context and registry; ask only if a material ambiguity remains.
 - For experiments: domain. Plus hypothesis, protocol summary, duration, started date.
 - For production-logs: medium. Plus projects, host, editor (if known), recording / publish status.
 - Human-facing title (Unicode is fine), plus an optional explicit lowercase
@@ -405,18 +405,15 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    Evidence page. If an external original is missing, capture it explicitly and
    then cite the returned governed path or stable ref. If the original cannot be
    recovered, remove the unsupported claim; never reconstruct it from the draft.
-4. **Draft the page in conversation** — show full content including frontmatter,
-   all sections per the page-type template, and wikilinks to existing pages where
-   they obviously match. **Run `suggest_links` on the draft first; use
-   `suggest_relations` when directional meaning matters.** Put accepted note-level
-   edges under `## Relations` as `- relation_type [[Target]]`; keep claim-specific
-   edges in semantic-block `relations:` metadata.
-5. **Wait for confirmation.** Default is propose-then-write.
-6. On confirm:
-   - Write the file and each supported source `ingested_into` back-reference in
-     one guarded batch. Any unresolved citation or concurrent source change
-     refuses the whole write.
-   - Update the relevant subfolder `index.md`.
+4. Draft frontmatter, page-type sections and reviewed connections; the candidate is ready for the governed writer.
+   Reuse established context. Use `suggest_links` only for missing candidates and
+   `suggest_relations` when directional meaning remains unresolved. Put accepted
+   note-level edges under `## Relations` as `- relation_type [[Target]]`; keep
+   claim-specific edges in semantic-block `relations:` metadata.
+5. Check the [write authority procedure](writing.md#when-to-ask-vs-when-to-proceed); present content and obtain confirmation only when required.
+6. When authorized, commit through `create_note`; the note and source back-references publish in one guarded batch.
+   An unresolved citation or concurrent source change refuses the whole write.
+   The writer updates the relevant subfolder `index.md`.
 7. Report paths written and any body wikilinks that target nonexistent pages
    (offer to create stubs via `link`).
 

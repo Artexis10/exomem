@@ -395,7 +395,7 @@ empty governed corpus.
 
 A relation qualifies as a **typed edge** only when it is authored or explicitly
 reviewer-accepted, its target resolves unambiguously to an eligible governed page at
-evaluation time, its canonical registry entry is active and scope-valid, its registry
+evaluation time, its canonical registry entry is active and scope-valid, is not marked `generic: true`, its registry
 family is not `link`, `citation`, `derivation`, `evidence`, `mention`, `observation`, or
 `provenance`, and either (a) its origin is `markdown_relation`, `semantic_relation`, or
 `semantic_block`, or (b) its origin is `frontmatter` and its registered family is exactly
@@ -423,7 +423,7 @@ disposition a no-op for exactly the bulk-import case that most needs review.
 
 Inbound edges MUST NOT satisfy connectivity. Unresolved or ambiguous forward targets MUST
 NOT satisfy either lane. A disposition satisfied by connectivity SHALL report that signal
-distinctly from a typed edge and SHALL emit a non-blocking typed-edge-absent warning. The
+distinctly from a typed edge and SHALL emit a non-blocking typed-edge-absent warning, except when the authored-all-generic advisory already describes that pattern. The
 disposition SHALL carry any reviewed-none reason and reference it was satisfied by, so
 review decisions are observable rather than write-only. No minimum relation count SHALL be
 imposed in either lane.
@@ -434,7 +434,7 @@ imposed in either lane.
 - **AND** no other inactive target receives this exception
 
 #### Scenario: Typed relation satisfies disposition
-- **WHEN** a new compiled page has a registered canonical relation to an existing page
+- **WHEN** a new compiled page has a registered non-generic canonical relation to an existing page
 - **THEN** its relation disposition is satisfied and reports the typed edge
 - **AND** no typed-edge-absent warning is emitted
 
@@ -525,6 +525,37 @@ imposed in either lane.
 #### Scenario: Inactive body wikilink target does not connect
 - **WHEN** a compiled page's only outbound body wikilink resolves to an inactive page
 - **THEN** that link does not satisfy connectivity or qualify as a typed edge
+
+#### Scenario: A registry-marked generic relation is connectivity only
+- **WHEN** a page authors an active scope-valid relation marked generic in the registry to a connectable governed page
+- **THEN** that relation does not qualify as a typed edge, regardless of its registry family
+- **AND** it remains writable connectivity with non-blocking guidance
+
+#### Scenario: A specific extension remains typed
+- **WHEN** an authored relation resolves to an active non-generic extension and meets the other typed-edge conditions
+- **THEN** it qualifies as a typed edge even when its registry parent is generic
+
+### Requirement: Authored all-generic relations receive accurate non-blocking feedback
+
+When admitted authored explicit relations are present and all are registry-marked generic, semantic evaluation SHALL emit one bounded non-blocking advisory.
+It SHALL ask the active agent to review specific registered meaning while allowing honest generic relations or no edge.
+It SHALL describe only that authored pattern, even when a qualifying incoming specific relation satisfies disposition.
+It SHALL suppress the duplicate typed-edge-absent warning for that pattern without changing incoming-specific qualification.
+It SHALL NOT infer meaning, force a predicate, impose an output count or refuse a write.
+Default compact mutation feedback SHALL retain the advisory and an actionable relation-resolution route.
+
+#### Scenario: Incoming specificity does not conceal generic authorship
+- **WHEN** a page authors only admitted registered generic relations and also has a qualifying incoming specific relation
+- **THEN** disposition remains satisfied by that incoming relation and the authored-all-generic advisory is visible
+- **AND** the advisory does not claim that no typed relation exists
+
+#### Scenario: Specific authorship does not receive the all-generic advisory
+- **WHEN** an admitted authored explicit relation is specific rather than registry-marked generic
+- **THEN** the all-generic advisory is absent
+
+#### Scenario: Honest generic edges remain writable
+- **WHEN** an otherwise valid write authors only admitted generic relations
+- **THEN** the write may commit with the advisory and no specificity refusal
 
 ### Requirement: Reviewed-None Creation Is Logically Atomic, Crash-Recoverable, And Content-Bound
 Creation-capable governed writers SHALL support `validate_only=true`. Validation SHALL preassign a candidate page UUID and return `draft_id`, `draft_hash`, a bounded opaque `draft_token` for server-derived render inputs and ordered project auto-registration intent, deterministic relation findings/candidates, and no filesystem mutation. A reviewed-none commit SHALL repeat identical proposed content and supply the unused `draft_id`, echoed `draft_token`, `relation_disposition="reviewed_none"`, matching `relation_review_hash`, and a non-empty `relation_review_reason`. The writer SHALL recalculate the hash over candidate identity plus normalized final content/destination and reject mismatch/reuse. A bounded portable creation receipt SHALL be prepared for every full active-compiled commit before its deterministic auxiliary writes, and the primary Markdown SHALL be replaced last as the logical commit marker, so a visible page never lacks required review state. Reviewed-none/bootstrap receipts SHALL also carry their disposition; a qualifying-relation receipt SHALL be transaction/recovery state only. Portable state SHALL live in governed Markdown/frontmatter or a vault-managed governed artifact in the same creation batch, not solely in a derived database, and SHALL survive index rebuild or vault transfer. Exact recovery SHALL reconstruct the same ordered auxiliary target/content digest, include already-applied expected targets unchanged, bind every existing leaf to its exact safely read content, and reject unrelated drift rather than overwrite it. An exact existing qualifying primary without an artifact SHALL remain an idempotent already-committed case after upgrade, while a page-less no-artifact attempt has no retroactive prepared-recovery guarantee.
