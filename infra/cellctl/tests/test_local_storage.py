@@ -1472,7 +1472,7 @@ def test_a_local_cell_at_80_percent_use_keeps_its_size() -> None:
 
 @pytest.mark.parametrize(("size", "grown"), [(18, 20), (20, None)], ids=["clamped-to-the-cap", "at-the-cap"])
 def test_a_local_cell_never_grows_past_the_configured_cap(size: int, grown: int | None) -> None:
-    capped = StorageConfig(local=LocalStorage(max_cell_gib=20))
+    capped = StorageConfig(local=LocalStorage(), max_cell_gib=20)
 
     decision = _measure(_backed_up(used=95), _row(storage_gib=size, hold_kind="backup", hold_started_at=STARTED),
                         storage=capped)
@@ -1485,7 +1485,7 @@ def test_a_cell_at_its_cap_past_80_percent_use_raises_the_growth_alert() -> None
     # operator must act, as when its node has no room.
     from cellctl.alerts import growth_blocked
 
-    capped = StorageConfig(local=LocalStorage(max_cell_gib=20))
+    capped = StorageConfig(local=LocalStorage(), max_cell_gib=20)
     row = _row(storage_gib=20, hold_kind="backup", hold_started_at=STARTED)
 
     decision = _measure(_backed_up(used=95), row, storage=capped)

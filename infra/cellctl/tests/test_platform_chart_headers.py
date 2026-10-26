@@ -1283,7 +1283,7 @@ def test_the_per_cell_growth_cap_reaches_cellctl(monkeypatch: pytest.MonkeyPatch
     # D10: a cap the chart sets but cellctl never reads would let a cell grow
     # to cellctl's built-in default instead.
     storage = _cellctl_storage(_helm_template("--set", "cellStorage.local.maxCellGib=12"), monkeypatch)
-    assert storage.local.max_cell_gib == 12
+    assert storage.max_cell_gib == 12
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1463,3 +1463,12 @@ def test_cellctl_is_given_the_upgrade_readiness_deadline_the_chart_sets(monkeypa
 
     changed = _cellctl_env(_helm_template("--set", "cellctl.upgradeReadyDeadlineMinutes=45"))
     assert changed[name] == "45"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_attachable_only_fleet_receives_the_shared_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = _cellctl_storage(_helm_template("--set", "cellStorage.local.enabled=false",
+                                            "--set", "cellStorage.maxCellGib=24"), monkeypatch)
+    assert storage.local is None and storage.max_cell_gib == 24
+    refused = _helm_render("--set", "cellStorage.maxCellGib=24", "--set", "cellStorage.local.maxCellGib=28")
+    assert refused.returncode != 0 and "cellStorage.maxCellGib and cellStorage.local.maxCellGib must agree" in refused.stderr

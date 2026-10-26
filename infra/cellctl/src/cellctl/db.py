@@ -55,6 +55,7 @@ OBSERVED_COLUMNS = (
     "used_bytes",
     "filesystem_bytes",
     "usage_observed_at",
+    "import_limits",
 )
 
 ROLLOUT_COLUMNS = ("paused", "error_code", "held_cell_id", "last_good_image")
@@ -99,7 +100,10 @@ async def connect(dsn: str) -> asyncpg.Connection:
 
 
 def _row_from_record(record: asyncpg.Record) -> CellRow:
-    return CellRow(**{column: record[column] for column in CELL_COLUMNS})
+    values = {column: record[column] for column in CELL_COLUMNS}
+    if isinstance(values["import_limits"], str):
+        values["import_limits"] = json.loads(values["import_limits"])
+    return CellRow(**values)
 
 
 def _rollout_from_record(record: asyncpg.Record) -> RolloutRow:
@@ -154,6 +158,8 @@ async def write_observed(
     unknown = set(updates) - set(OBSERVED_COLUMNS)
     if unknown:
         raise ValueError(f"not an observed column: {sorted(unknown)}")
+    updates = {key: json.dumps(value) if key == "import_limits" and value is not None else value
+               for key, value in updates.items()}
     assignments, values = _assignments(updates, start=2)
     await connection.execute(
         f"UPDATE exomem_cloud_cells SET {assignments} WHERE cell_id = $1", cell_id, *values
@@ -345,7 +351,8 @@ async def write_import(connection: asyncpg.Connection, import_id: str, updates: 
     import uuid
 
     # C5 column grants fix this controller-owned subset.
-    allowed = {"recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state", "error_code"}
+    allowed = {"recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state", "error_code",
+               "staged_files", "staged_bytes"}
     if not updates:
         return
     if set(updates) - allowed:
