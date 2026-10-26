@@ -79,11 +79,17 @@ activation {
 EOF
 /sbin/lvm pvcreate --yes "$loop_device"
 pv_created=1
-/sbin/lvm vgcreate --physicalextentsize 4M "$PROOF_VG" "$loop_device"
+# The host's udev pvscan must not autoactivate the fixture's LVs while the fixture changes them.
+/sbin/lvm vgcreate --setautoactivation n --physicalextentsize 4M "$PROOF_VG" "$loop_device"
 vg_created=1
 # A metadata spare serves only pool repair, which no proof exercises.
-/sbin/lvm lvcreate --yes --type thin-pool --size 512M --poolmetadatasize 16M --poolmetadataspare n \
-    --name "$PROOF_POOL" "$PROOF_VG"
+if ! /sbin/lvm lvcreate --yes --type thin-pool --size 512M --poolmetadatasize 16M --poolmetadataspare n \
+    --name "$PROOF_POOL" "$PROOF_VG"; then
+    # Name what held the device, so a fixture failure is never read as a proof result.
+    dmsetup info -c || true
+    ps -eo pid,args | grep -E '[p]vscan|[u]disks|[m]ultipath|[l]vm' || true
+    exit 1
+fi
 /sbin/lvm lvcreate --yes --size 4M --name fence "$PROOF_VG"
 /sbin/lvm lvmconfig --type current --mergedconfig devices/global_filter global/wait_for_locks global/locking_dir
 setsid "$binary" "-test.run=^$test_name\$" -test.v -test.timeout=3m > "$output" 2>&1 &
