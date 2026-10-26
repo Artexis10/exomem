@@ -22,7 +22,7 @@ import mcp_read_latency_gate as gate  # noqa: E402, I001
 from release_arm import MeasurementRefused  # noqa: E402, I001
 
 CONTRACT_SHA = "c" * 64
-PROFILE_SHA = "p" * 64
+PROFILE_SHA = "9" * 64
 
 
 def reference(*groups: str, allowance_ms: float | None = None, lists: tuple[str, ...] = ()) -> dict:
@@ -39,8 +39,8 @@ def group_cases(group: str, differences: list[float], *, base_ms: float = 100.0)
         assigned.append({"id": case, "group": group})
         for repeat in range(3):
             for arm, elapsed in (("base", base_ms), ("head", base_ms + difference)):
-                samples.append({"case": case, "group": group, "arm": arm, "repeat": repeat,
-                                "elapsed_ms": elapsed, "failure": None})
+                samples.append({"case": case, "group": group, "arm": arm, "repeat": repeat, "first": "base",
+                                "elapsed_ms": elapsed, "outcome": "ok", "failure": None})
     return assigned, samples
 
 
@@ -250,3 +250,18 @@ def test_an_arm_whose_derived_collections_are_all_ready_is_accepted(tmp_path: Pa
 def test_an_arm_without_a_derived_file_is_accepted(tmp_path: Path) -> None:
     (tmp_path / "vault-1").mkdir()
     gate.require_derived_ready(tmp_path)
+
+
+# --- Stored documents ----------------------------------------------------------
+
+
+def test_a_summary_and_its_fragment_validate_against_the_stored_schema() -> None:
+    measured = fragment([group_cases("read", spread(1))],
+                        environment={"cpu_pressure_start": None, "cpu_pressure_end": 0.5, "python": "3.12.3", "cpus": 4,
+                                     "arms": {"base": {"ready_s": 20.0, "quiescent_s": 12.0},
+                                              "head": {"ready_s": 21.0, "quiescent_s": 12.0}}})
+    summary = summarize([measured], reference("read", allowance_ms=10))
+    gate.validate_document(measured)
+    gate.validate_document(summary)
+    gate.validate_document({"schema_version": 1, "mode": "aggregate", "state": "refused",
+                            "failures": [{"code": "arm-not-quiescent", "phase": "quiescence"}]})

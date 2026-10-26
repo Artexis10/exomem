@@ -1,0 +1,952 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MCP read latency gate documents",
+  "description": "Content-free plan, fragment and summary documents of scripts/mcp_read_latency_gate.py. A document selects its definition with `mode`.",
+  "$defs": {
+    "problem": {
+      "type": "object",
+      "required": [
+        "code"
+      ],
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number"
+        ]
+      },
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "group_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group",
+        "gating",
+        "cases",
+        "verdict",
+        "base_p50_ms",
+        "base_p95_ms",
+        "head_p50_ms",
+        "head_p95_ms"
+      ],
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "gating": {
+          "type": "boolean"
+        },
+        "cases": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean_ms": {
+          "type": "number"
+        },
+        "lower_ms": {
+          "type": "number"
+        },
+        "upper_ms": {
+          "type": "number"
+        },
+        "allowance_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "verdict": {
+          "enum": [
+            "failed",
+            "demonstrated",
+            "inconclusive",
+            "allowance-not-set",
+            "insufficient-cases",
+            "reported"
+          ]
+        },
+        "base_p50_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "base_p95_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "head_p50_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "head_p95_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "p95_target_ms",
+            "result"
+          ],
+          "properties": {
+            "p95_target_ms": {
+              "type": "number",
+              "minimum": 0
+            },
+            "result": {
+              "enum": [
+                "meets target",
+                "misses target"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "mode",
+        "tag",
+        "base_commit",
+        "shards"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "mode": {
+          "const": "plan"
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "shards": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "fragment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "shard",
+            "shards",
+            "case_total",
+            "assigned",
+            "samples",
+            "environment",
+            "contract_revision",
+            "contract_sha256",
+            "profile_sha256",
+            "cases_sha256",
+            "boundary",
+            "tag",
+            "base_commit",
+            "reduced"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "contract_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile_sha256": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cases_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "boundary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "reduced": {
+              "type": "boolean"
+            },
+            "mode": {
+              "const": "fragment"
+            },
+            "state": {
+              "const": "measured"
+            },
+            "shard": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "shards": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "case_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "assigned": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "group"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "group": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "samples": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "case",
+                  "group",
+                  "arm",
+                  "repeat",
+                  "first",
+                  "elapsed_ms",
+                  "outcome",
+                  "failure"
+                ],
+                "properties": {
+                  "case": {
+                    "type": "string"
+                  },
+                  "group": {
+                    "type": "string"
+                  },
+                  "arm": {
+                    "enum": [
+                      "base",
+                      "head"
+                    ]
+                  },
+                  "repeat": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "first": {
+                    "enum": [
+                      "base",
+                      "head"
+                    ]
+                  },
+                  "elapsed_ms": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "outcome": {
+                    "type": "string"
+                  },
+                  "failure": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "environment": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cpu_pressure_start",
+                "cpu_pressure_end",
+                "python",
+                "cpus",
+                "arms"
+              ],
+              "properties": {
+                "cpu_pressure_start": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "cpu_pressure_end": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "python": {
+                  "type": "string"
+                },
+                "cpus": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "arms": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "base",
+                    "head"
+                  ],
+                  "properties": {
+                    "base": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "ready_s",
+                        "quiescent_s"
+                      ],
+                      "properties": {
+                        "ready_s": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "quiescent_s": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      }
+                    },
+                    "head": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "ready_s",
+                        "quiescent_s"
+                      ],
+                      "properties": {
+                        "ready_s": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "quiescent_s": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "shard",
+            "reason",
+            "phase"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "const": "fragment"
+            },
+            "state": {
+              "const": "refused"
+            },
+            "shard": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "aggregate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "contract_revision",
+            "contract_sha256",
+            "profile_sha256",
+            "cases_sha256",
+            "boundary",
+            "tag",
+            "base_commit",
+            "reduced",
+            "family",
+            "environment",
+            "groups",
+            "warnings",
+            "failures"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "contract_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile_sha256": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cases_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "boundary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "reduced": {
+              "type": "boolean"
+            },
+            "mode": {
+              "enum": [
+                "aggregate",
+                "private"
+              ]
+            },
+            "state": {
+              "enum": [
+                "passed",
+                "failed",
+                "reduced"
+              ]
+            },
+            "family": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "groups",
+                "confidence",
+                "multiplicity"
+              ],
+              "properties": {
+                "groups": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "confidence": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "exclusiveMaximum": 1
+                },
+                "multiplicity": {
+                  "type": "string"
+                }
+              }
+            },
+            "environment": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "shard",
+                  "cpu_pressure_start",
+                  "cpu_pressure_end",
+                  "python",
+                  "cpus",
+                  "arms"
+                ],
+                "properties": {
+                  "cpu_pressure_start": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "cpu_pressure_end": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "python": {
+                    "type": "string"
+                  },
+                  "cpus": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "arms": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "base",
+                      "head"
+                    ],
+                    "properties": {
+                      "base": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "ready_s",
+                          "quiescent_s"
+                        ],
+                        "properties": {
+                          "ready_s": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "quiescent_s": {
+                            "type": "number",
+                            "minimum": 0
+                          }
+                        }
+                      },
+                      "head": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "ready_s",
+                          "quiescent_s"
+                        ],
+                        "properties": {
+                          "ready_s": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "quiescent_s": {
+                            "type": "number",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "shard": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group_row"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/problem"
+              }
+            },
+            "failures": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/problem"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "failures"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "enum": [
+                "aggregate",
+                "private"
+              ]
+            },
+            "state": {
+              "const": "refused"
+            },
+            "failures": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "phase"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "phase": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "private": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "contract_revision",
+            "contract_sha256",
+            "profile_sha256",
+            "cases_sha256",
+            "boundary",
+            "tag",
+            "base_commit",
+            "reduced",
+            "family",
+            "environment",
+            "groups",
+            "warnings",
+            "failures"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "contract_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile_sha256": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cases_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "boundary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "reduced": {
+              "type": "boolean"
+            },
+            "mode": {
+              "enum": [
+                "aggregate",
+                "private"
+              ]
+            },
+            "state": {
+              "enum": [
+                "passed",
+                "failed",
+                "reduced"
+              ]
+            },
+            "family": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "groups",
+                "confidence",
+                "multiplicity"
+              ],
+              "properties": {
+                "groups": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "confidence": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "exclusiveMaximum": 1
+                },
+                "multiplicity": {
+                  "type": "string"
+                }
+              }
+            },
+            "environment": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "shard",
+                  "cpu_pressure_start",
+                  "cpu_pressure_end",
+                  "python",
+                  "cpus",
+                  "arms"
+                ],
+                "properties": {
+                  "cpu_pressure_start": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "cpu_pressure_end": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "python": {
+                    "type": "string"
+                  },
+                  "cpus": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "arms": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "base",
+                      "head"
+                    ],
+                    "properties": {
+                      "base": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "ready_s",
+                          "quiescent_s"
+                        ],
+                        "properties": {
+                          "ready_s": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "quiescent_s": {
+                            "type": "number",
+                            "minimum": 0
+                          }
+                        }
+                      },
+                      "head": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "ready_s",
+                          "quiescent_s"
+                        ],
+                        "properties": {
+                          "ready_s": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "quiescent_s": {
+                            "type": "number",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "shard": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group_row"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/problem"
+              }
+            },
+            "failures": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/problem"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "failures"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "enum": [
+                "aggregate",
+                "private"
+              ]
+            },
+            "state": {
+              "const": "refused"
+            },
+            "failures": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "phase"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "phase": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
