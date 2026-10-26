@@ -800,12 +800,25 @@ def test_capture_identity_ignores_stale_catalog_rows_without_derived_state(vault
 def test_invalid_markdown_binding_never_proves_capture_absence(vault, source_schema, capture_owner, tmp_path, damage):
     import hashlib
 
+    from exomem import preserve
     from exomem.commands import op_capture_source
 
     staged = tmp_path / "original.md"
     staged.write_text("Untrusted Markdown")
     saved = add_module.add(vault, source_schema, title="Attached document", content="", source_type="session",
                            artifact=add_module.SourceArtifact(staged, "original.md", "text/markdown"))
+    # Legacy Markdown originals can carry page-shaped metadata; new originals use a non-page suffix.
+    artifact = vault / saved.artifact_path
+    legacy_artifact = artifact.with_suffix("")
+    page = vault / saved.path
+    legacy_page = preserve._sidecar_path(legacy_artifact, protected=True)
+    fields, body, _ = add_module.parse_frontmatter(page.read_text())
+    fields["evidence_file"] = legacy_artifact.relative_to(vault).as_posix()
+    artifact.rename(legacy_artifact)
+    page.rename(legacy_page)
+    legacy_page.write_text("---\n" + yaml.safe_dump(fields, sort_keys=False) + "---\n" + body)
+    saved.artifact_path = legacy_artifact.relative_to(vault).as_posix()
+    saved.path = legacy_page.relative_to(vault).as_posix()
     if damage == "bytes":
         (vault / saved.artifact_path).write_text("Changed bytes")
     elif damage == "unsafe":

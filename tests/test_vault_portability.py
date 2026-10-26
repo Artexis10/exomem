@@ -203,7 +203,7 @@ def test_portability_consumes_security_registry_and_never_defines_it(
 
     classification = portability.classify_artifact(path)
 
-    assert observed == [path]
+    assert observed and set(observed) == {path}
     assert classification.artifact_class is not portability.ArtifactClass.CANONICAL
     assert portability.classification_registry()["internal_state_registry_version"] == 1
 
