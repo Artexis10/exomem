@@ -428,6 +428,32 @@ def test_capture_identity_conflict_never_writes(vault, source_schema, capture_ow
     assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
 
 
+def test_capture_identity_skips_legacy_original_beside_valid_receipts(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    inputs = dict(title="Captured entry", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "entry-7", "revision": "r1"})
+    first = op_capture_source(vault, source_schema, **inputs)
+    op_capture_source(vault, source_schema, **{**inputs, "source_identity": {
+        "system": "archive", "record_id": "entry-8", "revision": "r1"}})
+    legacy = vault / "Knowledge Base" / "Evidence" / "Legacy" / "fragment.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    original = b"# Archived fragment\n\nOriginal text without metadata.\n"
+    legacy.write_bytes(original)
+
+    reused = op_capture_source(vault, source_schema, **inputs)
+    created = op_capture_source(vault, source_schema, **{**inputs, "source_identity": {
+        "system": "archive", "record_id": "entry-9", "revision": "r1"}})
+
+    assert reused["capture_outcome"] == "reused"
+    assert reused["source"]["ref"] == first["source"]["ref"]
+    assert created["capture_outcome"] == "created"
+    assert created["source"]["ref"] != first["source"]["ref"]
+    for result in (reused, created):
+        assert any(legacy.relative_to(vault).as_posix() in warning for warning in result["source"]["warnings"])
+    assert legacy.read_bytes() == original
+
+
 def test_capture_identity_keeps_records_and_out_of_order_revisions_separate(vault, source_schema, capture_owner):
     from exomem.commands import op_capture_source
 

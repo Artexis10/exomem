@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "seed": 7,
+  "pages": 6500,
+  "paragraphs": 8,
+  "paragraph_words": 27,
+  "page_target_bytes": 2500,
+  "transcript_fraction": 0.05,
+  "transcript_target_bytes": 20000,
+  "links_min": 5,
+  "links_max": 25,
+  "unit_page_fraction": 0.5,
+  "units_per_page": 3,
+  "vocabulary_min": 5000,
+  "median_page_bytes": [
+    2000,
+    3000
+  ],
+  "source": {
+    "path": "prose.txt",
+    "sha256": "0f01fb7e459706e507443fda1015f84b56ee18b4e84a470e5349821011410c77",
+    "url": "https://github.com/python/cpython/tree/60403a5409ff2c3f3b07dd2ca91a7a3e096839c7/Doc",
+    "license": "Python Software Foundation License Version 2",
+    "license_file": "LICENSE.cpython.txt",
+    "provenance_file": "prose-provenance.json",
+    "state": "pinned"
+  },
+  "sqlite_versions": [
+    "3.45.1",
+    "3.46.1"
+  ],
+  "python_reference": "3.12.3",
+  "case_file": "cases.json",
+  "unmeasured": [
+    "encode-floor-one-and-two-threads",
+    "fresh-connection-sqlite-3.45.1-and-3.46.1"
+  ],
+  "worker_environment": [
+    "PATH",
+    "HOME",
+    "XDG_CACHE_HOME",
+    "TMPDIR",
+    "LD_LIBRARY_PATH",
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HF_HUB_OFFLINE",
+    "EXOMEM_MODEL_ARTIFACT_DIR",
+    "EXOMEM_MODEL_ARTIFACT_URL",
+    "EXOMEM_CPU_THREADS",
+    "EXOMEM_SYNC_WORKERS",
+    "EXOMEM_ALLOW_NATIVE_THREAD_OVERRIDES",
+    "EXOMEM_ONNX_SHARE_WEIGHTS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "RAYON_NUM_THREADS",
+    "TOKENIZERS_PARALLELISM"
+  ],
+  "transcript_bytes": [
+    10000,
+    30000
+  ]
+}

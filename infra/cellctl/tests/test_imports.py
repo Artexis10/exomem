@@ -102,7 +102,7 @@ async def test_reconcile_prepare_survives_restart_with_real_c5(cell_db):
         # Each call uses fresh LoopMemory, as after process restart.
         cluster.observations[CELL] = replace(_observed_from_applied(cluster, CELL), pod_uses_volume=False)
         await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "prepare"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "prepare"
         jobs["prepare"] = ImportJob(succeeded=True, report={"recipient": "age1" + "a" * 58})
         await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert (await db.read_import(controller, CELL)).observed_state == "key_ready"
@@ -299,7 +299,7 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
         assert (await db.select_all_rows(controller))[0].hold_kind == "import"
         cluster.observations[CELL] = replace(cluster.observations[CELL], pod_uses_volume=False)
         await step()
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True, pods_present=True)
         current += timedelta(seconds=30)
         await step()
@@ -396,7 +396,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
         jobs.clear()
 
         def removed_key_then_crash(manifest):
-            assert manifest["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+            assert manifest["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
             key_file.unlink(missing_ok=True)
             raise RuntimeError("cleanup process stopped after private key deletion")
 
@@ -410,7 +410,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
         assert running.staged_files is None and running.staged_bytes is None
         assert not key_file.exists()
         await step()  # A missing completion Job replays only idempotent local cleanup.
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True, pods_present=True)
         cleanup_calls = []
         def delete_ciphertext(self, item):
@@ -434,7 +434,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
         assert not ciphertext.exists()
         jobs.clear()  # The old completed Job also disappeared during the restart.
         await step()
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True)
 
         def stopping_journal_then_crash(namespace, name):
@@ -606,7 +606,7 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
         def run_discard(manifest):
             command = manifest["spec"]["template"]["spec"]["containers"][0]["command"]
             # Execute the real cell command with the rendered operation and its adoption flag.
-            assert cloud_import_job.main([*command[2:], "--vault", str(vault),
+            assert cloud_import_job.main([*command[command.index("cell-import") + 1:], "--vault", str(vault),
                                           "--termination-log", str(tmp_path / "result.json")]) == 0
             jobs["discard"] = ImportJob(exists=True, succeeded=True, pods_present=True)
 

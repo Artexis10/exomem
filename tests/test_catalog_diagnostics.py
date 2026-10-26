@@ -10,10 +10,9 @@ from typing import Any
 
 import pytest
 
-from exomem.governance.principal import library_scope
-
 from exomem import commands, find_types, freshness, lexstore
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 
 _PROFILE_KEYS = {
     "capability",
@@ -195,7 +194,9 @@ def test_exact_catalog_cold_and_hot_timings_are_measurable(
     assert len(hot["hits"]) == 2
     cold_timing = cold["timings"]
     hot_timing = hot["timings"]
-    assert "ms" in cold_timing["stages"]["filter_eligibility"]
+    # Cold unit eligibility belongs to the unit query's enclosing span.
+    cold_eligibility = "semantic_units.filter_eligibility" if result_level == "unit" else "filter_eligibility"
+    assert "ms" in cold_timing["stages"][cold_eligibility]
     assert set(cold_timing["profile"]["catalog"]) == _PROFILE_KEYS
     assert cold_timing["profile"]["catalog"] == {
         "capability": "semantic_catalog",

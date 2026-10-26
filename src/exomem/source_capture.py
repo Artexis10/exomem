@@ -96,7 +96,7 @@ def capture_digest(root: Path, *, content: str, title: str, source_type: str, ur
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def find_capture(root: Path, identity: SourceIdentity) -> tuple[str, str, str] | None:
+def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
     """Scan under the caller's mutation guard; derived state cannot prove absence."""
     from .client_artifacts import _expected_companion_path
     from .governance import companions, raw_protection
@@ -213,11 +213,13 @@ def find_capture(root: Path, identity: SourceIdentity) -> tuple[str, str, str] |
             if page in frontmatter_free:
                 lines = snapshots[page].decode("utf-8").splitlines()
                 # These headers are the fixed Sources catalog producer format.
-                if (root / page == indexes.sources_index_path(root)
-                        and indexes.SOURCES_BY_TYPE_HEADER in lines
-                        and indexes.SOURCES_RECENT_HEADER in lines):
-                    continue
-                unavailable()
+                if root / page == indexes.sources_index_path(root):
+                    if indexes.SOURCES_BY_TYPE_HEADER in lines and indexes.SOURCES_RECENT_HEADER in lines:
+                        continue
+                    # Capture updates this reserved path; unknown bytes cannot be overwritten as a catalog.
+                    unavailable()
+                warnings.append(f"Legacy page has no frontmatter and was skipped during Source identity lookup: {page}; curate its metadata separately")
+                continue
             fields = parsed[page]
             if "source_identity" not in fields:
                 if "capture_input_digest" in fields:
