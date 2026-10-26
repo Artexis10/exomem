@@ -3186,7 +3186,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a selected page, semantic unit or view.\n\nunit_ref returns the current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.\nWhen sensing is enabled, a page may carry epistemic_status: released\nrefinement/contradiction evidence with reading provenance and completeness,\nfor agent review. Incomplete evidence is not an exhaustive count.",
+    "description": "Read a page, semantic unit, or map.\n\nunit_ref: exact current unit, parent citation/lifecycle, up to 2,400 context chars.\nMissing/stale/ambiguous/superseded is explicit; no substitution. Omit for page.\nMaps: exomem://map, /topic/<domain key>, /unfiled.\nSensing on: epistemic_status gives released items/reading provenance;\nincomplete counts are partial.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3643,7 +3643,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.\nWhen sensing is enabled, anchors may carry compact epistemic_status counts\nand completeness for released evidence. Use read_memory for items and\nreading provenance. Status never changes ranking or authorizes a write.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation supplies excerpts, not attachment reads.\nfocus is agent-authored, not human intent; clarify ambiguity.\nKeep source identity/scope. Due/refresh grants no writes.\nPull map refs with read_memory.\nOptional epistemic_status has counts/completeness; read_memory gives\nitems/reading provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
