@@ -7,7 +7,7 @@ runs:
       id: contract
       shell: bash
       run: |
-        jq -r '"repository=\(.repository)", "ref=\(.ref)", "migration=\(.migration)", "grants=\(.grants)", "exports_migration=\(.exports_migration)", "custody_migration=\(.custody_migration)"' \
+        jq -r '"repository=\(.repository)", "ref=\(.ref)", "migration=\(.migration)", "grants=\(.grants)", "exports_migration=\(.exports_migration)", "custody_migration=\(.custody_migration)", "imports_migration=\(.imports_migration)"' \
           infra/cellctl/tests/fixtures/substrate-contract.json >> "$GITHUB_OUTPUT"
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
@@ -21,6 +21,7 @@ runs:
           ${{ steps.contract.outputs.grants }}
           ${{ steps.contract.outputs.exports_migration }}
           ${{ steps.contract.outputs.custody_migration }}
+          ${{ steps.contract.outputs.imports_migration }}
     - name: Select the test contract checkout
       shell: bash
       run: echo "CELLCTL_SUBSTRATE_CONTRACT_ROOT=$GITHUB_WORKSPACE/.substrate-test-contract" >> "$GITHUB_ENV"

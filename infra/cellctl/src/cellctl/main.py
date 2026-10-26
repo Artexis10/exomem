@@ -91,6 +91,7 @@ def build_reconcile_config() -> ReconcileConfig:
         kwargs["backup_concurrency"] = int(concurrency_raw)
     for field, variable, unit in (
         ("import_deadline", "CELLCTL_IMPORT_DEADLINE_MINUTES", "minutes"),
+        ("import_growth_deadline", "CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES", "minutes"),
         ("import_cleanup_deadline", "CELLCTL_IMPORT_CLEANUP_DEADLINE_MINUTES", "minutes"),
         ("import_cleanup_retry", "CELLCTL_IMPORT_CLEANUP_RETRY_MINUTES", "minutes"),
         ("export_deadline", "CELLCTL_EXPORT_DEADLINE_MINUTES", "minutes"),
@@ -106,16 +107,25 @@ def build_reconcile_config() -> ReconcileConfig:
 
 
 def build_storage_config() -> StorageConfig:
-    """CELLCTL_CELL_STORAGE holds {"domain": <class>, "local": {LocalStorage fields}};
-    unset means Hetzner volumes only, as before local storage."""
+    """Read the shared cap and optional local class; accept the earlier nested cap."""
 
     raw = os.environ.get("CELLCTL_CELL_STORAGE")
     if not raw:
         return DEFAULT_STORAGE
     value = json.loads(raw)
-    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "per_cell_class"} or not isinstance(value.get("local"), dict):
-        raise ValueError("cell storage must be a JSON object with a local object and an optional domain")
-    return StorageConfig(domain=value.get("domain", LEGACY_CLASS), local=LocalStorage(**value["local"]),
+    # These are the closed keys of the controller's storage configuration schema.
+    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "max_cell_gib", "per_cell_class"}:
+        raise ValueError("cell storage must be a JSON object with optional domain, local and max_cell_gib")
+    local = value.get("local")
+    if local is not None and not isinstance(local, dict):
+        raise ValueError("cell storage local must be an object")
+    local = dict(local) if local is not None else None
+    legacy_cap = local.pop("max_cell_gib", None) if local is not None else None
+    cap = value.get("max_cell_gib", legacy_cap if legacy_cap is not None else DEFAULT_STORAGE.max_cell_gib)
+    if legacy_cap is not None and cap != legacy_cap:
+        raise ValueError("max_cell_gib and local.max_cell_gib must agree")
+    return StorageConfig(domain=value.get("domain", LEGACY_CLASS),
+                         local=LocalStorage(**local) if local is not None else None, max_cell_gib=cap,
                          per_cell_class=value.get("per_cell_class"))
 
 

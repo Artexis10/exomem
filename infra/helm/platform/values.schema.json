@@ -333,6 +333,7 @@
       "required": ["domain", "local", "arrayExporter", "snapshotController"],
       "properties": {
         "domain": {"enum": ["hetzner", "local"]},
+        "maxCellGib": {"type": ["integer", "null"], "minimum": 4},
         "local": {
           "type": "object",
           "additionalProperties": false,
@@ -340,7 +341,7 @@
           "properties": {
             "enabled": {"type": "boolean"},
             "backupConcurrencyPerNode": {"type": "integer", "minimum": 1},
-            "maxCellGib": {"type": "integer", "minimum": 4}
+            "maxCellGib": {"type": ["integer", "null"], "minimum": 4}
           }
         },
         "arrayExporter": {

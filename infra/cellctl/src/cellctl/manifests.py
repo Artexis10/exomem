@@ -1110,7 +1110,7 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
     """A controller-authored immutable Job request, never reconstructed bearer claims."""
     import json
 
-    from .imports import job_name
+    from .imports import MAX_MEMBERS, RESERVE_BYTES, job_name
 
     command = ["exomem", "cell-import", "discard" if phase == "cleanup" else phase,
                "--import-id", item.import_id]
@@ -1121,7 +1121,10 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
     pod = _job_pod_spec(spec, job_kind="import", command=[], data_read_only=False, repo="")
     container = pod["containers"][0]
     container["command"] = command
-    container["env"] = _init_env(spec)
+    container["env"] = _init_env(spec) + [
+        {"name": "EXOMEM_IMPORT_MAX_MEMBERS", "value": str(MAX_MEMBERS)},
+        {"name": "EXOMEM_IMPORT_RESERVE_BYTES", "value": str(RESERVE_BYTES)},
+    ]
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: "import"}
     return {
         "apiVersion": "batch/v1", "kind": "Job",

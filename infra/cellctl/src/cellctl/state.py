@@ -127,6 +127,7 @@ class CellRow:
     usage_observed_at: datetime | None = None
     # Read only: a cell never backed up ages its backup alert from here.
     created_at: datetime | None = None
+    import_limits: dict | None = None
 
     @property
     def size_gib(self) -> int:
