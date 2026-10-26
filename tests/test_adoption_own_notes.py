@@ -70,12 +70,14 @@ def test_a_mixed_collection_becomes_draft_notes_beside_their_sources_and_keeps_t
     assert frontmatter["aliases"] == ["The Trip"]
     assert frontmatter["import_collection"] == "Coll"
     assert frontmatter["collection_path"] == "Journal/trip.md"
-    assert "See [[ideas]] and ![[pic.png]]." in body  # the original body is kept verbatim
-    # Links in the note point at the other note and at the image's Source, not at the originals.
+    # The original body is kept verbatim. The appended links point at the other note
+    # and at the image's Source, not at the originals.
     ideas_path = applied["outcomes"]["Coll/Journal/ideas.md"]["note"]["target_path"]
     pic_source = _copy(applied, "Coll/Journal/pic.png")
-    assert f"[[{ideas_path.removesuffix('.md')}" in body
-    assert f"[[{pic_source.removesuffix('.md')}" in body
+    assert body == (
+        "# Trip planning\n\nSee [[ideas]] and ![[pic.png]].\n\n## Links\n\n"
+        f"- [[{ideas_path.removesuffix('.md')}]]\n- [[{pic_source.removesuffix('.md')}]]\n"
+    )
     # The Source copy still holds the original bytes under the original hash.
     fenced = (vault / trip_source).read_text(encoding="utf-8").split("## Capture\n\n", 1)[1]
     fence = fenced.split("\n", 1)[0]
@@ -85,6 +87,31 @@ def test_a_mixed_collection_becomes_draft_notes_beside_their_sources_and_keeps_t
         applied["outcomes"]["Coll/Journal/trip.md"]["sha256"]
     )
     assert len(_notes(vault)) == 2  # the Exports file is a Source only
+
+
+def test_a_note_keeps_its_original_body_when_it_links_a_note_made_after_it(
+    tmp_path: Path,
+) -> None:
+    # Notes are made in path order: alpha's note exists before zeta's, not after.
+    files = {
+        "Coll/Journal/alpha.md": "---\ntags: [x]\n---\nSee [[zeta]], then [[zeta#End|the end]].\n",
+        "Coll/Journal/zeta.md": "# Zeta\n\nBack to [[alpha]].",
+    }
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    note = {
+        original: applied["outcomes"][original]["note"]["target_path"].removesuffix(".md")
+        for original in files
+    }
+
+    assert _page(vault, f"{note['Coll/Journal/alpha.md']}.md")[1] == (
+        "See [[zeta]], then [[zeta#End|the end]].\n\n## Links\n\n"
+        f"- [[{note['Coll/Journal/zeta.md']}]]\n- [[{note['Coll/Journal/zeta.md']}#End]]\n"
+    )
+    assert _page(vault, f"{note['Coll/Journal/zeta.md']}.md")[1] == (
+        f"# Zeta\n\nBack to [[alpha]].\n\n## Links\n\n- [[{note['Coll/Journal/alpha.md']}]]\n"
+    )
 
 
 def test_a_draft_note_leaves_its_source_in_the_backlog_until_the_note_is_promoted(

@@ -448,11 +448,15 @@ def note_body(planned: Mapping[str, Any], text: str) -> str:
     """The own note's body: the original body after its front matter, then the generated links.
 
     The links section is the one a Source gets, with each own-note target replaced by that
-    item's note, so an import never rewrites a sentence of the original.
+    item's note, so an import never rewrites a sentence of the original: the body's bytes
+    are kept as read, and the section follows after a blank line.
     """
     body = parse_frontmatter(text)[1]
     links = _links_section({"links": planned["note"]["links"]})
-    return "\n".join([body.rstrip("\n"), "", *links]) if links else body
+    if not links:
+        return body
+    separator = "" if not body else "\n" if body.endswith("\n") else "\n\n"
+    return body + separator + "\n".join(links)
 
 
 def create_draft_note(
@@ -462,13 +466,16 @@ def create_draft_note(
     *,
     source_path: str,
     collection: str | None,
+    date_iso: str,
 ) -> Any:
     """Create one own note as a draft through the note leaf's two-phase creation.
 
     The leaf validates first, and the commit repeats the same arguments with the
     draft it returned, so the write is the governed one; no relation disposition
-    is recorded, because a draft has reviewed nothing. Returns the leaf's result;
-    the leaf's `NoteError` reaches the caller unchanged.
+    is recorded, because a draft has reviewed nothing. The leaf keeps the body as
+    given and places the note under `date_iso`, the plan's day, so the path is the
+    one the plan froze. Returns the leaf's result; the leaf's `NoteError` reaches
+    the caller unchanged.
     """
     from . import note as note_module
 
@@ -484,6 +491,8 @@ def create_draft_note(
         "sources": [adoption_plan.wikilink_for(source_path)],
         "status": note["status"],
         "_extra_frontmatter": adoption_plan.note_extra_frontmatter(planned, collection),
+        "_verbatim_body": True,
+        "_path_date": date_iso,
     }
     preflight = note_module.note(root, validate_only=True, **arguments)
     if preflight.destination != note["target_path"]:

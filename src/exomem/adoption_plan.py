@@ -597,10 +597,12 @@ def plan_note(
     rule: Mapping[str, Any],
     *,
     destinations: Destinations,
+    date_iso: str,
 ) -> dict[str, Any] | dict[str, str]:
     """The frozen note target and inputs of one own-note item, or a refusal `{code, reason}`.
 
-    The leaf names the folder and file; this only keeps two notes of one plan apart.
+    The leaf names the folder and file under the plan's day; this only keeps two notes
+    of one plan apart.
     """
     from .note import NoteError, planned_destination
     from .vault import InvalidSlugError
@@ -620,7 +622,7 @@ def plan_note(
         try:
             target = planned_destination(
                 root, note_type=rule["note_type"], title=title, slug=slug,
-                project=rule.get("project"), domain=rule.get("domain"),
+                project=rule.get("project"), domain=rule.get("domain"), date_iso=date_iso,
             )
         except (NoteError, InvalidSlugError, ValueError) as error:
             return {"code": getattr(error, "code", "WRITE_REFUSED"),
@@ -647,8 +649,6 @@ def note_extra_frontmatter(item: Mapping[str, Any], collection: str | None) -> d
     if collection is not None:
         extra["import_collection"] = nfc(collection)
         extra["collection_path"] = item["collection_path"]
-    else:
-        extra["imported_from"] = item["original_path"]
     return extra
 
 
@@ -727,7 +727,9 @@ def plan_item(
             if existing is not None:
                 item["existing_note"] = existing
             else:
-                planned_note = plan_note(root, item, text, note_rule, destinations=destinations)
+                planned_note = plan_note(
+                    root, item, text, note_rule, destinations=destinations, date_iso=date_iso
+                )
                 if "code" in planned_note:
                     return {"path": original_path, **planned_note}
                 item["note"] = planned_note
@@ -772,7 +774,9 @@ def plan_item(
     if slug_warning:
         item["slug_warning"] = slug_warning
     if owes_note:
-        planned_note = plan_note(root, item, text, note_rule, destinations=destinations)
+        planned_note = plan_note(
+            root, item, text, note_rule, destinations=destinations, date_iso=date_iso
+        )
         if "code" in planned_note:
             return {"path": original_path, **planned_note}
         item["note"] = planned_note

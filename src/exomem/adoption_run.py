@@ -1614,7 +1614,10 @@ def _create_notes(
             stats["notes_deferred"] += 1
             break
         started = time.monotonic()
-        _create_note(root, planned, texts[path], outcomes[path], label=label, stats=stats, written=written)
+        _create_note(
+            root, planned, texts[path], outcomes[path],
+            label=label, date_iso=run["plan"]["date"], stats=stats, written=written,
+        )
         stats["notes_started"] += 1
         stats["note_ms_max"] = max(stats["note_ms_max"], int((time.monotonic() - started) * 1000))
         created_any = True
@@ -1626,7 +1629,7 @@ def _create_notes(
 
 def _create_note(
     root: Path, planned: dict, text: str, outcome: dict, *,
-    label: str | None, stats: Counter, written: list[str],
+    label: str | None, date_iso: str, stats: Counter, written: list[str],
 ) -> None:
     """Find or create one item's draft note, then settle the item on the result."""
     from . import note as note_module
@@ -1657,7 +1660,7 @@ def _create_note(
         return
     try:
         created = adopt_module.create_draft_note(
-            root, planned, text, source_path=source_page, collection=label
+            root, planned, text, source_path=source_page, collection=label, date_iso=date_iso
         )
     except Exception as error:  # noqa: BLE001 - a refused note is this item's outcome; its Source stays
         # A failure after the commit still left the note: the identity check records it.
