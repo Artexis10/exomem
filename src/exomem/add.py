@@ -454,14 +454,15 @@ def add(
         connector_boundary.require_create(vault_root, (folder_path / f"{date_iso}-{filename_slug}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
+    identity_warnings: list[str] = []
     if source_identity is not None:
-        existing = source_capture.find_capture(vault_root, source_identity)
+        existing = source_capture.find_capture(vault_root, source_identity, warnings=identity_warnings)
         if existing is not None:
             path, reference, original_digest = existing
             source_capture.require_authority(vault_root)
             if original_digest != capture_input_digest:
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
-            return AddResult(path=path, ref=reference, warnings=[], capture_outcome="reused")
+            return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
     if adoption_seed is not None:
         actual_destination = folder_path.relative_to(vault_root).as_posix()
         if adoption_seed.get("destination") != actual_destination:
@@ -643,7 +644,7 @@ def add(
         # Global index/log prose cannot carry the protected title or byte identity.
         writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
 
-    warnings: list[str] = list(slug_warnings) + tag_warnings
+    warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
     # "registered 'field-notebook'" reports what the write did, so routing it
     # through the suppression channel would let a dismissal hide a fact.

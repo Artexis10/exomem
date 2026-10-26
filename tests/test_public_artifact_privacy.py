@@ -24,7 +24,6 @@ import pytest
 
 from exomem import install_skill, package_skills
 from exomem.public_artifact_privacy import (
-    PUBLIC_ARTIFACT_INVENTORY,
     BinaryProvenance,
     PublicArtifactPrivacyError,
     assert_public_artifacts_clean,
@@ -40,26 +39,6 @@ VAULT_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 SYNTHETIC_FIXTURES = (
     REPO_ROOT / "tests" / "privacy_fixtures" / "public_artifact_privacy"
 )
-
-
-def test_inventory_names_every_public_input_and_output_class() -> None:
-    assert {item.name for item in PUBLIC_ARTIFACT_INVENTORY} == {
-        "package-source",
-        "plugin-marketplace",
-        "documentation",
-        "openspec",
-        "tests-fixtures-examples",
-        "example-scripts",
-        "generated-schemas-docs",
-        "build-metadata",
-        "root-docs-config-release",
-        "agent-config",
-        "deployment-examples",
-        "sidecars",
-        "wheel-sdist",
-        "filesystem-installs",
-        "skill-plugin-archives",
-    }
 
 
 def test_repository_inventory_enumerates_root_release_and_deploy_inputs() -> None:

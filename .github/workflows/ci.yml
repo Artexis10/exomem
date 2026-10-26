@@ -636,6 +636,8 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -670,6 +672,83 @@ jobs:
         with:
           name: test-durations-latency-shard-${{ matrix.shard }}
           path: *duration-snapshot-path
+
+  recall-latency-series:
+    name: recall latency paired series
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      series: ${{ steps.series.outputs.series }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the series from the reference case file
+        id: series
+        # The case file defines the series; the paired matrix keeps no second list.
+        run: echo "series=$(jq -c '[.[].series] | unique' benchmarks/recall-latency/cases.json)" >> "$GITHUB_OUTPUT"
+
+  recall-latency-paired:
+    name: recall latency paired (${{ matrix.series }})
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: recall-latency-series
+    # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
+    runs-on: ubuntu-24.04
+    # One series per job: about 10 minutes of preparation and at most about
+    # 14 minutes of owner sampling at today's latency, so 45 minutes leaves room.
+    timeout-minutes: &recall-paired-timeout 45
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ${{ fromJSON(needs.recall-latency-series.outputs.series) }}
+    steps:
+      - name: Record paired workload start
+        run: date +%s > "$RUNNER_TEMP/recall-latency-job-start"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Resolve the served encoder digest
+        id: recall-encoder
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --encoder-cache-key >> "$GITHUB_OUTPUT"
+      - name: Cache the served encoder by digest
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: recall-encoder-${{ runner.os }}-${{ steps.recall-encoder.outputs.digest }}
+      - name: Verify the latency instrument
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py tests/test_recall_timing.py -q
+      - name: Compare governed recall with the latest release
+        # Stop under the job budget so the elapsed record and evidence upload still run.
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERIES: ${{ matrix.series }}
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --paired --series "$SERIES" --output "recall-latency-paired-$SERIES.json"
+      - name: Record elapsed paired workload
+        if: always()
+        env:
+          JOB_TIMEOUT_MINUTES: *recall-paired-timeout
+        run: python3 -c 'import json,os,pathlib,time; start=int((pathlib.Path(os.environ["RUNNER_TEMP"])/"recall-latency-job-start").read_text()); pathlib.Path("recall-latency-job-elapsed.json").write_text(json.dumps({"boundary":"first-step-to-pre-upload-timer","elapsed_seconds":time.time()-start,"job_budget_seconds":60*int(os.environ["JOB_TIMEOUT_MINUTES"])}))'
+      - name: Upload paired recall evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-latency-paired-${{ matrix.series }}
+          path: |
+            recall-latency-paired-${{ matrix.series }}.json
+            recall-latency-job-elapsed.json
+          if-no-files-found: warn
 
   governance-projection-wire:
     needs: scope
@@ -1103,6 +1182,8 @@ jobs:
       - cloud-cellctl
       - retrieval-quality
       - retrieval-latency
+      - recall-latency-series
+      - recall-latency-paired
       - governance-projection-wire
       - governance-projection-wire-vector-cpu
       - semantic-write-latency
