@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.146.0](https://github.com/Artexis10/exomem/compare/v0.145.1...v0.146.0) (2026-10-26)
+
+
+### Features
+
+* **import:** adopt own notes as drafts and serve the Source backlog to agents ([#2114](https://github.com/Artexis10/exomem/issues/2114)) ([d63b496](https://github.com/Artexis10/exomem/commit/d63b496c11df80edfd0433e39aae0537331886db))
+
+
+### Bug Fixes
+
+* **collection-store:** bound reads, wait out handoffs, name lock holders, release at stop, refresh legacy audit ([#2115](https://github.com/Artexis10/exomem/issues/2115)) ([d703e30](https://github.com/Artexis10/exomem/commit/d703e30e34dfbba379deab1f20e9b2d29a9ab204))
+
 ## [0.145.1](https://github.com/Artexis10/exomem/compare/v0.145.0...v0.145.1) (2026-10-26)
 
 
