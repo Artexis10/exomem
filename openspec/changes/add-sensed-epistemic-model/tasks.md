@@ -67,7 +67,7 @@
 
   Nothing else in the read changes, and the field is absent when there is nothing to say.
 - [x] 7.2 `activate_context` attaches the same status to resolved anchor pages after the packet is built, outside the packet cache, charged to the packet budget, and never raising.
-- [ ] 7.3 Describe `epistemic_status` in the `read_memory` and `activate_context` tool text, and regenerate the derived artifacts (tool schemas and plugin contract, packaged skills, hosted renders, capabilities). Deferred to slice 3: slice 1 changes no tool text, the field exists only when the owner turns sensing on, and its line is self-describing.
+- [x] 7.3 Describe `epistemic_status` in the `read_memory` and `activate_context` tool text, and regenerate the derived artifacts (tool schemas and plugin contract, packaged skills, hosted renders, capabilities). Tool descriptions and recall guidance now describe released evidence and incomplete counts. Generated schemas, fingerprints, pending connector contract, packaged skills, and capabilities are refreshed.
 
 ## 8. Egress (slice 1)
 
@@ -78,8 +78,8 @@
   - Tests: `test_a_third_page_never_moves_a_pairs_selection`, `test_over_the_cache_bound_the_same_cosine_pairs_are_proposed`, `test_one_pass_over_the_vectors_serves_every_page_of_a_tick`, `test_a_withheld_page_cannot_decide_a_visible_pages_selection`, `test_a_rebuilt_projection_serves_nothing_until_every_page_is_projected`, `test_a_budget_spent_by_the_pass_still_applies_the_pages_it_was_read_for`, `test_pages_in_one_tick_find_the_cosine_pairs_separate_ticks_find`, and the contradicting, refining and bridge twins served per caller.
 - [ ] 8.4 Slice 3: close-memory-loop `design.md:212` condition (a). Build a fixture on the sensed family's real pairs showing the label improves disposition at a false-positive rate no worse than the family's structural evidence.
 - [x] 8.5 Close-memory-loop `design.md:212` condition (b): no read regression in the write-burst probes. `tests/test_sensed_write_burst_probe.py` measures `read_memory` and `activate_context` on a synthetic vault under a write burst, with sensing off and on, interleaved. The numbers are recorded under "Measured" in `design.md`.
-- [ ] 8.6 Before sensing is on by default, or slice 3 surfaces status widely: bound a hub's served-status cost ("Open items" in `design.md`). Filter neutral verdicts in the query and keep each partner's dropped count. Make any truncation count released edges only and report `evidence_complete: false`.
-- [ ] 8.7 Before sensing is enabled on any install, and before slice 5's ledger restore: close the three rebuild windows under "Open items" in `design.md`. Hold the sensed tick and its view while the dreamer reseeds. Write the `seeding` flag atomically with the schema row. Gate the view during a genesis-triggered reprojection.
+- [x] 8.6 Before sensing is on by default, or slice 3 surfaces status widely: bound a hub's served-status cost ("Open items" in `design.md`). Filter neutral verdicts in the query and keep each partner's dropped count. Make any truncation count released edges only and report `evidence_complete: false`.
+- [x] 8.7 Before sensing is enabled on any install, and before slice 5's ledger restore: close the three rebuild windows under "Open items" in `design.md`. Hold the sensed tick and its view while the dreamer reseeds. Write the `seeding` flag atomically with the schema row. Gate the view during a genesis-triggered reprojection.
 
 ## 9. Later slices (specified here, built later)
 
@@ -105,3 +105,14 @@
   - Closed by the independent re-review of task 8.3 (two rounds, final verdict APPROVE). Round 1 verified each first-round finding in code and by test. The recheck verified the 8.3 corrections and recorded three latent rebuild windows as Open items (task 8.7).
 - [x] 10.4 Record known misses in `design.md` from the real-pin fixture run.
 - [x] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.
+
+### Repair delivery boundary
+
+Tasks 7.3, 8.6, and 8.7 form one repair batch.
+The instrument batch waits for its CPU runtime and source-keyed fixture spike.
+This dependency separates the deliveries; it does not close tasks 8.4 or 9.1.
+Sensing remains off by default.
+The repair checks cover sensing, caller egress, tool schemas, workflow skills, and cloud packages.
+A mixed-endpoint query probe covers 10,000 hub pairs and confirms the composite partner lookup.
+Strict OpenSpec validation and the repository privacy gate pass before delivery.
+The integrated batch still needs independent review and the full CI corpus before merge.

@@ -470,6 +470,63 @@ def test_a_contamination_verdict_without_its_span_is_refused() -> None:
 # -- the pull budget ----------------------------------------------------------
 
 
+def test_prepared_execution_sends_legacy_text_and_complete_document_frames_without_vault_custody(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval import session
+
+    slot = Slot(tmp_path / "slot")
+    slot.runtime.mkdir(parents=True)
+    slot.cwd.mkdir()
+    captured = tmp_path / "received.jsonl"
+    client = tmp_path / "stand_in_client.py"
+    client.write_text('''
+import json, sys
+print(sys.argv[2], flush=True)
+with open(sys.argv[1], "wb") as capture:
+    for line in sys.stdin.buffer:
+        capture.write(line)
+        capture.flush()
+        print(json.dumps({"type": "result", "subtype": "success", "result": "received"}), flush=True)
+''', encoding="utf-8")
+    spec = arm_specs()["P"]
+    init = {"type": "system", "subtype": "init", "apiKeySource": "none",
+            "model": "m", "claude_code_version": "v",
+            "tools": [f"mcp__exomem__{tool}" for tool in spec.tools],
+            "mcp_servers": [{"name": "exomem", "status": "connected"}]}
+    legacy = "An ordinary naïve turn.\r\n"
+    # The CLI protocol defines these document blocks and the human origin field.
+    envelope = {
+        "type": "user", "parent_tool_use_id": None, "origin": {"kind": "human"},
+        "message": {"role": "user", "content": [
+            {"type": "text", "text": "Compile these two documents."},
+            {"type": "document", "title": "attachment-1.txt", "source": {
+                "type": "text", "media_type": "text/plain", "data": "Complete first attachment\r\n"}},
+            {"type": "document", "title": "attachment-2.txt", "source": {
+                "type": "text", "media_type": "text/plain", "data": "Second multibyte naïve attachment\n"}},
+        ]},
+    }
+    inputs = replace(_inputs(arm="P"), cwd=slot.cwd, turns=(legacy, envelope), scored_turn=1,
+                     argv=(sys.executable, str(client), str(captured), json.dumps(init)))
+
+    def unexpected_custody(*args):
+        pytest.fail("prepared execution must use the supplied slot without vault custody")
+
+    monkeypatch.setattr(session, "prepare_session_slot", unexpected_custody)
+    monkeypatch.setattr(session, "recover_session_custody", unexpected_custody)
+    monkeypatch.setattr(session, "_USER_STATE_ROOT", tmp_path / "user-state")
+    executor = ClaudeSessionExecutor(Layout(tmp_path), {"P": spec}, "m", "v", {}, turn_timeout=5)
+
+    result = executor.execute_prepared(inputs, tmp_path / "attempt", slot)
+
+    assert result.outcome == OK and result.answer == "received"
+    frames = captured.read_bytes().splitlines(keepends=True)
+    assert len(frames) == 2
+    assert json.loads(frames[0]) == {
+        "type": "user", "message": {"role": "user", "content": legacy},
+        "parent_tool_use_id": None, "session_id": "default",
+    }
+    assert json.loads(frames[1]) == envelope
+
+
 @pytest.mark.parametrize("eventually_ready", [True, False], ids=["ready", "setup-timeout"])
 def test_the_ready_gate_holds_requests_without_spending_the_turn_budget_or_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eventually_ready: bool) -> None:
     from membench.utility.switch_eval import session
@@ -1185,9 +1242,11 @@ def test_session_exceptions_return_the_unchanged_vault(built_slot_tree: Layout, 
     executor = ClaudeSessionExecutor(layout, {"P": arm_specs()["P"]}, "m", "v", {})
 
     def interrupted(*args):
+        assert not (layout.shared_tree("snapshot") / "vault").exists()
+        assert (layout.slot / "vault" / "notes" / "page.md").read_text() == "A frozen observation."
         raise failure
 
-    monkeypatch.setattr(executor, "_execute", interrupted)
+    monkeypatch.setattr(executor, "execute_prepared", interrupted)
     with pytest.raises(type(failure)):
         executor(_inputs(arm="P"), tmp_path / "attempt")
     assert (layout.shared_tree("snapshot") / "vault" / "notes" / "page.md").read_text() == "A frozen observation."

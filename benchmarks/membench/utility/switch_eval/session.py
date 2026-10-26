@@ -267,7 +267,7 @@ class SessionInputs:
     argv: tuple[str, ...]
     env: Mapping[str, str]
     cwd: Path
-    turns: tuple[str, ...]
+    turns: tuple[str | dict, ...]
     scored_turn: int
     files: Mapping[str, str]
     state_digests: Mapping[str, str]
@@ -404,15 +404,15 @@ class AttemptResult:
         return asdict(self)
 
 
-def _user_message(text: str) -> str:
-    return json.dumps(
-        {
+def _user_message(turn: str | dict) -> str:
+    if isinstance(turn, str):
+        turn = {
             "type": "user",
-            "message": {"role": "user", "content": text},
+            "message": {"role": "user", "content": turn},
             "parent_tool_use_id": None,
             "session_id": "default",
         }
-    )
+    return json.dumps(turn)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -850,7 +850,7 @@ def _user_state_writes(since: float) -> list[str]:
 
 @dataclass
 class ClaudeSessionExecutor:
-    """Runs one attempt for real. Each attempt starts from a fresh state copy."""
+    """Runs one attempt in a prepared slot, or checks out a fresh state copy."""
 
     layout: Layout
     specs: Mapping[str, ArmSpec]
@@ -867,7 +867,7 @@ class ClaudeSessionExecutor:
                 self.layout, spec.arm_id, inputs.tree, inputs.planned.session_id
             )
             try:
-                result = self._execute(inputs, attempt_dir, slot)
+                result = self.execute_prepared(inputs, attempt_dir, slot)
             finally:
                 _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
                 recovery = recover_session_custody(self.layout)
@@ -878,7 +878,9 @@ class ClaudeSessionExecutor:
         except StateError as error:
             return AttemptResult(ABORT, "state", str(error))
 
-    def _execute(self, inputs: SessionInputs, attempt_dir: Path, slot: Slot) -> AttemptResult:
+    def execute_prepared(self, inputs: SessionInputs, attempt_dir: Path, slot: Slot) -> AttemptResult:
+        """Run trusted prepared inputs in the supplied slot without vault custody."""
+
         spec = self.specs[inputs.planned.arm]
         attempt_dir.mkdir(parents=True, exist_ok=True)
         started_wall = time.time()
