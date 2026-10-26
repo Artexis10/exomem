@@ -266,7 +266,7 @@ def test_the_item_context_hands_over_the_registry_hash_and_the_call_that_reverts
     assert graph_sync.drain_active_rebuilds(timeout=60)
     ref = _entry_ref(vault, "registry")
 
-    context = commands.op_review_item_context(vault, ref)
+    context = call("review_item_context", {"ref": ref})
 
     current = call("schema_memory", {"subject": "entity-types", "operation": "inspect"})
     assert context["revert_fingerprint"] == current["content_hash"]
@@ -285,11 +285,11 @@ def test_the_item_context_hands_over_the_registry_hash_and_the_call_that_reverts
     assert stale["error"]["code"] == "STALE_REGISTRY"
     assert _entity_type_keys(call) == {"venue": "active", "arena": "active"}
 
-    fresh = commands.op_review_item_context(vault, ref)["revert"]["arguments"]
+    fresh = call("review_item_context", {"ref": ref})["revert"]["arguments"]
     done = call("schema_memory", {**fresh, "why": "the user undid it"})
     assert done["ok"] is True
     assert _entity_type_keys(call) == {"arena": "active"}, "the later save stays"
-    assert commands.op_review_item_context(vault, ref)["revert_fingerprint"] is None, "settled"
+    assert call("review_item_context", {"ref": ref})["revert_fingerprint"] is None, "settled"
 
 
 @pytest.mark.parametrize("use", ["topic", "home", "unused"])
