@@ -9,7 +9,7 @@ as an authoring contract.
 from __future__ import annotations
 
 import re
-from collections.abc import Set
+from collections.abc import Iterator, Sequence, Set
 from dataclasses import dataclass
 
 from . import relation_registry
@@ -205,3 +205,24 @@ def interpret_markdown_relations(
 
 def _normalize_heading(value: str) -> str:
     return re.sub(r"[\s_-]+", "_", value.strip().lower()).strip("_")
+
+
+def heading_title(text: str) -> str:
+    """Title of a heading given with or without its `#` markers."""
+    match = _HEADING_RE.match(text) or _HEADING_RE.match(f"# {text}")
+    return match.group("title") if match else text.strip()
+
+
+def heading_key(title: str) -> str:
+    """Key under which two spellings of a heading name the same section."""
+    return _normalize_heading(title)
+
+
+def iter_headings(lines: Sequence[str]) -> Iterator[tuple[int, int, str]]:
+    """Yield `(line index, level, title)` for each heading outside a code fence."""
+    in_fence = False
+    for index, line in enumerate(lines):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and (heading := _HEADING_RE.match(line)):
+            yield index, len(heading.group("marks")), heading.group("title")

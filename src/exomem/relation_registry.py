@@ -56,6 +56,7 @@ _DEFINITION_FIELDS = {
     "status",
     "replaced_by",
     "presentation_role",
+    "label",
 }
 #: Fields a shipped core relation may carry. This closed set is the pack's own schema
 #: (field names, not vocabulary); a pack with another field is a build defect.
@@ -83,6 +84,8 @@ class RelationDefinition:
     core: bool = False
     # Optional renderer metadata never changes the relation's meaning or display label.
     presentation_role: str | None = None
+    # A declared display label; absent, `display_label` reads the key (core) or its name.
+    label: str | None = None
     # Marks the core pack's one relation for "related, with no specific meaning". An
     # extension never carries it, so a specific refinement is never taken for it.
     generic: bool = False
@@ -101,6 +104,7 @@ class RelationDefinition:
             ("inverse", self.inverse),
             ("replaced_by", self.replaced_by),
             ("presentation_role", self.presentation_role),
+            ("label", self.label),
         ):
             if scalar_value:
                 out[key] = scalar_value
@@ -153,6 +157,15 @@ class RelationRegistry:
     def generic_key(self) -> str:
         """The key of the one generic relation; the core pack guarantees exactly one."""
         return next(key for key, definition in self.core.items() if definition.generic)
+
+    @cached_property
+    def active_keys_by_label(self) -> dict[str, tuple[str, ...]]:
+        """Each display label with the active entries that carry it."""
+        by_label: dict[str, list[str]] = {}
+        for definition in (*self.core.values(), *self.extensions.values()):
+            if definition.status == "active":
+                by_label.setdefault(_own_label(definition), []).append(definition.key)
+        return {label: tuple(keys) for label, keys in by_label.items()}
 
     def definition(self, key: str) -> RelationDefinition | None:
         return self.core.get(key) or self.extensions.get(key)
@@ -223,6 +236,37 @@ class RelationRegistry:
             terminal_replacement=self.terminal_replacement(canonical),
             findings=tuple(findings),
         )
+
+
+def _own_label(definition: RelationDefinition) -> str:
+    """A relation's label before any qualifier: declared, else the key (core) or its name."""
+    if definition.label:
+        return definition.label
+    # An extension key is `<namespace>.<name>` (`_KEY_RE`); the name is its default label.
+    return definition.key if definition.core else definition.key.partition(".")[2]
+
+
+def display_label(registry: RelationRegistry, key: str) -> str:
+    """How a relation reads to a person; the key stays the machine identity.
+
+    A core relation reads as its label and an extension as `<label> (a kind of
+    <parent label>)`. An extension whose label another active entry also carries
+    reads with its namespace (`<namespace>.<label>`), and a deprecated entry ends
+    in `(deprecated)`. A key the registry does not hold reads as itself.
+    """
+    definition = registry.definition(key)
+    if definition is None:
+        return key
+    label = _own_label(definition)
+    if not definition.core and any(
+        other != key for other in registry.active_keys_by_label.get(label, ())
+    ):
+        label = f"{definition.key.partition('.')[0]}.{label}"
+    if definition.parent:
+        label = f"{label} (a kind of {display_label(registry, definition.parent)})"
+    if definition.status == "deprecated":
+        label = f"{label} (deprecated)"
+    return label
 
 
 def traversable_resolution_status(status: str | None) -> bool:
@@ -320,6 +364,54 @@ def load_registry(
 
     selected = instances.select(Path(vault_root), SPEC, registry_scope)
     return vocabulary_registry.load(selected, Path(vault_root)).typed
+
+
+def load_admitted(
+    vault_root: Path, registry_scope: str | None = None
+) -> RelationRegistry | None:
+    """The registry of one instance, or None when this caller cannot admit it.
+
+    None is one answer for an instance that does not exist, a binding that is
+    ambiguous and an overlay the caller may not read, so a refusal never says
+    which of them it is.
+    """
+    from .vocabulary import contract, instances
+
+    root = Path(vault_root)
+    try:
+        selected = instances.select(root, SPEC, registry_scope)
+        if contract.admission_refusal(root, selected) is not None:
+            return None
+        return vocabulary_registry.load(selected, root).typed
+    except vocabulary_registry.RegistryError:
+        return None
+
+
+def load_for_page(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
+) -> RelationRegistry:
+    """The registry the page's instance defines; core meanings when this caller cannot admit it."""
+    from .vocabulary import instances
+
+    try:
+        scope = instances.page_scope(Path(vault_root), rel_path, dict(frontmatter))
+    except vocabulary_registry.RegistryError:
+        return core_registry()
+    return load_admitted(vault_root, scope) or core_registry()
+
+
+def authored_label(registry: RelationRegistry, requested: str, canonical: str) -> str:
+    """The spelling a page carries for `canonical`, chosen as `requested`.
+
+    The bare label stays when this registry resolves it to that one entry; the
+    namespaced key (or the explicit `core.` spelling of a shadowed core key)
+    stands in when it does not.
+    """
+    label = normalize_relation(requested)
+    for spelling in (label, canonical, f"{CORE_PREFIX}{canonical}"):
+        if registry.resolve(spelling).canonical == canonical:
+            return spelling
+    return canonical
 
 
 def clear_cache() -> None:
@@ -496,6 +588,8 @@ def _definition_document(definition: RelationDefinition) -> dict[str, Any]:
         value["replaced_by"] = definition.replaced_by
     if definition.presentation_role is not None:
         value["presentation_role"] = definition.presentation_role
+    if definition.label is not None:
+        value["label"] = definition.label
     scope: dict[str, list[str]] = {}
     if definition.projects:
         scope["projects"] = sorted(definition.projects)
@@ -553,8 +647,9 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
 
 
 def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> None:
-    if "presentation_role" in patch:
-        old["presentation_role"] = patch["presentation_role"]
+    for display_field in ("presentation_role", "label"):
+        if display_field in patch:
+            old[display_field] = patch[display_field]
     immutable = {
         "parent",
         "family",
@@ -910,6 +1005,19 @@ def _parse_extension_data(
                 "must be an identifier or null", relation=key,
             ))
             presentation_role = None
+        label = value.get("label")
+        if label is not None:
+            label = normalize_relation(label) if isinstance(label, str) else ""
+            if not _LABEL_RE.fullmatch(label):
+                findings.append(
+                    _finding(
+                        "invalid_label",
+                        f"{span}.label",
+                        "must be a relation label, lowercase with underscores",
+                        relation=key,
+                    )
+                )
+                label = None
         definition = RelationDefinition(
             key=key,
             description=description,
@@ -963,6 +1071,7 @@ def _parse_extension_data(
             replaced_by=_optional(value.get("replaced_by")),
             core=False,
             presentation_role=presentation_role,
+            label=label,
         )
         extensions[key] = definition
     canonical = set(core.core) | set(extensions)
@@ -1070,6 +1179,19 @@ def _parse_extension_data(
                             relation=key,
                         )
                     )
+    for key, definition in extensions.items():
+        # A label a caller is shown must be one it can pass back: `aliases` holds the
+        # bindings that survived the collision checks above.
+        if definition.label and aliases.get(definition.label) != key:
+            findings.append(
+                _finding(
+                    "unresolved_label",
+                    f"extensions.{key}.label",
+                    f"label {definition.label!r} must also be one of the relation's aliases",
+                    relation=key,
+                    severity="warning" if key in grandfathered else "error",
+                )
+            )
     findings.extend(_cycle_findings(extensions, "replaced_by", allow_pair=False))
     findings.extend(_cycle_findings(extensions, "inverse", allow_pair=True))
     terminals, predecessors, replacement_findings = _replacement_closure(
@@ -1274,6 +1396,7 @@ class _Adapter:
                 attributes["scope"] = scope
             out[definition.key] = vocabulary_registry.Entry(
                 key=definition.key,
+                label=definition.label or "",
                 description=definition.description,
                 aliases=definition.aliases,
                 status=definition.status,
@@ -1332,8 +1455,12 @@ class _Adapter:
                 raw["replaced_by"] = entry.replaced_by
             if "presentation_role" in entry.attributes:
                 raw["presentation_role"] = entry.attributes["presentation_role"]
+            if entry.label:
+                raw["label"] = entry.label
             return
         row: dict[str, Any] = {"parent": entry.parent, "description": entry.description}
+        if entry.label:
+            row["label"] = entry.label
         attributes = entry.attributes
         for name in _ATTRIBUTE_FIELDS:
             if name in attributes and attributes[name] not in (None, "", []):
@@ -1376,7 +1503,9 @@ SPEC = vocabulary_registry.RegistrySpec(
     stem="relation-registry",
     overlay=extension_registry_path,
     adapter=_Adapter(),
-    fields=frozenset({"description", "aliases", "status", "replaced_by", "parent", "attributes"}),
+    fields=frozenset(
+        {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes"}
+    ),
     attributes=frozenset({*_ATTRIBUTE_FIELDS, "scope"}),
     # Relations keep their meaning fixed in place; a new meaning is a new key.
     immutable=frozenset(

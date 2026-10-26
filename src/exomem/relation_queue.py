@@ -84,7 +84,7 @@ def _candidate_identity(candidate: dict[str, Any]) -> str:
 
 
 def _bullet(candidate: dict[str, Any]) -> str:
-    relation = candidate.get("relation_type") or "relates_to"
+    relation = candidate.get("authored_label") or candidate.get("relation_type") or "relates_to"
     destination = str(candidate.get("to") or "").removesuffix(".md")
     return f"- {relation} [[{destination}]]"
 
@@ -111,8 +111,9 @@ def selected_relation(
         source_project = None
     if not isinstance(target_project, str):
         target_project = None
+    registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
     resolved = semantic_contract_module._registry_resolution(
-        relation_registry.load_registry(vault_root),
+        registry,
         requested_relation,
         projects=(source_project,) if source_project is not None else (),
         page_type=page.page_type,
@@ -120,14 +121,19 @@ def selected_relation(
         target_kind=target.page_type,
         origin="markdown_relation",
     )
-    definition = resolved.definition
+    definition, canonical = resolved.definition, resolved.canonical
     if (
         definition is None
+        or canonical is None
         or resolved.status not in {"core", "extension", "alias"}
         or (definition.projects and target_project not in definition.projects)
     ):
         raise ValueError("INVALID_SELECTED_RELATION: relation is not active for reviewed endpoints")
-    return {**candidate, "relation_type": resolved.canonical}
+    return {
+        **candidate,
+        "relation_type": canonical,
+        "authored_label": relation_registry.authored_label(registry, requested_relation, canonical),
+    }
 
 
 def _evidence_signal_version(page: Any, candidate: dict[str, Any]) -> str:
@@ -184,7 +190,9 @@ def _relation_document(page: Any, vault_root: Path) -> Any:
         page.body,
         validate=False,
         language_registry=semantic_language_registry.load_registry(vault_root),
-        relation_registry=relation_registry.load_registry(vault_root),
+        relation_registry=relation_registry.load_for_page(
+            vault_root, page.rel_path, page.frontmatter
+        ),
         page_type=page.page_type,
     )
 
@@ -979,6 +987,11 @@ def accept(
         "from": selected.get("from"),
         "to": selected.get("to"),
         "relation_type": selected.get("relation_type"),
+        "relation_label": relation_registry.display_label(
+            relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter),
+            str(selected.get("relation_type") or ""),
+        ),
+        "authored_label": selected.get("authored_label") or selected.get("relation_type"),
         "method": candidate.get("method"),
         "fingerprint": resolved.fingerprint,
         "bullet": bullet,

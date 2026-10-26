@@ -43,6 +43,7 @@ from . import (
     corpus_aware,
     indexes,
     lifecycle_statuses,
+    markdown_relations,
     reserved_paths,
     semantic_contract,
     semantic_writes,
@@ -760,14 +761,6 @@ def apply_surgical_replace(
     return body.replace(old_string, new_string_norm, n), warnings
 
 
-_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
-
-
-def _normalize_heading(h: str) -> str:
-    """Drop leading `#` markers + surrounding whitespace so `## Foo` == `Foo`."""
-    return h.lstrip("#").strip()
-
-
 def apply_section_edit(
     body: str,
     heading: str,
@@ -796,16 +789,20 @@ def apply_section_edit(
     untouched (matching `apply_surgical_replace`).
     """
     where = f" in {rel_path}" if rel_path else ""
-    want = _normalize_heading(heading)
+    # The relation parser decides what counts as a section (case-blind, outside
+    # code fences), so this match follows it; a stricter match would append a
+    # second `## Relations` heading beside one the parser already reads.
+    want_title = markdown_relations.heading_title(heading)
+    want = markdown_relations.heading_key(want_title)
     lines = body.split("\n")
+    headings = list(markdown_relations.iter_headings(lines))
 
     h_idx = -1
     h_level = 0
-    for i, line in enumerate(lines):
-        m = _HEADING_RE.match(line)
-        if m and m.group(2).strip() == want:
+    for i, level, title in headings:
+        if markdown_relations.heading_key(title) == want:
             h_idx = i
-            h_level = len(m.group(1))
+            h_level = level
             break
     if h_idx == -1:
         if not create_missing:
@@ -825,15 +822,12 @@ def apply_section_edit(
         )
         prefix = body.rstrip("\n")
         joiner = "\n\n" if prefix else ""
-        new_body = f"{prefix}{joiner}## {want}\n\n{content_norm}\n"
+        new_body = f"{prefix}{joiner}## {want_title}\n\n{content_norm}\n"
         return new_body, warnings
 
-    end = len(lines)
-    for j in range(h_idx + 1, len(lines)):
-        m = _HEADING_RE.match(lines[j])
-        if m and len(m.group(1)) <= h_level:
-            end = j
-            break
+    end = next(
+        (j for j, level, _ in headings if j > h_idx and level <= h_level), len(lines),
+    )
 
     if resolver is None:
         resolver = find_module.shared_resolver(vault_root)

@@ -440,12 +440,14 @@ def _normalize_connections(
     *,
     vault_root: Path,
     resolver: WikilinkResolver,
+    bullet_kind: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Canonicalize each connection wikilink to full vault-rooted form.
 
     Returns (canonical_connections, warnings). Same fall-through behaviour
     as `note._normalize_sources`: unresolved targets pass through with a
-    warning so forward refs aren't blocked.
+    warning so forward refs aren't blocked. With `bullet_kind`, each target
+    must render as exactly one `## Relations` line, so no value can add one.
     """
     if not connections:
         return [], []
@@ -453,13 +455,21 @@ def _normalize_connections(
     out: list[str] = []
     seen: set[str] = set()
     warnings: list[str] = []
-    for c in connections:
+    for index, c in enumerate(connections):
         c = (c or "").strip()
         if not c:
             continue
         canonical, warning = normalize_wikilink(
             c, vault_root, resolver=resolver, strict=False, visible=visible
         )
+        if bullet_kind is not None and len(
+            _scan_relation_line(bullet_kind, render_wikilink_target(canonical, vault_root))
+        ) != 1:
+            raise LinkError(
+                "INVALID_LINK",
+                ["connections"],
+                f"connections[{index}] must be one single-line wikilink target",
+            )
         if warning:
             warnings.append(warning)
         if canonical not in seen:
@@ -470,6 +480,15 @@ def _normalize_connections(
 
 def _relation_line(kind: str, target: str) -> str:
     return f"- {kind} [[{target}]]"
+
+
+def _scan_relation_line(
+    kind: str, target: str
+) -> tuple[markdown_relations.MarkdownRelationCandidate, ...]:
+    """The relation candidates that one rendered bullet yields when a page is read back."""
+    return markdown_relations.scan_markdown_relations(
+        f"## Relations\n{_relation_line(kind, target)}\n"
+    ).candidates
 
 
 def _normalize_relations(
@@ -508,9 +527,7 @@ def _normalize_relations(
         )
         warnings.extend(warning for warning in target_warnings if warning not in warnings)
         pair = (item["kind"].strip(), render_wikilink_target(targets[0], vault_root))
-        parsed = markdown_relations.scan_markdown_relations(
-            f"## Relations\n{_relation_line(*pair)}\n"
-        ).candidates
+        parsed = _scan_relation_line(*pair)
         if len(parsed) != 1 or not parsed[0].grammar_valid or parsed[0].kind != pair[0]:
             raise LinkError(
                 "INVALID_LINK",
@@ -638,6 +655,32 @@ def _prepend_log_entry(
     return text[:insertion_point] + "\n" + new_entry + "\n" + text[insertion_point:]
 
 
+def _authored_entity(project: str | None, tags: list[str] | None) -> dict[str, object]:
+    return {"type": "entity", "project": project, "tags": _clean_tags(tags)}
+
+
+def entity_instance(
+    vault_root: Path,
+    *,
+    project: str | None,
+    tags: list[str] | None,
+    registry_scope: str | None,
+) -> str | None:
+    """The registry instance a new entity selects; None is the public one.
+
+    One selection for `link` and for every caller that must bind the same instance.
+    """
+    from .vocabulary import instances
+
+    return instances.page_scope(
+        vault_root,
+        "",
+        _authored_entity(project, tags),
+        registry_scope=registry_scope,
+        prospective=True,
+    )
+
+
 def link(
     vault_root: Path,
     *,
@@ -675,9 +718,9 @@ def link(
     """
     from .vocabulary import instances
 
-    authored = {"type": "entity", "project": project, "tags": _clean_tags(tags)}
-    selected_scope = instances.page_scope(
-        vault_root, "", authored, registry_scope=registry_scope, prospective=True
+    authored = _authored_entity(project, tags)
+    selected_scope = entity_instance(
+        vault_root, project=project, tags=tags, registry_scope=registry_scope
     )
     registry = load_entity_types(vault_root, registry_scope=selected_scope)
     definition = registry.resolve(entity_type)
@@ -836,7 +879,7 @@ def link(
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
     connections_norm, connection_warnings = _normalize_connections(
-        connections, vault_root=vault_root, resolver=resolver
+        connections, vault_root=vault_root, resolver=resolver, bullet_kind="relates_to"
     )
     relation_pairs, relation_warnings = _normalize_relations(
         relations, vault_root=vault_root, resolver=resolver
@@ -862,6 +905,15 @@ def link(
         why_clean, why_warnings = normalize_body_wikilinks(
             why_in_kb, vault_root, resolver=resolver
         )
+    # Same refusal as the unclosed fence below: free text cannot carry relations.
+    for field, text in (("summary", summary_clean), ("why_in_kb", why_clean)):
+        if text and markdown_relations.scan_markdown_relations(text).canonical_section_present:
+            raise LinkError(
+                "INVALID_LINK",
+                [field],
+                f"{field} must not carry a Relations heading; "
+                "pass edges as `relations` or `connections`",
+            )
     connection_targets = [render_wikilink_target(item, vault_root) for item in connections_norm]
     source = _render_entity(
         entity_type=entity_type,

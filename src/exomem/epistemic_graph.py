@@ -378,6 +378,8 @@ class GraphEdge:
     #: edge still counts as an edge to its page. None means the destination is
     #: already a page.
     dst_page_key: str | None = None
+    #: How `relation_type` reads to a person, from the registry that resolved it.
+    relation_label: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -385,6 +387,7 @@ class GraphEdge:
             "src_key": self.src_key,
             "dst_key": self.dst_key,
             "relation_type": self.relation_type,
+            "relation_label": self.relation_label,
             "raw_relation": self.raw_relation,
             "parent_relation": self.parent_relation,
             "registry_status": self.registry_status,
@@ -411,6 +414,7 @@ class GraphNeighbor:
     relation_type: str | None
     direction: str
     family: str
+    relation_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -7705,9 +7709,8 @@ class EpistemicGraphIndex:
                     if edge is None:
                         continue
                     relation_type = edge.get("relation_type")
-                    definition = view.registry_for(str(edge.get("source_path") or "")).definition(
-                        str(relation_type or "")
-                    )
+                    authored = view.registry_for(str(edge.get("source_path") or ""))
+                    definition = authored.definition(str(relation_type or ""))
                     rows.append(
                         (
                             seed_order[seed_rel],
@@ -7718,6 +7721,11 @@ class EpistemicGraphIndex:
                                 relation_type=relation_type,
                                 direction=direction,
                                 family=definition.family if definition else "",
+                                relation_label=(
+                                    relation_registry.display_label(authored, definition.key)
+                                    if definition
+                                    else None
+                                ),
                             ),
                         )
                     )
@@ -9603,6 +9611,10 @@ def graph_context(
                     continue
                 if profile.direction == "incoming" and edge["dst_key"] not in frontier:
                     continue
+                edge = {
+                    **edge,
+                    "relation_label": relation_registry.display_label(authored, definition.key),
+                }
                 diagnostics = _relation_diagnostics(edge)
                 if diagnostics:
                     edge = {**edge, **diagnostics}
@@ -11686,6 +11698,7 @@ def _edge(
         resolver_origin,
         dict(review_evidence or {}),
         dst_page_key if dst_page_key != dst_key else None,
+        relation_registry.display_label(registry, canonical) if canonical else None,
     )
 
 

@@ -303,6 +303,7 @@ def test_exact_aliases_survive_bounded_extension_pages() -> None:
             "match": "alias",
             "requested_relation": "wanted",
             "canonical": "vault.match",
+            "relation_label": "match (a kind of relates_to)",
             "parent": "relates_to",
             "family": "relation",
             "description": "Exact match",

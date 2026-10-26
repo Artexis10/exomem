@@ -151,3 +151,59 @@ def test_bumps_updated_and_writes_log(vault, monkeypatch: pytest.MonkeyPatch) ->
     log_md = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
     assert "section edit auditable" in log_md
     assert "heading-test" in log_md
+
+
+def test_an_existing_relations_section_is_reused_whatever_its_casing(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The relation parser reads `## relations` as the Relations section, so a
+    # create-missing write must append there instead of adding a second heading.
+    p = vault / NOTE_REL
+    text = BODY.replace("## Connections", "## relations\n\n- part_of [[Alpha]]")
+    p.write_text(text, encoding="utf-8")
+    find_module.clear_cache()
+    edit_module.edit(
+        vault, path=NOTE_REL, why="accept a relation", heading="Relations",
+        section_position="append", new_string="- supports [[Beta]]",
+        create_missing_section=True,
+    )
+    text = _read(p)
+    assert text.lower().count("## relations") == 1
+    assert text.index("- part_of [[Alpha]]") < text.index("- supports [[Beta]]")
+
+
+def test_a_heading_inside_a_code_fence_is_not_a_section(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = vault / NOTE_REL
+    p.write_text(
+        BODY.replace("## Connections", "```\n## Relations\n```"), encoding="utf-8",
+    )
+    find_module.clear_cache()
+    edit_module.edit(
+        vault, path=NOTE_REL, why="accept a relation", heading="Relations",
+        section_position="append", new_string="- supports [[Beta]]",
+        create_missing_section=True,
+    )
+    text = _read(p)
+    # The fenced example stays untouched; a real section is added after it.
+    assert text.count("## Relations") == 2
+    assert text.rindex("## Relations") < text.index("- supports [[Beta]]")
+    assert text.index("```\n## Relations\n```") < text.rindex("## Relations")
+
+
+def test_a_fenced_hash_line_does_not_end_the_section_it_sits_in(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = vault / NOTE_REL
+    p.write_text(
+        BODY.replace("Intro line.", "Intro line.\n\n```\n# shell comment\n```"),
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+    edit_module.edit(
+        vault, path=NOTE_REL, why="extend overview", heading="Overview",
+        section_position="append", new_string="Tail line.",
+    )
+    text = _read(p)
+    assert text.index("# shell comment") < text.index("Tail line.") < text.index("## Details")

@@ -1787,6 +1787,166 @@ def test_a_limited_client_resolves_and_observes_the_bound_public_registries(
     assert hashes == hashes_for_full
 
 
+def test_a_private_relation_label_resolves_only_for_a_caller_admitted_to_its_instance(
+    private_instances, vault
+):
+    """A caller who cannot admit the private instance gets what an unregistered label gets."""
+    from exomem import commands, relation_registry
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    with principal.request_scope(private_instances("full")):
+        overlay = instances.select(vault, relation_registry.SPEC, SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\nextensions:\n  vault.has_pet:\n    parent: relates_to\n"
+            "    description: A person keeps an animal.\n    aliases: [has_pet]\n",
+            encoding="utf-8",
+        )
+        admitted = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="has_pet", registry_scope=SCOPE
+        )
+        without_scope = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="has_pet"
+        )
+    with principal.request_scope(private_instances("limited")):
+        withheld = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="has_pet", registry_scope=SCOPE
+        )
+        unknown = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="has_pet",
+            registry_scope="01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        )
+        unregistered = commands.op_connect_memory(
+            vault, "resolve-relation", requested_relation="has_pet"
+        )
+
+    assert [match["canonical"] for match in admitted["exact_matches"]] == ["vault.has_pet"]
+    assert without_scope["exact_matches"] == []
+    assert withheld == unknown == unregistered
+    assert "vault.has_pet" not in json.dumps(withheld)
+
+
+def test_queue_selection_resolves_a_label_in_the_instance_of_the_source_page(
+    private_instances, vault
+):
+    """A private page accepts its instance's label; a public page does not know it."""
+    from exomem import relation_queue, relation_registry
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    notes = vault / "Knowledge Base/Notes"
+    with principal.request_scope(private_instances("full")):
+        overlay = instances.select(vault, relation_registry.SPEC, SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\nextensions:\n  vault.has_pet:\n    parent: relates_to\n"
+            "    description: A person keeps an animal.\n    aliases: [has_pet]\n",
+            encoding="utf-8",
+        )
+        for name, front in (
+            ("owner", f"project: private-project\nregistry_scope: {SCOPE}\n"),
+            ("visitor", ""),
+            ("pet", ""),
+        ):
+            (notes / f"{name}.md").write_text(
+                f"---\ntype: insight\nstatus: active\n{front}---\n# {name}\n\nBody.\n",
+                encoding="utf-8",
+            )
+        candidate = {
+            "from": "Knowledge Base/Notes/owner.md",
+            "to": "Knowledge Base/Notes/pet.md",
+            "relation_type": "relates_to",
+        }
+        selected = relation_queue.selected_relation(vault, candidate, "has_pet")
+        with pytest.raises(ValueError, match="INVALID_SELECTED_RELATION"):
+            relation_queue.selected_relation(
+                vault, {**candidate, "from": "Knowledge Base/Notes/visitor.md"}, "has_pet"
+            )
+
+    assert (selected["relation_type"], selected["authored_label"]) == ("vault.has_pet", "has_pet")
+
+
+def test_bootstrap_vocabulary_describes_one_admitted_instance_and_hides_the_rest(
+    private_instances, vault
+):
+    """A scope the caller cannot admit reads the same whether it is withheld or absent."""
+    from exomem.governance import principal
+    from exomem.vocabulary import bootstrap, instances
+
+    absent = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    with principal.request_scope(private_instances("full")):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE)
+        spec.overlay(vault).parent.mkdir(parents=True, exist_ok=True)
+        spec.overlay(vault).write_text("schema_version: 1\nentity_types: {}\n", encoding="utf-8")
+        private = bootstrap.block(vault, inspect_route="schema_memory", registry_scope=SCOPE)
+        public = bootstrap.block(vault, inspect_route="schema_memory")
+    with principal.request_scope(private_instances("limited")):
+        withheld = bootstrap.block(vault, inspect_route="schema_memory", registry_scope=SCOPE)
+        unknown = bootstrap.block(vault, inspect_route="schema_memory", registry_scope=absent)
+
+    assert "top" in private["entity-types"] and "top" in public["entity-types"]
+    assert withheld == unknown
+    assert withheld["entity-types"] == {"unavailable": "audience_restricted"}
+
+
+def test_curation_creates_an_entity_in_its_private_instance_and_binds_that_instance(
+    private_instances, vault
+):
+    """A create-entity step carries `aliases` and `registry_scope`; a registry move blocks it."""
+    from exomem import commands, curation
+    from exomem.governance import principal
+
+    step = {"step_id": "venue", "kind": "create-entity", "args": {
+        "entity_type": "meeting-place", "name": "Private venue",
+        "summary": "A hall for private meetings.",
+        "project": "private-project", "registry_scope": SCOPE, "aliases": ["the private hall"],
+    }}
+    plan = {"version": 1, "title": "Private venue", "steps": [step]}
+    with principal.request_scope(private_instances("full")):
+        inspected = commands.op_schema_memory(
+            vault, "inspect", subject="entity-types", registry_scope=SCOPE
+        )
+        commands.op_schema_memory(
+            vault, "save", subject="entity-types", registry_scope=SCOPE,
+            expected_hash=inspected["content_hash"], why="Private venue destinations",
+            proposal={"upsert": {"venue": {
+                "label": "Venue", "guidance": "A stable meeting place.", "parent": "concept",
+                "aliases": ["meeting-place"],
+                "attributes": {"folder": "Private Venues", "optional_frontmatter": ["project"]},
+            }}},
+        )
+        proposed = curation.propose(vault, plan)
+        moved = commands.op_schema_memory(
+            vault, "inspect", subject="entity-types", registry_scope=SCOPE
+        )
+        commands.op_schema_memory(
+            vault, "save", subject="entity-types", registry_scope=SCOPE,
+            expected_hash=moved["content_hash"], why="A private registry move after sealing",
+            proposal={"upsert": {"hall": {
+                "label": "Hall", "guidance": "A large room.", "parent": "concept",
+                "attributes": {"folder": "Halls"},
+            }}},
+        )
+        with pytest.raises(curation.CurationError) as refused:
+            curation.apply(
+                vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"],
+                expected_plan_fingerprint=proposed["plan_fingerprint"], why="Approved exact plan.",
+            )
+        assert refused.value.code == "CURATION_REGISTRY_CHANGED"
+        fresh = curation.propose(vault, plan)
+        applied = curation.apply(
+            vault, run_id=fresh["run_id"], plan_id=fresh["plan_id"],
+            expected_plan_fingerprint=fresh["plan_fingerprint"], why="Approved exact plan.",
+        )
+    created = (vault / applied["step"]["path"]).read_text(encoding="utf-8")
+    assert Path(applied["step"]["path"]).parent.name == "Private Venues"
+    assert "the private hall" in created
+    with principal.request_scope(private_instances("limited")):
+        with pytest.raises(ValueError, match="REGISTRY_UNAVAILABLE"):
+            curation.propose(vault, plan)
+
+
 def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_instances, vault):
     """Each response names the overlay that the bound public instance reads and writes.
 

@@ -29,6 +29,17 @@ class GraphProvenance:
     relation_type: str | None
     direction: str
     seed: str
+    relation_label: str | None = None
+
+    def as_dict(self) -> dict[str, str | None]:
+        out = {
+            "relation_type": self.relation_type,
+            "direction": self.direction,
+            "seed": self.seed,
+        }
+        if self.relation_label is not None:
+            out["relation_label"] = self.relation_label
+        return out
 
 
 @dataclass
@@ -329,11 +340,7 @@ class Hit:
         if self.order_indeterminate:
             out["order_indeterminate"] = list(self.order_indeterminate)
         if self.graph_provenance is not None:
-            out["graph"] = {
-                "relation_type": self.graph_provenance.relation_type,
-                "direction": self.graph_provenance.direction,
-                "seed": self.graph_provenance.seed,
-            }
+            out["graph"] = self.graph_provenance.as_dict()
         if self.relation_match is not None:
             out["relation_match"] = self.relation_match
         if self.media_type:
@@ -400,11 +407,7 @@ class Hit:
             "updated": self.updated,
         }
         if self.graph_provenance is not None:
-            out["graph"] = {
-                "relation_type": self.graph_provenance.relation_type,
-                "direction": self.graph_provenance.direction,
-                "seed": self.graph_provenance.seed,
-            }
+            out["graph"] = self.graph_provenance.as_dict()
         if self.relation_match is not None:
             out["relation_match"] = self.relation_match
         if self.media_type:

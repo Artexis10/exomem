@@ -160,6 +160,8 @@ _CREATE_ENTITY_FIELDS = frozenset(
         "identity_decision",
         "facets",
         "relations",
+        "aliases",
+        "registry_scope",
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})
@@ -458,6 +460,8 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
     elif kind == "create-entity":
         for field in ("entity_type", "name", "summary"):
             _require_string(args.get(field), f"steps[{ordinal}].args.{field}")
+        if "registry_scope" in args:
+            _require_string(args["registry_scope"], f"steps[{ordinal}].args.registry_scope")
     elif kind == "accept-relation":
         for field in _ACCEPT_RELATION_FIELDS:
             _require_string(args.get(field), f"steps[{ordinal}].args.{field}")
@@ -756,6 +760,49 @@ def _optional_model_call(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
+def _step_instances(vault_root: Path, plan: Mapping[str, Any]) -> list[str]:
+    """The private instances the plan's create-entity steps select, as `link` selects them."""
+    from . import link as link_module
+    from .vocabulary.registry import RegistryError
+
+    found: set[str] = set()
+    for step in plan.get("steps") or ():
+        if step.get("kind") != "create-entity":
+            continue
+        args = step["args"]
+        try:
+            scope = link_module.entity_instance(
+                vault_root,
+                project=args.get("project"),
+                tags=args.get("tags"),
+                registry_scope=args.get("registry_scope"),
+            )
+        except RegistryError:
+            # The step's own preparation refuses it; no instance is bound for it here.
+            continue
+        if scope is not None:
+            found.add(scope)
+    return sorted(found)
+
+
+def _instance_identity(vault_root: Path, scope: str) -> str:
+    from . import entity_types, relation_registry
+    from .vocabulary.registry import RegistryError
+
+    try:
+        entities = entity_types.load_entity_types(vault_root, registry_scope=scope)
+        relations = relation_registry.load_registry(vault_root, registry_scope=scope)
+    except RegistryError:
+        # A caller who cannot admit the instance gets one answer, never its definitions.
+        return _digest({"scope": scope, "available": False})
+    return _digest(
+        {
+            "entities": [entities.core_version, entities.extension_hash],
+            "relations": [relations.core_version, relations.extension_hash],
+        }
+    )
+
+
 def registry_identities(vault_root: Path) -> dict[str, str]:
     """Return deterministic identities for registries that affect executability."""
     from . import entity_types, relation_registry
@@ -788,6 +835,17 @@ def registry_identities(vault_root: Path) -> dict[str, str]:
             {"core_version": relations.core_version, "extension_hash": relations.extension_hash}
         ),
         "schemas": _digest(schema_rows),
+    }
+
+
+def plan_registry_identities(vault_root: Path, plan: Mapping[str, Any]) -> dict[str, str]:
+    """The public registry identities plus one per private instance the plan's steps select."""
+    return {
+        **registry_identities(vault_root),
+        **{
+            f"instance@{scope}": _instance_identity(vault_root, scope)
+            for scope in _step_instances(Path(vault_root), plan)
+        },
     }
 
 
@@ -1655,7 +1713,7 @@ def seal_proposal(
             holder_kind="command",
         )
     ):
-        blockers = _binding_blockers(root, sealed, registry_identities(root))
+        blockers = _binding_blockers(root, sealed, plan_registry_identities(root, sealed))
         if blockers:
             raise _error(blockers[0]["code"], blockers[0]["reason"])
         return CurationStore(root).create_forward(
@@ -1672,10 +1730,10 @@ def prepare_proposal(
     """Every check `propose` makes, without sealing anything. Read-only, so a
     caller preparing several plans can refuse them all before sealing one."""
     root = Path(vault_root)
-    # Captured before anything is read, so a registry change during preparation
-    # differs from the seal-time recheck instead of being absorbed into the plan.
-    registry_ids = registry_identities(root)
     validated = validate_forward_plan(plan, allow_records=allow_records)
+    # Captured before any step is prepared, so a registry change during preparation
+    # differs from the seal-time recheck instead of being absorbed into the plan.
+    registry_ids = plan_registry_identities(root, validated)
     # Candidate identity and state are re-read before any plan artifact is
     # published.  A stale review must not leave an inert but misleading plan in
     # the governed run store.
@@ -1882,7 +1940,7 @@ def preview(
     store = CurationStore(root)
     plan = store.load_plan(run_id)
     identity, fingerprint = store.identities(run_id)
-    blockers = _binding_blockers(root, plan, registry_identities(root), keep=keep)
+    blockers = _binding_blockers(root, plan, plan_registry_identities(root, plan), keep=keep)
     if (
         isinstance(plan.get("entity_candidate"), Mapping)
         and not _committed_step_ids(store.reconstruct(run_id))
@@ -2722,7 +2780,7 @@ def _blockers_for_uncommitted(
         except CurationError as error:
             return [{"code": error.code, "reason": error.reason}]
     return _binding_blockers(
-        vault_root, _uncommitted_plan(plan, committed), registry_identities(vault_root)
+        vault_root, _uncommitted_plan(plan, committed), plan_registry_identities(vault_root, plan)
     )
 
 

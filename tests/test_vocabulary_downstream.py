@@ -517,7 +517,7 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
     applied = VocabularyState(tmp_path).get(relation_item.ref)
     assert applied["state"] == "applied"
     assert len(applied["receipts"]) == 2
-    assert "- venue.hosts [[Knowledge Base/Notes/event]]" in (tmp_path / source).read_text(
+    assert "- hosts [[Knowledge Base/Notes/event]]" in (tmp_path / source).read_text(
         encoding="utf-8"
     )
     with library_scope():
@@ -529,7 +529,7 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
             read_only=False,
         )
     assert replay == accepted
-    assert (tmp_path / source).read_text(encoding="utf-8").count("venue.hosts") == 1
+    assert (tmp_path / source).read_text(encoding="utf-8").count("- hosts [[") == 1
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
     graph = commands.op_graph_context(

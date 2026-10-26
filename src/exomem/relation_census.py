@@ -1014,6 +1014,11 @@ def sample(
                 continue
             definition = registry.definition(row.relation or "")
             family = definition.family if definition is not None else "unknown"
+            # Core meanings are shared; any other key reads in its authoring page's instance.
+            authored = (
+                registry if row.relation in registry.core
+                else reader.view.registry_for(row.source_path)
+            )
             strata[family] += 1
             rank = int.from_bytes(
                 hashlib.sha256(f"{seed}\0{row.edge_key}".encode()).digest()[:8], "big"
@@ -1031,6 +1036,7 @@ def sample(
                 {
                     "family": family,
                     "relation": row.relation,
+                    "relation_label": relation_registry.display_label(authored, row.relation or ""),
                     "source": {"path": row.source_path, "anchor": row.source_anchor},
                     "target": {"path": row.dst_page, "anchor": row.dst_anchor},
                     "verdict": None,

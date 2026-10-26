@@ -65,7 +65,10 @@ def test_sample_is_seeded_and_stratified_by_family(tmp_path: Path) -> None:
     assert set(drawn_families) == {"citation", "dependency", "evidence", "support"}
     assert drawn_families.count("support") >= drawn_families.count("dependency")
     for item in first["items"]:
-        assert set(item) == {"id", "family", "relation", "source", "target", "verdict"}
+        assert set(item) == {
+            "id", "family", "relation", "relation_label", "source", "target", "verdict",
+        }
+        assert item["relation_label"] == item["relation"]  # core relations read as their key
         assert set(item["source"]) == {"path", "anchor"}
         assert set(item["target"]) == {"path", "anchor"}
         assert item["relation"] not in {"relates_to", "links_to"}

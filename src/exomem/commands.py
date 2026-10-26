@@ -9917,8 +9917,10 @@ def op_connect_memory(
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
         relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
     """
-    if registry_scope is not None and operation != "create-entity":
-        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
+    if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity or resolve-relation"
+        )
     if relations not in (None, []) and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: relations requires create-entity")
     _validate_vocabulary_binding(
@@ -9987,7 +9989,14 @@ def op_connect_memory(
         _, observation_offset = relation_vocabulary_module.continuation_offsets(
             continuation
         )
-        registry = relation_registry_module.load_registry(vault_root)
+        # An instance this caller cannot admit answers as the public one does, so the
+        # reply never says whether the scope exists or what it defines.
+        admitted = (
+            relation_registry_module.load_admitted(vault_root, registry_scope)
+            if registry_scope is not None
+            else None
+        )
+        registry = admitted or relation_registry_module.load_registry(vault_root)
         observations = memory_schema_module.indexed_relation_observations(
             vault_root,
             limit=limit,
