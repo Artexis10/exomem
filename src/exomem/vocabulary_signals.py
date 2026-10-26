@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from . import relation_registry
 from .vocabulary_workflow import PROJECTION_STATUSES, REVIEW_PREFIX, _hash, _text, family_descriptor
 
 MAX_ORIGINS_PER_PROJECTION = 64
@@ -68,7 +69,7 @@ def consider_generic_pair(
         )
     elif question:
         eligibility, reason = "eligible", "explicit_meaning_question"
-    elif relation != "relates_to":
+    elif relation != relation_registry.generic_relation_key():
         eligibility, reason = "not_eligible", "not_a_generic_relation"
     elif len(keys) >= 2:
         eligibility, reason = "eligible", "independent_origin_recurrence"

@@ -6,14 +6,17 @@
 # without a role matches no role predicate. A compiled type declares its one
 # `Notes/<Name>` folder. `time_bounded` marks a compiled type whose pages
 # record one bounded period; `sources: required` marks a type whose pages
-# must cite their sources.
+# must cite their sources. `partition` names what splits the type's folder into
+# sub-folders (project, domain, medium or none) and `stem` how the typed writer
+# builds a file name from the slug (slug, dated or started); `index_row` is the token of
+# the type's top-index Counts row when it differs from the key. Only this pack sets them.
 schema_version: 1
 registry: note-types
 entries:
   research-note:
     label: Research note
     description: Findings from a research thread in one project.
-    attributes: {role: compiled, folder: Notes/Research, sources: required}
+    attributes: {role: compiled, folder: Notes/Research, sources: required, partition: project, index_row: research}
   insight:
     label: Insight
     description: One durable conclusion and why it holds.
@@ -29,11 +32,11 @@ entries:
   experiment:
     label: Experiment
     description: A bounded trial with a hypothesis and an outcome.
-    attributes: {role: compiled, folder: Notes/Experiments, time_bounded: true}
+    attributes: {role: compiled, folder: Notes/Experiments, time_bounded: true, partition: domain, stem: started}
   production-log:
     label: Production log
     description: The record of one produced artifact and its reception.
-    attributes: {role: compiled, folder: Notes/Productions, time_bounded: true}
+    attributes: {role: compiled, folder: Notes/Productions, time_bounded: true, partition: medium, stem: dated}
   entity:
     label: Entity
     description: A stable identity whose type lives in the entity-type registry.

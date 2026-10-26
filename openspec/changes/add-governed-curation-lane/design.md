@@ -81,6 +81,7 @@ state machines.
 | `resume` | mutation | Execute at most the next step of the already approved forward or compensation plan. |
 | `propose-compensation` | mutation | Derive a new immutable compensation plan from committed receipts. |
 | `apply-compensation` | mutation | Record approval for the exact compensation plan and execute at most its next step. |
+| `revert` | mutation | Apply the promotion's deterministic revert bound to its current fingerprint and the user's undo request. |
 
 The signature reuses `plan_id` and `why` and adds only curation-specific
 arguments (`curation_action`, `run_id`, `plan`, `refs`, `paths`, and

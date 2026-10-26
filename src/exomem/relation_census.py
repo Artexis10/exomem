@@ -2,15 +2,17 @@
 
 The census answers "how good are this vault's edges?" with integers and the
 ratios derived from them. It reads one `_open_read_snapshot()` plus the relation
-and entity-type registries. The census itself parses no Markdown, runs no
-model, builds no index and writes nothing; under a governed policy the owner's
+and entity-type registries. The new-edge cohort also reads structured activity
+logs through CommonMark and JSON. It parses no page Markdown, runs no model,
+builds no index and writes nothing; under a governed policy the owner's
 release filter reads each page's bytes to decide its release. When the snapshot
 is unavailable (disabled, warming, catching up) it says so and never reports a
 zero.
 
-It streams: edge rows are reduced as they are read, and the two checks that
+The historical graph reduction streams: edge rows are reduced as they are read, and the two checks that
 compare an edge with its reverse run as SQL aggregates, so memory follows the
-page count, not the edge count.
+page count, not the edge count. The new cohort reads maintained activity logs,
+including rotation archives; it never reparses page content.
 
 Egress (D15). Links resolve against the whole vault, so a withheld page can
 change how a visible page's bare link resolves: a shared stem makes it
@@ -37,6 +39,7 @@ import json
 import math
 import os
 import sqlite3
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -58,7 +61,6 @@ _AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 # page to anything else.
 _STRUCTURAL_ORIGINS = ("semantic_unit", "semantic_block")
 _BODY_LINK_ORIGINS = frozenset({"wikilink", "markdown_relation", "semantic_relation"})
-_GENERIC = "relates_to"
 _LINK = "links_to"
 _STATUS_KEYS = (
     "core_specific",
@@ -93,6 +95,481 @@ Keep = Callable[[str], bool] | None
 #: is counted but cannot undo whole-vault link resolution, so it must never
 #: stand in for a restricted audience.
 CALLER: Any = object()
+
+
+def operation_provenance(
+    preflight: Any,
+    *,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+) -> dict[str, Any] | None:
+    """Retain authored additions from a writer's exact semantic before/after images."""
+    from . import note_types, semantic_writes, vault
+
+    if preflight.provenance_server_at is None:
+        return None
+    if isinstance(preflight, semantic_writes.ExistingPreflight):
+        before = preflight.before_corpus
+        after = preflight.after_corpus
+        state = preflight.after
+        prior_path = preflight.path
+        before_hash = preflight.before_hash
+        after_hash = vault.content_hash(preflight.after_source)
+        placement = None
+    else:
+        before = preflight.corpus
+        state = preflight.semantic_state
+        after = before.with_candidate(state) if before is not None else None
+        prior_path = predecessor_path
+        before_hash = None
+        after_hash = vault.content_hash(preflight.source)
+        placement = preflight.placement
+
+    def authored(context: Any, path: str | None) -> list[Any]:
+        return (
+            [
+                fact
+                for fact in context.relation_facts
+                if fact.authored_path == path and fact.authored and fact.origin in _AUTHORED_ORIGINS
+            ]
+            if context is not None
+            else []
+        )
+
+    def operand(fact: Any) -> tuple[Any, ...]:
+        return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
+
+    def endpoint(context: Any, path: str, anchor: str | None = None) -> str:
+        page = context.pages.get(path)
+        identity = f"{page.identity_kind}:{page.identity}" if page is not None else path
+        return f"{identity}#{anchor}" if anchor else identity
+
+    def identity(context: Any, fact: Any, owner: str | None) -> tuple[Any, ...]:
+        # The author endpoint stays relative to its page across a successor write.
+        source = (
+            ("self", fact.authored_anchor, fact.source_kind)
+            if fact.logical_source_path == owner
+            else endpoint(context, fact.logical_source_path)
+        )
+        target = fact.logical_target_ref or endpoint(
+            context, fact.logical_target_path, fact.target_anchor
+        )
+        return (
+            source,
+            target,
+            fact.canonical_relation or fact.raw_relation,
+            fact.registry_instance,
+        )
+
+    prior = authored(before, prior_path)
+    current = authored(after, state.path)
+
+    def stable_endpoints(context: Any, fact: Any) -> bool:
+        # "file" is the resolver's page-endpoint protocol token, not a vocabulary key.
+        if fact.source_kind != "file" and fact.authored_anchor is None:
+            return False
+        target_page = context.pages.get(fact.logical_target_path)
+        if target_page is not None and fact.logical_target_ref is not None:
+            target_unit = next(
+                (
+                    unit
+                    for unit in target_page.document.units
+                    if unit.unit_ref == fact.logical_target_ref
+                ),
+                None,
+            )
+            if target_unit is not None and target_unit.anchor is None:
+                return False
+        return True
+
+    uncertain = sum(not stable_endpoints(before, fact) for fact in prior) + sum(
+        not stable_endpoints(after, fact) for fact in current
+    )
+    identity_denominator = len(prior) + len(current)
+    prior = [fact for fact in prior if stable_endpoints(before, fact)]
+    current = [fact for fact in current if stable_endpoints(after, fact)]
+    # Unchanged operands cannot become additions through resolver or registry drift.
+    remaining = Counter(operand(fact) for fact in prior)
+    changed = []
+    for fact in current:
+        key = operand(fact)
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            changed.append(fact)
+    previous: Counter[Any] = Counter()
+    for fact in prior:
+        if remaining[operand(fact)]:
+            previous[identity(before, fact, prior_path)] += 1
+            remaining[operand(fact)] -= 1
+    additions = []
+    occurrences: Counter[Any] = Counter()
+    for fact in changed:
+        key = identity(after, fact, state.path)
+        if previous[key]:
+            previous[key] -= 1
+            continue
+        source_page = after.pages.get(fact.logical_source_path)
+        target_page = after.pages.get(fact.logical_target_path)
+
+        def role(page: Any) -> str | None:
+            if page is None:
+                return None
+            basis = page.type_basis or note_types.Basis(after.vault_root)
+            definition = basis.resolve(page.page_type).note_type
+            return definition.role if definition is not None else None
+
+        source_role, target_role = role(source_page), role(target_page)
+        # Entity is a schema-fixed note-type role; type keys remain registry data.
+        source_entity, target_entity = source_role == "entity", target_role == "entity"
+        endpoint_class = (
+            None
+            if source_role is None or target_role is None
+            else (
+                "entity_to_entity"
+                if source_entity and target_entity
+                else "note_to_entity"
+                if target_entity
+                else "entity_to_note"
+                if source_entity
+                else "note_to_note"
+            )
+        )
+        definition = after.registry_for(state.path).definition(fact.canonical_relation or "")
+        source_endpoint = fact.logical_source_ref or endpoint(
+            after, fact.logical_source_path, fact.authored_anchor
+        )
+        target_endpoint = fact.logical_target_ref or endpoint(
+            after, fact.logical_target_path, fact.target_anchor
+        )
+        occurrences[key] += 1
+        edge_identity = (source_endpoint, target_endpoint, *key[2:], occurrences[key])
+        additions.append(
+            {
+                "identity": hashlib.sha256(
+                    json.dumps(edge_identity, sort_keys=True).encode()
+                ).hexdigest(),
+                "source": source_endpoint,
+                "target": target_endpoint,
+                "source_path": fact.logical_source_path,
+                "target_path": fact.logical_target_path,
+                "relation": fact.canonical_relation or fact.raw_relation,
+                "registry_instance": fact.registry_instance,
+                "origin": fact.origin,
+                "endpoint_class": endpoint_class,
+                "generic": definition.generic if definition is not None else None,
+                "reason": None,
+                "reason_recorded": False,
+            }
+        )
+    # The v1 log schema fixes mutation kinds; note-type keys stay in their registry.
+    return {
+        "path": state.path,
+        "server_at": preflight.provenance_server_at,
+        "mutation_kind": "edit"
+        if isinstance(preflight, semantic_writes.ExistingPreflight)
+        else "creation",
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+        "predecessor_hash": predecessor_content_hash,
+        "added_edges": additions if after is not None else None,
+        "identity_coverage": {
+            "numerator": identity_denominator - uncertain,
+            "denominator": identity_denominator,
+            "unavailable_facts": uncertain,
+            "limitation": "Anonymous unit fingerprints do not prove stable identity across authored changes.",
+        },
+        "placement": {"basis": placement["basis"]} if placement is not None else None,
+    }
+
+
+def _cohort_now() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
+def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
+    from . import mode, vault
+
+    default_days, default_target = 30, 0.15
+    configured = mode.read_config().get("relation_census", {})
+    configured = configured if isinstance(configured, dict) else {}
+    days = configured.get("window_days", default_days)
+    if type(days) is not int or days <= 0:
+        days = default_days
+    target = configured.get("entity_generic_review_share", default_target)
+    if type(target) not in (int, float) or not math.isfinite(target) or not 0 <= target <= 1:
+        target = default_target
+    now = _cohort_now()
+    try:
+        start = now - dt.timedelta(days=days)
+    except OverflowError:
+        days = default_days
+        start = now - dt.timedelta(days=days)
+    window = {"days": days, "from": start.isoformat(), "to": now.isoformat(), "clock": "server_utc"}
+    source = "atomic_operation_log_v1:live_and_rotation_archives"
+    log = vault.read_operation_log(vault_root)
+    timed_events: dict[str, tuple[dt.datetime, dict[str, Any]]] = {}
+    observed = 0
+    unknown_time = 0
+    uninstrumented = 0
+
+    def instant(raw: Any) -> dt.datetime | None:
+        try:
+            value = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return value.astimezone(dt.UTC) if value.tzinfo is not None else None
+
+    for entry in log["entries"]:
+        data = entry.get("provenance")
+        legacy_path = entry["path"].removesuffix(".md") + ".md"
+        if legacy_path not in reader.pages:
+            legacy_path = kb_prefix() + legacy_path
+        path = data.get("path", legacy_path) if data else legacy_path
+        if not isinstance(path, str) or not reader.author_ok(path):
+            continue
+        timestamp = instant(data.get("server_at")) if data else None
+        if timestamp is None:
+            # Legacy dates describe author intent, never a known server write instant.
+            unknown_time += 1
+            uninstrumented += 1
+            continue
+        if start <= timestamp <= now:
+            observed += 1
+        if (
+            entry.get("provenance_invalid")
+            or not isinstance(data.get("operation_id"), str)
+            or not data.get("operation_id")
+            or not isinstance(data.get("added_edges"), list)
+            or not isinstance(data.get("after_hash"), str)
+            or not isinstance(data.get("identity_coverage", {}), dict)
+            or type(data.get("identity_coverage", {}).get("unavailable_facts", 0)) is not int
+            or data.get("identity_coverage", {}).get("unavailable_facts", 0) < 0
+            # These fields are fixed by the v1 operation-log schema.
+            or any(
+                not isinstance(edge, dict)
+                or any(
+                    not isinstance(edge.get(field), str)
+                    for field in ("identity", "source", "target", "source_path", "target_path")
+                )
+                or type(edge.get("generic")) not in (bool, type(None))
+                or type(edge.get("reason_recorded")) is not bool
+                for edge in data["added_edges"]
+            )
+        ):
+            if start <= timestamp <= now:
+                uninstrumented += 1
+            continue
+        previous = timed_events.get(data["operation_id"])
+        if previous is None or timestamp < previous[0]:
+            timed_events[data["operation_id"]] = (timestamp, data)
+    events = {
+        identity: event
+        for identity, (timestamp, event) in timed_events.items()
+        if start <= timestamp <= now
+    }
+    coverage = {
+        "status": "partial" if events else "unavailable",
+        "numerator": len(events),
+        "denominator": observed + unknown_time,
+        "unit": "observed_log_entries",
+        "live_log_present": log["live_log_present"],
+        "files_read": log["files_read"],
+        "files_unreadable": log["files_unreadable"],
+        "uninstrumented_entries": uninstrumented,
+        "unknown_server_time_entries": unknown_time,
+        "unlogged_operations": None,
+        "window_complete": False,
+        "limitation": "Unlogged writes and writes without a durable server-time binding have incomplete coverage.",
+    }
+    recorded_edges = [edge for event in events.values() for edge in event["added_edges"]]
+    unknown_identity = sum(
+        event.get("identity_coverage", {}).get("unavailable_facts", 0) for event in events.values()
+    )
+    coverage["identity_unavailable_facts"] = unknown_identity
+    coverage["identity_limitation"] = (
+        "Anonymous unit identity deltas are unavailable; counts cover stable endpoints only."
+    )
+    edges = [
+        edge
+        for edge in recorded_edges
+        if reader.admitted(edge.get("source_path")) and reader.admitted(edge.get("target_path"))
+    ]
+    coverage["admitted_endpoint_edges"] = len(edges) if events else None
+    coverage["recorded_edges"] = len(recorded_edges) if events else None
+
+    def metric(
+        numerator: int | None, denominator: int | None, *, covered: dict | None = None
+    ) -> dict[str, Any]:
+        return {
+            "numerator": numerator,
+            "denominator": denominator,
+            "share": _ratio(numerator, denominator)
+            if numerator is not None and denominator is not None
+            else None,
+            "window": window,
+            "source": source,
+            "coverage": covered or coverage,
+            "available": numerator is not None,
+        }
+
+    def generic_share(population: list[dict]) -> dict[str, Any]:
+        known = [edge for edge in population if type(edge.get("generic")) is bool]
+        measured = bool(events) and (bool(known) or (not population and not unknown_identity))
+        return metric(
+            sum(edge["generic"] for edge in known) if measured else None,
+            len(known) if measured else None,
+            covered={**coverage, "classified_edges": len(known), "cohort_edges": len(population)},
+        )
+
+    generic = [edge for edge in edges if edge.get("generic") is True]
+    reasoned = [edge for edge in generic if edge.get("reason_recorded") is True]
+    reason_coverage = {
+        "status": "partial" if reasoned else "unavailable",
+        "numerator": len(reasoned),
+        "denominator": len(generic) if events else None,
+        "limitation": "These writers do not yet record edge-bound generic review reasons.",
+    }
+    reasons = [
+        unicodedata.normalize("NFKC", " ".join(edge["reason"].split())).casefold()
+        for edge in reasoned
+        if isinstance(edge.get("reason"), str) and edge["reason"].strip()
+    ]
+    duplicates = Counter(reasons)
+    # Endpoint classes are fixed report dimensions, not entity or relation vocabulary.
+    classes = {
+        name: {
+            "raw_generic_share": generic_share(
+                [edge for edge in edges if (edge.get("endpoint_class") or "unknown") == name]
+            )
+        }
+        for name in (
+            "entity_to_entity",
+            "note_to_entity",
+            "entity_to_note",
+            "note_to_note",
+            "unknown",
+        )
+    }
+    touching_entity = [
+        edge
+        for edge in edges
+        if edge.get("endpoint_class") in ("entity_to_entity", "note_to_entity", "entity_to_note")
+    ]
+    entity_share = generic_share(touching_entity)
+    placements = [
+        event["placement"]
+        for event in events.values()
+        if isinstance(event.get("placement"), dict)
+        and isinstance(event["placement"].get("basis"), str)
+    ]
+    creations = sum(event.get("mutation_kind") == "creation" for event in events.values())
+    placement_coverage = {
+        "status": "partial" if placements else "unavailable",
+        "numerator": len(placements),
+        "denominator": creations if events else None,
+        "limitation": "Only placement bases supplied by writers are counted.",
+    }
+    placement_metric = metric(
+        len(placements) if placements else None,
+        creations if events else None,
+        covered=placement_coverage,
+    )
+    # The writer's basis format carries a category and an optional private home key.
+    placement_metric["by_basis"] = dict(
+        Counter(item["basis"].partition(":")[0] for item in placements)
+    )
+    unavailable = {
+        "status": "unavailable",
+        "numerator": None,
+        "denominator": None,
+        "limitation": "Correlated referent outcomes are not instrumented; clearing is not acting.",
+    }
+    return {
+        "window": window,
+        "source": source,
+        "time_basis": "first_server_commit_preparation",
+        "coverage": coverage,
+        "authored_edges": metric(
+            len(edges) if events and (edges or not unknown_identity) else None,
+            len(recorded_edges) if events and (edges or not unknown_identity) else None,
+        ),
+        "raw_generic_share": generic_share(edges),
+        "endpoint_classes": classes,
+        "unreasoned_generic_edges": metric(
+            sum(
+                not isinstance(edge.get("reason"), str) or not edge["reason"].strip()
+                for edge in reasoned
+            )
+            if reasoned
+            else None,
+            len(reasoned) if reasoned else None,
+            covered=reason_coverage,
+        ),
+        "exact_duplicate_reason_share": {
+            **metric(
+                sum(count for count in duplicates.values() if count > 1) if reasoned else None,
+                len(reasons) if reasoned else None,
+                covered=reason_coverage,
+            ),
+            "normalization": "unicode_nfkc_casefold_whitespace",
+            "numerator_basis": "all_edges_in_repeated_reason_groups",
+        },
+        # D7 fixes these three outcome dimensions; no clearing signal supplies one.
+        "referents": {
+            name: metric(None, None, covered=unavailable)
+            for name in ("acted", "dismissed", "ignored")
+        },
+        "placement_by_basis": placement_metric,
+        "review": {
+            "target": target,
+            "entity_touching_generic_share": entity_share,
+            "needed": entity_share["numerator"] > target * entity_share["denominator"]
+            if entity_share["denominator"]
+            else None,
+            "gate": False,
+            "note_to_note_target": None,
+        },
+    }
+
+
+def generic_share_review(vault_root: Path) -> tuple[list[audit.AuditFinding], dict[str, Any]]:
+    """Expose the census's configured review signal through the existing audit surface."""
+    result = census(vault_root)
+    if not result["available"]:
+        return [], {"status": "unavailable", "reason": result["reason"]}
+    cohort = result["new_edges"]
+    coverage = cohort["coverage"]
+    review = cohort["review"]
+    if review["needed"] is not True:
+        return [], coverage
+    measurement = review["entity_touching_generic_share"]
+    numerator, denominator = measurement["numerator"], measurement["denominator"]
+    target, days = review["target"], cohort["window"]["days"]
+    # Clock movement alone must not re-raise a dismissed signal with unchanged evidence.
+    signal = [numerator, denominator, target, days, coverage]
+    finding = audit.AuditFinding(
+        category=audit.RELATION_GENERIC_SHARE_CATEGORY,
+        severity="info",
+        path=f"{kb_prefix()}index.md",
+        detail=(
+            f"Recorded edges that touch an entity: {numerator}/{denominator} generic "
+            f"over {days} days; review target {target * 100:g}%. Coverage: {coverage['status']}."
+        ),
+        proposed_fix=(
+            "Review the recorded choices through schema_memory(subject='relations', "
+            "operation='census'). Use a specific predicate when the evidence supports it; "
+            "keep an honest generic choice with its reason. This signal never blocks a write."
+        ),
+        meta={
+            "signal_version": hashlib.sha256(
+                json.dumps(signal, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16],
+            "measurement": measurement,
+            "target": target,
+        },
+    )
+    return [finding], coverage
 
 
 class ServiceKeyRefused(Exception):
@@ -189,6 +666,7 @@ def infer_counts(
             "generic": 0,
             "unregistered": 0,
         }
+        generic_key = relation_registry.generic_relation_key()
         authored: set[str] = set()
         body_linked: set[str] = set()
         for row in reader.rows():
@@ -204,7 +682,7 @@ def infer_counts(
                 relation_counts["deprecated"] += 1
             elif status == "unregistered":
                 relation_counts["unregistered"] += 1
-            elif row.relation == _GENERIC:
+            elif row.relation == generic_key:
                 relation_counts["generic"] += 1
             elif status == "core":
                 relation_counts["core"] += 1
@@ -620,6 +1098,7 @@ def _census_payload(
     from .memory_schema import _normalize_indexed_relation
 
     registry = relation_registry.load_registry(vault_root)
+    generic_key = relation_registry.generic_relation_key()
     types = entity_types.load_entity_types(vault_root)
     eligible, undated, outside = _eligible_cohort(vault_root, reader, start=start, end=end)
 
@@ -690,7 +1169,7 @@ def _census_payload(
             connected.add(source)
             if typed:
                 typed_pages.add(source)
-                if row.relation != _GENERIC:
+                if row.relation != generic_key:
                     specific_pages.add(source)
         if typed:
             # Core definitions are shared by every instance; any other key means
@@ -737,9 +1216,9 @@ def _census_payload(
             if other != source and other is not None and entity_family(other) is not None:
                 bucket = _bucket(row)
                 entity_edges[bucket] += 1
-                generic = row.relation == _GENERIC and bucket == "core_generic"
+                generic = row.relation == generic_key and bucket == "core_generic"
                 entity_generic_only[source] = entity_generic_only.get(source, True) and generic
-                if typed and row.relation != _GENERIC:
+                if typed and row.relation != generic_key:
                     entity_specific.add(source)
 
     directed_both_ways, inverse_duplicates = reader.pair_checks(eligible, registry)
@@ -838,6 +1317,7 @@ def _census_payload(
             "outside_scope": outside,
         },
         "metrics": metrics,
+        "new_edges": _new_edge_cohort(vault_root, reader),
         "checks": {
             name: checks[name]
             for name in (
@@ -997,6 +1477,7 @@ def sample(
         if reader is None:
             return _unavailable("counts")
         registry = relation_registry.load_registry(vault_root)
+        generic_key = relation_registry.generic_relation_key()
         eligible, _undated, _outside = _eligible_cohort(vault_root, reader)
         strata: Counter[str] = Counter()
         # Per family, a max-heap (by negated hash) of the `size` smallest hashes.
@@ -1006,12 +1487,17 @@ def sample(
                 not row.in_view
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
-                or row.relation in (None, _GENERIC, _LINK)
+                or row.relation in (None, generic_key, _LINK)
                 or row.status == "unregistered"
             ):
                 continue
             definition = registry.definition(row.relation or "")
             family = definition.family if definition is not None else "unknown"
+            # Core meanings are shared; any other key reads in its authoring page's instance.
+            authored = (
+                registry if row.relation in registry.core
+                else reader.view.registry_for(row.source_path)
+            )
             strata[family] += 1
             rank = int.from_bytes(
                 hashlib.sha256(f"{seed}\0{row.edge_key}".encode()).digest()[:8], "big"
@@ -1029,6 +1515,7 @@ def sample(
                 {
                     "family": family,
                     "relation": row.relation,
+                    "relation_label": relation_registry.display_label(authored, row.relation or ""),
                     "source": {"path": row.source_path, "anchor": row.source_anchor},
                     "target": {"path": row.dst_page, "anchor": row.dst_anchor},
                     "verdict": None,
@@ -1167,7 +1654,7 @@ def _bucket(row: _Row) -> str:
     status = row.status
     if status in {"unregistered", "scope_violation", "deprecated"}:
         return status
-    if row.relation == _GENERIC:
+    if row.relation == relation_registry.generic_relation_key():
         return "core_generic"
     if status == "core":
         return "core_specific"

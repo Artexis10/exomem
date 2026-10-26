@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -277,6 +278,7 @@ class RelationReviewRecord:
     draft_token_hash: str | None = None
     predecessor_path: str | None = None
     predecessor_content_hash: str | None = None
+    provenance_server_at: str | None = None
 
     def storage_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -298,10 +300,14 @@ class RelationReviewRecord:
                     "predecessor_content_hash": self.predecessor_content_hash,
                 }
             )
+        if self.provenance_server_at is not None:
+            value["provenance_server_at"] = _provenance_time(self.provenance_server_at)
         return value
 
     def as_dict(self) -> dict[str, Any]:
-        return {**self.storage_dict(), "reference": self.reference}
+        value = self.storage_dict()
+        value.pop("provenance_server_at", None)
+        return {**value, "reference": self.reference}
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,9 +352,10 @@ class LifecyclePreparedTransition:
     auxiliary_hash: str
     carried_from: str | None
     reference: str
+    provenance_server_at: str | None = None
 
     def storage_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "contract_version": self.contract_version,
             "kind": self.kind,
@@ -366,6 +373,9 @@ class LifecyclePreparedTransition:
             "auxiliary_hash": self.auxiliary_hash,
             "carried_from": self.carried_from,
         }
+        if self.provenance_server_at is not None:
+            value["provenance_server_at"] = _provenance_time(self.provenance_server_at)
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +537,7 @@ class _PreparedCreationDraft:
     reuse: _PrevalidatedAttempt | None
     preliminary_commit_result: semantic_contract.SemanticContractResult
     preliminary_outcome: str
+    provenance_server_at: str | None = None
 
 
 class _DuplicateJsonKey(ValueError):
@@ -836,6 +847,7 @@ def build_lifecycle_prepared_transition(
     transition_token: str,
     auxiliary_hash: str,
     carried_from: LifecycleDecision | None = None,
+    provenance_server_at: str | None = None,
 ) -> LifecyclePreparedTransition:
     transition = _canonical_id(
         transition_id, code="LIFECYCLE_TRANSITION_INVALID_ID"
@@ -902,6 +914,7 @@ def build_lifecycle_prepared_transition(
         auxiliary_hash,
         carried_reference,
         _lifecycle_reference(identity, "prepared.json"),
+        _provenance_time(provenance_server_at),
     )
     serialize_lifecycle_prepared(prepared)
     return prepared
@@ -1155,7 +1168,8 @@ def _parse_lifecycle_prepared(
     raw: bytes, *, page_identity: str
 ) -> LifecyclePreparedTransition:
     value = _parse_lifecycle_json(raw)
-    if set(value) != _LIFECYCLE_PREPARED_KEYS:
+    if (set(value) - {"provenance_server_at"} != _LIFECYCLE_PREPARED_KEYS
+            or "provenance_server_at" in value and value["provenance_server_at"] is None):
         raise RelationReviewError(
             "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid keys"
         )
@@ -1200,6 +1214,7 @@ def _parse_lifecycle_prepared(
         value["auxiliary_hash"],
         value["carried_from"],
         _lifecycle_reference(page_identity, "prepared.json"),
+        _provenance_time(value.get("provenance_server_at")),
     )
     _validate_lifecycle_prepared(prepared)
     if prepared.page_identity != page_identity:
@@ -2781,7 +2796,8 @@ def _parse_record(
             "RELATION_REVIEW_UNSUPPORTED_VERSION", "review artifact schema version is unsupported"
         )
     expected_keys = _V1_RECORD_KEYS if version == 1 else _V2_RECORD_KEYS
-    if set(value) != expected_keys:
+    if (set(value) - ({"provenance_server_at"} if version == 2 else set()) != expected_keys
+            or "provenance_server_at" in value and value["provenance_server_at"] is None):
         raise RelationReviewError(
             "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid keys"
         )
@@ -2866,6 +2882,7 @@ def _parse_record(
         token_hash,
         predecessor_path,
         predecessor_hash,
+        _provenance_time(value.get("provenance_server_at")),
     )
     return record, hashlib.sha256(raw).hexdigest()
 
@@ -3586,6 +3603,24 @@ def _review_reason(value: object) -> str:
     return reason
 
 
+def _provenance_time(value: Any) -> str | None:
+    """One optional, canonical UTC timestamp owned by the server recovery record."""
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, str) or len(value) > 27:
+            raise ValueError
+        moment = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        canonical = moment.astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
+        if moment.utcoffset() != dt.timedelta(0) or value != canonical:
+            raise ValueError
+    except ValueError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "recovery provenance time is invalid",
+        ) from error
+    return value
+
+
 def _serialize_record(record: RelationReviewRecord) -> str:
     return json.dumps(record.storage_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 
@@ -3625,6 +3660,7 @@ def _commit_plan(
     predecessor_path: str | None,
     predecessor_content_hash: str | None,
     reuse_result: semantic_contract.SemanticContractResult | None = None,
+    provenance_server_at: str | None = None,
 ) -> tuple[semantic_contract.SemanticContractResult, RelationReviewRecord | None]:
     validation = attempt.validation
     if requested_review and supplied_hash != validation.draft_hash:
@@ -3730,6 +3766,8 @@ def _commit_plan(
         raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
     else:
         raise RelationReviewError("INVALID_RELATION_REVIEW", "reviewed-none approval is required")
+    if record is not None:
+        record = replace(record, provenance_server_at=_provenance_time(provenance_server_at))
     if attempt.artifact is not None:
         if attempt.artifact.schema_version == 1:
             legacy_match = bool(
@@ -3766,6 +3804,7 @@ def prepare_commit_creation_draft(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     prevalidated: _PrevalidatedAttempt | None = None,
+    provenance_server_at: str | None = None,
 ) -> _PreparedCreationDraft:
     """Pre-boundary validation for ``commit_creation_draft``.
 
@@ -3868,6 +3907,7 @@ def prepare_commit_creation_draft(
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
+            provenance_server_at=provenance_server_at,
         )
         if preliminary.reused:
             # The preflight's stamp was current at this entry, so its captured
@@ -3914,6 +3954,7 @@ def prepare_commit_creation_draft(
             reuse,
             preliminary_commit_result,
             _reuse_outcome(prevalidated, preliminary),
+            provenance_server_at,
         )
     except RelationReviewError:
         raise
@@ -3998,6 +4039,7 @@ def commit_prepared_creation_draft(
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
                 reuse_result=preliminary_commit_result if attempt.reused else None,
+                provenance_server_at=prepared.provenance_server_at,
             )
 
             existing_artifact = attempt.artifact

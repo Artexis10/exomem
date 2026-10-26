@@ -20,7 +20,7 @@ relations:
   observed_in: {description: Was observed in, family: observation, direction: directed, origins: [semantic_relation]}
   mentions: {description: Mentions, family: mention, direction: directed, origins: [semantic_relation]}
   about_entity: {description: Is about an entity, family: entity, direction: directed, origins: [semantic_relation]}
-  relates_to: {description: Has a general meaningful relationship to, family: relation, direction: symmetric, origins: [semantic_relation], presentation_role: association}
+  relates_to: {description: Has a general meaningful relationship to, family: relation, direction: symmetric, origins: [semantic_relation], presentation_role: association, generic: true}
   links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, frontmatter, wikilink], presentation_role: association}
   cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation]}
   tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}
@@ -33,3 +33,5 @@ relations:
   supplies: {description: Supplies goods or services to, family: supply, direction: directed, origins: [semantic_relation]}
   produces: {description: Produces or makes, family: production, direction: directed, origins: [semantic_relation]}
   member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation]}
+  kin_of: {description: Is a relative of, family: kinship, direction: symmetric, origins: [semantic_relation]}
+  affiliated_with: {description: Is affiliated with without being a member or owner, family: affiliation, direction: directed, origins: [semantic_relation]}

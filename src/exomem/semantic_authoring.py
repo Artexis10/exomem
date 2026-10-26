@@ -17,7 +17,7 @@ from typing import Any
 
 from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 9
+AUTHORING_CONTRACT_VERSION = 10
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 STATUS_CLASSIFICATION_RULE = (
@@ -399,7 +399,15 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         ],
         "structural_rule": (
             "Reject missing, invalid, or mismatched compiled frontmatter before evaluating "
-            "the minimum-unit predicate."
+            "the minimum-unit predicate. A page in a type folder needs a compiled type; a "
+            "compiled type may sit in any Notes folder, and a compiled page outside Notes "
+            "is refused."
+        ),
+        "placement_rule": (
+            "Folders are defaults. `create_note` files research notes in their `project` home. "
+            "Other compiled notes use the first `topics` entry with a home. "
+            '`schema_memory(subject="homes", operation="inspect")` lists homes. The '
+            "draft's `placement` gives the folder, basis and call to make a topic a home."
         ),
         "lifecycle_rule": (
             "Check live creates, replacements and transitions to live; "
@@ -681,10 +689,10 @@ def render_concise(
         "If the exposed bootstrap schema lacks `section`, use "
         '`bootstrap(profile="full")` instead; released profiles reject section arguments. '
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
-        f"Shipped compiled types: {destinations}. More may be registered; "
-        '`schema_memory(subject="note-types", operation="inspect")` lists the live set. '
-        f"{minimum['structural_rule']} The minimum predicate applies when "
-        f"{applies}. "
+        f"Shipped compiled types and their default folders: {destinations}. More may be "
+        'registered; `schema_memory(subject="note-types", operation="inspect")` lists the '
+        f"live set. {minimum['structural_rule']} {minimum['placement_rule']} "
+        f"The minimum predicate applies when {applies}. "
         f"{minimum['lifecycle_rule']}\n"
         f"- Existing active pages: {minimum['final_unit_rule']}\n"
         f"- Exempt content: {exemptions}.\n"

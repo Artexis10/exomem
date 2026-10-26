@@ -39,7 +39,7 @@ def test_resolver_returns_complete_core_and_honest_outcomes() -> None:
     )
 
     vocabulary = {item["key"]: item for item in result["core_vocabulary"]}
-    assert len(vocabulary) == 33
+    assert len(vocabulary) == len(relation_registry.core_registry().core)
     assert vocabulary["part_of"]["inverse"] == "contains"
     assert result["honest_outcomes"] == {
         "relates_to": "available when a meaningful generic connection is justified",
@@ -303,6 +303,7 @@ def test_exact_aliases_survive_bounded_extension_pages() -> None:
             "match": "alias",
             "requested_relation": "wanted",
             "canonical": "vault.match",
+            "relation_label": "match (a kind of relates_to)",
             "parent": "relates_to",
             "family": "relation",
             "description": "Exact match",
