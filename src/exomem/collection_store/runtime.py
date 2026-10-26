@@ -21,7 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
-from .. import foreground_priority, state_paths
+from .. import call_spans, foreground_priority, state_paths
 from . import connection, legacy_originals, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -1133,7 +1133,8 @@ class StoreServer:
         # A store handoff, such as an idle release, refuses every checkout until it ends. Wait it out
         # here, where this thread holds nothing: a waiter at the deep refusals could stall the handoff.
         # The wait ends at the acceptance deadline, which the queue wait below shares.
-        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), \
+                call_spans.span("store.admission_wait"):
             self.manager.await_store_admission(deadline)
         request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
@@ -1142,7 +1143,8 @@ class StoreServer:
                 self._condition.notify_all()
         # Between two rebuild steps this thread waits as a bulk pass while other requests run;
         # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
-        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition:
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition, \
+                call_spans.span("store.queue_wait"):
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -1154,7 +1156,7 @@ class StoreServer:
         # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
         waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
                    else foreground_priority.outside_foreground)
-        with waiting():
+        with waiting(), call_spans.span("store.serve"):
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
         if not completed and read_only:
             # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.

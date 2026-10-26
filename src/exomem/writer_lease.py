@@ -7751,6 +7751,8 @@ def invoke_command(
 
     with ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector:
+        # The dispatcher's own checks before the body, which the leaf span alone does not separate.
+        call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
             # Fixed phase labels carry timing only, never caller or vault data.
             with body_meter as measured, call_spans.span("command.body", measured):
@@ -7769,7 +7771,8 @@ def invoke_command(
                         emit_boundary_receipt(collector)
             raise
         try:
-            ownership_scope.finish()
+            with call_spans.span("command.ownership_finish"):
+                ownership_scope.finish()
         finally:
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)
