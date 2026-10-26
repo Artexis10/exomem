@@ -2016,21 +2016,31 @@ def _request_full_rebuild(key: Path, *, lag_only: bool = False) -> None:
     _FULL_REBUILD_REQUESTED.add(key)
 
 
-def _yield_for_moving_source(
-    key: Path, paths: list[Path], error: _SourceMoved, *, lag_only: bool
+def _is_repair_contention(error: Exception) -> bool:
+    from .cli_ops import OpError
+    from .vault import VaultLockTimeout
+
+    # MUTATION_BUSY is the coordinator's closed error code for a bounded wait.
+    return isinstance(error, VaultLockTimeout) or (
+        isinstance(error, OpError) and error.code == "MUTATION_BUSY"
+    )
+
+
+def _yield_targeted_repair(
+    key: Path, paths: list[Path], error: Exception, *, lag_only: bool
 ) -> None:
-    """Keep a claim a moving source refused, and end this flight.
+    """Keep a claim a moving source or bounded lock wait refused.
 
     The caller holds `_REPAIRS_LOCK`, outside any full pass. Admission stays
-    revoked. Retrying now would meet the same edit, and any path queued
+    revoked. Retrying now would meet the same edit or holder, and any path queued
     meanwhile shares that transaction, so the flight always yields. The
     source's own event, the next proof that sees the lag, or the runtime's
     catalogue recovery backoff starts the next bounded attempt, and runs any
     work that arrived meanwhile.
     """
     log.info(
-        "lexical targeted repair kept paths=%d for a moving source (%s); "
-        "retrying when it settles",
+        "lexical targeted repair kept paths=%d (%s); "
+        "retrying on the next recovery trigger",
         len(paths),
         error,
     )
@@ -2039,7 +2049,9 @@ def _yield_for_moving_source(
     if paths:
         _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
     _REPAIRS_IN_FLIGHT.discard(key)
-    _set_repair_progress(key, "idle", result="source_changed")
+    _set_repair_progress(
+        key, "idle", result="source_changed" if isinstance(error, _SourceMoved) else "error"
+    )
 
 
 def _admit_if_current(vault_root: Path) -> bool:
@@ -2079,6 +2091,8 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     except _SourceMoved:
         raise
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
+        if _is_repair_contention(error):
+            raise
         log.info("lexical catch-up declined (%s); rebuilding", error)
         return False
 
@@ -2230,9 +2244,11 @@ def _schedule_repair(
                         _set_repair_progress(key, "targeted")
                     try:
                         caught_up = _caught_up_without_rebuild(vault_root, store)
-                    except _SourceMoved as error:
+                    except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
+                        if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
+                            raise
                         with _REPAIRS_LOCK:
-                            _yield_for_moving_source(key, paths, error, lag_only=True)
+                            _yield_targeted_repair(key, paths, error, lag_only=True)
                         return
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
@@ -2244,9 +2260,11 @@ def _schedule_repair(
                 targeted_started = time.monotonic()
                 try:
                     full_pass = rebuild or not store.retry_deferred_upsert(paths)
-                except _SourceMoved as error:
+                except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
+                    if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
+                        raise
                     with _REPAIRS_LOCK:
-                        _yield_for_moving_source(key, paths, error, lag_only=False)
+                        _yield_targeted_repair(key, paths, error, lag_only=lag_only)
                     return
                 if paths and not rebuild:
                     # The deferral above logs "retrying these paths" and, until
@@ -6199,19 +6217,21 @@ class LexicalStore:
         Returns whether the rows landed. False escalates to `rebuild_atomic`,
         the answer to anything that is neither contention nor a moving source:
         a sqlite error or a failed read says the store or the disk is wrong,
-        and re-applying rows cannot fix either. A source that moved under the
-        apply raises `_SourceMoved` instead, so the caller keeps the claim.
+        and re-applying rows cannot fix either. Source movement and bounded
+        publication timeouts raise instead, so the caller keeps the claim.
         """
         if self._failed or not paths:
             return False
-        from .vault import VaultLockError
+        from .vault import VaultLockError, VaultLockTimeout
 
         try:
             source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
                 return self._apply_paths_locked(paths, [], source_proofs=source_proofs)
+        except VaultLockTimeout:
+            raise
         except VaultLockError as e:
-            log.info("lexical targeted retry still contended (%s); rebuilding", e)
+            log.info("lexical targeted retry lock failed (%s); rebuilding", e)
             return False
         except _SourceMoved:
             raise

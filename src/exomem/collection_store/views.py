@@ -1000,6 +1000,31 @@ def presentation_label(operation, path):
     return True, vault.resolve_display_title(frontmatter, body, path)
 
 
+def presentation_namespace_contains(operation, candidate, listings):
+    """Probe the same owned overlay and ordinary namespace as `presentation_wikilinks`."""
+    paths = [candidate + ".md"]
+    # The resolver strips only lowercase .md; uppercase Markdown suffixes stay
+    # in its key, so that exact physical spelling is also a possible entry.
+    if Path(candidate).suffix.lower() == ".md" and not candidate.endswith(".md"):
+        paths.append(candidate)
+    proof = operation.projection_ownership()
+    for path in paths:
+        if proof.owner(operation.root, path) is not None:
+            registered = operation.conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM projection_state WHERE path=?) "
+                "OR EXISTS(SELECT 1 FROM items WHERE view_path=?) "
+                "OR EXISTS(SELECT 1 FROM collections WHERE manifest_path=?)",
+                (path, path, path),
+            ).fetchone()[0]
+            if registered:
+                return True
+        elif vault.walk_vault_md_admits(operation.root, operation.root / path, listings):
+            relative = (operation.root / path).resolve().relative_to(operation.root.resolve()).as_posix()
+            if relative.removesuffix(".md") == candidate:
+                return True
+    return False
+
+
 @contextmanager
 def presentation_resolver(conn, root, manifest, *, operation=None, observe_read=None, cache=None):
     """Use one canonical snapshot and authorization pass for a batch of item labels."""
@@ -1008,6 +1033,7 @@ def presentation_resolver(conn, root, manifest, *, operation=None, observe_read=
         return
     owned = operation is None
     operation = operation or governance.OperationAuthorization(root, conn, mutation=False, cache=cache)
+    listings = {}
 
     def lookup_item(key):
         row = conn.execute(
@@ -1022,6 +1048,9 @@ def presentation_resolver(conn, root, manifest, *, operation=None, observe_read=
             lookup_item=lookup_item, lookup_path=lambda path: presentation_label(operation, path),
             observe_read=observe_read,
             wikilink_resolver=lambda: presentation_wikilinks(operation),
+            targeted_namespace_contains=lambda candidate: presentation_namespace_contains(
+                operation, candidate, listings
+            ),
         )
     finally:
         if owned:
