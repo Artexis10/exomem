@@ -755,3 +755,78 @@ def test_malformed_reference_cannot_prove_an_absent_original(tmp_path: Path):
         "binary_size": 1, "stored_object": {"store": "test-store"},
     }), ""))
     assert originals.original_state(tmp_path, binary, binding=originals.StoreBinding("test-store")).state == "missing"
+
+
+@pytest.mark.parametrize("filename, layout", [
+    ("upload.txt", "native"), ("original.md", "opaque"),
+    ("original.md", "notes"), ("original.md", "double"),
+])
+def test_captured_source_original_reconciles_and_recovers_without_metadata_rewrites(
+    vault: Path, source_schema, selected_store, tmp_path: Path, filename, layout,
+):
+    from test_source_corrections import _legacy_markdown_pair
+
+    from exomem import (
+        add,
+        artifact_recovery,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        source_capture,
+    )
+    from exomem import vault as vault_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    raw_identity = "00000000-0000-4000-8000-000000000001"
+    original = f"---\ntype: source\nexomem_id: {raw_identity}\n---\nOriginal bytes.\r\n".encode()
+    staged = tmp_path / filename
+    staged.write_bytes(original)
+    mime = "text/plain" if filename.endswith(".txt") else "text/markdown; charset=utf-8"
+    captured = add.add(vault, source_schema, title="Captured original", content="", source_type="session",
+                       artifact=add.SourceArtifact(staged, filename, mime))
+    path, page = vault / captured.artifact_path, vault / captured.path
+    if layout in {"notes", "double"}:
+        path, page = _legacy_markdown_pair(vault, path, page)
+        if layout == "notes":
+            canonical = preserve._sidecar_paths(path, protected=False, source=True)[0]
+            page.rename(canonical)
+            page = canonical
+        else:
+            unrelated = add.add(vault, source_schema, title="Captured original notes", content="Unrelated canonical Source.", source_type="session")
+            assert vault / unrelated.path == preserve._sidecar_paths(path, protected=False, source=True)[0]
+    elif layout == "opaque":
+        assert path.name.endswith(".md.bin")
+    metadata, _, _ = vault_module.parse_frontmatter(page.read_text())
+    assert metadata["exomem_id"] != raw_identity
+    assert metadata["original_filename"] == filename and metadata["original_content_type"] == mime
+    classified = source_capture.canonical_pages(vault)
+    assert page.relative_to(vault).as_posix() in classified.canonical
+    assert path.relative_to(vault).as_posix() not in classified.canonical
+    if layout == "native":
+        assert path.name != filename
+        media_processing.reconcile_media(vault, path, explicit=False)
+        pending, _, _ = vault_module.parse_frontmatter(page.read_text())
+        assert pending["exomem_id"] == metadata["exomem_id"]
+        assert pending["original_filename"] == filename and pending["original_content_type"] == mime
+        preserve.update_sidecar_extraction(vault, page, text="Completed original text.", engine="text")
+        media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+        completed = page.read_bytes()
+        assert media_processing.reconcile_media(vault, path, explicit=False).state == "completed"
+        assert page.read_bytes() == completed
+    else:
+        assert media_processing.reconcile_media(vault, path, explicit=False) is None
+    media_store.enqueue_offloads(vault)
+    _offload(vault, path)
+    published = page.read_bytes()
+    assert originals.original_state(vault, path).sidecar_path == page
+    assert media_store.evict(vault, path)
+    assert media_processing.reconcile_all_media(vault) == 0
+    assert page.read_bytes() == published
+    who = owner_principal(surface="mcp")
+    with request_scope(who), artifact_recovery.stage(vault, page.relative_to(vault).as_posix(), who) as (copied, descriptor):
+        assert copied.private_path.read_bytes() == original
+        assert descriptor["file_name"] == filename and descriptor["mime_type"] == mime
+    assert media_processing.reconcile_all_media(vault) == 0
+    assert page.read_bytes() == published
+    assert not media_jobs.MediaJobStore(vault).has_pending_ocr(path)

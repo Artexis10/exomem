@@ -111,14 +111,16 @@ def _read_artifact(vault_root, rel_path: str) -> reserved_paths.GenericFileSnaps
         raise CompanionClassificationError("artifact_unsafe") from error
 
 
+def _companion_refusal(error: reserved_paths.ReservedPathLeafError) -> CompanionClassificationError:
+    reason: CompanionReason = "descriptor_missing" if error.code == "MISSING" else "companion_unsafe"
+    return CompanionClassificationError(reason)
+
+
 def _read_companion(vault_root, rel_path: str) -> reserved_paths.GenericFileSnapshot:
     try:
         return reserved_paths.read_generic_bytes(vault_root, rel_path)
     except reserved_paths.ReservedPathLeafError as error:
-        reason: CompanionReason = (
-            "descriptor_missing" if error.code == "MISSING" else "companion_unsafe"
-        )
-        raise CompanionClassificationError(reason) from error
+        raise _companion_refusal(error) from error
 
 
 def _semantics(value: object) -> dict[str, tuple[str, ...]]:
@@ -244,7 +246,11 @@ def _classify_sibling(
     artifact_path: str,
     artifact: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy | originals.OriginalSnapshot,
 ) -> BoundCompanion:
-    companion_path = originals.sidecar_path(Path(artifact_path)).as_posix()
+    try:
+        sidecar = originals.original_state(vault_root, artifact_path).sidecar_path
+    except reserved_paths.ReservedPathLeafError as error:
+        raise _companion_refusal(error) from error
+    companion_path = sidecar.relative_to(Path(vault_root).resolve()).as_posix()
     companion = _read_companion(vault_root, companion_path)
     result = classify_proposed_sibling(
         artifact_path, artifact_sha256=_digest(artifact),

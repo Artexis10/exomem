@@ -274,10 +274,10 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             raw = reserved_paths.read_generic_bytes(vault, sidecar.relative_to(vault).as_posix())
             fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), strict=True)
             relative = originals.bound_path(fields)
-            if not isinstance(relative, str) or sidecar != originals.sidecar_path(vault / relative):
+            if not isinstance(relative, str):
                 continue
             snapshot = original_state(vault, relative)
-            if snapshot.binary_sha256 is not None:
+            if snapshot.sidecar_path == sidecar and snapshot.binary_sha256 is not None:
                 yield snapshot
         except (UnicodeError, ValueError):
             continue
