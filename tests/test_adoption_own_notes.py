@@ -18,7 +18,7 @@ from test_adoption_collection import (
     tiny_budget,  # noqa: F401 - the fixture
 )
 
-from exomem import adopt, adoption_run, context_refs, request_budget
+from exomem import adopt, adoption_run, commands, context_refs, request_budget
 from exomem import audit as audit_module
 
 JOURNAL_RULE = {"path": "Coll/Journal", "adopt_as": "note", "note_type": "insight"}
@@ -244,6 +244,25 @@ def test_an_unchanged_re_import_creates_nothing_and_reports_the_notes_as_already
     assert replanned["plan"]["notes"] == {"to_create": 0, "existing": 2, "previous": 0}
     assert {o["status"] for o in second["outcomes"].values()} == {"already-applied"}
     assert sorted(str(p) for p in vault.rglob("*.md") if "_Imports" not in str(p)) == pages_before
+
+
+def test_a_re_import_finds_a_note_the_user_moved_without_rewriting_links(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path, {"Coll/Journal/trip.md": TRIP})
+    first_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    first, _calls = _apply_all(vault, first_id, planned["plan"]["plan_id"])
+    note = first["outcomes"]["Coll/Journal/trip.md"]["note"]["target_path"]
+    moved = "Knowledge Base/Notes/Insights/Travel/trip-planning.md"
+    # The Source's `ingested_into` still names the old path.
+    commands.op_move_file(vault, note, moved, update_wikilinks=False)
+
+    run_id, replanned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    second, _calls = _apply_all(vault, run_id, replanned["plan"]["plan_id"])
+
+    assert replanned["plan"]["notes"] == {"to_create": 0, "existing": 1, "previous": 0}
+    assert second["outcomes"]["Coll/Journal/trip.md"]["status"] == "already-applied"
+    assert _notes(vault) == [vault / moved]
 
 
 def test_a_changed_original_plans_only_a_new_source_and_names_the_note_it_leaves_behind(

@@ -1132,6 +1132,7 @@ def plan(
         inventory = {row["path"]: row for row in run.get("inventory") or []}
         ceiling = client_artifacts.fetch_budget().max_file_bytes
         index = adoption_plan.read_import_index(root)
+        notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
         for planned in draft["items"]:
             frozen_paths = [(planned.get("note") or {}).get("target_path")]
@@ -1152,7 +1153,7 @@ def plan(
                 collection=collection["label"], collection_root=collection["root"],
                 classification=classification.get(rel), taxonomy=taxonomy,
                 text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
-                date_iso=draft["date"], destinations=destinations, index=index,
+                date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
                 ceiling=ceiling,
             )
             draft["next"] += 1
@@ -1444,12 +1445,14 @@ class _CallReads:
     """What one `apply` call reads from the vault once and keeps current across its chunks.
 
     Walking every Source for each chunk made a re-run cost grow with the whole vault.
-    Both start empty and fill on first use; a batch that raised drops them, because
-    what it left on disk is then unknown.
+    Each starts empty and fills on first use; a batch that raised drops the Source
+    reads, because what it left on disk is then unknown. A batch writes no note, so
+    the note index stays.
     """
 
     index: list[adoption_plan.EarlierImport] | None = None
     source_counts: dict[str, int] | None = None
+    notes: adoption_plan.NoteIndex | None = None
 
 
 def _commit_chunk(
@@ -1587,13 +1590,19 @@ def _apply_chunk(
     # The Sources are written without the semantic seam, so the chunk counts them in the
     # backlog itself, before any note does. Each draft note's own commit refreshes its Source.
     due_state.refresh_after_writes(root, [due_state.PageWrite(path) for path in copied])
-    _create_notes(root, store, run, chunk, texts, label=label, budget=budget, stats=stats, written=written)
+    if reads.notes is None:
+        reads.notes = adoption_plan.NoteIndex(root)
+    _create_notes(
+        root, store, run, chunk, texts,
+        label=label, notes=reads.notes, budget=budget, stats=stats, written=written,
+    )
     return extractions
 
 
 def _create_notes(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], texts: dict[str, str], *,
-    label: str | None, budget: request_budget.RequestBudget, stats: Counter, written: list[str],
+    label: str | None, notes: adoption_plan.NoteIndex, budget: request_budget.RequestBudget,
+    stats: Counter, written: list[str],
 ) -> None:
     """Create the draft note of every own-note item in `chunk` whose Source is on disk.
 
@@ -1616,7 +1625,7 @@ def _create_notes(
         started = time.monotonic()
         _create_note(
             root, planned, texts[path], outcomes[path],
-            label=label, date_iso=run["plan"]["date"], stats=stats, written=written,
+            label=label, notes=notes, date_iso=run["plan"]["date"], stats=stats, written=written,
         )
         stats["notes_started"] += 1
         stats["note_ms_max"] = max(stats["note_ms_max"], int((time.monotonic() - started) * 1000))
@@ -1629,7 +1638,8 @@ def _create_notes(
 
 def _create_note(
     root: Path, planned: dict, text: str, outcome: dict, *,
-    label: str | None, date_iso: str, stats: Counter, written: list[str],
+    label: str | None, notes: adoption_plan.NoteIndex, date_iso: str, stats: Counter,
+    written: list[str],
 ) -> None:
     """Find or create one item's draft note, then settle the item on the result."""
     from . import note as note_module
@@ -1639,7 +1649,7 @@ def _create_note(
 
     def found() -> str | None:
         return adoption_plan.find_note(
-            root, source_page, collection=label, collection_path=planned["collection_path"],
+            root, notes, collection=label, collection_path=planned["collection_path"],
             frozen=frozen,
         )
 

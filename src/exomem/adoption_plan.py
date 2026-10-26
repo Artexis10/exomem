@@ -31,7 +31,6 @@ from . import (
     reserved_paths,
     source_taxonomy,
 )
-from .kbdir import kb_dirname
 from .vault import (
     kb_root,
     parse_frontmatter,
@@ -516,22 +515,6 @@ def text_facts(original_path: str, text: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # own notes
 # --------------------------------------------------------------------------- #
-def _backref_targets(value: Any) -> list[str]:
-    """Page paths a Source's `ingested_into` names, as the governed commit wrote them.
-
-    The commit writes a vault-relative page path (the knowledge-base prefix may be
-    dropped on a vault that opens the managed folder itself). A name that is not
-    such a path resolves to nothing, and the draft is then created again.
-    """
-    if isinstance(value, str):
-        text = value.strip().removeprefix("[[").removesuffix("]]")
-        target = text.split("|", 1)[0].split("#", 1)[0].strip().removesuffix(".md")
-        return [target] if target else []
-    if isinstance(value, list):
-        return [target for item in value for target in _backref_targets(item)]
-    return []
-
-
 def _is_note_of(
     root: Path, rel_path: str, *, collection: str, collection_path: str
 ) -> bool:
@@ -549,9 +532,58 @@ def _is_note_of(
     )
 
 
+class NoteIndex:
+    """The notes that earlier imports made, by import identity, read once per plan or apply call.
+
+    A note carries the `import_collection` and `collection_path` of its original wherever
+    the user has since moved it, so the index finds a moved note. The knowledge base is
+    walked on the first lookup: a call without an own-note item never reads the notes.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._paths: dict[tuple[str, str], str] | None = None
+
+    def _read(self) -> dict[tuple[str, str], str]:
+        from .find_corpus import walk_md
+
+        found: dict[tuple[str, str], str] = {}
+        kb = kb_root(self._root)
+        if not kb.is_dir():
+            return found
+        basis = note_types.Basis(self._root)
+        # A compiled page cannot be in Sources/: the mover refuses moves into it, and
+        # `read_import_index` already reads its pages for their own identities.
+        sources = kb / "Sources"
+        # Sorted, so the first of two pages that carry one identity is always the same page.
+        for page in sorted(walk_md(kb)):
+            if page.is_relative_to(sources):
+                continue
+            try:
+                frontmatter = _leading_frontmatter(self._root, page)
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                continue
+            if frontmatter is None:
+                continue
+            collection = _text_field(frontmatter.get("import_collection"))
+            collection_path = _text_field(frontmatter.get("collection_path"))
+            if collection is None or collection_path is None:
+                continue
+            if basis.selects(frontmatter.get("type"), note_types.compiled):
+                found.setdefault(
+                    (collection, collection_path), page.relative_to(self._root).as_posix()
+                )
+        return found
+
+    def find(self, *, collection: str, collection_path: str) -> str | None:
+        if self._paths is None:
+            self._paths = self._read()
+        return self._paths.get((nfc(collection), collection_path))
+
+
 def find_note(
     root: Path,
-    source_page: str | None,
+    notes: NoteIndex,
     *,
     collection: str,
     collection_path: str,
@@ -559,23 +591,13 @@ def find_note(
 ) -> str | None:
     """The note an earlier run created for this collection path, or None.
 
-    The note carries the collection path of the original it was made from. It is
-    looked for at its frozen target (a note committed before its outcome was recorded)
-    and among the pages the Source names in `ingested_into`, which the note's own
-    commit wrote together with it, so a note the user has since moved still counts.
+    The frozen target is checked first: it holds a note committed after `notes` was
+    read, such as one whose commit raised. Otherwise the note is found by the import
+    identity it carries, wherever it now is.
     """
-    candidates: list[str] = [frozen] if frozen else []
-    if source_page:
-        try:
-            frontmatter = _leading_frontmatter(root, root / source_page)
-        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-            frontmatter = None
-        for target in _backref_targets((frontmatter or {}).get("ingested_into")):
-            candidates += [f"{target}.md", f"{kb_dirname()}/{target}.md"]
-    for candidate in dict.fromkeys(candidates):
-        if _is_note_of(root, candidate, collection=collection, collection_path=collection_path):
-            return candidate
-    return None
+    if frozen and _is_note_of(root, frozen, collection=collection, collection_path=collection_path):
+        return frozen
+    return notes.find(collection=collection, collection_path=collection_path)
 
 
 def is_markdown(original_path: str) -> bool:
@@ -680,6 +702,7 @@ def plan_item(
     date_iso: str,
     destinations: Destinations,
     index: Iterable[EarlierImport],
+    notes: NoteIndex,
     ceiling: int,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Facts, identity and a frozen destination for one original; or a refusal dict."""
@@ -722,7 +745,7 @@ def plan_item(
             # The Source exists: the note may too (a re-run), or may be owed (a crash, or
             # an earlier import that had no note rule).
             existing = find_note(
-                root, earlier.path, collection=collection, collection_path=item["collection_path"]
+                root, notes, collection=collection, collection_path=item["collection_path"]
             )
             if existing is not None:
                 item["existing_note"] = existing
@@ -742,7 +765,7 @@ def plan_item(
         item["previous_import"] = context_refs.source_ref(changed.path)
         if owes_note:
             previous = find_note(
-                root, changed.path, collection=collection, collection_path=item["collection_path"]
+                root, notes, collection=collection, collection_path=item["collection_path"]
             )
             if previous is not None:
                 # The original changed: the earlier note stays as it is, and only a new Source is made.
@@ -960,6 +983,7 @@ __all__ = [
     "Destinations",
     "EarlierImport",
     "LinkResolver",
+    "NoteIndex",
     "item_digest",
     "artifact_of",
     "decode_text",

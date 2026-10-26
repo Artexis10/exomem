@@ -616,6 +616,8 @@ def plan_import_items(
     date_iso = today.isoformat()
     skipped: list[dict] = []
     index = adoption_plan.read_import_index(root)
+    # This path has no note rule, so the index is never read.
+    notes = adoption_plan.NoteIndex(root)
     destinations = adoption_plan.Destinations(root)
     ceiling = client_artifacts.fetch_budget().max_file_bytes
     planned: list[dict] = []
@@ -630,7 +632,7 @@ def plan_import_items(
         result = adoption_plan.plan_item(
             root, rel, collection=None, collection_root="", classification=None,
             taxonomy=None, text_hint=True, date_iso=date_iso, destinations=destinations,
-            index=index, ceiling=ceiling,
+            index=index, notes=notes, ceiling=ceiling,
         )
         if isinstance(result, dict):
             skipped.append(result)
