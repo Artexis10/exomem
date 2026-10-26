@@ -212,6 +212,10 @@ class _ReleaseSelection:
 _METADATA_SEAL = object()
 
 
+class _StaleQueryHistoryProjection(collections.CollectionError):
+    """Authentic history needs a fresh read; direct callers keep the existing refusal."""
+
+
 @dataclass(frozen=True, slots=True)
 class _InspectionState:
     manifest: CanonicalSubject
@@ -1505,11 +1509,11 @@ class OperationAuthorization:
                 state = evidence.history
                 manifest = writer._collection(state.collection_id, facade_profile=state.profile)[1]
                 if (manifest.path != state.manifest_path or payload.get("collection_id") != state.collection_id
-                        or payload.get("snapshot") != state.snapshot
-                        or hashlib.sha256(_json(agent_history(writer, manifest)).encode()).hexdigest()
-                        != state.history_hash):
+                        or payload.get("snapshot") != state.snapshot):
                     self.refuse()
                 _history_references(payload, state)
+                if hashlib.sha256(_json(agent_history(writer, manifest)).encode()).hexdigest() != state.history_hash:
+                    self.refuse(_StaleQueryHistoryProjection)
             current = []
             for state in evidence.selections:
                 cid = state.manifest.collection_id
@@ -1542,6 +1546,8 @@ class OperationAuthorization:
                 current.append(state)
             evidence = replace(evidence, selections=tuple(current))
             return evidence
+        except _StaleQueryHistoryProjection:
+            raise
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             self.refuse()
 
@@ -1843,8 +1849,9 @@ class OperationAuthorization:
         return decision.level >= 6
 
     @staticmethod
-    def refuse() -> None:
-        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    def refuse(error_type=collections.CollectionError) -> None:
+        # Internal freshness signals retain the same content-free public refusal.
+        raise error_type("COLLECTION_NOT_FOUND", "collection was not found")
 
     def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
         """Decode only released rows; the manifest is an independent L6 gate."""
