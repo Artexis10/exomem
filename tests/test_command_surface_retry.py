@@ -1793,24 +1793,30 @@ def test_identical_retry_without_replay_identity_contends_normally(
 
 @pytest.mark.parametrize(
     ("read_only", "code", "committed"),
-    [(False, "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN", True), (True, "COLLECTION_STORE_BUSY", False)],
+    [(False, "MUTATION_ACKNOWLEDGEMENT_PENDING", None), (True, "COLLECTION_STORE_BUSY", False)],
 )
-def test_second_pass_store_refusal_after_commit_reports_the_commit(
+def test_second_pass_store_refusal_after_a_write_leaf_reports_an_unknown_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     read_only: bool,
     code: str,
-    committed: bool,
+    committed: bool | None,
 ) -> None:
-    """A store read that misses its deadline in the MCP second pass follows a commit on a write."""
+    """A store read that misses its deadline in the MCP second pass never reads as "nothing committed" on a write.
+
+    The same-identity retry then replays the stored terminal without running the leaf again.
+    """
     from exomem.collection_store import connection
     from exomem.governance import egress
 
     vault = tmp_path / "vault"
     (vault / "Knowledge Base").mkdir(parents=True)
     written = vault / "Knowledge Base" / "committed.txt"
+    runs = 0
 
     def leaf(root: Path, *, value: int) -> dict:  # noqa: ARG001
+        nonlocal runs
+        runs += 1
         written.write_text("done", encoding="utf-8")
         return {"value": value}
 
@@ -1824,7 +1830,7 @@ def test_second_pass_store_refusal_after_commit_reports_the_commit(
     def second_pass_misses_its_deadline(*args, **kwargs):
         nonlocal seen
         seen += 1
-        if seen == 1:  # the dispatcher's own pass
+        if seen != 2:  # the dispatcher's own pass, and every pass of the retry
             return filter_passes(*args, **kwargs)
         raise connection.busy("the collection store did not finish this read within its completion deadline")
 
@@ -1835,6 +1841,10 @@ def test_second_pass_store_refusal_after_commit_reports_the_commit(
     assert result["success"] is False
     assert result["error"]["code"] == code
     assert result["error"]["committed"] is committed
-    if committed:
-        assert result["error"]["status"] == "committed"
-        assert result["error"]["post_commit_refusal"] == "COLLECTION_STORE_BUSY"
+    if read_only:
+        return
+    assert result["error"]["status"] == "uncertain"
+    assert result["error"]["post_leaf_refusal"] == "COLLECTION_STORE_BUSY"
+    retried = command_surface.bind_vault(leaf, vault, command=command)(value=7)
+    assert runs == 1
+    assert retried == {"value": 7}

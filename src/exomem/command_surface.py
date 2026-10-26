@@ -945,9 +945,9 @@ def bind_vault(
                     raise
                 if returned_from_invoke and not invocation_read_only:
                     # The leaf returned before this second pass over its result refused.
-                    from .writer_lease import post_commit_refusal
+                    from .writer_lease import post_leaf_refusal
 
-                    refusal = cli_ops.public_refusal(post_commit_refusal(error, result)) or refusal
+                    refusal = cli_ops.public_refusal(post_leaf_refusal(error)) or refusal
                 _log_tool_failure(
                     tool=tool_name,
                     request_id=request_id,
