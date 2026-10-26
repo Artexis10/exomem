@@ -1587,6 +1587,7 @@ def _cited_source_paths(
     *,
     prior_markdown: str | None,
     related_pages: Iterable[str],
+    resolver: Callable[[], Any],
 ) -> list[str]:
     """The Sources whose coverage a write to `rel` can change.
 
@@ -1594,6 +1595,7 @@ def _cited_source_paths(
     (`prior_markdown`), every Source a page it changed in the same operation cites
     (`related_pages`, such as a superseded predecessor), and the page itself when it
     is a captured Source. The claims resolve to paths only: this reads no Source.
+    `resolver` returns the one wikilink snapshot of this write's delta.
     """
     from . import find as find_module
     from . import note_types, source_closure
@@ -1610,11 +1612,11 @@ def _cited_source_paths(
             claims.extend(source_closure.claims_in(other.frontmatter, type_basis))
     paths: set[str] = set()
     if claims:
-        resolver = find_module.writer_resolver_snapshot(vault_root)
+        snapshot = resolver()
         paths.update(
             path
             for path in (
-                source_closure.resolve_reference(vault_root, claim, resolver=resolver)
+                source_closure.resolve_reference(vault_root, claim, resolver=snapshot)
                 for claim in dict.fromkeys(claims)
             )
             if path is not None
@@ -1625,7 +1627,9 @@ def _cited_source_paths(
     return sorted(paths)
 
 
-def _source_findings(vault_root: Path, source_paths: list[str]) -> dict[str, list[dict[str, Any]]]:
+def _source_findings(
+    vault_root: Path, source_paths: list[str], *, resolver: Callable[[], Any]
+) -> dict[str, list[dict[str, Any]]]:
     """The `SOURCE_BACKLOG` entries of these Sources, by path; a Source with none is absent."""
     from . import audit as audit_module
     from . import find as find_module
@@ -1637,7 +1641,7 @@ def _source_findings(vault_root: Path, source_paths: list[str]) -> dict[str, lis
     if not pages:
         return {}
     findings = audit_module._check_unprocessed_sources(
-        vault_root, pages, today=_FAR_FUTURE, lookup=lookup
+        vault_root, pages, today=_FAR_FUTURE, lookup=lookup, resolver=resolver
     )
     return _entries_from_findings(vault_root, findings).get(SOURCE_BACKLOG) or {}
 
@@ -1674,10 +1678,22 @@ def apply_write_delta(
     _track_batch_path(vault_root, rel)
     page = find_module._CACHE.get(vault_root / rel, vault_root)
     pages = [page] if page is not None else []
+
+    @functools.lru_cache(maxsize=1)
+    def resolver() -> Any:
+        # One snapshot for the whole delta, built on first use. Building it walks the
+        # vault, so the two steps below share it instead of each paying for one.
+        return find_module.writer_resolver_snapshot(vault_root)
+
     source_paths = _cited_source_paths(
-        vault_root, rel, page, prior_markdown=prior_markdown, related_pages=related_pages
+        vault_root,
+        rel,
+        page,
+        prior_markdown=prior_markdown,
+        related_pages=related_pages,
+        resolver=resolver,
     )
-    source_entries = _source_findings(vault_root, source_paths)
+    source_entries = _source_findings(vault_root, source_paths, resolver=resolver)
 
     findings: list[Any] = []
     if pages:

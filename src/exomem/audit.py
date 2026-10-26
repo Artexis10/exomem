@@ -2604,6 +2604,7 @@ def _check_unprocessed_sources(
     today: dt.date | None = None,
     lookup: Callable[[str], find_module.ParsedPage | None] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
 ) -> list[AuditFinding]:
     """Flag Sources that no live page compiles, aged + triaged oldest-first.
 
@@ -2625,10 +2626,12 @@ def _check_unprocessed_sources(
     if lookup is None:
         lookup = {page.rel_path: page for page in pages}.get
 
-    @lru_cache(maxsize=1)
-    def resolver():
-        # Built on first use: a vault whose Sources name no derivative never pays for it.
-        return find_module.writer_resolver_snapshot(vault_root)
+    if resolver is None:
+
+        @lru_cache(maxsize=1)
+        def resolver():
+            # Built on first use: a vault whose Sources name no derivative never pays for it.
+            return find_module.writer_resolver_snapshot(vault_root)
 
     rows: list[tuple[int, AuditFinding]] = []  # (age_days for sort, finding)
     for page in pages:
