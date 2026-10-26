@@ -178,52 +178,78 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 
 ## Release flow
 
-1. Merge feature/fix PRs to `main` using Conventional Commit titles.
-2. Release Please opens or updates a release PR that bumps `pyproject.toml`,
-   `.release-please-manifest.json`, and `CHANGELOG.md`.
-3. Confirm CI and the pre-release checks above.
-4. **Required: run one full CI pass on `main` and confirm it is green before
-   merging the release PR.** The release PR runs lint, build, specs,
-   capabilities, the wheel onboarding gate and release evidence, and no other
-   test job: the full run at its base revision is its test evidence. Release
-   evidence also refuses a release PR that changes any file release-please
-   does not manage, so land a fix
-   through its own pull request, never by a push to the release branch. Full
-   CI (retrieval quality/latency, governance wire characterization, semantic
-   write latency, graph convergence, docker, the frozen verifier and source K3s
-   integration) runs on the nightly schedule and
-   on explicit dispatch, never per push to the release branch
-   (each release-PR push used to re-trigger a 46-job full run; 61% of a
-   measured day's runner-minutes went to those stampedes while ordinary PRs
-   queued). Dispatch, then watch the run this dispatch created — selecting by
-   `--limit 1` alone can grab a *previous* dispatch run, so filter on runs
-   created after a timestamp captured before dispatching (the retry loop
-   covers the API lag before the new run appears):
+A normal PR run is partial. It omits Python 3.11, the specialized Full jobs,
+and the nightly latency gate. It cannot qualify a release source by itself.
 
-   ```bash
-   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ); gh workflow run ci.yml --ref main
-   until run_id=$(gh run list --workflow=ci.yml --branch=main --event=workflow_dispatch --created ">$ts" --limit 1 --json databaseId --jq '.[0].databaseId') && [ -n "$run_id" ]; do sleep 5; done; gh run watch "$run_id" --exit-status
-   ```
+Full CI runs on schedule or dispatch. After its required gate passes, it retains
+`full-ci-evidence-RUN-ATTEMPT` with the actual checkout commit and Git tree.
+The shared selector verifies the repository, workflow, run, attempt, full scope,
+and tree. A dispatch on a source branch can qualify its identical squash tree
+on main. A changed tree, expired receipt, or incomplete proof uses the Full
+fallback. Legacy scheduled or dispatched runs remain eligible only at their
+exact main commit, under their original event contract.
 
-   A green nightly run on the same `main` revision serves equally; a red or
-   missing full run blocks the release-PR merge. The full run cancels the
-   unfinished push run at the same revision itself, because it runs every job
-   that the push run runs.
+1. Merge the reviewed source PR; expect Release Please to update its release PR.
+2. Inspect that release PR and its source; expect only managed release metadata and generated Cloud packages.
+3. Record the selected PR, source commit, and reviewed head; expect explicit inputs for the guarded merge.
 
-   Cloud image builds and smoke checks still run on the release pull request.
-   The version checker parses Python and TOML assignments, so a version marker
-   cannot hide another runtime or dependency change.
-5. Merge the Release Please PR.
-6. Release Please tags `vX.Y.Z` and creates the GitHub Release.
-7. The release workflow's `plan` job finds the release artifacts that are missing
-   and hands the publish to a run of the same workflow on the `vX.Y.Z` tag.
-8. The run on the tag builds `dist/` with `uv build` and uploads the wheel, the
-   sdist and the Cloud archives to the GitHub Release.
-9. The same run publishes the missing artifacts whose gate is on:
-   - PyPI, from the same wheel and sdist, if `PYPI_PUBLISH_ENABLED=true`;
-   - the MCP Registry entry, if `MCP_REGISTRY_PUBLISH_ENABLED=true`;
-   - the lean, ml, cuda, cloud and cellctl images, if
-     `GHCR_PUBLISH_ENABLED=true`.
+```bash
+read -r release_pr source_commit reviewed_head < <(gh pr view release-please--branches--main --json number,baseRefOid,headRefOid --jq '[.number,.baseRefOid,.headRefOid] | map(tostring) | join(" ")')
+printf 'Release PR: %s\nSource: %s\nReviewed head: %s\n' "$release_pr" "$source_commit" "$reviewed_head"
+```
+
+Record the source-ready timestamp and the review or CI evidence behind it in
+the release handoff. This timestamp describes the reviewed source, rather than
+a later publication or installation.
+
+4. Request evidence for the selected source; expect reuse or one Full fallback dispatch.
+
+```bash
+gh workflow run release-evidence-automation.yml --ref main -f release_pr="$release_pr" -f expected_base="$source_commit"
+```
+
+The evidence workflow refreshes failed release checks when complete proof
+arrives. It does not merge. Repeated intent reuses matching proof or an existing
+Full run. The release PR retains lint, build, specs, capabilities, image smoke,
+release-file validation, and the wheel onboarding check.
+
+5. Wait for evidence and required checks; expect a green release PR.
+6. Run the guarded merge with the recorded inputs; expect the reviewed head to merge.
+
+```bash
+GH_REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" python3 scripts/release_evidence.py merge --pr "$release_pr" --expected-base "$source_commit" --expected-head "$reviewed_head"
+```
+
+The command checks current main, the release PR, required checks, managed files,
+and Full source evidence. It rereads main and the PR head immediately before
+merging. Any failed preflight stops before `gh pr merge`. GitHub pins the head
+with `--match-head-commit`; its API cannot atomically pin the expected base.
+A main update between the final read and merge remains possible. Record the
+actual merge ancestry and investigate a mismatch before qualifying artifacts.
+
+7. Inspect the tagged publisher run; expect Release Please to create the tag and GitHub Release.
+8. Read its Python qualification receipt; expect exact producer identity and matching official distribution hashes.
+9. Inspect each image result independently; expect its own publication and qualification state.
+
+The publisher builds or recovers the wheel, sdist, and Cloud archives from the
+tag. It publishes missing enabled artifacts. Python qualification runs after
+`build-artifacts` and `publish-pypi`; it does not depend on image jobs or the
+whole workflow conclusion. A skipped PyPI job can qualify when complete matching
+distributions were already present.
+
+The `python-qualification-RUN-ATTEMPT` artifact and job summary identify the tag,
+source, exact producer artifact, wheel and sdist hashes, and qualification time.
+The helper verifies actual bytes from the producer, GitHub Release, and PyPI.
+It retries missing PyPI distributions for at most six observations, ten seconds
+apart. Conflicting immutable bytes fail immediately.
+
+Python qualification leaves images unqualified and consumer verification
+unverified. It grants no installation or rollout authority. Report source-ready
+to Python-qualified latency from the recorded timestamps. Report ready-to-artifacts
+latency only after Python and all required images qualify. Keep consumer installation
+and rollout as a separate boundary. Report ready-to-production latency only after
+the deployment owner supplies consumer verification and its timestamp.
+Publication time cannot replace missing consumer evidence.
 
 Every later push to `main` checks the newest release again and hands any missing
 artifact to a run on its tag. Recovery verifies filenames, hashes, original image evidence, and each discovery

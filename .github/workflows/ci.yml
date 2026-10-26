@@ -964,6 +964,7 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: |
             scripts/check_release_pr_files.py
+            scripts/release_evidence.py
             release-please-config.json
           sparse-checkout-cone-mode: false
       - name: Require that the release PR changes only what release-please writes
@@ -985,33 +986,13 @@ jobs:
           gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" --jq '.[] | tojson' \
             > "$RUNNER_TEMP/pr-files.jsonl"
           python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl"
-      - name: Require a green full run on main at the release base
+      - name: Require complete Full evidence for the release source tree
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-        # Enforces docs/release.md's evidence step in CI instead of prose: a
-        # release PR merges only when a green dispatched (or scheduled) full
-        # run exists on main at the PR's recorded base revision. Known
-        # strictness bound: base.sha is captured at the PR's last synchronize
-        # event, so a main push AFTER the evidence run but WITHOUT a
-        # release-please resync is not caught here; release-please resyncs on
-        # every main push in practice, which re-points BASE_SHA and re-runs
-        # this job.
-        run: |
-          if test -z "$BASE_SHA"; then
-            echo "not a release pull request; nothing to verify"
-            exit 0
-          fi
-          count=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$BASE_SHA&per_page=100" \
-            --jq "[.workflow_runs[] | select((.event == \"workflow_dispatch\" or .event == \"schedule\") and .head_sha == \"$BASE_SHA\")] | length")
-          if test "$count" -ge 1; then
-            echo "green full run found on main at $BASE_SHA"
-            exit 0
-          fi
-          echo "no green dispatched or scheduled full CI run exists on main at $BASE_SHA" >&2
-          echo "dispatch one and let it finish green first: gh workflow run ci.yml --ref main" >&2
-          echo "then re-run this job (docs/release.md, release flow)" >&2
-          exit 1
+          GH_REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/release_evidence.py select --source "$BASE_SHA"
 
   # A dispatched or scheduled full run is a superset of the push run at the
   # same revision: the same jobs plus the full tier and py3.11. The push run is
@@ -1104,6 +1085,19 @@ jobs:
             printf '%s\n' "$failures" >&2
             exit 1
           fi
+      - uses: actions/checkout@v4
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Record the actual checkout after the Full gate passes
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python3 scripts/release_evidence.py record --output full-ci-evidence.json
+      - name: Retain immutable Full evidence for this run and attempt
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: full-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: full-ci-evidence.json
+          if-no-files-found: error
+          retention-days: 90
 
   # A full run that release-evidence-automation.yml dispatched with
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full
@@ -1126,4 +1120,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           EVIDENCE_RUN: ${{ github.run_id }}
-        run: gh workflow run release-evidence-automation.yml --ref main -f evidence_run="$EVIDENCE_RUN"
+          EVIDENCE_ATTEMPT: ${{ github.run_attempt }}
+        run: gh workflow run release-evidence-automation.yml --ref main -f evidence_run="$EVIDENCE_RUN" -f evidence_attempt="$EVIDENCE_ATTEMPT"

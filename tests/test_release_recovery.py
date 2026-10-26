@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,116 @@ spec = importlib.util.spec_from_file_location(
 assert spec and spec.loader
 recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
+
+
+@pytest.mark.parametrize("published", ["success", "skipped"])
+def test_python_qualification_uses_exact_producer_while_images_are_running(
+    tmp_path, monkeypatch, published
+):
+    """Official bytes can qualify before unrelated image jobs or the workflow complete."""
+    source = "a" * 40
+    names = ["sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz"]
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
+    monkeypatch.setattr(recovery, "project", lambda tag: {"name": "sample", "version": "1.2.3"})
+    build = {
+        "name": "build-artifacts",
+        "conclusion": "success",
+        "started_at": "2026-01-01T00:00:00Z",
+        "completed_at": "2026-01-01T00:01:00Z",
+        "steps": [
+            {"name": "Upload missing artifacts to the GitHub release", "conclusion": "success"}
+        ],
+    }
+    producer = {
+        "id": 12,
+        "run_attempt": 2,
+        "path": ".github/workflows/release-please.yml",
+        "event": "workflow_dispatch",
+        "head_branch": "v1.2.3",
+        "head_sha": source,
+        "repository": {"full_name": "example/project"},
+        "head_repository": {"full_name": "example/project"},
+        "status": "in_progress",
+    }
+    artifact = {
+        "id": 99,
+        "name": "python-distributions",
+        "expired": False,
+        "created_at": "2026-01-01T00:00:30Z",
+        "workflow_run": {"id": 12, "head_sha": source},
+    }
+
+    def run(*args):
+        if args[:2] == ("git", "rev-parse"):
+            return source
+        endpoint = args[-1]
+        if endpoint.endswith("/attempts/2"):
+            return json.dumps(producer)
+        if "/attempts/2/jobs?" in endpoint:
+            return json.dumps(
+                [
+                    {
+                        "jobs": [
+                            build,
+                            {"name": "publish-pypi", "conclusion": published},
+                            {"name": "publish-images", "conclusion": None},
+                        ]
+                    }
+                ]
+            )
+        if "/artifacts?" in endpoint:
+            return json.dumps([{"artifacts": [artifact]}])
+        raise AssertionError(args)
+
+    def download(tag, selected, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in selected:
+            (directory / name).write_bytes(name.encode())
+
+    monkeypatch.setattr(recovery, "run", run)
+    monkeypatch.setattr(recovery, "release_assets", lambda tag: [{"name": name} for name in names])
+    monkeypatch.setattr(recovery, "download_release", download)
+    monkeypatch.setattr(
+        recovery,
+        "download_artifact",
+        lambda artifact, repo, directory: download("v1.2.3", names, directory),
+    )
+    urls = [
+        {
+            "filename": name,
+            "url": name,
+            "digests": {"sha256": recovery.hashlib.sha256(name.encode()).hexdigest()},
+        }
+        for name in names
+    ]
+    observations = iter([[], urls])
+    monkeypatch.setattr(recovery, "pypi_files", lambda *args: next(observations))
+    monkeypatch.setattr(recovery.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        recovery.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(url.encode())
+    )
+    receipt = recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
+    assert receipt["producer"] == {
+        "repository": "example/project",
+        "run_id": "12",
+        "run_attempt": "2",
+        "artifact_id": 99,
+    }
+    assert {row["filename"] for row in receipt["distributions"]} == set(names)
+    assert receipt["python"]["state"] == "qualified"
+    assert receipt["images"]["state"] == "unqualified"
+    assert receipt["consumer_verification"]["state"] == "unverified"
+
+    # A conflicting public digest is permanent; it must not trigger another registry retry.
+    urls[0]["digests"]["sha256"] = "0" * 64
+    monkeypatch.setattr(recovery, "pypi_files", lambda *args: urls)
+    monkeypatch.setattr(recovery.time, "sleep", lambda seconds: pytest.fail("conflict retried"))
+    with pytest.raises(ValueError, match="immutable distribution"):
+        recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
+
+    producer["head_sha"] = "b" * 40
+    with pytest.raises(ValueError, match="producer identity"):
+        recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
 
 
 def test_distribution_completeness_requires_matching_package_and_both_kinds():
