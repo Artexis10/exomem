@@ -508,11 +508,13 @@ def audit(
     semantic_detail: Literal["actionable", "full"] = "actionable",
     retain_reflected_observations: bool = False,
     status_basis: lifecycle_statuses.Basis | None = None,
+    source_context: bool = True,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
     `categories` filters which checks to run (default: all). Read-only.
     `today` is dependency-injectable for tests (used by unprocessed-source aging).
+    `source_context=False` builds no reader context on an unprocessed-source finding.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     selected = set(categories) if categories else set(ALL_CATEGORIES)
@@ -551,7 +553,11 @@ def audit(
     if "orphan_entity" in selected:
         findings.extend(_check_orphan_entities(vault_root, pages))
     if "unprocessed_source" in selected:
-        findings.extend(_check_unprocessed_sources(vault_root, pages, today=today))
+        findings.extend(
+            _check_unprocessed_sources(
+                vault_root, pages, today=today, source_context=source_context
+            )
+        )
     if "unresolved_source_citation" in selected:
         findings.extend(_check_unresolved_source_citations(vault_root, pages))
     if "index_drift" in selected:
@@ -2605,6 +2611,7 @@ def _check_unprocessed_sources(
     lookup: Callable[[str], find_module.ParsedPage | None] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
+    source_context: bool = True,
 ) -> list[AuditFinding]:
     """Flag Sources that no live page compiles, aged + triaged oldest-first.
 
@@ -2612,7 +2619,8 @@ def _check_unprocessed_sources(
     cites it (`source_coverage`); a draft, retired, missing or unclaimed derivative
     leaves it here, listed with its reason. `lookup` finds a derivative's parsed
     page; it defaults to `pages`, so a derivative the caller cannot see reports as
-    missing.
+    missing. `source_context=False` leaves out the title, excerpt and derivatives
+    a reader groups by; the due-state projection stores none of them.
 
     Adds age signal so the backlog can be drained by priority rather than
     treated as an undifferentiated pile: bucket fresh (<30d) / aging (30-90d) /
@@ -2661,7 +2669,7 @@ def _check_unprocessed_sources(
             # The capture date, or the floor the projection sorts last, as every
             # other dated family publishes it.
             "due_since": (captured or dt.date.min).isoformat(),
-            **source_coverage.context(vault_root, page, coverage),
+            **(source_coverage.context(vault_root, page, coverage) if source_context else {}),
         }
         age_days: int | None = None
         if captured is not None:

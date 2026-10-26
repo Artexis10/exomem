@@ -12,11 +12,17 @@ from pathlib import Path
 import pytest
 
 from exomem import commands, set_frontmatter_field
+from exomem import delete_file as delete_file_module
 from exomem import due_state as due_state_module
 from exomem import note as note_module
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 pytestmark = pytest.mark.usefixtures("obligations_only")
+
+#: The real rebuild, kept before a fixture disables it, so a test can compare the
+#: served count with what a full pass over the vault finds.
+_RECOMPUTE = due_state_module.recompute
+_RECONCILE = due_state_module.reconcile
 
 
 def _import_sources(vault: Path, count: int) -> list[str]:
@@ -64,18 +70,25 @@ def _outstanding_sources(vault: Path) -> int:
     return _block(vault).get("categories", {}).get("unprocessed_source", 0)
 
 
+def _recomputed_sources(vault: Path) -> int:
+    return len(_RECOMPUTE(vault)["categories"]["unprocessed_source"])
+
+
+def _no_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_rebuild(*_args, **_kwargs):
+        raise AssertionError("a write must refresh its Sources without a vault-wide rebuild")
+
+    monkeypatch.setattr(due_state_module, "reconcile", no_rebuild)
+    monkeypatch.setattr(due_state_module, "recompute", no_rebuild)
+
+
 @pytest.fixture
 def imported(obligations_only: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list[str]]:
     """Three outstanding Sources in a built projection, with every full rebuild disabled."""
     vault = obligations_only
     sources = _import_sources(vault, 3)
     due_state_module.reconcile(vault)
-
-    def no_rebuild(*_args, **_kwargs):
-        raise AssertionError("a write must refresh its Sources without a vault-wide rebuild")
-
-    monkeypatch.setattr(due_state_module, "reconcile", no_rebuild)
-    monkeypatch.setattr(due_state_module, "recompute", no_rebuild)
+    _no_rebuild(monkeypatch)
     return vault, sources
 
 
@@ -119,10 +132,53 @@ def test_trashing_the_live_note_returns_its_source_to_the_count(
     note = _compile(vault, "Compiled claim", status="active", source=sources[0])
     assert _outstanding_sources(vault) == 2
 
-    # The Source still names the note, as any cited derivative does.
-    commands.op_delete(vault, note, confirm=True, force_orphan=True)
+    # The leaf itself, as curation calls it; the Source still names the note.
+    delete_file_module.delete_file(vault, path=note, confirm=True, force_orphan=True)
 
-    assert _outstanding_sources(vault) == 3
+    assert _outstanding_sources(vault) == _recomputed_sources(vault) == 3
+
+
+def test_capturing_a_source_adds_it_to_the_served_count(
+    imported: tuple[Path, list[str]], source_schema: object,
+) -> None:
+    vault, _sources = imported
+    (vault / "Knowledge Base/Sources/index.md").write_text(
+        "# Sources — Index\n\n## By type\n\n## Recent captures\n\n", encoding="utf-8"
+    )
+
+    commands.op_capture_source(
+        vault, source_schema, title="A new capture", content="Captured text.", source_kind="session"
+    )
+
+    assert _outstanding_sources(vault) == _recomputed_sources(vault) == 4
+
+
+def test_trashing_a_folder_returns_the_sources_its_live_notes_compiled(
+    obligations_only: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = obligations_only
+    folder = "Knowledge Base/Notes/Batch"
+    (vault / folder).mkdir(parents=True)
+    for index, source in enumerate(_import_sources(vault, 2)):
+        page = vault / source
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "ingested_into: []", f"ingested_into: ['[[batch-note-{index}]]']"
+            ),
+            encoding="utf-8",
+        )
+        (vault / folder / f"batch-note-{index}.md").write_text(
+            f"---\ntype: insight\nstatus: active\nsources: ['[[document-{index}]]']\n---\n\n"
+            f"# Batch note {index}\n",
+            encoding="utf-8",
+        )
+    _RECONCILE(vault)
+    assert _outstanding_sources(vault) == 0
+    _no_rebuild(monkeypatch)
+
+    commands.op_delete(vault, folder, confirm=True, recursive=True, force_orphan=True)
+
+    assert _outstanding_sources(vault) == _recomputed_sources(vault) == 2
 
 
 def test_dismissing_items_lowers_what_is_visible_and_keeps_outstanding(

@@ -37,6 +37,7 @@ from . import adopt as adopt_module
 from . import (
     adoption_plan,
     context_refs,
+    due_state,
     held_fs,
     knowledge_packs,
     note_types,
@@ -1574,13 +1575,18 @@ def _apply_chunk(
     for planned in [*settled, *landed]:
         _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
     extractions: list[float] = []
+    copied: list[str] = []
     for planned in landed:
         if _source_status(outcomes[planned["original_path"]]) == "applied":
-            written.append(planned["target_path"])
+            copied.append(planned["target_path"])
         if planned["form"] == "artifact":
             seconds = _request_extraction(root, planned, budget, stats)
             if seconds is not None:
                 extractions.append(seconds)
+    written.extend(copied)
+    # The Sources are written without the semantic seam, so the chunk counts them in the
+    # backlog itself, before any note does. Each draft note's own commit refreshes its Source.
+    due_state.refresh_after_writes(root, [due_state.PageWrite(path) for path in copied])
     _create_notes(root, store, run, chunk, texts, label=label, budget=budget, stats=stats, written=written)
     return extractions
 

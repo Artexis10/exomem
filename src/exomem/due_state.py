@@ -1049,6 +1049,8 @@ def recompute(
         today=_FAR_FUTURE,
         now=now,
         retain_reflected_observations=True,
+        # The projection stores no excerpt, so the rebuild does not build one.
+        source_context=False,
     )
     from . import artifact_role_review, artifact_role_state
     role_marker = (
@@ -1580,33 +1582,45 @@ def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PageWrite:
+    """One committed page write, as a projection delta reads it.
+
+    `prior_markdown` is the page as it stood before an edit or delete, and
+    `related_pages` are other pages the same operation changed. Both only widen
+    which cited Sources are refreshed.
+    """
+
+    path: str
+    prior_markdown: str | None = None
+    related_pages: tuple[str, ...] = ()
+
+
 def _cited_source_paths(
     vault_root: Path,
-    rel: str,
+    write: PageWrite,
     page: Any,
     *,
-    prior_markdown: str | None,
-    related_pages: Iterable[str],
+    type_basis: Any,
     resolver: Callable[[], Any],
-) -> list[str]:
-    """The Sources whose coverage a write to `rel` can change.
+) -> set[str]:
+    """The Sources whose coverage `write` can change.
 
     Every Source the page cites after the write, every Source it cited before
     (`prior_markdown`), every Source a page it changed in the same operation cites
     (`related_pages`, such as a superseded predecessor), and the page itself when it
     is a captured Source. The claims resolve to paths only: this reads no Source.
-    `resolver` returns the one wikilink snapshot of this write's delta.
+    `resolver` returns the one wikilink snapshot of this delta.
     """
     from . import find as find_module
     from . import note_types, source_closure
 
-    type_basis = note_types.Basis(vault_root)
     claims: list[str] = []
     if page is not None:
         claims.extend(source_closure.claims_in(page.frontmatter, type_basis))
-    if prior_markdown:
-        claims.extend(source_closure.source_claims(prior_markdown, type_basis))
-    for related in related_pages:
+    if write.prior_markdown:
+        claims.extend(source_closure.source_claims(write.prior_markdown, type_basis))
+    for related in write.related_pages:
         other = find_module._CACHE.get(vault_root / str(related), vault_root)
         if other is not None:
             claims.extend(source_closure.claims_in(other.frontmatter, type_basis))
@@ -1623,14 +1637,14 @@ def _cited_source_paths(
         )
     # A deleted page may have been a Source: its row has to go too.
     if page is None or type_basis.selects(page.page_type, note_types.captured_source):
-        paths.add(rel)
-    return sorted(paths)
+        paths.add(write.path)
+    return paths
 
 
 def _source_findings(
     vault_root: Path, source_paths: list[str], *, resolver: Callable[[], Any]
-) -> dict[str, list[dict[str, Any]]]:
-    """The `SOURCE_BACKLOG` entries of these Sources, by path; a Source with none is absent."""
+) -> list[Any]:
+    """The `SOURCE_BACKLOG` findings of these Sources; a compiled Source has none."""
     from . import audit as audit_module
     from . import find as find_module
 
@@ -1639,11 +1653,12 @@ def _source_findings(
 
     pages = [page for page in map(lookup, source_paths) if page is not None]
     if not pages:
-        return {}
-    findings = audit_module._check_unprocessed_sources(
-        vault_root, pages, today=_FAR_FUTURE, lookup=lookup, resolver=resolver
+        return []
+    # The projection stores no excerpt, so the delta does not build one.
+    return audit_module._check_unprocessed_sources(
+        vault_root, pages, today=_FAR_FUTURE, lookup=lookup, resolver=resolver,
+        source_context=False,
     )
-    return _entries_from_findings(vault_root, findings).get(SOURCE_BACKLOG) or {}
 
 
 @_owner_local
@@ -1660,13 +1675,47 @@ def apply_write_delta(
     Returns the updated projection, or None when there is nothing to delta against
     — a missing or unreadable projection is recovered by a read surface, never by
     turning this write into a vault-wide scan it would then have to pay for.
+    `prior_markdown` and `related_pages` are as `PageWrite` describes them.
+    """
+    return apply_write_deltas(
+        vault_root,
+        [PageWrite(str(rel_path), prior_markdown, tuple(related_pages))],
+        today=today,
+    )
 
-    `prior_markdown` is the page as it stood before an edit or delete, and
-    `related_pages` are other pages the same operation changed. Both only widen
-    which cited Sources are refreshed.
+
+def refresh_after_writes(vault_root: Path, writes: Iterable[PageWrite]) -> None:
+    """Apply the projection delta of writes that have committed, best effort.
+
+    A fault here costs the projection a refresh that the next reconcile performs,
+    never the write that already committed.
+    """
+    writes = list(writes)
+    if not writes:
+        return
+    try:
+        apply_write_deltas(vault_root, writes)
+    except Exception:  # noqa: BLE001 - a projection delta never breaks a committed write
+        log.debug("due-state delta failed for %d written page(s)", len(writes), exc_info=True)
+
+
+@_owner_local
+def apply_write_deltas(
+    vault_root: Path,
+    writes: Iterable[PageWrite],
+    *,
+    today: dt.date | None = None,
+) -> dict[str, Any] | None:
+    """Recompute the entries of a batch of written pages with one load and one save.
+
+    The same bounded delta as `apply_write_delta`, per page, and None for the same
+    reason: a missing projection is recovered by a read surface. One batch shares one
+    wikilink snapshot, one review-ref lookup and one save of the projection, so a
+    bulk import pays for the projection once per batch rather than once per page.
     """
     from . import audit as audit_module
     from . import find as find_module
+    from . import note_types
 
     today = today or dt.date.today()
     payload = _load_shared(vault_root)
@@ -1674,10 +1723,19 @@ def apply_write_delta(
         return None
 
     vault_root = Path(vault_root)
-    rel = str(rel_path).replace("\\", "/").lstrip("/")
-    _track_batch_path(vault_root, rel)
-    page = find_module._CACHE.get(vault_root / rel, vault_root)
-    pages = [page] if page is not None else []
+    writes = [
+        PageWrite(
+            str(write.path).replace("\\", "/").lstrip("/"),
+            write.prior_markdown,
+            tuple(write.related_pages),
+        )
+        for write in writes
+    ]
+    page_of: dict[str, Any] = {}
+    for write in writes:
+        _track_batch_path(vault_root, write.path)
+        page_of[write.path] = find_module._CACHE.get(vault_root / write.path, vault_root)
+    pages = [page for page in page_of.values() if page is not None]
 
     @functools.lru_cache(maxsize=1)
     def resolver() -> Any:
@@ -1685,17 +1743,19 @@ def apply_write_delta(
         # vault, so the two steps below share it instead of each paying for one.
         return find_module.writer_resolver_snapshot(vault_root)
 
-    source_paths = _cited_source_paths(
-        vault_root,
-        rel,
-        page,
-        prior_markdown=prior_markdown,
-        related_pages=related_pages,
-        resolver=resolver,
+    type_basis = note_types.Basis(vault_root)
+    source_paths = sorted(
+        set().union(
+            *(
+                _cited_source_paths(
+                    vault_root, write, page_of[write.path], type_basis=type_basis, resolver=resolver
+                )
+                for write in writes
+            )
+        )
     )
-    source_entries = _source_findings(vault_root, source_paths, resolver=resolver)
 
-    findings: list[Any] = []
+    findings: list[Any] = _source_findings(vault_root, source_paths, resolver=resolver)
     if pages:
         findings.extend(
             audit_module._check_prediction_window(vault_root, pages, today=_FAR_FUTURE)
@@ -1708,9 +1768,11 @@ def apply_write_delta(
         findings.extend(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
-        # Page-local half of a split category: this page's own pointers only.
+        # Page-local half of a split category: these pages' own pointers only.
         findings.extend(_page_local_supersession(vault_root, pages))
+    # One grouping, so the Source rows and the page rows share one review-ref lookup.
     grouped = _entries_from_findings(vault_root, findings)
+    source_entries = grouped.get(SOURCE_BACKLOG) or {}
 
     with _LOCK:
         current = _load_shared(vault_root) or payload
@@ -1720,38 +1782,41 @@ def apply_write_delta(
             from . import artifact_role_review, artifact_role_state
             enabled = set(PAGE_DELTA_CATEGORIES) & set(artifact_role_review.FAMILIES)
             if enabled:
-                try:
-                    artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
-                    if page is not None and page.page_type == "experiment":
-                        role_index = {**role_index, "has_origins": True}
-                except Exception:  # noqa: BLE001 - committed mutation retains its receipt
-                    log.debug("artifact role delta unavailable", exc_info=True)
+                for rel, page in page_of.items():
+                    try:
+                        artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
+                        if page is not None and page.page_type == "experiment":
+                            role_index = {**role_index, "has_origins": True}
+                    except Exception:  # noqa: BLE001 - committed mutation retains its receipt
+                        log.debug("artifact role delta unavailable", exc_info=True)
         for category in PAGE_DELTA_CATEGORIES:
             if category in {"artifact_role_promotion", "transient_state_review"}:
                 continue
             pages_map = dict(categories.get(category) or {})
-            entries = (grouped.get(category) or {}).get(rel)
-            if entries:
-                pages_map[rel] = _bucket(entries, today)
-            else:
-                pages_map.pop(rel, None)
+            for rel in page_of:
+                entries = (grouped.get(category) or {}).get(rel)
+                if entries:
+                    pages_map[rel] = _bucket(entries, today)
+                else:
+                    pages_map.pop(rel, None)
             categories[category] = pages_map
         for category, settleable in DELTA_DEFECTS.items():
             pages_map = dict(categories.get(category) or {})
-            # Keep every stored defect this write cannot decide (the chain-scoped
-            # half), replace only the page-local ones it just recomputed.
-            preserved = [
-                entry
-                for entry in _unbucket(pages_map.get(rel))
-                if str(entry.get("defect") or "") not in settleable
-            ]
-            entries = preserved + list((grouped.get(category) or {}).get(rel) or [])
-            if entries:
-                pages_map[rel] = _bucket(entries, today)
-            else:
-                pages_map.pop(rel, None)
+            for rel in page_of:
+                # Keep every stored defect this write cannot decide (the chain-scoped
+                # half), replace only the page-local ones it just recomputed.
+                preserved = [
+                    entry
+                    for entry in _unbucket(pages_map.get(rel))
+                    if str(entry.get("defect") or "") not in settleable
+                ]
+                entries = preserved + list((grouped.get(category) or {}).get(rel) or [])
+                if entries:
+                    pages_map[rel] = _bucket(entries, today)
+                else:
+                    pages_map.pop(rel, None)
             categories[category] = pages_map
-        # Rows of the Sources this page cites, not of this page: a live note
+        # Rows of the Sources these pages cite, not of the pages: a live note
         # compiles a Source, a draft or a retired note does not.
         backlog = dict(categories.get(SOURCE_BACKLOG) or {})
         for path in source_paths:
@@ -1764,11 +1829,11 @@ def apply_write_delta(
             "version": SCHEMA_VERSION,
             "computed_on": today.isoformat(),
             "categories": categories,
-            # One governed write, one projection delta, one tick. This is the
-            # denominator the "more automatic" claim is measured against, and
-            # it has to be persisted because the emission governor above it is
-            # per-process memory no projector can read.
-            "emission": _bump_ledger(vault_root, current, writes=1),
+            # One governed page write, one tick. This is the denominator the
+            # "more automatic" claim is measured against, and it has to be
+            # persisted because the emission governor above it is per-process
+            # memory no projector can read.
+            "emission": _bump_ledger(vault_root, current, writes=len(writes)),
             # Carried, not rebuilt. A page write learns nothing about bindings
             # and must not drop the index the structured deltas depend on --
             # losing it here would silently send every later plan write back to
