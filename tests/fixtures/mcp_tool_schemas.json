@@ -80,7 +80,7 @@
     }
   },
   "adoption_studio": {
-    "description": "Review and import an existing collection of notes, documents, images, audio and video in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Apply commits the previewed plan or refuses.\n\nstart scans; select chooses files; plan previews; apply copies each file\ninto Sources, and drafts a note under an own-note rule; cancel closes\npre-apply; finish proves recall and reports coverage. Repeat plan or apply\nwith a returned `continuation`. Then\nwork-item reads context, propose submits proposals, apply-proposal\napproves one. Details: references/operations.md.",
+    "description": "Review and import a collection in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nwrite. Apply commits the previewed plan or refuses.\n\nstart scans; select chooses; plan previews; apply copies into Sources and\ndrafts notes under own-note rules; cancel closes pre-apply; finish reports\nrecall and coverage. Resume plan/apply with `continuation`.\nwork-item reads context; propose submits; apply-proposal approves.\nDetails: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -102,11 +102,11 @@
         },
         "run_id": {
           "type": "string",
-          "description": "From `start`; required except for `start` and run-listing `status`."
+          "description": "From `start`; omit only to start or list runs."
         },
         "path": {
           "default": "",
-          "description": "For `start`, subtree to scan (default: vault root). For run-listing `status`, count distinct filed originals in this subtree; omit for the legacy listing. An incomplete count is null; `complete` is false.",
+          "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
           "type": "string"
         },
         "include_hidden": {
@@ -138,7 +138,7 @@
             ]
           },
           "type": "array",
-          "description": "For `select`, paths whose files are selected, or {path, source_kind?, domain?} to file a folder under registered keys, or {path, adopt_as: note, note_type, project?, domain?} for a draft note of each Markdown file."
+          "description": "For `select`, paths or folder rules {path, source_kind?, domain?} using registered keys; {path, adopt_as: note, note_type, project?, domain?} drafts a note for each Markdown file."
         },
         "exclude": {
           "items": {

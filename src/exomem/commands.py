@@ -10244,31 +10244,30 @@ def op_adoption_studio(
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
 ) -> dict:
-    """Review and import an existing collection of notes, documents, images, audio and video in a resumable run.
+    """Review and import a collection in a resumable run.
 
     Never rewrite, move or delete originals. Status/work-item read; other actions
-    save run state or material. Apply commits the previewed plan or refuses.
+    write. Apply commits the previewed plan or refuses.
 
-    start scans; select chooses files; plan previews; apply copies each file
-    into Sources, and drafts a note under an own-note rule; cancel closes
-    pre-apply; finish proves recall and reports coverage. Repeat plan or apply
-    with a returned `continuation`. Then
-    work-item reads context, propose submits proposals, apply-proposal
-    approves one. Details: references/operations.md.
+    start scans; select chooses; plan previews; apply copies into Sources and
+    drafts notes under own-note rules; cancel closes pre-apply; finish reports
+    recall and coverage. Resume plan/apply with `continuation`.
+    work-item reads context; propose submits; apply-proposal approves.
+    Details: references/operations.md.
 
     Args:
         action: Lifecycle step.
-        run_id: From `start`; required except for `start` and run-listing `status`.
-        path: For `start`, subtree to scan (default: vault root). For run-listing
-            `status`, count distinct filed originals in this subtree; omit for
-            the legacy listing. An incomplete count is null; `complete` is false.
+        run_id: From `start`; omit only to start or list runs.
+        path: For `start`, scan subtree (default: vault root). For run-listing
+            `status`, count distinct successfully filed originals across historical
+            runs in this subtree; null with `complete=false` if incomplete.
+            Omit for legacy listing.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
-        include: For `select`, paths whose files are selected, or {path,
-            source_kind?, domain?} to file a folder under registered keys, or
-            {path, adopt_as: note, note_type, project?, domain?} for a draft
-            note of each Markdown file.
+        include: For `select`, paths or folder rules {path, source_kind?,
+            domain?} using registered keys; {path, adopt_as: note, note_type,
+            project?, domain?} drafts a note for each Markdown file.
         exclude: For `select`, paths to deselect.
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
