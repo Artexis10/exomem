@@ -1419,6 +1419,53 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
         raise RuntimeError("installed Records presentation remained stale after guarded refresh")
 
 
+async def _maps_consumption_session(
+    client, state: dict[str, Any], *, activation_tool: str, timeout: float,
+) -> None:
+    """Follow installed map and profile references to a persisted synthetic fact."""
+    async def current_view(reference: str) -> dict[str, Any]:
+        # Read views can warm their catalogue after the first installed request.
+        async with asyncio.timeout(timeout):
+            while True:
+                view = await _call(client, "read_memory", {"path": reference}, timeout)
+                if view.get("state") == "ready" and not view.get("stale"):
+                    return view
+                if view.get("state") not in ("ready", "index_warming"):
+                    raise RuntimeError(f"installed view is unavailable: {view!r}")
+                await asyncio.sleep(0.1)
+
+    packet = await _call(
+        client, activation_tool,
+        {"turn": "What must Project Alpha retain after a release?", "max_chars": 8000},
+        timeout,
+    )
+    block = packet.get("map", {})
+    if packet.get("abstained") or block.get("state") != "ready" or block.get("stale"):
+        raise RuntimeError(f"installed maps activation did not return a fresh map: {packet!r}")
+    anchor = next(
+        (item for item in block["items"] if item["ref"] == "project:project-alpha"), None,
+    )
+    if anchor is None or not anchor.get("profile"):
+        raise RuntimeError("installed activation omitted the synthetic project's profile")
+    view = await current_view(block["ref"])
+    if not any(item.get("profile") == anchor["profile"] for item in view["items"]):
+        raise RuntimeError("installed map view lost the profile returned by activation")
+    profile = await current_view(anchor["profile"])
+    fixture = state["maps"]
+    fact = next(
+        (item for item in profile["items"]
+         if item.get("provenance", {}).get("path") == fixture["path"]
+         or item.get("ref") in (fixture["ref"], fixture["path"])), None,
+    )
+    if fact is None:
+        raise RuntimeError("installed profile supplied no reference to the stored fact")
+    reference = fact.get("provenance", {}).get("path") or fact["ref"]
+    read = await _call(client, "read_memory", {"path": reference}, timeout)
+    if read.get("ref") != fixture["ref"] or fixture["expected_fact"] not in read.get("body", ""):
+        raise RuntimeError("following the installed profile did not recover its stored fact")
+    fixture.update({"activation_tool": activation_tool, "profile_ref": profile["ref"]})
+
+
 async def _stdio_session(
     executable: Path,
     env: dict[str, str],
@@ -1455,8 +1502,12 @@ async def _stdio_session(
                 found = find_rendering(name, PRODUCT_COMMANDS)
                 return found[0].name if found is not None else name
 
+            activation_tool = next(
+                (name for name in tools if _command_name(name) == "activate_context"), "",
+            )
             tools = {_command_name(name) for name in tools}
             required = {
+                "activate_context",
                 "capture_source",
                 "remember",
                 "ask_memory",
@@ -1518,11 +1569,12 @@ async def _stdio_session(
                     raise RuntimeError(
                         "installed schema governance did not hash-guard relation registry"
                     )
+                expected_fact = "Retain the signed release manifest for thirty days."
                 source = await _call_mutation(
                     client,
                     "capture_source",
                     {
-                        "content": "Project Lantern uses governed references across restarts.",
+                        "content": f"Project Lantern uses governed references across restarts.\n{expected_fact}",
                         "source_type": "article",
                         "title": "Lantern architecture source",
                         "url": "https://example.com/lantern",
@@ -1698,6 +1750,25 @@ async def _stdio_session(
                         "registry_hash": registry_result["saved"]["content_hash"],
                     }
                 )
+                maps_memory = await _call_mutation(
+                    client, "remember",
+                    {
+                        "title": "Project Alpha release retention",
+                        "note_type": "insight",
+                        "projects": ["project-alpha"],
+                        "sources": [source["path"]],
+                        "content": (
+                            f"# Release retention\n\n- [constraint] {expected_fact} ^retention\n\n"
+                            "## Relations\n\n"
+                            f"- supports [[{replacement['new_path'].removesuffix('.md')}]]\n"
+                        ),
+                    },
+                    timeout,
+                )
+                state["maps"] = {
+                    "ref": maps_memory["ref"], "path": maps_memory["path"],
+                    "expected_fact": expected_fact,
+                }
                 await _records_first_session(client, state, timeout)
                 await _manual_records_session(client, state, timeout)
                 await _planning_first_session(client, state, timeout)
@@ -1760,6 +1831,9 @@ async def _stdio_session(
                     relation_ref=state["relation_ref"],
                     timeout=timeout,
                 )
+            await _maps_consumption_session(
+                client, state, activation_tool=activation_tool, timeout=timeout,
+            )
     return state
 
 
@@ -1769,6 +1843,8 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     work = Path(args.work)
     home = Path(args.home)
     env = _clean_env(home, vault)
+    # Opt in only for this synthetic installed journey; other transports retain their defaults.
+    env["EXOMEM_ACTIVATION_PACKET"] = "maps"
     state: dict[str, Any] = {}
     state["vault"] = str(vault)
     state["records"] = _write_records_fixture(vault)
