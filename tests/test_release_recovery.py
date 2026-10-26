@@ -18,9 +18,12 @@ recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
 
 
-@pytest.mark.parametrize("published", ["success", "skipped"])
+@pytest.mark.parametrize(
+    ("published", "verification_attempt"),
+    [("success", "1"), ("skipped", "1"), ("success", "2")],
+)
 def test_python_qualification_uses_exact_producer_while_images_are_running(
-    tmp_path, monkeypatch, published
+    tmp_path, monkeypatch, published, verification_attempt
 ):
     """Official bytes can qualify before unrelated image jobs or the workflow complete."""
     source = "a" * 40
@@ -28,6 +31,8 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
     monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
     monkeypatch.setattr(recovery, "project", lambda tag: {"name": "sample", "version": "1.2.3"})
     build = {
+        "id": 91,
+        "run_attempt": 1,
         "name": "build-artifacts",
         "conclusion": "success",
         "started_at": "2026-01-01T00:00:00Z",
@@ -38,7 +43,8 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
     }
     producer = {
         "id": 12,
-        "run_attempt": 2,
+        "run_attempt": 1,
+        "run_started_at": "2026-01-01T00:00:00Z",
         "path": ".github/workflows/release-please.yml",
         "event": "workflow_dispatch",
         "head_branch": "v1.2.3",
@@ -59,15 +65,23 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
         if args[:2] == ("git", "rev-parse"):
             return source
         endpoint = args[-1]
-        if endpoint.endswith("/attempts/2"):
+        if endpoint.endswith("/attempts/1"):
             return json.dumps(producer)
-        if "/attempts/2/jobs?" in endpoint:
+        if endpoint.endswith("/attempts/2"):
+            return json.dumps({**producer, "run_attempt": 2, "run_started_at": "2026-01-01T00:02:00Z"})
+        if "/jobs?" in endpoint:
+            # GitHub copies a successful job into later attempts with a new ID,
+            # but preserves the original execution timestamps and artifact.
+            copied_build = {**build, "id": 92, "run_attempt": 2}
+            publication = (
+                "failure" if verification_attempt == "2" and "/attempts/1/" in endpoint else published
+            )
             return json.dumps(
                 [
                     {
                         "jobs": [
-                            build,
-                            {"name": "publish-pypi", "conclusion": published},
+                            copied_build if "/attempts/2/" in endpoint else build,
+                            {"name": "publish-pypi", "conclusion": publication},
                             {"name": "publish-images", "conclusion": None},
                         ]
                     }
@@ -104,28 +118,41 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
     monkeypatch.setattr(
         recovery.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(url.encode())
     )
-    receipt = recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
+    receipt = recovery.qualify_python(
+        "v1.2.3", source, "12", "1", tmp_path, verification_attempt=verification_attempt
+    )
     assert receipt["producer"] == {
         "repository": "example/project",
         "run_id": "12",
-        "run_attempt": "2",
+        "run_attempt": "1",
         "artifact_id": 99,
+    }
+    assert receipt["verification"] == {
+        "repository": "example/project", "run_id": "12", "run_attempt": verification_attempt,
     }
     assert {row["filename"] for row in receipt["distributions"]} == set(names)
     assert receipt["python"]["state"] == "qualified"
     assert receipt["images"]["state"] == "unqualified"
     assert receipt["consumer_verification"]["state"] == "unverified"
 
+    if verification_attempt == "2":
+        with pytest.raises(ValueError, match="predates.*producer attempt"):
+            recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
+
     # A conflicting public digest is permanent; it must not trigger another registry retry.
     urls[0]["digests"]["sha256"] = "0" * 64
     monkeypatch.setattr(recovery, "pypi_files", lambda *args: urls)
     monkeypatch.setattr(recovery.time, "sleep", lambda seconds: pytest.fail("conflict retried"))
     with pytest.raises(ValueError, match="immutable distribution"):
-        recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
+        recovery.qualify_python(
+            "v1.2.3", source, "12", "1", tmp_path, verification_attempt=verification_attempt
+        )
 
     producer["head_sha"] = "b" * 40
     with pytest.raises(ValueError, match="producer identity"):
-        recovery.qualify_python("v1.2.3", source, "12", "2", tmp_path)
+        recovery.qualify_python(
+            "v1.2.3", source, "12", "1", tmp_path, verification_attempt=verification_attempt
+        )
 
 
 def test_distribution_completeness_requires_matching_package_and_both_kinds():

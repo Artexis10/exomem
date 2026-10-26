@@ -30,7 +30,7 @@ The preflight prevents releasing stale source. A false refusal delays the mainta
 
 ### Qualify Python at the existing publication boundary
 
-Extend `release_recovery.py` with read-only qualification. Reuse its package parsers, release download helpers, and PyPI reader. Verify exact producer run and attempt, source, relevant successful jobs, and official distribution bytes. Retain a scoped JSON receipt as an Actions artifact and job summary. Run after Python publication, independently of image completion. Registry lag remains retryable, bounded observation; it is not an image dependency.
+Extend `release_recovery.py` with read-only qualification. Reuse its package parsers, release download helpers, and PyPI reader. Verify exact producer run and attempt, source, relevant successful jobs, and official distribution bytes. Retain the build job attempt as an output and pass it separately from the qualification attempt, because retries can reuse successful jobs. Retain a scoped JSON receipt as an Actions artifact and job summary. Run after Python publication, independently of image completion. Registry lag remains retryable, bounded observation; it is not an image dependency.
 
 ### Measure real boundaries
 

@@ -1047,7 +1047,13 @@ def test_python_qualification_does_not_wait_for_image_publication() -> None:
     assert "needs.plan.outputs.dry_run != 'true'" in job["if"]
     assert job["permissions"] == {"contents": "read", "actions": "read"}
     qualify = next(step for step in job["steps"] if step.get("name", "").startswith("Qualify official"))
-    assert '--run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"' in qualify["run"]
+    assert '--run-id "$GITHUB_RUN_ID" --attempt "$PRODUCER_ATTEMPT"' in qualify["run"]
+    assert '--verification-attempt "$GITHUB_RUN_ATTEMPT"' in qualify["run"]
+    assert qualify["env"]["PRODUCER_ATTEMPT"] == "${{ needs.build-artifacts.outputs.producer_attempt }}"
+    build = workflow["jobs"]["build-artifacts"]
+    assert build["outputs"]["producer_attempt"] == "${{ steps.producer.outputs.attempt }}"
+    producer = next(step for step in build["steps"] if step.get("id") == "producer")
+    assert producer["run"] == 'echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"'
     assert job["steps"][-1]["with"]["name"] == "python-qualification-${{ github.run_id }}-${{ github.run_attempt }}"
 
 

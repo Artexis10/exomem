@@ -206,52 +206,67 @@ def download_artifact(artifact: dict, repository: str, directory: Path) -> None:
         shutil.unpack_archive(archive, directory, format="zip")
 
 
-def qualify_python(tag: str, source: str, run_id: str, attempt: str, directory: Path) -> dict:
+def qualify_python(
+    tag: str,
+    source: str,
+    run_id: str,
+    attempt: str,
+    directory: Path,
+    *,
+    verification_attempt: str | None = None,
+) -> dict:
     """Qualify official Python bytes without waiting for unrelated image jobs."""
     run_id = _run_number(run_id, label="producer run")
     attempt = _run_number(attempt, label="producer attempt")
+    verification_attempt = _run_number(verification_attempt or attempt, label="verification attempt")
     repository = os.environ["GITHUB_REPOSITORY"]
     if run("git", "rev-parse", f"{tag}^{{commit}}") != source:
         raise ValueError("tag source differs from the requested source")
     package = project(tag)
     if Version(package["version"]) != Version(tag.removeprefix("v")):
         raise ValueError("package version differs from release tag")
-    producer = json.loads(
-        run("gh", "api", f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}")
-    )
-    # These fields bind the fixed publisher workflow and tag invocation protocol.
-    expected = {
-        "id": int(run_id),
-        "run_attempt": int(attempt),
-        "head_sha": source,
-        "head_branch": tag,
-        "event": "workflow_dispatch",
-        "path": ".github/workflows/release-please.yml",
-    }
-    if (
-        any(producer.get(key) != value for key, value in expected.items())
-        or producer.get("repository", {}).get("full_name") != repository
-        or producer.get("head_repository", {}).get("full_name") != repository
-    ):
-        raise ValueError("publisher producer identity differs from the requested release")
-    jobs = [
-        job
-        for page in json.loads(
-            run(
-                "gh",
-                "api",
-                "--paginate",
-                "--slurp",
-                f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30",
-            )
+    identities = {}
+    jobs = {}
+    for selected_attempt in dict.fromkeys((attempt, verification_attempt)):
+        identity = json.loads(
+            run("gh", "api", f"repos/{repository}/actions/runs/{run_id}/attempts/{selected_attempt}")
         )
-        for job in page["jobs"]
-    ]
+        # These fields bind the fixed publisher workflow and tag invocation protocol.
+        expected = {
+            "id": int(run_id),
+            "run_attempt": int(selected_attempt),
+            "head_sha": source,
+            "head_branch": tag,
+            "event": "workflow_dispatch",
+            "path": ".github/workflows/release-please.yml",
+        }
+        if (
+            any(identity.get(key) != value for key, value in expected.items())
+            or identity.get("repository", {}).get("full_name") != repository
+            or identity.get("head_repository", {}).get("full_name") != repository
+        ):
+            raise ValueError("publisher producer identity differs from the requested release")
+        identities[selected_attempt] = identity
+        jobs[selected_attempt] = [
+            job
+            for page in json.loads(
+                run(
+                    "gh",
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{repository}/actions/runs/{run_id}/attempts/{selected_attempt}/jobs?per_page=30",
+                )
+            )
+            for job in page["jobs"]
+        ]
     # These are the two Python producer jobs in the publisher's closed job protocol.
     builds = [
-        job for job in jobs if job["name"] == "build-artifacts" and job["conclusion"] == "success"
+        job
+        for job in jobs[attempt]
+        if job["name"] == "build-artifacts" and job["conclusion"] == "success"
     ]
-    publications = [job for job in jobs if job["name"] == "publish-pypi"]
+    publications = [job for job in jobs[verification_attempt] if job["name"] == "publish-pypi"]
     if (
         len(builds) != 1
         or len(publications) != 1
@@ -259,6 +274,13 @@ def qualify_python(tag: str, source: str, run_id: str, attempt: str, directory: 
     ):
         raise ValueError("Python producer jobs did not complete successfully")
     build = builds[0]
+    # GitHub copies successful jobs into retries while retaining their original execution times.
+    if datetime.fromisoformat(build["started_at"]) < datetime.fromisoformat(
+        identities[attempt]["run_started_at"]
+    ):
+        raise ValueError(
+            "Python build predates the requested producer attempt; pass its original attempt"
+        )
     # This successful upload step excludes dry runs, including historical artifact names.
     if not any(
         step["name"] == "Upload missing artifacts to the GitHub release"
@@ -344,6 +366,11 @@ def qualify_python(tag: str, source: str, run_id: str, attempt: str, directory: 
                 "run_id": run_id,
                 "run_attempt": attempt,
                 "artifact_id": artifact["id"],
+            },
+            "verification": {
+                "repository": repository,
+                "run_id": run_id,
+                "run_attempt": verification_attempt,
             },
             "distributions": [
                 {"filename": path.name, "sha256": sha256(path)} for path in sorted(files)
@@ -912,13 +939,20 @@ def main() -> None:
     parser.add_argument("--image", help="Image role from the publication plan to join")
     parser.add_argument("--source", help="Exact release source commit for Python qualification")
     parser.add_argument("--run-id", help="Exact publisher run for Python qualification")
-    parser.add_argument("--attempt", help="Exact publisher attempt for Python qualification")
+    parser.add_argument("--attempt", help="Original Python build attempt in the publisher run")
+    parser.add_argument(
+        "--verification-attempt",
+        help="Publisher attempt checking Python publication; defaults to the original attempt",
+    )
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.command == "qualify-python":
         if args.dry_run or not all((args.source, args.run_id, args.attempt)):
             parser.error("qualify-python requires --source, --run-id and --attempt, without --dry-run")
-        receipt = qualify_python(args.tag, args.source, args.run_id, args.attempt, args.directory)
+        receipt = qualify_python(
+            args.tag, args.source, args.run_id, args.attempt, args.directory,
+            verification_attempt=args.verification_attempt,
+        )
         path = args.directory / "python-qualification.json"
         path.write_text(json.dumps(receipt, indent=2) + "\n")
         print(json.dumps(receipt))

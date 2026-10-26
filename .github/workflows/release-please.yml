@@ -376,6 +376,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      producer_attempt: ${{ steps.producer.outputs.attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -478,6 +480,10 @@ jobs:
           set -euo pipefail
           python3 .release-tools/infra/scripts/release_recovery.py upload --tag "$TAG"
 
+      - name: Record the original Python producer attempt
+        id: producer
+        run: echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
   # A dry run skips this job, because entering the pypi environment records a deployment.
   publish-pypi:
     needs: [plan, build-artifacts]
@@ -547,10 +553,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+          PRODUCER_ATTEMPT: ${{ needs.build-artifacts.outputs.producer_attempt }}
         run: >-
           python3 .release-tools/infra/scripts/release_recovery.py qualify-python
           --tag "$TAG" --source "$SOURCE_COMMIT"
-          --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --run-id "$GITHUB_RUN_ID" --attempt "$PRODUCER_ATTEMPT"
+          --verification-attempt "$GITHUB_RUN_ATTEMPT"
           --directory "$RUNNER_TEMP/python-qualification"
       - name: Retain the scoped Python qualification receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

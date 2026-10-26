@@ -239,6 +239,11 @@ distributions were already present.
 
 The `python-qualification-RUN-ATTEMPT` artifact and job summary identify the tag,
 source, exact producer artifact, wheel and sdist hashes, and qualification time.
+The build job records its original attempt as an output. Qualification keeps
+that identity when GitHub carries a successful build into a later retry.
+The receipt reports the verification attempt separately. Manual qualification
+uses `--attempt` for the original build and `--verification-attempt` for the
+publication retry to inspect. Verification defaults to the original attempt.
 The helper verifies actual bytes from the producer, GitHub Release, and PyPI.
 It retries missing PyPI distributions for at most six observations, ten seconds
 apart. Conflicting immutable bytes fail immediately.

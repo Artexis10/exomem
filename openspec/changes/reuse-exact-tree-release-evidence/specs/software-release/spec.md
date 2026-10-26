@@ -38,6 +38,10 @@ Python qualification SHALL bind the exact tag, source commit, publisher run and 
 - **WHEN** the exact publisher has produced matching official Python distributions while images remain in progress
 - **THEN** the Python handback passes and names its producer without claiming image qualification
 
+#### Scenario: A retry inherits successful distribution bytes
+- **WHEN** a publisher retry retains an artifact from an earlier successful job
+- **THEN** the receipt keeps the original artifact producer attempt and records the later verification attempt separately
+
 ### Requirement: Report delivery boundaries separately
 
 A release receipt SHALL record observed source readiness, artifact qualification, and consumer verification separately. It SHALL name each timestamp's source. It SHALL distinguish Python qualification from complete image qualification. Missing consumer proof SHALL remain unverified and SHALL NOT be replaced with publication time.
