@@ -992,41 +992,47 @@ def compiled_intent(page: SemanticPageState) -> bool:
 
 
 def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
-    """Return a deterministic path/type mismatch before semantic applicability."""
+    """Return a deterministic path/type mismatch before semantic applicability.
+
+    A type folder holds pages of any compiled type, and a compiled type is valid in
+    any Notes folder the router does not exempt. So a page is off its route only when
+    a type folder holds a page without a compiled type, or a compiled page sits where
+    the router never selects it.
+    """
     destination = _route(page)
     compiled_type = _compiled_type(page)
-    page_type = normalized_compiled_type(page.page_type)
     if _path_excluded_from_semantic_minimum(page.path) and compiled_type is None:
         return None
-    if destination is not None and page_type != destination.key:
+    if destination is not None and compiled_type is None:
         return ContractFinding(
             code="COMPILED_TYPE_MISMATCH",
             severity="error",
             path=page.path,
             span=None,
             detail=(
-                f"canonical {destination.folder} content requires "
-                f"frontmatter type {destination.key!r}"
+                f"canonical {destination.folder} content requires a compiled "
+                f"frontmatter type, got {normalized_compiled_type(page.page_type) or 'none'!r}"
             ),
             remediation=(
-                f"Set `type: {destination.key}` or move the document outside that "
-                "canonical compiled destination."
+                "Set a compiled `type:` (shipped: "
+                + ", ".join(item.key for item in note_types.shipped(note_types.compiled))
+                + ") or move the document outside that canonical compiled destination."
             ),
             governed_element_identity=("compiled_intent", "type"),
             resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
         )
-    if compiled_type is not None and destination is None:
+    if compiled_type is not None and _route_name(page.path) is None:
         return ContractFinding(
             code="COMPILED_DESTINATION_MISMATCH",
             severity="error",
             path=page.path,
             span=None,
             detail=(
-                f"compiled frontmatter type {page_type!r} is outside its canonical "
-                f"{compiled_type.folder} destination"
+                f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
+                f"sits outside a {kb_dirname()}/{note_types.NOTES_FOLDER}/<Folder> destination"
             ),
             remediation=(
-                f"Move the document under `{compiled_type.folder}` or use "
+                f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
                 "a non-compiled type appropriate to this destination."
             ),
             governed_element_identity=("compiled_intent", "destination"),

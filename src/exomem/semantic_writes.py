@@ -931,6 +931,8 @@ class CreationPreflight:
     relation_attempt: relation_review._PrevalidatedAttempt | None = field(
         default=None, compare=False, repr=False
     )
+    #: Where the typed writer filed the page and why; absent for writers that do not place pages.
+    placement: dict[str, Any] | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -962,6 +964,8 @@ class CreationPreflight:
             value["applicability"] = self.applicability
         if self.vocabulary_binding is not None:
             value["vocabulary_resolution"] = self.vocabulary_binding.as_dict()
+        if self.placement is not None:
+            value["placement"] = self.placement
         return value
 
 

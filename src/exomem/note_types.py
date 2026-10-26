@@ -42,6 +42,10 @@ PACK = "note-types.yaml"
 ROLES = frozenset({"compiled", "entity", "source", "evidence"})
 # The note-type registry schema fixes the two `sources` values.
 SOURCES_VALUES = frozenset({"required", "optional"})
+# nosemgrep: ep-word-set -- The typed writer implements these partition kinds; a pack entry picks one.
+PARTITIONS = frozenset({"project", "domain", "medium", "none"})
+# nosemgrep: ep-word-set -- The typed writer implements these stem kinds; a pack entry picks one.
+STEMS = frozenset({"slug", "dated", "started"})
 #: The one parent folder a compiled type's folder sits in.
 NOTES_FOLDER = "Notes"
 
@@ -69,16 +73,33 @@ class NoteType:
     folder: str | None = None
     time_bounded: bool = False
     sources: str = "optional"
+    #: What splits the type folder into sub-folders: the page's project, domain or medium.
+    partition: str = "none"
+    #: How the file stem is built from the slug: bare, month-prefixed or start-month-prefixed.
+    stem: str = "slug"
+    #: The token of the type's row in the top index Counts. Rows written before the pack named
+    #: the research type `research-note` use `research`.
+    index_row: str = ""
 
 
 def _note_type(entry: registry.Entry) -> NoteType:
     attributes = entry.attributes
+    partition, stem = attributes.get("partition", "none"), attributes.get("stem", "slug")
+    if partition not in PARTITIONS or stem not in STEMS:
+        # Only the shipped pack sets these, so a bad value is a build defect.
+        raise registry.RegistryError(
+            f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} has partition {partition!r} or stem {stem!r} "
+            "that the typed writer does not implement"
+        )
     return NoteType(
         key=entry.key,
         role=attributes.get("role"),
         folder=attributes.get("folder"),
         time_bounded=bool(attributes.get("time_bounded", False)),
         sources=str(attributes.get("sources", "optional")),
+        partition=partition,
+        stem=stem,
+        index_row=str(attributes.get("index_row") or entry.key),
     )
 
 

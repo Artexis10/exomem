@@ -18,9 +18,9 @@ import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from . import call_spans
+from . import call_spans, homes, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
@@ -40,6 +40,7 @@ SOURCES_BY_TYPE_HEADER = "## By type"
 SOURCES_RECENT_HEADER = "## Recent captures"
 INDEX_RECENT_HEADER = "## Recent activity"
 INDEX_COUNTS_HEADER = "## Counts"
+NOTES_BY_TYPE_HEADER = "## By type"
 LOG_SEPARATOR = "\n---\n"
 
 
@@ -229,35 +230,80 @@ def _count_sources(
     return out
 
 
-# Map Notes/<folder> → page-type key used in the Counts section
-# (e.g. "Research" → "research", "Productions" → "production-log").
-_NOTES_FOLDER_TO_TYPE: dict[str, str] = {
-    "Research": "research",
-    "Insights": "insight",
-    "Failures": "failure",
-    "Patterns": "pattern",
-    "Experiments": "experiment",
-    "Productions": "production-log",
-}
+@dataclass(frozen=True, slots=True)
+class _NotesOwner:
+    """A Notes folder that one Counts row and one section of `Notes/index.md` report."""
+
+    #: The folder's segments below Notes, as registered.
+    parts: tuple[str, ...]
+    #: The token of the folder's `- Notes (<token>): N` row.
+    token: str
+    #: The section titles that name the folder, preferred first.
+    titles: tuple[str, ...]
+    #: Set for a home, whose section this module writes when it is missing.
+    description: str | None = None
+    active: bool = True
 
 
-def _count_notes(notes_dir: Path) -> dict[str, int]:
-    """Per-type compiled-note count, recursing into project/domain/medium subfolders.
+def _notes_owners(home_set: homes.HomeSet | None) -> tuple[_NotesOwner, ...]:
+    """The shipped compiled types' folders, then the vault's homes."""
+    owners = [
+        _NotesOwner(
+            PurePosixPath(str(note_type.folder)).parts[1:],
+            note_type.index_row or note_type.key,
+            (PurePosixPath(str(note_type.folder)).name,),
+        )
+        for note_type in note_types.shipped(note_types.compiled)
+    ]
+    for home in home_set.homes if home_set is not None else ():
+        owners.append(
+            _NotesOwner(home.parts, home.key, (home.label, home.parts[-1]), home.description, home.active)
+        )
+    return tuple(owners)
 
-    Returns a dict keyed by the page-type token used in `index.md` Counts
-    (e.g. "research", "insight", "production-log"). Excludes index.md files
-    and any folder starting with "_".
+
+def _owner_of(owners: tuple[_NotesOwner, ...], parts: tuple[str, ...]) -> _NotesOwner | None:
+    """The deepest owner whose folder holds `parts`, so a nested home counts its own pages."""
+    folded = tuple(part.casefold() for part in parts)
+    best: _NotesOwner | None = None
+    for owner in owners:
+        own = tuple(part.casefold() for part in owner.parts)
+        if folded[: len(own)] == own and (best is None or len(own) > len(best.parts)):
+            best = owner
+    return best
+
+
+def _count_notes(notes_dir: Path, *, home_set: homes.HomeSet | None = None) -> dict[str, int]:
+    """Per-folder compiled-note count, recursing into project/domain/medium subfolders.
+
+    Returns a dict keyed by the token of each folder's `index.md` Counts row: the type's
+    row for a shipped type folder (e.g. "research", "insight", "production-log") and the
+    home's key for a home. A page counts once, under the deepest folder that owns it.
+    Excludes index.md files and any folder starting with "_".
     """
     out: dict[str, int] = {}
     if not notes_dir.is_dir():
         return out
+    owners = _notes_owners(home_set)
+    by_name = {owner.parts[0].casefold(): owner for owner in owners if len(owner.parts) == 1}
     for sub in notes_dir.iterdir():
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
-        key = _NOTES_FOLDER_TO_TYPE.get(sub.name)
-        if key is None:
+        owner = by_name.get(sub.name.casefold())
+        if owner is None:
             continue  # unknown top-level folder under Notes/; ignore
-        out[key] = _count_markdown_pages(sub)
+        out[owner.token] = _count_markdown_pages(sub)
+    for owner in owners:
+        if len(owner.parts) < 2:
+            continue
+        nested = notes_dir.joinpath(*owner.parts)
+        if not nested.is_dir():
+            continue
+        pages = _count_markdown_pages(nested)
+        out[owner.token] = out.get(owner.token, 0) + pages
+        enclosing = _owner_of(tuple(o for o in owners if o is not owner), owner.parts[:-1])
+        if enclosing is not None and enclosing.token in out:
+            out[enclosing.token] -= pages
     return out
 
 
@@ -419,7 +465,7 @@ def _prepend_recent_activity(
 SOURCES_COUNT_PATTERN = re.compile(r"^- Sources: .+$", re.MULTILINE)
 # Top-index Counts rows: `- Notes (research): 106` or `- Entities (person): 21`.
 _NOTES_COUNT_LINE = re.compile(
-    r"^(- Notes \()([a-z-]+)(\): )(\d+)\s*$", re.MULTILINE
+    r"^(- Notes \()([a-z0-9-]+)(\): )(\d+)\s*$", re.MULTILINE
 )
 _ENTITIES_COUNT_LINE = re.compile(
     r"^(- Entities \()([a-z-]+)(\): )(\d+)\s*$", re.MULTILINE
@@ -535,23 +581,10 @@ def _rewrite_sources_count(text: str, *, counts: dict[str, int]) -> str:
 # ---------------- sub-folder index refresh ----------------
 
 
-# Per page-type subfolders that show up in Notes/index.md and we keep
-# count-current. Order matches the existing real-vault index layout.
-_NOTES_SUBINDEX_TYPES: tuple[tuple[str, str], ...] = (
-    # (page-type token, folder name on disk)
-    ("research", "Research"),
-    ("insight", "Insights"),
-    ("failure", "Failures"),
-    ("pattern", "Patterns"),
-    ("experiment", "Experiments"),
-    ("production-log", "Productions"),
-)
-
-
 # H3 header `### Research — project-or-domain-scoped synthesis (43)` — capture
 # the type name (group 1), the description (group 2), and the count (group 3).
 _NOTES_H3_COUNT = re.compile(
-    r"^(### (?P<name>[A-Z][\w\- ]*?))( — [^\n]*?)? \((?P<count>\d+)\)\s*$",
+    r"^(### (?P<name>[^\W\d_][\w\- ]*?))( — [^\n]*?)? \((?P<count>\d+)\)\s*$",
     re.MULTILINE,
 )
 
@@ -627,25 +660,29 @@ def _refresh_notes_subindex_text(
     *,
     counts_by_type: dict[str, int],
     counts_by_subfolder: dict[str, dict[str, int]],
+    owners: tuple[_NotesOwner, ...] | None = None,
 ) -> str:
     """Rewrite count numbers in `Notes/index.md` without touching descriptions.
 
     Counts are rewritten in two places:
-    - H3 type headers `### Research — desc (43)` → updates `(43)` from `counts_by_type`.
+    - H3 section headers `### Research — desc (43)` → updates `(43)` from `counts_by_type`.
     - Subfolder bullets `- [[link|Project Alpha]] (2) — desc` → updates `(2)` from `counts_by_subfolder`.
 
-    Descriptions and section ordering are left untouched. Subfolders that
-    appear on disk but aren't already represented as bullets stay un-added;
-    audit's index_drift check surfaces them so you can add a description.
+    Descriptions and section ordering are left untouched. A home without a section gets one
+    at the end of `## By type`. Subfolders that appear on disk but aren't already represented
+    as bullets stay un-added; audit's index_drift check surfaces them so you can add a description.
     """
-    folder_to_type = {f: t for t, f in _NOTES_SUBINDEX_TYPES}
+    owners = _notes_owners(None) if owners is None else owners
+
+    def _owner_titled(name: str) -> _NotesOwner | None:
+        folded = name.strip().casefold()
+        return next(
+            (owner for owner in owners if folded in {title.casefold() for title in owner.titles}), None
+        )
 
     def _h3(m: re.Match[str]) -> str:
-        name = m.group("name").strip()
-        type_key = folder_to_type.get(name)
-        if type_key is None:
-            return m.group(0)
-        actual = counts_by_type.get(type_key)
+        owner = _owner_titled(m.group("name"))
+        actual = counts_by_type.get(owner.token) if owner is not None else None
         if actual is None:
             return m.group(0)
         prefix = m.group(1)  # `### Research`
@@ -665,8 +702,44 @@ def _refresh_notes_subindex_text(
         return f"{m.group(1)} ({actual}){rest}"
 
     text = _NOTES_H3_COUNT.sub(_h3, text)
+    text = _add_home_sections(text, owners, counts_by_type, _owner_titled)
     text = _notes_subfolder_bullet_re(kb_prefix()).sub(_bullet, text)
     return text
+
+
+def _add_home_sections(
+    text: str,
+    owners: tuple[_NotesOwner, ...],
+    counts_by_type: dict[str, int],
+    owner_titled: Callable[[str], _NotesOwner | None],
+) -> str:
+    """Give each home that has no section one, at the end of `## By type`."""
+    present = {match.group("name") for match in _NOTES_H3_COUNT.finditer(text)}
+    start = text.find(NOTES_BY_TYPE_HEADER)
+    if start == -1:
+        return text
+    sections: list[str] = []
+    for owner in owners:
+        if owner.description is None or any(owner_titled(name) is owner for name in present):
+            continue
+        count = counts_by_type.get(owner.token, 0)
+        if not owner.active and count == 0:
+            continue
+        summary = " ".join(owner.description.split())
+        for title in owner.titles:
+            header = f"### {title}{f' — {summary}' if summary else ''} ({count})"
+            # Only a header that reads back as this home's own keeps a later refresh idempotent.
+            found = _NOTES_H3_COUNT.fullmatch(header)
+            if found is not None and owner_titled(found.group("name")) is owner:
+                sections.append(header)
+                break
+    if not sections:
+        return text
+    end = text.find("\n## ", start + len(NOTES_BY_TYPE_HEADER))
+    end = len(text) if end == -1 else end
+    head, tail = text[:end].rstrip("\n"), text[end:].lstrip("\n")
+    joined = head + "\n\n" + "\n\n".join(sections) + "\n"
+    return joined + ("\n" + tail if tail else "")
 
 
 def _refresh_entities_subindex_text(
@@ -776,7 +849,9 @@ def compute_subindex_writes(
             sources_counts = _count_sources(sources_dir)
     else:
         sources_counts = dict(sources_counts)
-    notes_counts = _count_notes(notes_dir)
+    home_set = homes.load(vault_root)
+    notes_owners = _notes_owners(home_set)
+    notes_counts = _count_notes(notes_dir, home_set=home_set)
     entities_counts = _count_entities(entities_dir, registry=entity_registry)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
 
@@ -794,24 +869,18 @@ def compute_subindex_writes(
                 sources_counts[source_folder] = sources_counts.get(source_folder, 0) + 1
         elif head == "Notes" and len(parts) >= 3:
             type_folder = parts[1]
-            type_key = {
-                "Research": "research",
-                "Insights": "insight",
-                "Failures": "failure",
-                "Patterns": "pattern",
-                "Experiments": "experiment",
-                "Productions": "production-log",
-            }.get(type_folder)
-            if type_key:
-                notes_counts[type_key] = notes_counts.get(type_key, 0) + 1
-            # For nested types, also bump the per-subfolder count.
-            if type_folder in ("Research", "Experiments", "Productions") and len(parts) >= 4:
-                sub = parts[2]
-                inner = notes_by_subfolder.setdefault(type_folder, {})
-                inner[sub] = inner.get(sub, 0) + 1
-            elif type_folder in ("Insights", "Failures", "Patterns"):
-                inner = notes_by_subfolder.setdefault(type_folder, {})
-                inner[""] = inner.get("", 0) + 1
+            owner = _owner_of(notes_owners, tuple(parts[1:-1]))
+            if owner is not None:
+                notes_counts[owner.token] = notes_counts.get(owner.token, 0) + 1
+                enclosing = _owner_of(
+                    tuple(o for o in notes_owners if o is not owner), tuple(owner.parts[:-1])
+                )
+                if enclosing is not None and enclosing.token in notes_counts:
+                    notes_counts[enclosing.token] -= 1
+            # A folder with sub-folders counts a page under its own; a flat one under "".
+            inner = notes_by_subfolder.setdefault(type_folder, {})
+            sub = parts[2] if len(parts) >= 4 else ""
+            inner[sub] = inner.get(sub, 0) + 1
         elif head == "Entities" and len(parts) >= 3:
             ent_folder = parts[1]
             definition = entity_registry.by_folder.get(ent_folder.casefold())
@@ -878,6 +947,7 @@ def compute_subindex_writes(
                     logical,
                     counts_by_type=notes_counts,
                     counts_by_subfolder=notes_by_subfolder,
+                    owners=notes_owners,
                 ),
             )
             new = render_wikilinks_for_vault(new, vault_root)
