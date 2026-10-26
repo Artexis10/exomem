@@ -11,6 +11,7 @@ knowledge and inspect matching pages before creating another. Capture external
 originals into Source/Evidence first and include their returned references in
 `sources:` on the first compiled write; a URL or derivative is not the original.
 Honest `sources: []` is valid for live reasoning with no captured external input.
+For source ingestion, follow the [source compilation pass](writing.md#source-compilation-pass); a valid citation proves linkage, not semantic coverage.
 Use `connect_memory(operation="suggest-links")` on a draft when relevant connections
 are missing, and `suggest-relations` when their direction is unresolved. Reuse
 current evidence instead of repeating discovery; accept only reviewed, meaningful
@@ -50,9 +51,9 @@ reviewed snapshot through
 Its decision carries the item fingerprint, family, registry hashes, target
 versions, outcome, rationale, and canonical `choice`; it is not execution or permission.
 `generic, no-edge, or defer` are valid truthful outcomes. A proposed
-new identity still uses its family's canonical writer, and all existing
-confirmation rules remain in force: v1 has no scoped delegation or automatic
-vocabulary write.
+new identity still uses its family's canonical writer. Follow the live envelope's
+`promotion_classes` and disposition for that write; a vocabulary decision grants
+no extra authority. v1 has no standing restructure delegation.
 
 Bind that supported canonical write with `vocabulary_ref` and
 `vocabulary_fingerprint`, and keep one transport idempotency identity across

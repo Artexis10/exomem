@@ -8,7 +8,7 @@ After S1, the coupled S2/S3 batch, S5 and S10 can run in parallel; other depende
 
 Base `118f377ab04c595db26f13024a682f05aca31fc0` has the foundation merge's exact tree.
 CI run `37762518836` reported success on that exact head.
-The S1 boxes cite their proof below. Task 2.1 is delivered in PR #1630. Task 2.2 stays open. The S3 boxes stay open until PR #1630 merges.
+The S1 boxes cite their proof below. Task 2.1 is delivered in PR #1630. Task 2.2 stays open. S3 shipped in #1630 (`7b242bfa8`, change archived 2026-10-11), S4a in #1647 (`fb74f8c57`) and S10 in #1640 (`5c38c1f2b`, change archived 2026-10-11).
 
 ## S1. Substrate, revert, generic contract, bootstrap section (shipped foundation)
 
@@ -38,14 +38,14 @@ The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, inges
 
 ## S3. Lifecycle statuses (`add-lifecycle-status-registry`)
 
-- [ ] 3.1 Add the status registry with `class` (live, pending, superseded, retired, abandoned) and turn the inactive, retired, history and find-penalty sets into predicates on it; record the planned-evidence recurrence change while preserving entity identity rules.
-- [ ] 3.2 Keep an unregistered status live and report it as debt. Proof: register `abandoned` with its class and see `activate_context` stop serving that page as current; run the full suite.
+- [x] 3.1 Add the status registry with `class` (live, pending, superseded, retired, abandoned) and turn the inactive, retired, history and find-penalty sets into predicates on it; record the planned-evidence recurrence change while preserving entity identity rules.
+- [x] 3.2 Keep an unregistered status live and report it as debt. Proof: register `abandoned` with its class and see `activate_context` stop serving that page as current; run the full suite.
 
 ## S4a. Note types, read side (`add-note-type-registry`)
 
 Tasks 1.1 to 1.13 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4a. `folder`, `time_bounded` and `sources` join S4a there.
 
-- [ ] 4.1 Add the note-type registry with `role`, move the ranking multipliers into `ranking_config`, and move the semantic contract, audit, claims and the skills' role text onto role predicates. Proof: the suites pass unchanged; run the full suite.
+- [x] 4.1 Add the note-type registry with `role`, move the ranking multipliers into `ranking_config`, and move the semantic contract, audit, claims and the skills' role text onto role predicates. Proof: the suites pass unchanged; run the full suite.
 
 ## S4b. Note types, write side and promotion (`add-note-type-registry`)
 
@@ -77,7 +77,19 @@ Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.
 
 ## S10. Planning (`add-planning-value-registry`)
 
-- [ ] 10.1 Move Planning values into the vocabulary substrate as the `planning-values` registry (pack `packs/core/planning-values.yaml`, overlay `_Schema/planning-values.yaml`), with `class` on statuses and `parents` on kinds, under `add-planning-value-registry`. The values do not go into `_collection_types/planning.yaml`: only the substrate has the overlay, history and restore a vault-added value needs, and a built-in collection type cannot change its bytes before P4. `rank` and `order` wait for a consumer.
+- [x] 10.1 Move Planning values into the vocabulary substrate as the `planning-values` registry (pack `packs/core/planning-values.yaml`, overlay `_Schema/planning-values.yaml`), with `class` on statuses and `parents` on kinds, under `add-planning-value-registry`. The values do not go into `_collection_types/planning.yaml`: only the substrate has the overlay, history and restore a vault-added value needs, and a built-in collection type cannot change its bytes before P4. `rank` and `order` wait for a consumer.
+
+## S11. Registry tolerance, shadowing and bare names (organisation PR A)
+
+- [x] 11.1 Make page validation honour each registry finding's severity, and report an unknown field in a saved overlay as a warning, so that a later overlay field cannot block every page after a rollback. Check: a saved overlay with an unknown field leaves page writes working.
+- [x] 11.2 Keep a saved extension alias bound to its extension when a newer core key has the same label: a `core_shadowed` warning, the explicit `core.<key>` spelling for the core meaning, and grandfathering by the saved alias. Ship it in the same release as, or before, any new core relation key. Check: a shadowed alias keeps its meaning across a core upgrade.
+- [x] 11.3 Write the bare label on queue acceptance when it resolves to one entry in the page's admitted instance, and resolve labels through the caller's or page's admitted instance in `resolve-relation`, the queue, the bootstrap vocabulary section and curation identity. Curation accepts `aliases` and `registry_scope` for entity creation. Check: a private-instance label resolves and binds; a public caller never sees it.
+
+Evidence: PR A supplies registry tolerance, shadowing, admitted-instance resolution and bare labels. The tolerance, private-instance, display-label and queue suites pass; independent review and delivery evidence remain on PR A.
+
+## S12. Vocabulary at authoring time (organisation PR B)
+
+- [ ] 12.1 Add one bounded vocabulary-delta carrier: at most 5 entries added since the session last received the caller's admitted effective digest, read from registry history, acknowledged through the due-state emission ledger and riding activation and mutating responses; the hook renders it and resets it on compact or resume. Check: one emission per session per digest change; admitted instances only; counted inside `limit_chars`.
 
 ## Closure
 

@@ -14,10 +14,19 @@ This change measures the current behaviour first, then ships the smallest prompt
 
 ## What Changes
 
-- Measure first: a separate case-authoring lane files a benchmark amendment with the pass line that the owner delegate set, and freezes six positive cases with durability-matched twins and an answer key. A sibling measurement lane runs a baseline on `main` and each arm through the real agent driver, with 3 repeats per case per client shape.
+The source-quality repair also restores honest relation qualification and separates custody from semantic compilation.
+It adds deterministic feedback and agent guidance without a new refusal, completion database, or server-side semantic author.
+The deferred entity barrier and paired behaviour measurement retain their existing holds.
+
+- Deliver the organisation substrate without a model-measurement gate. Before building the behaviour layers, a separate case-authoring lane files the revised amendment.
+  Development uses at most five rounds and eighty sessions; one blind final comparison covers forty situations and 160 sessions.
+  The behaviour layers merge only with an established paired gain or the owner's ruling.
 - Rewrite the nine served texts that require confirmation or leave a promotion unclassified, and make the owner's type, category and relation saves and authored typed edges `proactive_capture` through a MODIFIED envelope ceiling, ratified by owner decision O2. The served envelope classifies each promotion action in a structured map.
 - Add an `undeclared_referents` block to every durable write's receipt: up to 3 names that the write newly links and that have no entity, each with the `create-entity` route. It ships only if the arm with it beats the arm without it, or the agent acts on its names.
-- Add typed `create-entity` connections, the additive `add-relation` leaf on `connect_memory` and the `remove_relation` operation on `edit_memory`, with relation `generic` and `endpoints` data, kinship and affiliation core relations, and an offer that replaces a generic edge in place.
+- Use the shipped `create-entity` `relations=[{kind,target}]` items and ordinary `## Relations` bullets for typed edges.
+  Add registry `generic` and `endpoints` data, kinship and affiliation relations, and an internal curation removal step.
+  Refuse new generic edges that touch an entity only when visible endpoints have fitting specific options; one reasoned retry keeps a generic edge.
+  Offer non-blocking replacement options for note-to-note generic edges.
 - Gate a `referents` declaration argument on `remember` and `observe_memory`: it is built only when the shipped arm misses the pass line, and it ships only if its arm beats the shipped arm.
 - Add a `recent_promotions` due-state category that surfaces each promotion once in the next interactive session, and one revert call per promotion, keyed by its entry.
 - Show relations by label, for example `has_pet (a kind of owns)`, through one formatter.
@@ -35,13 +44,17 @@ This change measures the current behaviour first, then ships the smallest prompt
 - `delegation-envelope`: the ceiling requirement adds the owner's promotions to `proactive_capture`, and a scoped edge removal and the promotion revert to `restructure_execution`.
 - `write-time-identity-candidates`: detection, not the server, never creates an entity; writes carry `undeclared_referents`.
 - `epistemic-relation-registry`: relation labels, the display formatter, endpoint families and the generic marker.
+- `semantic-write-contract`: registry-marked generic relations remain connectivity, never typed-specific qualification; authored all-generic relations receive bounded advisory feedback.
+- `adoption-compile-planning`: source descriptions, capture guidance, proposals and compact write feedback distinguish citation linkage from unassessed semantic compilation.
 - `relation-vocabulary-evolution`: a generic edge between entities offers fitting predicates that replace it in place.
 - `graph-traversal-profiles` and `context-activation` (conditional): pack profiles, the `entity` profile and typed expansion of entity anchors.
 
 ## Impact
 
 - Code: `commands.py`, `envelope.py`, `edit_operations.py`, `prominence.py`, the scaffold, `capture_sweep.py`, `semantic_writes.py`, `link.py`, `curation.py`, `relation_registry.py`, `vocabulary/registry.py`, `due_state.py`, `mutation_terminal.py` and the core packs; `traversal_profiles.py`, `working_set.py` and `epistemic_graph.py` only on the D4 trigger.
-- Published surface: `connect_memory` gains `add-relation` and typed `connections`; `edit_memory` gains `remove_relation`; `maintain_memory` gains the `revert` curation action; `schema_memory` gains the `remove` delta verb. Each needs a measured raise of its schema ceiling. Removal and revert land only on tools that are already destructive, so `connect_memory` and `triage_memory` stay non-destructive.
+- Published surface: `maintain_memory` gains the `revert` curation action; `schema_memory` gains the `remove` delta verb.
+  Generic `relations` items gain an optional `reason` in the behaviour batch. No additive or removal tool operation is added.
+  Measure schema growth beside each ceiling. Removal and revert use existing destructive surfaces; `connect_memory` and `triage_memory` stay non-destructive.
 - Bootstrap: `promotion_classes` is paid for by trimming the confirm-first texts it replaces, on both the compact core ceiling and the compact reference bound; neither is raised.
   `referents`, if earned, adds about 844 bytes on each of two tools and needs both per-tool ceilings and the 90,000-byte surface total raised.
   The ChatGPT connector needs a refresh after the release.

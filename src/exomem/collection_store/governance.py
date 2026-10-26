@@ -213,7 +213,7 @@ _METADATA_SEAL = object()
 
 
 class _StaleQueryHistoryProjection(collections.CollectionError):
-    """Authentic history needs a fresh read; direct callers keep the existing refusal."""
+    """Authentic query metadata needs a fresh read; direct callers keep the existing refusal."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +235,17 @@ class _QueryHistoryState:
 
 
 @dataclass(frozen=True, slots=True)
+class _QuerySourceState:
+    collection_id: str
+    manifest_path: str
+    profile: str
+    snapshot: str
+    manifest: CanonicalSubject
+    sources: tuple[tuple[str, str], ...]
+    contributors: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _CanonicalInspectionEvidence:
     """Producer provenance with an opaque handle identity, never a resource."""
 
@@ -249,6 +260,7 @@ class _CanonicalInspectionEvidence:
     _seal: object
     inventory: bool = False
     history: _QueryHistoryState | None = None
+    query_sources: _QuerySourceState | None = None
 
     def __reduce__(self) -> object:
         raise TypeError("canonical inspection evidence is process-local")
@@ -365,14 +377,30 @@ def _history_references(value, state):
                  if (event["transition_id"], event["canonical_path"]) in state.owners)
 
 
+def _query_source_references(value, state, *, initial=False):
+    versions = value["source_versions"]
+    paths = [entry["path"] for entry in versions]
+    # Duplicate paths cannot identify one producer-owned metadata slot.
+    if len(set(paths)) != len(paths):
+        OperationAuthorization.refuse()
+    if initial and tuple((entry["path"], entry["hash"]) for entry in versions) != state.sources:
+        OperationAuthorization.refuse()
+    owners = {path for path, _version in state.sources}
+    return tuple((("source_versions", index, "path"), path)
+                 for index, path in enumerate(paths) if path in owners)
+
+
 def _seal_metadata_projection(value, evidence):
     """Only the producer and trusted terminal transformations call this."""
     if type(evidence) is _CanonicalCoverageEvidence:
         # File receipt removal can shift indexes; only the original sealed owners receive new slots.
         references = _coverage_references(value, evidence.contributors)
-    elif evidence.history is not None:
-        # History slots follow authenticated transitions when terminal filtering shifts indexes.
-        references = _history_references(value, evidence.history)
+    elif evidence.query_sources is not None or evidence.history is not None:
+        # Independent source and history owners survive trusted filtering that shifts indexes.
+        references = (() if evidence.query_sources is None else _query_source_references(
+            value, evidence.query_sources, initial=not evidence.payload_hash))
+        if evidence.history is not None:
+            references += _history_references(value, evidence.history)
     elif evidence.inventory:
         # Filtering file entries can shift canonical rows; identity, not position, owns each slot.
         owners = {(state.manifest.collection_id, state.manifest.basis.subject.path)
@@ -1477,23 +1505,80 @@ class OperationAuthorization:
         evidence = self._inspection_proof(handle, tuple(selections), (), inventory=True)
         return _seal_metadata_projection(payload, evidence)
 
-    def query_history_evidence(self, payload, writer, manifest):
-        """Certify audit topology, never current file bytes or another query field."""
-        history = payload["agent_history"]
-        state = _QueryHistoryState(
+    def query_metadata_evidence(self, payload, writer, manifest, result, *, contributors=()):
+        """Certify the final query's sources and optional history, without physical presentation proof."""
+        from ..record_formats import profile_for
+
+        if "source_versions" not in payload:
+            return payload
+        identity_field = profile_for(manifest.semantic_profile).item_id_property
+        owners = {(row[identity_field], row["item_version"]) for row in result.rows}
+        owners.update(contributors)
+        current_manifest, current = self._query_source_metadata(manifest, owners)
+        sources = tuple((entry["path"], entry["hash"]) for entry in payload["source_versions"])
+        expected = {(manifest.path, manifest.manifest_version.hash)}
+        if manifest.storage.strategy == "markdown-log":
+            # A shared log version names the producer snapshot, never every row's physical bytes.
+            expected.add((manifest.storage.source, payload["snapshot"]))
+        else:
+            expected.update((path, version) for _key, path, version in current if path != manifest.path)
+        if any(source not in expected for source in sources):
+            self.refuse()
+        paths = {path for path, _version in sources}
+        state = _QuerySourceState(
+            manifest.collection_id, manifest.path, manifest.semantic_profile, payload["snapshot"],
+            current_manifest, sources, tuple(owner for owner in current if owner[1] in paths),
+        )
+        history = payload.get("agent_history")
+        history_state = None if history is None else _QueryHistoryState(
             manifest.collection_id, manifest.path, manifest.semantic_profile, payload["snapshot"],
             hashlib.sha256(_json(history).encode()).hexdigest(),
             tuple((event["transition_id"], event["canonical_path"]) for event in history["events"]),
         )
-        evidence = self._inspection_proof(writer.handle, (), (), history=state)
+        evidence = self._inspection_proof(writer.handle, (), (), history=history_state, query_sources=state)
         return _seal_metadata_projection(payload, evidence)
 
-    def _inspection_proof(self, handle, selections, references, *, inventory=False, history=None):
+    def _query_source_metadata(self, manifest, owners):
+        from .reader import row_source
+
+        self._load_grants()
+        current_manifest = next(iter_subjects(
+            self.conn, manifest.collection_id, self.logical_vault_id,
+            identity=manifest.path, include_held=False), None)
+        if current_manifest is None or self.decision(current_manifest).level < 6:
+            self.refuse(_StaleQueryHistoryProjection)
+        plan = self.field_plan(manifest)
+        owners = sorted(owners)
+        rows = []
+        for key, _version in owners:
+            subject = next(iter_subjects(self.conn, manifest.collection_id, self.logical_vault_id,
+                                         row_key=key, include_held=False), None)
+            if subject is None or self.decision(subject).level < 6:
+                self.refuse(_StaleQueryHistoryProjection)
+            fields = "row_id,collection_id,item_key,row_version,payload_hash,view_path"
+            if not plan.owner:
+                fields += ",values_json"
+            cursor = self.conn.execute(
+                f"SELECT {fields} FROM items WHERE collection_id=? AND item_key=?",
+                (manifest.collection_id, key))
+            rows.append(dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True)))
+        if not plan.owner:
+            rows, _snapshot = self.field_rows(manifest.collection_id, rows, "")
+        current = []
+        for (key, version), row in zip(owners, rows, strict=True):
+            public_version = (tokens.item_version(manifest.collection_id, key, row["row_version"], row["payload_hash"])
+                              if plan.owner else row["public_version"])
+            if public_version != version:
+                self.refuse(_StaleQueryHistoryProjection)
+            current.append((key, row_source(manifest, row), public_version))
+        return current_manifest, tuple(current)
+
+    def _inspection_proof(self, handle, selections, references, *, inventory=False, history=None, query_sources=None):
         from . import views
 
         return _CanonicalInspectionEvidence(
             self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
-            self.who, self.purpose, selections, references, "", _METADATA_SEAL, inventory, history,
+            self.who, self.purpose, selections, references, "", _METADATA_SEAL, inventory, history, query_sources,
         )
 
     def validate_inspection_projection(self, payload, handle, *, writer=None):
@@ -1503,6 +1588,27 @@ class OperationAuthorization:
             return None
         try:
             self._validate_metadata_binding(payload, handle, evidence)
+            if evidence.query_sources is not None:
+                state = evidence.query_sources
+                if (payload.get("collection_id") != state.collection_id
+                        or payload.get("snapshot") != state.snapshot):
+                    self.refuse()
+                try:
+                    from .preview import selected_writer
+
+                    admitted = selected_writer(self.root, state.collection_id)
+                    if admitted is None or admitted.handle._inspection_identity is not handle._inspection_identity:
+                        self.refuse(_StaleQueryHistoryProjection)
+                    # The manifest and selected row metadata suffice; a catalog would load unreturned owners.
+                    manifest = self.field_manifest(state.collection_id)
+                    current_manifest, contributors = self._query_source_metadata(
+                        manifest, ((key, version) for key, _path, version in state.contributors))
+                    if (manifest.path != state.manifest_path or manifest.semantic_profile != state.profile
+                            or current_manifest != state.manifest
+                            or contributors != state.contributors):
+                        self.refuse(_StaleQueryHistoryProjection)
+                except collections.CollectionError:
+                    self.refuse(_StaleQueryHistoryProjection)
             if evidence.history is not None:
                 from .history import agent_history
 

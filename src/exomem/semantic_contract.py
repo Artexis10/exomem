@@ -992,41 +992,47 @@ def compiled_intent(page: SemanticPageState) -> bool:
 
 
 def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
-    """Return a deterministic path/type mismatch before semantic applicability."""
+    """Return a deterministic path/type mismatch before semantic applicability.
+
+    A type folder holds pages of any compiled type, and a compiled type is valid in
+    any Notes folder the router does not exempt. So a page is off its route only when
+    a type folder holds a page without a compiled type, or a compiled page sits where
+    the router never selects it.
+    """
     destination = _route(page)
     compiled_type = _compiled_type(page)
-    page_type = normalized_compiled_type(page.page_type)
     if _path_excluded_from_semantic_minimum(page.path) and compiled_type is None:
         return None
-    if destination is not None and page_type != destination.key:
+    if destination is not None and compiled_type is None:
         return ContractFinding(
             code="COMPILED_TYPE_MISMATCH",
             severity="error",
             path=page.path,
             span=None,
             detail=(
-                f"canonical {destination.folder} content requires "
-                f"frontmatter type {destination.key!r}"
+                f"canonical {destination.folder} content requires a compiled "
+                f"frontmatter type, got {normalized_compiled_type(page.page_type) or 'none'!r}"
             ),
             remediation=(
-                f"Set `type: {destination.key}` or move the document outside that "
-                "canonical compiled destination."
+                "Set a compiled `type:` (shipped: "
+                + ", ".join(item.key for item in note_types.shipped(note_types.compiled))
+                + ") or move the document outside that canonical compiled destination."
             ),
             governed_element_identity=("compiled_intent", "type"),
             resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
         )
-    if compiled_type is not None and destination is None:
+    if compiled_type is not None and _route_name(page.path) is None:
         return ContractFinding(
             code="COMPILED_DESTINATION_MISMATCH",
             severity="error",
             path=page.path,
             span=None,
             detail=(
-                f"compiled frontmatter type {page_type!r} is outside its canonical "
-                f"{compiled_type.folder} destination"
+                f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
+                f"sits outside a {kb_dirname()}/{note_types.NOTES_FOLDER}/<Folder> destination"
             ),
             remediation=(
-                f"Move the document under `{compiled_type.folder}` or use "
+                f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
                 "a non-compiled type appropriate to this destination."
             ),
             governed_element_identity=("compiled_intent", "destination"),
@@ -1072,22 +1078,14 @@ def _missing_semantic_unit_finding(page: SemanticPageState) -> ContractFinding |
 def _copy_definition(
     definition: relation_registry.RelationDefinition,
 ) -> relation_registry.RelationDefinition:
-    return relation_registry.RelationDefinition(
-        key=definition.key,
-        description=definition.description,
-        family=definition.family,
-        direction=definition.direction,
-        parent=definition.parent,
-        inverse=definition.inverse,
+    return replace(
+        definition,
         origins=frozenset(definition.origins),
         aliases=tuple(definition.aliases),
         source_kinds=frozenset(definition.source_kinds),
         target_kinds=frozenset(definition.target_kinds),
         projects=frozenset(definition.projects),
         page_types=frozenset(definition.page_types),
-        status=definition.status,
-        replaced_by=definition.replaced_by,
-        core=definition.core,
     )
 
 
@@ -4470,14 +4468,16 @@ def qualify_relation(
 ) -> RelationQualification:
     """Whether ``fact`` is a deliberate typed epistemic edge.
 
-    Unchanged in meaning: excluded families are rejected, frontmatter only counts
-    for supersession, and targets must be eligible governed pages.
+    Registry-marked generic associations and excluded families do not qualify.
+    Frontmatter only counts for supersession; targets must be eligible governed pages.
     """
     reasons, definition = _structural_relation_reasons(
         fact, registry=registry, corpus=corpus, target_paths=corpus.eligible_governed_paths
     )
     if definition is not None and definition.family in _EXCLUDED_FAMILIES:
         reasons.append("excluded_family")
+    if definition is not None and definition.generic:
+        reasons.append("generic_relation")
     if fact.origin == "frontmatter":
         if definition is None or definition.family != "supersession":
             reasons.append("frontmatter_not_supersession")
@@ -4961,14 +4961,19 @@ def _registry_findings(
         else:
             governed_element_identity = ("relations", "registry", raw)
             resolved_rule = ("relations", "*", "registry")
+        severity = str(registry_finding.get("severity", "error"))
         findings.append(
             ContractFinding(
                 code=str(registry_finding.get("code", "invalid_relation_registry")),
-                severity="error",
+                severity=severity,
                 path=page.path,
                 span=None,
                 detail=str(registry_finding.get("detail", "invalid relation registry")),
-                remediation="Repair the relation registry before validating pages.",
+                remediation=(
+                    "Repair the relation registry before validating pages."
+                    if severity == "error"
+                    else "Review the relation registry when convenient; this never blocks a write."
+                ),
                 governed_element_identity=governed_element_identity,
                 resolved_rule=resolved_rule,
             )
@@ -5228,6 +5233,69 @@ def _disposition_finding(
     )
 
 
+# These closed contract finding codes share fixed presentation text with compact replies.
+RELATION_QUALITY_ADVISORIES = MappingProxyType({
+    "RELATION_TYPED_EDGE_ABSENT": {
+        "detail": (
+            "connected through wikilinks, cited provenance or generic associations only; "
+            "no qualifying specific relation names the relationship"
+        ),
+        "remediation": (
+            "Optional. Review the source and registered vocabulary with "
+            "`schema_memory(operation='inspect', subject='relations')`. Author a specific relation "
+            "only when supported; genuine generic relations or no edge remain valid. "
+            "Never author an edge merely to clear this warning."
+        ),
+    },
+    "RELATION_AUTHORED_ALL_GENERIC": {
+        "detail": (
+            "the admitted registered explicit relations authored by this page are all "
+            "generic associations; incoming specific relations may still qualify"
+        ),
+        "remediation": (
+            "Optional. Review the source and registered vocabulary with "
+            "`schema_memory(operation='inspect', subject='relations')`. Use governed authorship "
+            "for a supported specific relation; keep genuine generic relations or no "
+            "edge when appropriate. Never author an edge merely to clear this warning."
+        ),
+    },
+})
+
+
+def _authored_generic_finding(
+    page: SemanticPageState, disposition: RelationDisposition, corpus: SemanticCorpusContext,
+) -> ContractFinding | None:
+    """Describe admitted explicit authorship independently of incoming specificity."""
+    if not page.eligible_compiled:
+        return None
+    # Disposition already holds the writer's admitted facts; do not parse the page again.
+    facts = (*disposition.qualifying_facts, *(item.fact for item in disposition.rejected_facts))
+    definitions = []
+    for fact in {fact.identity: fact for fact in facts}.values():
+        # These are the explicit authoring origins fixed by the semantic contract.
+        if fact.authored_path != page.path or fact.origin not in {
+            "markdown_relation", "semantic_relation", "semantic_block",
+        }:
+            continue
+        registry = corpus.registry_for(fact.authored_path)
+        if not qualify_connectivity(fact, registry=registry, corpus=corpus).qualifies:
+            continue
+        definition = registry.definition(fact.canonical_relation or "")
+        if definition is not None:
+            definitions.append(definition)
+    if not definitions or not all(definition.generic for definition in definitions):
+        return None
+    return ContractFinding(
+        code="RELATION_AUTHORED_ALL_GENERIC",
+        severity="warning",
+        path=page.path,
+        span=None,
+        **RELATION_QUALITY_ADVISORIES["RELATION_AUTHORED_ALL_GENERIC"],
+        governed_element_identity=("relations", "authored_generic"),
+        resolved_rule=("relations", "*", "authored_generic"),
+    )
+
+
 def _typed_edge_finding(
     page: SemanticPageState, disposition: RelationDisposition
 ) -> ContractFinding | None:
@@ -5245,16 +5313,7 @@ def _typed_edge_finding(
         severity="warning",
         path=page.path,
         span=None,
-        detail=(
-            "connected through wikilinks or cited provenance only; no typed edge "
-            "names what the relationship actually is"
-        ),
-        remediation=(
-            "Optional. When the relationship is nameable, add a row under "
-            "`## Relations` as `- relation_type [[Target]]`, or review "
-            "`connect_memory(operation='suggest-relations')`. Never author an edge "
-            "merely to clear this warning."
-        ),
+        **RELATION_QUALITY_ADVISORIES["RELATION_TYPED_EDGE_ABSENT"],
         governed_element_identity=("relations", "typed_edge"),
         resolved_rule=("relations", "*", "typed_edge"),
     )
@@ -5343,7 +5402,9 @@ def _raw_findings(
         )
         if disposition_finding is not None:
             findings.append(disposition_finding)
-        typed_edge_finding = _typed_edge_finding(page, disposition)
+        typed_edge_finding = _authored_generic_finding(page, disposition, corpus)
+        if typed_edge_finding is None:
+            typed_edge_finding = _typed_edge_finding(page, disposition)
         if typed_edge_finding is not None:
             findings.append(typed_edge_finding)
     return findings, disposition

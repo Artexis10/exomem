@@ -1536,6 +1536,7 @@ def test_hidden_vertices_and_edges_cannot_change_public_graph_fusion_or_evidence
     }
     assert data["hits"][1]["graph"] == {
         "relation_type": "supports",
+        "relation_label": "supports",
         "direction": "outbound",
         "seed": seed,
     }

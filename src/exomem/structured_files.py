@@ -907,6 +907,7 @@ def apply(
             rel_path_no_ext=plan.manifest.storage.source.removesuffix(".md"),
             body=audit_body,
             operation_token=f"structured-files:{plan_id}",
+            machine_generated=True,
         )
         if log_plan.warning is not None:
             raise collections.CollectionError(

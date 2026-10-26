@@ -1,12 +1,11 @@
-"""propose_compilation: turn unprocessed source(s) into a draft note skeleton.
+"""propose_compilation: offer one optional note scaffold from captured sources.
 
 Pure retrieval. Reads the cited source(s), infers a likely note_type, finds the
 adjacent compiled notes worth connecting to (reusing corpus_aware.suggest_related),
-and returns a sectioned outline with `sources[]` and proposed `relates_to`
-relations pre-filled. It NEVER writes — the client fills the prose, reviews the
-proposed relations, and calls
-`note()`. Generation stays client-side per the pure-substrate principle; the
-server just hands over the scaffolding and the connections it can compute.
+and returns a sectioned outline with citation candidates. Adjacent pages are
+unreviewed candidates, never authored edges. The outline is not a source-wide
+semantic compilation plan. The client reads the full material, judges useful
+destinations and relations, and writes through the governed authoring routes.
 
 Grouping (which sources belong together) is deliberately NOT done here — that's a
 judgment call the client is better at. The audit unprocessed_source check surfaces
@@ -19,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, source_coverage
+from . import corpus_aware, source_corrections, source_coverage
 from . import find as find_module
 from .governance import egress
 from .vault import normalize_wikilink
@@ -53,12 +52,22 @@ def propose_compilation(
     titles: list[str] = []
     body_parts: list[str] = []
     warnings: list[str] = []
+    keep = egress.restricted_release_filter(vault_root)
 
     for s in sources:
-        canonical, _w = normalize_wikilink(s, vault_root, resolver=resolver, strict=False)
-        abs_path = vault_root / f"{canonical}.md"
+        # Withheld matches must not change a visible source's ambiguity or result.
+        canonical, _w = normalize_wikilink(
+            s, vault_root, resolver=resolver, strict=False, visible=keep,
+        )
+        try:
+            current = source_corrections.resolve_current(vault_root, canonical)
+        except source_corrections.SourceCorrectionUnavailable:
+            warnings.append(f"source unavailable, skipped: {s}")
+            continue
+        canonical = current.selected_path.removesuffix(".md")
+        abs_path = vault_root / current.selected_path
         page = find_module._CACHE.get(abs_path, vault_root)
-        if page is None:
+        if page is None or (keep is not None and not keep(page.rel_path)):
             warnings.append(f"source not found, skipped: {s}")
             continue
         resolved.append(canonical)
@@ -95,7 +104,10 @@ def propose_compilation(
         "suggested_title": title,
         "suggested_sources": resolved,
         "suggested_connections": connections,
-        "outline_markdown": _render_outline(note_type, title, connections),
+        "outline_scope": "optional_single_destination",
+        "candidate_status": "unreviewed",
+        "outline_markdown": _render_outline(note_type, title),
+        "semantic_compilation": source_coverage.compilation_guidance(vault_root, resolved),
         "source_excerpts": _source_excerpts(vault_root, resolved, pages, warnings),
         "warnings": warnings,
     }
@@ -107,7 +119,7 @@ def _source_excerpts(
     pages: list[find_module.ParsedPage],
     warnings: list[str],
 ) -> list[dict]:
-    """The opening text and recorded metadata of each Source, so the note needs no read per Source.
+    """Opening-only text and recorded metadata; full-source reading remains necessary.
 
     The excerpts share `SCAFFOLD_EXCERPT_CHARS`. Room for `SCAFFOLD_EXCERPT_CHARS //
     MIN_EXCERPT_CHARS` excerpts is the most the bound can fund, so the Sources after
@@ -167,7 +179,7 @@ _SECTIONS: dict[str, list[str]] = {
 }
 
 
-def _render_outline(note_type: str, title: str, connections: list[str]) -> str:
+def _render_outline(note_type: str, title: str) -> str:
     sections = _SECTIONS.get(note_type, _SECTIONS["insight"])
     lines = [f"# {title}", ""]
     if note_type == "research-note":
@@ -188,6 +200,9 @@ def _render_outline(note_type: str, title: str, connections: list[str]) -> str:
             "",
         ]
     lines += [
+        "> Optional scaffold for one note, not a source-wide compilation plan. "
+        "Read the full sources and review adjacent candidates before choosing outputs or relations.",
+        "",
         "## Observations",
         "",
         "- [ ] Replace this row with `- [category] content #tags (context) ^anchor`.",
@@ -196,9 +211,5 @@ def _render_outline(note_type: str, title: str, connections: list[str]) -> str:
     for sec in sections:
         lines.append(f"## {sec}")
         lines.append("")
-        if sec == "Relations" and connections:
-            lines.append("<!-- Proposed relations: review before writing. -->")
-            for c in connections:
-                lines.append(f"- relates_to [[{c}]]")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

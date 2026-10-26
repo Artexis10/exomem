@@ -85,6 +85,7 @@ from . import (
     retrieval_models,
     semantic_census,
     source_capture,
+    source_corrections,
     upload_tokens,
     vault,
     vocabulary_resolution,
@@ -107,6 +108,7 @@ from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
+from . import promotions as promotions_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import readiness as readiness_module
@@ -133,6 +135,7 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
@@ -610,11 +613,8 @@ _OptionalClientArtifactFiles = Annotated[
     Field(
         max_length=8,
         description=(
-            "Up to eight temporary client file handles (raw material such as a "
-            "transcript, article, screenshot or recording), captured as Sources "
-            "instead of `content`. Each needs `download_url` and `file_id`; "
-            "Exomem fetches it server-side. Proof-bearing artifacts go to "
-            "`preserve_artifacts`."
+            "Up to eight original handles with download_url and file_id; "
+            "Exomem retrieves their bytes. Proof uses preserve_artifacts."
         ),
     ),
 ]
@@ -1812,7 +1812,7 @@ def op_bootstrap(
                 "raw_material": "capture_source",
                 "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
                 "new_durable_conclusion": "create_note",
-                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance and marks each source processed",
+                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance; one live citing derivative clears the citation backlog, not semantic compilation",
                 "small_correction": "edit_note",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "supersede_note",
@@ -3743,6 +3743,8 @@ def _add_source(
     projects: list[str] | None,
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
+    expected_sha256: str | None = None,
+    correction: source_corrections.SourceCorrection | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind."""
     try:
@@ -3751,7 +3753,7 @@ def _add_source(
         guard = active_manager().mutation_guard(
             vault_root, request_id=active_mutation_request_id(),
             operation="capture_source_identity", holder_kind="command",
-        ) if source_identity is not None else nullcontext()
+        ) if source_identity is not None or correction is not None else nullcontext()
         with guard:
             result = add_module.add(
                 vault_root,
@@ -3767,6 +3769,8 @@ def _add_source(
                 projects=projects,
                 raw_protection=raw_protection,
                 source_identity=source_identity,
+                expected_sha256=expected_sha256,
+                correction=correction,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -3854,7 +3858,7 @@ def op_audit(
       Bare names resolve against filename stems AND frontmatter `title:`
       (so date-prefixed sources with a title match are not flagged).
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
-    - `unprocessed_source`: source that no live note compiles yet (no page
+    - `unprocessed_source`: source without a live citing derivative (no page
       in its `ingested_into:` is live and cites it in its own `sources:`)
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
@@ -3936,8 +3940,8 @@ def op_attention(
       close enough to restate, refine, or contradict (do they conflict?).
     - `stale_review`: active conclusions that are old AND rarely surfaced in
       `find` AND low inbound-degree (possibly stale — still true?).
-    - `unprocessed_source`: sources captured but never compiled (nothing
-      distilled from them yet).
+    - `unprocessed_source`: sources without a live citing derivative.
+      Citation linkage does not assess semantic compilation.
     - `relation_debt`: active compiled pages with no outbound Markdown
       connections (semantic neighbours are not yet durable graph edges).
 
@@ -4242,15 +4246,14 @@ def op_propose_compilation(
     sources: list[str],
     suggested_title: str | None = None,
 ) -> dict:
-    """Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only.
+    """Offer one optional compiled-note scaffold from captured sources. Read-only.
 
     The backlog-drain companion to `audit`'s `unprocessed_source` findings:
-    point it at one or more raw sources and it hands back a ready-to-fill
-    note skeleton — inferred note_type, a Question/Findings/Relations (or
-    Claim/…) outline, the `sources[]` to cite, and adjacent compiled pages to
-    link (computed via the same hybrid retrieval as `suggest_links`). It
-    does NOT write anything: you fill the prose and call `note()` with the
-    returned `suggested_sources` + `suggested_connections`.
+    It returns an optional outline for one note, citation candidates and
+    adjacent pages for review. It is not a source-wide compilation plan.
+    Read the full material before choosing useful destinations and grounded
+    relations. `suggested_connections` are unreviewed candidates, not accepted
+    edges. Write chosen outputs through the normal governed authoring routes.
 
     Group sources yourself before calling — pass a set that genuinely belongs
     in one note (the audit list is aged oldest-first to help you triage).
@@ -4265,9 +4268,8 @@ def op_propose_compilation(
     Returns:
         {suggested_note_type, suggested_title, suggested_sources,
          suggested_connections, outline_markdown, source_excerpts, warnings}.
-        `source_excerpts` holds one bounded excerpt per source, with its
-        recorded import metadata, so the note can be written without a read
-        per source.
+        `source_excerpts` holds opening-only excerpts and admitted full-source
+        read routes. An excerpt or citation does not establish semantic coverage.
 
     Errors:
         INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).
@@ -4288,6 +4290,7 @@ def op_get(
     links: bool = False,
     include_raw: bool = False,
     max_body_chars: int | None = None,
+    follow_corrections: bool = True,
 ) -> GetResponse:
     """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).
 
@@ -4336,6 +4339,7 @@ def op_get(
         max_body_chars: Optional cap for the returned `body`. Use this when a
             client wants bounded content instead of an arbitrary full-page read.
             Values above 12000 are capped server-side; negative values are rejected.
+        follow_corrections: Follow a Source's immutable correction chain. False reads its exact historical page.
 
     Returns:
         {path, frontmatter, body, content_hash, mtime}.
@@ -4496,6 +4500,19 @@ def op_get(
         )
         if status is not None:
             out["epistemic_status"] = status
+    if follow_corrections and note_types.Basis(vault_root).selects(result.frontmatter.get("type"), note_types.raw):
+        try:
+            if source_corrections.has_correction(vault_root, result.frontmatter):
+                resolution = source_corrections.resolve_current(vault_root, result.path)
+                current = op_get(
+                    vault_root, path=resolution.selected_path, frontmatter_only=frontmatter_only,
+                    include_history=include_history, links=links, include_raw=include_raw,
+                    max_body_chars=max_body_chars, follow_corrections=False,
+                )
+                current["source_resolution"] = resolution.as_dict()
+                return current
+        except source_corrections.SourceCorrectionUnavailable:
+            raise ValueError("NOT_FOUND: memory identifier is unavailable") from None
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
@@ -4990,6 +5007,29 @@ def _replacement_review_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
+    """The origin a creation records for its `ref`; None when none was given.
+
+    A ref the caller cannot read, withheld or missing, is an origin of unknown
+    path, and never refuses the creation: both leave the same bytes.
+    """
+    if not ref:
+        return None
+    path: str | None = None
+    try:
+        resolved = _resolve_memory_identifier(vault_root, ref)
+        if (Path(vault_root) / resolved).is_file() and promotions_module.page_visible(
+            vault_root, resolved
+        ):
+            path = resolved
+    except Exception:  # noqa: BLE001 - what cannot be read is an unknown origin, whatever the cause
+        path = None
+    from .writer_lease import active_mutation_request_id
+
+    operation_id = active_mutation_request_id() if path else None
+    return {"path": path, "operation_id": operation_id}
+
+
 def op_link(
     vault_root: Path,
     entity_type: EntityTypeId,
@@ -5014,6 +5054,7 @@ def op_link(
     aliases: list[str] | None = None,
     registry_scope: str | None = None,
     relations: list[dict] | None = None,
+    ref: str | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -5061,6 +5102,7 @@ def op_link(
             a turn in that script reaches it. At most 8, one line and 64
             characters each; one any other page already answers to refuses.
         registry_scope: Public instance token or canonical private Scope ID; grants no authority.
+        ref: The page or write that led to this entity, kept in the log entry.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -5100,6 +5142,7 @@ def op_link(
             aliases=aliases,
             registry_scope=registry_scope,
             relations=relations,
+            origin=_creation_origin(vault_root, ref),
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -6607,14 +6650,14 @@ def op_activate_context(
     trigger: Literal["user_turn", "task_refresh"] = "user_turn",
     initiator: str | None = None,
 ) -> dict:
-    """Recall bounded authorized context; abstain if uncertain.
+    """Recall authorized context; abstain if uncertain.
 
-    Reuse held policy/context; conversation supplies relevant thread/attachment excerpts.
-    origin=focus: agent cues, not human words;
-    focus cannot settle human ambiguity. Reads no attachments.
-    Clarify unknown subjects first. Keep source identity and scope.
-    Due items/refresh grant no writes.
-    Packets may carry maps; pull refs with read_memory.
+    Reuse held context; conversation supplies excerpts, not attachment reads.
+    focus is agent-authored, not human intent; clarify ambiguity.
+    Keep source identity/scope. Due/refresh grants no writes.
+    Pull map refs with read_memory.
+    Optional epistemic_status has counts/completeness; read_memory gives
+    items/reading provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -7459,14 +7502,12 @@ def op_read_memory(
     history_limit: int | None = None,
     history_continuation: str | None = None,
     continuation: _OptionalViewContinuation = None,
+    follow_corrections: bool = True,
 ) -> dict:
-    """Read a selected page, semantic unit or view.
+    """Read a page, exact unit, or exomem://map view.
 
-    unit_ref returns the current unit, parent citation/lifecycle and up to
-    2,400 context characters. Missing/stale/ambiguous/superseded refs report
-    status; never substituted. Without unit_ref, returns the page.
-    Also reads the paged views exomem://map, exomem://map/topic/<domain key>
-    and exomem://map/unfiled.
+    Missing/stale units report status; never substituted.
+    Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
 
     Args:
         path: Vault-relative path or KB shorthand.
@@ -7479,6 +7520,7 @@ def op_read_memory(
         history_limit: Retained revisions per page, from 1 to 50.
         history_continuation: Position from the previous revision_history envelope.
         continuation: Next-page token of a view.
+        follow_corrections: False reads the historical Source; unit reads stay exact.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
@@ -7507,6 +7549,7 @@ def op_read_memory(
                 history_limit=history_limit,
                 history_continuation=history_continuation,
                 continuation=continuation,
+                follow_corrections=follow_corrections,
             )
     if continuation is not None:
         raise context_views_module.invalid_continuation()
@@ -7599,6 +7642,7 @@ def op_read_memory(
         include_history=include_history,
         links=links,
         include_raw=include_raw,
+        follow_corrections=follow_corrections,
     )
     if include_history and "content_hash" in result:
         from . import compiled_history
@@ -8146,29 +8190,44 @@ def op_capture_source(
     adoption: _OptionalArtifactAdoption = None,
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
+    expected_sha256: str | None = None,
+    correction: source_corrections.SourceCorrection | None = None,
 ) -> dict:
-    """Save raw text or file handles losslessly in Sources/.
+    """Save Source text or original files.
 
-    Proof goes to preserve_evidence or preserve_artifacts. source_kind is
-    required; domain is optional. Both accept new slugs. compile_guidance
-    returns a proposal; reuse it instead of calling prepare_note.
+    Never retype originals: use files, or transfer_artifact(upload, lane=source,
+    hold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.
+    Cloud needs handles; stdio needs HTTP MCP. source_kind is required.
 
     Args:
-        content: Raw text. Supply this or `files`, not both.
-        source_type: Alias of source_kind; conflicts are refused.
-        url: Required when the source kind declares it.
-        tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Return a reusable proposal.
-        suggested_title: Title hint for the proposal.
-        source_kind: What it IS; open lowercase slug, including new kinds.
-        domain: What it is ABOUT, lowercase slug.
-        projects: Project keys served; never affects storage.
-        files: Client file handles, captured instead of `content`.
-        adoption: Selects exactly one supplied handle. Establishes eligibility,
-            not write consent; agent-initiated use obeys proactive_capture.
-        raw_protection: Keep the original owner-only until a whole-artifact release.
-        source_identity: Opaque text identity; identical inputs reuse the Source indefinitely.
+        content: Authored text, or supply files.
+        source_type: source_kind alias.
+        url: Source URL.
+        tags: Labels.
+        compile_guidance: Optional scaffold or source read routes.
+        suggested_title: Proposal title.
+        source_kind: What it is; open slug.
+        domain: Subject slug.
+        projects: Projects.
+        files: Original handles.
+        adoption: Select one handle; not write consent.
+        raw_protection: Owner-only original.
+        source_identity: Durable text-capture identity.
+        expected_sha256: Original SHA-256 (UTF-8 for content).
+        correction: Correct a Source; expected_hash is its page hash.
     """
+    if correction is not None:
+        correction = source_corrections.validate_correction(correction)
+        if source_identity is not None or adoption is not None or files and len(files) != 1:
+            raise ValueError("INVALID_SOURCE_CORRECTION: correction requires one original and cannot combine with identity or adoption")
+    if expected_sha256 is not None:
+        source_capture.validate_sha256(expected_sha256)
+        if files and len(files) != 1:
+            raise ValueError("SOURCE_HASH_REQUIRES_ONE_FILE: expected_sha256 binds exactly one original file")
+        if not files:
+            source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
+    if files and content:
+        raise ValueError("INVALID_SOURCE: supply content or files, not both")
     if source_identity is not None:
         if files or adoption is not None:
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
@@ -8176,6 +8235,7 @@ def op_capture_source(
         source_capture.require_authority(vault_root)
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    out: dict
     if files or adoption is not None:
         from . import client_artifacts
 
@@ -8193,41 +8253,57 @@ def op_capture_source(
             projects=projects,
             adoption=adoption,
             raw_protection=raw_protection,
+            expected_sha256=expected_sha256,
+            correction=correction,
         )
         _note_committed_artifact_targets(captured)
-        return captured
-    source = _add_source(
-        vault_root,
-        source_schema,
-        kind=kind,
-        content=content,
-        title=title,
-        slug=slug,
-        url=url,
-        tags=tags,
-        why_captured=why_captured,
-        domain=domain,
-        projects=projects,
-        raw_protection=raw_protection,
-        source_identity=source_identity,
-    )
-    out: dict = {"source": source}
-    if source_identity is not None:
-        out["capture_outcome"] = source["capture_outcome"]
-        out["mutated"] = source["capture_outcome"] == "created"
-    # The terminal reads these from the leaf's top level.
-    for key in ("vocabulary_resolution", "vocabulary_receipt"):
-        if key in source:
-            out[key] = source[key]
+        out = captured
+        # Stored/replayed are the successful outcomes fixed by the artifact receipt protocol.
+        source_paths = [
+            row["page"] for row in captured.get("files", [])
+            if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
+        ]
+    else:
+        source = _add_source(
+            vault_root,
+            source_schema,
+            kind=kind,
+            content=content,
+            title=title,
+            slug=slug,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+            raw_protection=raw_protection,
+            source_identity=source_identity,
+            expected_sha256=expected_sha256,
+            correction=correction,
+        )
+        out = {"source": source}
+        if source_identity is not None:
+            out["capture_outcome"] = source["capture_outcome"]
+            out["mutated"] = source["capture_outcome"] == "created"
+        # The terminal reads these from the leaf's top level.
+        for key in ("vocabulary_resolution", "vocabulary_receipt"):
+            if key in source:
+                out[key] = source[key]
+        source_paths = [source["path"]]
+    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
     if compile_guidance:
-        try:
-            out["compile_guidance"] = op_propose_compilation(
-                vault_root,
-                sources=[source["path"]],
-                suggested_title=suggested_title,
-            )
-        except ValueError as exc:
-            out["compile_guidance"] = {"available": False, "error": str(exc)}
+        if files or adoption is not None:
+            # Originals remain usable while extraction is pending; preparation is optional.
+            out["compile_guidance"] = {"semantic_compilation": out["semantic_compilation"]}
+        else:
+            try:
+                out["compile_guidance"] = op_propose_compilation(
+                    vault_root,
+                    sources=source_paths,
+                    suggested_title=suggested_title,
+                )
+            except ValueError as exc:
+                out["compile_guidance"] = {"available": False, "error": str(exc)}
     return out
 
 
@@ -8570,20 +8646,26 @@ def op_preserve_artifacts(
 def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
+    hold: bool = False,
 ) -> dict:
-    """Prepare binary transfer when client file handles are unavailable.
+    """Prepare an original upload or download; a handoff does not prove custody.
 
-    Returns a short-lived handoff; issuance does not prove consumption.
-    For a stored original, download with artifact and optional expected_sha256.
-    Use the bounded native MCP resource where supported, or open the HTTPS link.
-    Note reads and exports remain separate.
+    Upload: hold=true with expected_sha256, then exomem attach --handoff-file.
+    Capture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
-        expected_sha256: Optional assertion of the original version to recover.
+        expected_sha256: Intended original SHA-256.
+        hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
+    if hold:
+        if operation != "upload" or artifact is not None or expected_sha256 is None:
+            raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
+        from . import upload_handoff
+
+        return upload_handoff.prepare_upload(vault_root, lane=lane, expected_sha256=expected_sha256)
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:
             raise ValueError("INVALID_MODE: original recovery needs download and artifact")
@@ -9117,6 +9199,10 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         from . import upkeep as upkeep_module
 
+        if promotions_module.is_promotion_ref(ref):
+            from . import promotion_revert as promotion_revert_module
+
+            return promotion_revert_module.item(vault_root, ref)
         if upkeep_module.is_upkeep_ref(ref):
             # Before the attention scan: an upkeep item revalidates from its
             # own pages and never runs the whole-vault union.
@@ -9228,6 +9314,24 @@ def op_review_item_context(
         raise ValueError("INVALID_REVIEW_CONTEXT_ARGUMENTS: continuation requires a vocabulary ref")
     from . import upkeep as upkeep_module
 
+    if promotions_module.is_promotion_ref(ref):
+        from . import promotion_revert as promotion_revert_module
+
+        if (
+            max_body_chars != 4000
+            or max_related_pages != 8
+            or max_graph_nodes != 30
+            or max_graph_edges != 60
+            or max_history != 10
+            or max_evolution_versions != 10
+        ):
+            raise ValueError(
+                "INVALID_PROMOTION_CONTEXT_ARGUMENTS: a recent promotion's context accepts "
+                "only expected_fingerprint"
+            )
+        return promotion_revert_module.context(
+            vault_root, ref, expected_fingerprint=expected_fingerprint
+        )
     if upkeep_module.is_upkeep_ref(ref):
         if (
             max_graph_nodes != 30
@@ -9733,6 +9837,16 @@ def op_triage_memory(
         )
     from . import upkeep as upkeep_module
 
+    if promotions_module.is_promotion_ref(ref):
+        _refuse_pairless_stance(ref, action)
+        return promotions_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if upkeep_module.is_upkeep_ref(ref):
         _refuse_pairless_stance(ref, action)
         return upkeep_module.triage(
@@ -9920,8 +10034,10 @@ def op_connect_memory(
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
         relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
     """
-    if registry_scope is not None and operation != "create-entity":
-        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
+    if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity or resolve-relation"
+        )
     if relations not in (None, []) and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: relations requires create-entity")
     _validate_vocabulary_binding(
@@ -9990,7 +10106,14 @@ def op_connect_memory(
         _, observation_offset = relation_vocabulary_module.continuation_offsets(
             continuation
         )
-        registry = relation_registry_module.load_registry(vault_root)
+        # An instance this caller cannot admit answers as the public one does, so the
+        # reply never says whether the scope exists or what it defines.
+        admitted = (
+            relation_registry_module.load_admitted(vault_root, registry_scope)
+            if registry_scope is not None
+            else None
+        )
+        registry = admitted or relation_registry_module.load_registry(vault_root)
         observations = memory_schema_module.indexed_relation_observations(
             vault_root,
             limit=limit,
@@ -10139,6 +10262,7 @@ def op_connect_memory(
             aliases=aliases,
             registry_scope=registry_scope,
             relations=relations,
+            ref=ref,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -10462,6 +10586,7 @@ def op_maintain_memory(
         "resume",
         "propose-compensation",
         "apply-compensation",
+        "revert",
     ]
     | None = None,
     run_id: str | None = None,
@@ -10571,6 +10696,7 @@ def op_maintain_memory(
                 "expected_plan_fingerprint",
                 "why",
             },
+            "revert": {"review_ref", "expected_plan_fingerprint", "why"},
         }
         allowed = allowed_by_action[curation_action]
         if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -10591,6 +10717,7 @@ def op_maintain_memory(
                 "expected_plan_fingerprint",
                 "why",
             },
+            "revert": {"review_ref", "expected_plan_fingerprint", "why"},
         }
         if any(supplied[name] is None for name in required_by_action[curation_action]):
             raise ValueError(
@@ -10630,6 +10757,16 @@ def op_maintain_memory(
             if curation_action == "propose-compensation":
                 assert run_id is not None
                 return curation_module.propose_compensation(vault_root, run_id=run_id)
+            if curation_action == "revert":
+                assert None not in (review_ref, expected_plan_fingerprint, why)
+                from . import promotion_revert as promotion_revert_module
+
+                return promotion_revert_module.revert(
+                    vault_root,
+                    review_ref=review_ref,
+                    expected_plan_fingerprint=expected_plan_fingerprint,
+                    why=why,
+                )
             assert curation_action == "apply-compensation"
             assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
             return curation_module.apply_compensation(
@@ -10855,8 +10992,8 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations. Inference reads unless
     save=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary
-    and usage; propose previews a delta; save applies upsert, alias or deprecate
-    with expected_hash and why; history lists kept versions; restore reverts one
+    and usage; propose previews a delta; save applies upsert, alias, deprecate or
+    remove with expected_hash and why; history lists kept versions; restore reverts one
     without rewriting pages.
     Operations: references/operation-routing.md.
 
@@ -10864,7 +11001,7 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
-            source-kinds, domains, statuses, planning-values or note-types);
+            source-kinds, domains, statuses, planning-values, note-types or homes);
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.

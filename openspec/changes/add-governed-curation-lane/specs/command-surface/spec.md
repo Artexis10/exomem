@@ -4,8 +4,8 @@
 
 The product registry SHALL extend `maintain_memory` with
 `mode="curation"` and the finite `curation_action` set `work-item`, `propose`,
-`preview`, `status`, `apply`, `resume`, `propose-compensation`, and
-`apply-compensation`. The registry-derived MCP tool, REST route, OpenAPI schema,
+`preview`, `status`, `apply`, `resume`, `propose-compensation`,
+`apply-compensation`, and `revert`. The registry-derived MCP tool, REST route, OpenAPI schema,
 CLI subcommand, generated capability documentation, and schema fixtures SHALL
 expose the same arguments and shared leaf implementation with no per-surface
 curation logic.
@@ -15,6 +15,11 @@ curation logic.
 - **WHEN** the registry generates MCP, REST, OpenAPI, CLI, and capability output
 - **THEN** every surface exposes the same curation actions and input constraints
   under `maintain_memory`
+
+#### Scenario: A promotion revert uses the common destructive surface
+
+- **WHEN** the user requests a promotion's undo and supplies its current revert fingerprint
+- **THEN** `maintain_memory(mode="curation", curation_action="revert")` applies the bound revert through the common mutation boundary
 
 ### Requirement: Curation selector classification is conservative and exact
 

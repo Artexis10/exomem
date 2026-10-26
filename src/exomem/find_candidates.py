@@ -1017,6 +1017,7 @@ def collect_candidates(
                             relation_type=neighbor.relation_type,
                             direction=neighbor.direction,
                             seed=neighbor.seed_rel,
+                            relation_label=neighbor.relation_label,
                         )
                     seen_target = set(typed_targets)
 

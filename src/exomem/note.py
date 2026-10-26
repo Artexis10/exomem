@@ -11,6 +11,9 @@ Path conventions:
 - experiment    → Notes/Experiments/<domain>/YYYY-MM-<slug>.md (date from `started`)
 - production-log → Notes/Productions/<medium>/YYYY-MM-<slug>.md (date from `created`)
 
+A vault home (`_Schema/homes.yaml`) replaces that folder for a page whose project (research
+note) or first topic (any other type) it serves; the file stem keeps the type's own form.
+
 Workflow per call:
 1. Validate inputs against the note_type's per-type rules.
 2. Resolve target path; auto-create domain/medium subfolder if needed.
@@ -35,6 +38,7 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +52,10 @@ from . import (
     note_types,
     relation_registry,
     relation_review,
+    semantic_contract,
     semantic_units,
     semantic_writes,
+    source_coverage,
     tag_variants,
     temporal,
     vocabulary_resolution,
@@ -57,7 +63,11 @@ from . import (
 from . import (
     find as find_module,
 )
+from . import (
+    homes as homes_module,
+)
 from . import project_keys as project_keys_module
+from .governance.membership import MembershipUnresolved
 from .kbdir import kb_prefix
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -74,6 +84,7 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    parse_frontmatter,
     plan_log_writes,
     read_guarded_text,
     render_wikilink_target,
@@ -83,6 +94,7 @@ from .vault import (
     writer_link_visibility,
     yaml_scalar,
 )
+from .vocabulary.registry import RegistryError
 
 log = logging.getLogger(__name__)
 
@@ -300,6 +312,7 @@ class _PreparedNote:
 def _build_write_feedback(
     *,
     vault_root: Path,
+    registry: relation_registry.RelationRegistry,
     note_type: str,
     rel_path: str,
     status: str | None,
@@ -312,7 +325,6 @@ def _build_write_feedback(
     suggestions_count: int,
     suggestions_requested: bool,
 ) -> dict:
-    registry = relation_registry.load_registry(vault_root)
     document = semantic_units.parse_semantic_units(
         body_clean,
         relation_registry=registry,
@@ -348,7 +360,10 @@ def _build_write_feedback(
             generic_targets.append(target)
 
     typed_note_relations = len(registered_note_relations)
-    typed_block_relations = sum(len(unit.relations) for unit in document.rich_units)
+    typed_block_relations = sum(
+        registry.resolve(relation.kind).status != "unregistered"
+        for unit in document.rich_units for relation in unit.relations
+    )
     relation_kinds = {relation.kind for relation in document.note_relations} | {
         relation.kind for unit in document.rich_units for relation in unit.relations
     }
@@ -386,8 +401,9 @@ def _build_write_feedback(
         else:
             next_actions.append(
                 "cite the `Sources/` page this drew from in `sources:` — each entry "
-                "appends this note's wikilink to that source's `ingested_into:`, which "
-                "is what marks the source processed"
+                "appends this note's wikilink to that source's `ingested_into:`. "
+                "A live citing derivative clears the citation backlog; semantic "
+                "compilation remains unassessed"
             )
     if relation_debt:
         next_actions.append(
@@ -419,6 +435,7 @@ def _build_write_feedback(
     relation_feedback: dict[str, object] = {
         "typed_note": typed_note_relations,
         "typed_block": typed_block_relations,
+        "count_basis": "registered relation syntax, including generic associations; not semantic specificity",
         "errors": [error.as_dict() for error in document.note_relation_errors],
         "relation_debt": relation_debt,
     }
@@ -447,6 +464,7 @@ def _build_write_feedback(
             "backrefs_planned": backrefs_planned,
             "required": note_type in SOURCES_REQUIRED_TYPES,
             "missing": note_type in SOURCES_REQUIRED_TYPES and not sources_norm,
+            "semantic_compilation": source_coverage.compilation_guidance(vault_root, sources_norm),
         },
         "links": {
             "body_wikilinks": len(body_targets),
@@ -744,6 +762,9 @@ def _legacy_note(
     kb = kb_root(vault_root)
     write_feedback = _build_write_feedback(
         vault_root=vault_root,
+        registry=relation_registry.load_for_page(
+            vault_root, note_path.relative_to(vault_root).as_posix(), parse_frontmatter(note_md)[0],
+        ),
         note_type=note_type,
         rel_path=note_path.relative_to(vault_root).as_posix(),
         status=status,
@@ -1089,6 +1110,168 @@ def _validate(
 # ---------------- path / slug ----------------
 
 
+@dataclass(frozen=True, slots=True)
+class _Placement:
+    """The folder and file stem a typed page takes."""
+
+    folder: Path
+    stem: str
+
+
+def _type_default(
+    *,
+    vault_root: Path,
+    note_type: str,
+    project: str | None,
+    slug: str,
+    domain: str | None,
+    medium: str | None,
+    started: str | None,
+    date_iso: str,
+    project_registry: project_keys_module.ProjectRegistry | None,
+) -> _Placement:
+    """The folder and stem of the type's own layout: its folder, partition and stem kind."""
+    definition = note_types.shipped_registry().types[note_type]
+    folder = kb_root(vault_root) / str(definition.folder)
+    if definition.partition == "project":
+        assert project is not None  # validated above
+        # Use live registry so auto-registered keys resolve to their folder.
+        registry = project_registry or _load_keys(vault_root)
+        folder /= registry.folder_for(project) or project.capitalize()
+    elif definition.partition == "domain":
+        assert domain  # validated above
+        folder /= _domain_folder(domain)
+    elif definition.partition == "medium":
+        assert medium  # validated above
+        folder /= _medium_folder(medium)
+    if definition.stem == "started":
+        assert started  # validated above
+        return _Placement(folder, f"{started[:7]}-{slug}")  # YYYY-MM-<slug>
+    if definition.stem == "dated":
+        return _Placement(folder, f"{date_iso[:7]}-{slug}")  # YYYY-MM-<slug>
+    return _Placement(folder, slug)
+
+
+def _homes_warnings(home_set: homes_module.HomeSet) -> list[str]:
+    return [f"HOMES_INVALID: {item['detail']}; pages go to their type folders." for item in home_set.findings]
+
+
+def _home_containing(
+    vault_root: Path, folder: Path, home_set: homes_module.HomeSet
+) -> homes_module.Home | None:
+    """The active home whose folder holds `folder`, if any."""
+    try:
+        below_kb = folder.relative_to(kb_root(vault_root)).parts
+    except ValueError:
+        return None
+    if below_kb[:1] != (note_types.NOTES_FOLDER,):
+        return None
+    return home_set.containing(below_kb[1:])
+
+
+def _require_home_keeps_scope(
+    root: Path,
+    home: homes_module.Home,
+    *,
+    destination: str,
+    default_destination: str,
+    source: str,
+) -> None:
+    """Refuse a home whose audience could differ from the type default's, before anything is written.
+
+    Governance scopes and vocabulary instances bind to paths, so filing a page in a home
+    must not move it into or out of a scope. Anything that cannot be shown equal is a refusal.
+    """
+    frontmatter = parse_frontmatter(source)[0]
+    # An ambiguous instance binding at the home's own path is the existing refusal, and it stands.
+    try:
+        chosen = homes_module.scope_of(root, destination, frontmatter)
+    except MembershipUnresolved as error:
+        raise NoteError("HOME_CHANGES_SCOPE", [], f"home {home.key} cannot be shown to keep the page's audience") from error
+    try:
+        default = homes_module.scope_of(root, default_destination, frontmatter)
+    except (MembershipUnresolved, RegistryError):
+        default = None
+    if chosen != default:
+        raise NoteError(
+            "HOME_CHANGES_SCOPE",
+            [],
+            f"home {home.key} ({home.folder}) would change who can see this page compared with its "
+            "type folder. Declare the home inside the same governance scope, or file the page by type.",
+            {"home": home.key, "folder": home.folder},
+        )
+
+
+def _placement_block(
+    root: Path,
+    destination: str,
+    home_set: homes_module.HomeSet,
+    *,
+    note_type: str,
+    topics: Sequence[str],
+) -> dict[str, Any]:
+    """Where the page goes and, when no home serves it, the call that would make its first topic one."""
+    folder = (root / destination).parent
+    home = _home_containing(root, folder, home_set)
+    block: dict[str, Any] = {
+        "folder": folder.relative_to(root).as_posix(),
+        "basis": f"home:{home.key}" if home is not None else "type_default",
+    }
+    # A research note is filed by project, so a topic home would not move it.
+    if home is None and topics and note_types.shipped_registry().types[note_type].partition != "project":
+        offer = homes_module.offer(home_set, topics[0])
+        if offer is not None:
+            block["make_home"] = offer
+    return block
+
+
+def _place(
+    *,
+    vault_root: Path,
+    note_type: str,
+    project: str | None,
+    slug: str,
+    domain: str | None,
+    medium: str | None,
+    started: str | None,
+    date_iso: str,
+    project_registry: project_keys_module.ProjectRegistry | None = None,
+    home_set: homes_module.HomeSet | None = None,
+    topics: Sequence[str] = (),
+    predecessor: str | None = None,
+) -> _Placement:
+    """Choose the folder: the predecessor's home, then a home for the project or topic, then the type's own.
+
+    A superseding page stays beside its predecessor only when that folder is a home, so a vault
+    without homes files every page where the type's layout always put it. The plural `projects`
+    never places a page. A research note is filed by its project, every other type by its first
+    topic that has a home; the file stem keeps the type's own form in every folder.
+    """
+    default = _type_default(
+        vault_root=vault_root,
+        note_type=note_type,
+        project=project,
+        slug=slug,
+        domain=domain,
+        medium=medium,
+        started=started,
+        date_iso=date_iso,
+        project_registry=project_registry,
+    )
+    if home_set is None or not home_set.homes:
+        return default
+    kb = kb_root(vault_root)
+    if predecessor is not None:
+        parent = (vault_root / predecessor).parent
+        if _home_containing(vault_root, parent, home_set) is not None:
+            return _Placement(parent, default.stem)
+    if note_types.shipped_registry().types[note_type].partition == "project":
+        home = home_set.by_project.get(project) if project else None
+    else:
+        home = next((home_set.by_topic[topic] for topic in topics if topic in home_set.by_topic), None)
+    return _Placement(kb / home.folder, default.stem) if home is not None else default
+
+
 def _resolve_path(
     *,
     vault_root: Path,
@@ -1101,34 +1284,25 @@ def _resolve_path(
     date_iso: str,
     project_registry: project_keys_module.ProjectRegistry | None = None,
     create_parents: bool = True,
+    home_set: homes_module.HomeSet | None = None,
+    topics: Sequence[str] = (),
+    predecessor: str | None = None,
 ) -> Path:
-    kb = kb_root(vault_root)
-    if note_type == "research-note":
-        assert project is not None  # validated above
-        # Use live registry so auto-registered keys resolve to their folder.
-        registry = project_registry or _load_keys(vault_root)
-        folder_name = registry.folder_for(project) or project.capitalize()
-        folder = kb / "Notes" / "Research" / folder_name
-        stem = slug
-    elif note_type == "insight":
-        folder = kb / "Notes" / "Insights"
-        stem = slug
-    elif note_type == "failure":
-        folder = kb / "Notes" / "Failures"
-        stem = slug
-    elif note_type == "pattern":
-        folder = kb / "Notes" / "Patterns"
-        stem = slug
-    elif note_type == "experiment":
-        assert domain and started  # validated above
-        folder = kb / "Notes" / "Experiments" / _domain_folder(domain)
-        stem = f"{started[:7]}-{slug}"  # YYYY-MM-<slug>
-    elif note_type == "production-log":
-        assert medium  # validated above
-        folder = kb / "Notes" / "Productions" / _medium_folder(medium)
-        stem = f"{date_iso[:7]}-{slug}"  # YYYY-MM-<slug>
-    else:  # pragma: no cover — validation guards this
-        raise ValueError(f"unhandled note_type: {note_type}")
+    placement = _place(
+        vault_root=vault_root,
+        note_type=note_type,
+        project=project,
+        slug=slug,
+        domain=domain,
+        medium=medium,
+        started=started,
+        date_iso=date_iso,
+        project_registry=project_registry,
+        home_set=home_set,
+        topics=topics,
+        predecessor=predecessor,
+    )
+    folder, stem = placement.folder, placement.stem
     from .governance import connector_boundary
 
     try:
@@ -1575,6 +1749,7 @@ def planned_destination(
         started=None,
         date_iso=date_iso or temporal.render_date(temporal.now()),
         create_parents=False,
+        home_set=homes_module.load(root),
     )
     return canonical_vault_rel(root, path.relative_to(root).as_posix())
 
@@ -1640,12 +1815,23 @@ def note(
         or (summary and summary.splitlines() != [summary])
     ):
         raise NoteError("INVALID_NOTE", ["summary"], "summary must be one line of at most 1024 characters")
+    home_set = homes_module.load(root)
+    home_warnings = _homes_warnings(home_set)
     topic_writes: tuple[PlannedWrite, ...] = ()
     topic_warnings: list[str] = []
     if topics is not None:
         try:
-            topics, topic_plan, topic_warnings = vocabulary_resolution.plan_topic_registrations(root, topics)
+            topics, topic_plan, topic_warnings = vocabulary_resolution.plan_topic_registrations(
+                root, topics, home_topics=frozenset(home_set.by_topic), decision=vocabulary_decision
+            )
         except vocabulary_resolution.VocabularyResolutionError as error:
+            preparation = error.details.get("vocabulary_preparation")
+            if error.code == "VOCABULARY_DECISION_REQUIRED" and isinstance(preparation, dict):
+                return vocabulary_resolution.VocabularyPreparation(preparation)
+            if error.code == "VOCABULARY_DEFERRED":
+                return vocabulary_resolution.VocabularyPreparation(
+                    {"family": "domain", "requested": error.details.get("requested", "")}, deferred=True
+                )
             raise NoteError(error.code, ["topics"], error.reason, error.details) from error
         topic_writes = topic_plan.writes
     try:
@@ -1747,13 +1933,14 @@ def note(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
         for item in key_plan.introductions
     )
+    placement_domain = domain_binding.destination if domain_binding is not None else domain
     if token_value is None:
         note_path = _resolve_path(
             vault_root=root,
             note_type=note_type,
             project=project,
             slug=filename_slug,
-            domain=domain_binding.destination if domain_binding is not None else domain,
+            domain=placement_domain,
             medium=medium,
             started=started,
             # An import plan froze its target under the plan's day (see `planned_destination`);
@@ -1761,6 +1948,9 @@ def note(
             date_iso=_path_date or render_date,
             project_registry=key_plan.registry,
             create_parents=False,
+            home_set=home_set,
+            topics=topics or (),
+            predecessor=_predecessor_path,
         )
         # Re-spell the destination to the real on-disk casing *before* it is
         # bound into the draft token: creating into an existing but
@@ -1848,6 +2038,28 @@ def note(
         if boundary == -1:
             raise NoteError("INVALID_NOTE", [], "rendered note frontmatter is invalid")
         source = source[:boundary] + "\n" + _frontmatter_lines(_extra_frontmatter) + source[boundary:]
+    home = _home_containing(root, (root / destination).parent, home_set)
+    if home is not None:
+        default = _type_default(
+            vault_root=root,
+            note_type=note_type,
+            project=project,
+            slug=filename_slug,
+            domain=placement_domain,
+            medium=medium,
+            started=started,
+            date_iso=render_date,
+            project_registry=key_plan.registry,
+        )
+        _require_home_keeps_scope(
+            root,
+            home,
+            destination=destination,
+            default_destination=canonical_vault_rel(
+                root, (default.folder / f"{default.stem}.md").relative_to(root).as_posix()
+            ),
+            source=source,
+        )
     try:
         preflight = semantic_writes.preflight_creation(
             root,
@@ -1871,10 +2083,17 @@ def note(
             error.reason,
             dict(getattr(error, "details", None) or {}),
         ) from error
+    preflight = dataclass_replace(
+        preflight,
+        placement=_placement_block(root, destination, home_set, note_type=note_type, topics=topics or ()),
+    )
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
-    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
+    warnings = (
+        list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
+        + home_warnings
+    )
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
         if provenance_warning is not None:
@@ -1923,6 +2142,8 @@ def note(
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     try:
+        from .relation_census import operation_provenance
+
         log_plan = plan_log_writes(
             root,
             date_iso=stamp_iso,
@@ -1944,6 +2165,10 @@ def note(
                 duration=duration,
             ),
             operation_token=encoded_token,
+            provenance=operation_provenance(
+                preflight, predecessor_path=_predecessor_path,
+                predecessor_content_hash=_predecessor_content_hash,
+            ),
         )
     except (OSError, UnicodeError, ValueError) as error:
         raise NoteError(
@@ -1970,6 +2195,13 @@ def note(
             destination,
             encoded_token,
         )
+    # Feedback shares the candidate's selected definitions, without a post-commit page reread.
+    feedback_registry = semantic_contract._authored_relations(
+        preflight.semantic_state,
+        preflight.corpus.registry if preflight.corpus is not None else relation_registry.load_for_page(
+            root, destination, preflight.semantic_state.frontmatter,
+        ),
+    )
     commit_started = time.perf_counter()
     from . import writer_lease
 
@@ -2057,6 +2289,7 @@ def note(
     )
     feedback = _build_write_feedback(
         vault_root=root,
+        registry=feedback_registry,
         note_type=note_type,
         rel_path=destination,
         status=status,

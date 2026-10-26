@@ -1391,6 +1391,70 @@ def _without_advisory_capture_sweep(result: Any) -> Any:
     return _without_leaf_advisory(result, "capture_sweep")
 
 
+def _semantic_advisory_projection(leaf: Any) -> dict[str, Any] | None:
+    """Carry fixed actionable relation findings without forwarding private payloads."""
+    from . import semantic_contract
+
+    if not isinstance(leaf, Mapping):
+        return None
+    codes: set[str] = set()
+    for key in ("creation", "semantic", None):
+        container = leaf if key is None else leaf.get(key)
+        contract = container.get("contract_result") if isinstance(container, Mapping) else None
+        findings = contract.get("findings") if isinstance(contract, Mapping) else None
+        if not isinstance(findings, (list, tuple)):
+            continue
+        for finding in findings:
+            code = finding.get("code") if isinstance(finding, Mapping) else None
+            # These closed finding codes are protocol data, not relation vocabulary.
+            if isinstance(code, str) and code in semantic_contract.RELATION_QUALITY_ADVISORIES:
+                codes.add(code)
+    if not codes:
+        return None
+    return {
+        "findings": [
+            {"code": code, **semantic_contract.RELATION_QUALITY_ADVISORIES[code]}
+            for code in sorted(codes)
+        ],
+        "next_action": {"tool": "schema_memory", "args": {"operation": "inspect", "subject": "relations"}},
+    }
+
+
+def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift informational state and bounded admitted read/preparation routes only."""
+    from . import source_coverage
+
+    if not isinstance(leaf, Mapping):
+        return None
+    feedback = leaf.get("write_feedback")
+    sources = feedback.get("sources") if isinstance(feedback, Mapping) else None
+    containers = [leaf, sources]
+    for container in containers:
+        block = container.get("semantic_compilation") if isinstance(container, Mapping) else None
+        # This state is fixed by the source-feedback protocol, never a semantic verdict.
+        if not isinstance(block, Mapping) or block.get("state") != "unassessed":
+            continue
+        out: dict[str, Any] = {"state": "unassessed"}
+        routes = block.get("full_source_reads", [])
+        if not isinstance(routes, (list, tuple)):
+            return out
+        paths: list[str] = []
+        for route in routes[:source_coverage.COMPILATION_SOURCES_LISTED]:
+            args = route.get("args") if isinstance(route, Mapping) else None
+            path = args.get("path") if isinstance(args, Mapping) else None
+            if (
+                isinstance(route, Mapping) and route.get("tool") == "read_memory"
+                and isinstance(args, Mapping) and args.get("include_raw") is True
+                and isinstance(path, str) and 0 < len(path) <= source_coverage.COMPILATION_PATH_CHARS
+            ):
+                paths.append(path)
+        out = source_coverage.compilation_routes(paths)
+        if block.get("truncated") is True or len(paths) < len(routes):
+            out["truncated"] = True
+        return out
+    return None
+
+
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
     """Project just-parsed unregistered facts plus optional indexed recurrence.
 
@@ -1441,7 +1505,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             normalized = relation_registry.normalize_relation(raw)
             if (
                 normalized
-                and normalized != "relates_to"
+                and normalized != relation_registry.generic_relation_key()
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)
@@ -2041,6 +2105,12 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["capture_sweep"] = capture_sweep
     if relation_advisory is not None:
         compact["relation_advisory"] = relation_advisory
+    semantic_advisory = _semantic_advisory_projection(leaf)
+    if semantic_advisory is not None:
+        compact["semantic_advisory"] = semantic_advisory
+    semantic_compilation = _semantic_compilation_projection(leaf)
+    if semantic_compilation is not None:
+        compact["semantic_compilation"] = semantic_compilation
     if "vocabulary_sync" in result or "vocabulary_advisory" in result:
         from .vocabulary_delivery import public_projection
 

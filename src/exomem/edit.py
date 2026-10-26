@@ -36,13 +36,14 @@ import datetime as dt
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
     corpus_aware,
     indexes,
     lifecycle_statuses,
+    markdown_relations,
     reserved_paths,
     semantic_contract,
     semantic_writes,
@@ -55,6 +56,8 @@ from .kbdir import kb_page_target, kb_prefix
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
+    DirectoryCensusGuard,
+    PathGuard,
     PlannedWrite,
     WikilinkResolver,
     content_hash,
@@ -159,6 +162,7 @@ def edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    read_dependency_guards: tuple[PathGuard | DirectoryCensusGuard, ...] = (),
 ) -> EditResult | EditValidation:
     """Edit an existing page in place. Frontmatter pages bump `updated:`.
 
@@ -388,6 +392,7 @@ def edit(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        read_dependency_guards=read_dependency_guards,
     )
     return EditResult(
         path=rel_path,
@@ -760,14 +765,6 @@ def apply_surgical_replace(
     return body.replace(old_string, new_string_norm, n), warnings
 
 
-_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
-
-
-def _normalize_heading(h: str) -> str:
-    """Drop leading `#` markers + surrounding whitespace so `## Foo` == `Foo`."""
-    return h.lstrip("#").strip()
-
-
 def apply_section_edit(
     body: str,
     heading: str,
@@ -796,16 +793,20 @@ def apply_section_edit(
     untouched (matching `apply_surgical_replace`).
     """
     where = f" in {rel_path}" if rel_path else ""
-    want = _normalize_heading(heading)
+    # The relation parser decides what counts as a section (case-blind, outside
+    # code fences), so this match follows it; a stricter match would append a
+    # second `## Relations` heading beside one the parser already reads.
+    want_title = markdown_relations.heading_title(heading)
+    want = markdown_relations.heading_key(want_title)
     lines = body.split("\n")
+    headings = list(markdown_relations.iter_headings(lines))
 
     h_idx = -1
     h_level = 0
-    for i, line in enumerate(lines):
-        m = _HEADING_RE.match(line)
-        if m and m.group(2).strip() == want:
+    for i, level, title in headings:
+        if markdown_relations.heading_key(title) == want:
             h_idx = i
-            h_level = len(m.group(1))
+            h_level = level
             break
     if h_idx == -1:
         if not create_missing:
@@ -825,15 +826,12 @@ def apply_section_edit(
         )
         prefix = body.rstrip("\n")
         joiner = "\n\n" if prefix else ""
-        new_body = f"{prefix}{joiner}## {want}\n\n{content_norm}\n"
+        new_body = f"{prefix}{joiner}## {want_title}\n\n{content_norm}\n"
         return new_body, warnings
 
-    end = len(lines)
-    for j in range(h_idx + 1, len(lines)):
-        m = _HEADING_RE.match(lines[j])
-        if m and len(m.group(1)) <= h_level:
-            end = j
-            break
+    end = next(
+        (j for j, level, _ in headings if j > h_idx and level <= h_level), len(lines),
+    )
 
     if resolver is None:
         resolver = find_module.shared_resolver(vault_root)
@@ -883,6 +881,7 @@ def commit_edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    read_dependency_guards: tuple[PathGuard | DirectoryCensusGuard, ...] = (),
 ) -> CommitEditResult:
     """Stage page write + opportunistic index refresh + ONE log entry; commit atomically.
 
@@ -918,34 +917,6 @@ def commit_edit(
     if changed:
         log_body_parts.append(f"Changed: {', '.join(changed)}.")
     log_body = " ".join(log_body_parts)
-    try:
-        log_plan = plan_log_writes(
-            vault_root,
-            date_iso=date_iso,
-            op=op,
-            rel_path_no_ext=rel_no_ext,
-            body=log_body,
-            operation_token=(
-                "edit:"
-                + content_hash(
-                    # Keyed on the calendar day, not the stamp: this token is
-                    # what makes a replayed edit idempotent, and a
-                    # second-granularity value would mint a fresh key on every
-                    # attempt and defeat the dedup entirely.
-                    f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
-                )
-            ),
-        )
-    except (OSError, UnicodeError, ValueError) as error:
-        raise EditError(
-            "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
-        ) from error
-    writes.extend(log_plan.writes)
-    derived_auxiliary_writes.extend(("operation-log", write) for write in log_plan.writes)
-    if log_plan.warning is not None:
-        warnings.append(log_plan.warning)
-    if log_plan.rotation_note is not None:
-        warnings.append(log_plan.rotation_note)
 
     semantic_operation = "edit" if op in {"edit", "multi_edit"} else op
     # One collector spans preflight+commit so the envelope accounts for the
@@ -988,6 +959,38 @@ def commit_edit(
                 stamp=date_iso,
                 timings=timings,
             )
+            preflight = replace(preflight, read_dependency_guards=read_dependency_guards)
+            try:
+                from .relation_census import operation_provenance
+
+                log_plan = plan_log_writes(
+                    vault_root,
+                    date_iso=date_iso,
+                    op=op,
+                    rel_path_no_ext=rel_no_ext,
+                    body=log_body,
+                    provenance=operation_provenance(preflight),
+                    operation_token=(
+                        "edit:"
+                        + content_hash(
+                            # Keyed on the calendar day, not the stamp: this token is
+                            # what makes a replayed edit idempotent, and a
+                            # second-granularity value would mint a fresh key on every
+                            # attempt and defeat the dedup entirely.
+                            f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                        )
+                    ),
+                )
+            except (OSError, UnicodeError, ValueError) as error:
+                raise EditError(
+                    "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
+                ) from error
+            writes.extend(log_plan.writes)
+            derived_auxiliary_writes.extend(("operation-log", write) for write in log_plan.writes)
+            if log_plan.warning is not None:
+                warnings.append(log_plan.warning)
+            if log_plan.rotation_note is not None:
+                warnings.append(log_plan.rotation_note)
             committed = semantic_writes.commit_existing(
                 vault_root,
                 preflight=preflight,

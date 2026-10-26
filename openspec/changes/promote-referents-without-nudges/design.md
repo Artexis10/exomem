@@ -12,6 +12,73 @@ Revision 3 follows the recheck (REQUEST_CHANGES, 1 blocking and 5 major findings
 Revision 4 follows a third recheck (0 blocking and 2 major findings): it moves removal and revert onto tools that are already destructive, and counts twin false positives per repeat.
 Revision 5 separates the revert fingerprint from the entry's review fingerprint, so a revert binds to the state the user saw while dismissal identity stays stable.
 
+## Amendment (2026-10-26)
+
+The owner approved the autonomous organisation plan. It amends this design as follows; the decisions below keep their history.
+
+- **Decision 3, items 3 to 5.** `create-entity` typed edges shipped as the separate `relations=[{kind,target}]` parameter, so `connections` gains no item union. The `add-relation` operation is dropped: agents author typed edges through `relations` items and `## Relations` bullets. Edge removal survives only as an internal curation step that the promotion revert runs; no tool gains a removal operation.
+- **Decision 3, item 6.** Organisation PR B replaces "endpoints never refuse a write" with a barrier: a newly added generic edge that touches an entity, where an active non-generic relation fits both endpoints, refuses before commit with at most 4 options and a one-retry route that keeps the generic relation with a recorded reason. Note-to-note generic edges are never refused; they get a warning and post-commit options. `endpoints` uses a typed grammar (`entity:<type>`, `entity:*`, `role:<note role>`) and lands with the barrier.
+- **Decision 7.** The rule that the baseline exists before any part of this change merges is replaced. Organisation PR A carries no behaviour layer, so the baseline is main with PR A.
+- **Decision 8.** Organisation PR B replaces the f33 protocol with the revised one: small paired development rounds, then one blind held-out run of 40 independent situations under a new preregistered amendment. The f33 amendment stays filed, sealed and unrun.
+
+### Source-quality repair
+
+This repair does not wait for the deferred entity barrier or behaviour measurement.
+A registry-marked generic relation is connectivity, not typed-specific qualification, regardless of its family.
+Specific relations, refined registry extensions and eligible incoming specific relations retain their qualification.
+When admitted authored explicit relations are all generic, one non-blocking advisory asks the agent to review their meaning.
+That advisory reports the authored pattern even when an incoming specific relation qualifies; it never claims that the page has no typed relation.
+It replaces a duplicate typed-edge-absent warning for the same pattern.
+Other connectivity-only cases retain the existing warning.
+No count, quota, forced predicate, new refusal or entity barrier is introduced.
+
+One live citing derivative clears the existing source-backlog criterion; this establishes citation linkage only.
+Original custody, media extraction, valid citations and semantic compilation are independent facts.
+Source descriptions, proposals and ordinary compact capture/write responses report semantic compilation as `unassessed`.
+No note count, edge count, citation or extraction result establishes semantic completion.
+Feedback uses only the already admitted source view and offers bounded actionable routes; full detail remains available.
+Opening excerpts disclose their limited scope and the existing full-source read route.
+File capture and adoption honour requested compilation guidance instead of returning before that route is prepared.
+Pending media extraction does not prevent the agent from using an available original.
+
+Compile proposals remain optional scaffolds for one note, not source-wide semantic plans.
+Adjacent pages are unreviewed candidates, and the generator authors no generic default bullet or instruction to copy candidates as accepted edges.
+The active conversation agent inventories available full-source themes and central durable referents, then retrieves prior knowledge, entities and filing context.
+Shared writing and composing guidance follows the live engagement authority; permitted writes gain no blanket draft-preview or confirmation requirement.
+It splits independently useful outputs by meaning, preserves attribution and uncertainty, and authors specific grounded relations when appropriate.
+It checks that inventory once after the writes and reports unread, unavailable or uncompiled material honestly.
+The workflow adds no semantic word list, fixed topic set, minimum output count or repeated per-source backlog warning.
+
+The boundary proof uses default MCP capture, attachment and compiled-write responses, with generic-writable and restricted/absent twins.
+These deterministic checks prove the contract and feedback, not no-nudge semantic autonomy.
+Independent source truth, actor runs and scoring remain with the measurement lane under its existing holds.
+
+### Destructive undo binds the original incarnation
+
+Entity undo binds the immutable page reference from the exact creation image.
+Edge undo also binds both endpoint references, the canonical predicate, and the exact introducing image and transition.
+Registry undo binds the registry instance, key, retained introducing version, and exact rendered overlay hash.
+Paths locate subjects; a path or current fingerprint alone cannot establish continuity.
+
+The internal proof admits every retained history file and guards its bytes and directory census through atomic commit.
+It examines at most the existing compiled-history maximum-page scan budget; reaching that bound reports undo as unavailable.
+Compiled page transitions must form one unique, acyclic, connected chain ending at the exact current image.
+Registry transitions require a unique, acyclic suffix reachable from the introducing image; that introducing version must remain retained.
+Both registry history producers record full raw before and after hashes beside the existing short audit hashes.
+A missing, unreadable, inadmissible, legacy, forked, cyclic, disconnected, or capped proof reports `PROMOTION_SUBJECT_UNVERIFIED`.
+The notice remains readable when admitted, but no destructive undo is offered or partially applied for unknown subjects.
+A proved absence ends the original promotion; restoring the edge or key creates a separate incarnation.
+
+The caller's revert fingerprint includes current page and history evidence for every subject.
+Each sealed edge step binds the original subject descriptor and proves its continuity again before commit.
+Earlier undo steps can change page bytes without invalidating another edge from the same promotion.
+Fresh proof guards still reject replacement endpoints and interrupted edge continuity.
+
+Supported moves can rewrite inbound pages without compiled history.
+This change adds neither move history nor predecessor metadata, so those gaps and earlier cycles can make destructive undo unavailable.
+Registry history pruning can also make undo unavailable when it removes the introducing version.
+These limits affect destructive undo only; ordinary writes remain available, and public history coverage remains unverified.
+
 ## Owner decisions (decided 2026-10-10)
 
 - **O1. Outcome.** Entity, category, relationship and type creation is first class and fully dynamic, and a promotion reaches all future interactions.
@@ -99,123 +166,23 @@ Otherwise it stays specified here and unbuilt, and its requirements leave the sp
 6. Relations run after both endpoints exist, through typed `connections` or `add-relation` (decision 3).
 7. The write's operation identity binds every referent leaf; an identical retry replays outcomes and creates nothing twice.
 
-**Budget.** Measured with `scripts/measure-tool-schema-bytes.py` at `2b9500f06`:
+**Budget.** `scripts/measure-tool-schema-bytes.py --json` measures the current wire objects; `tests/test_tool_schema_budget.py` holds the ceilings.
 
-| Tool | Bytes | Ceiling (`tests/test_tool_schema_budget.py:26-58`) |
-|---|---|---|
-| Surface total | 89,018 | 90,000 |
-| `edit_memory` | 6,714 | 6,725 |
-| `remember` | 5,195 | 5,200 |
-| `observe_memory` | 3,847 | 3,850 |
-| `capture_source` | 3,443 | 3,475 |
-| `connect_memory` | 4,292 | 4,300 |
-
-`referents` adds about 844 bytes per tool.
-On `remember` and `observe_memory` it needs both per-tool ceilings raised by about 850 bytes and the surface total raised by about 1,700 bytes, plus the `complete-referents` operation on `connect_memory`.
-The reason for the raise, if arm C beats the shipped B arm run beside it, is that measured difference; without it the raise is not justified.
-The core capture line for declarations (at most 160 bytes, served at `balanced` and `maximal` only) also ships only with the gate.
-It is paid for by a trim on both bootstrap limits of decision 2, item 9, never by raising either.
-
-### 2. Authority: owner promotion is proactive capture (O2)
-
-**Evidence.**
-- On 2026-10-07 the owner ruled that agents promote and humans revert: a v1 owner's registry save takes effect at once (`add-vocabulary-registries` design decision 7; `activate-agent-led-vocabulary-evolution` design decision 7).
-- Ruling R1 of 2026-09-28 put additive entity creation under `proactive_capture` (close-memory-loop design, "Identity batch 1 rulings").
-- The served contract still requires confirmation, or leaves an owner promotion unclassified, in nine places:
-  - `commands.py:1313-1317`: "Decision not permission; v1 writers retain confirmation";
-  - `commands.py:1092`: the structured entity-lifecycle field `"relation_outside_curation": "link_acceptance"`;
-  - `prominence.py:202`: "Missing schema: structural_suggestions/restructure_execution; relations: link_acceptance";
-  - `prominence.py:384-385` and `prominence.py:419-420`: "an affiliation relation requires link_acceptance";
-  - scaffold `SKILL.md:178`: `link_acceptance` covers "accepting a suggested relation" with no owner-authored edge row;
-  - scaffold `references/operations.md:38` and `references/engagement.md:63`: "affiliation relations require `link_acceptance`";
-  - scaffold `workflow-skills/exomem-capture/SKILL.md:51`: "affiliation relations use `link_acceptance`";
-  - `envelope.py:124-129`: `CONFIRM_REQUIRED` names additive entity creation but neither the owner's registry saves and typed edges nor edge removal.
-    `DECIDER_PROTOCOL` (`envelope.py:137-147`) tells the agent that "an unclassified action has no envelope cell and therefore no authority", so an action that the served text does not classify stays without authority.
-- The canonical ceiling requirement still lists entity creation under `restructure_execution`; the close-memory-loop delta moves it to `proactive_capture`.
-- The `complete-recurring-entity-lifecycle` envelope delta classed an unknown-kind type save as confirm-required.
-- v2 is an explicit opt-in vault activation with no default grants (`activate-agent-led-vocabulary-evolution` design decision 4). T13 is open PR #1124.
-
-**Decision.**
-1. O2 is the founder ratification that changes the ceilings.
-   The `delegation-envelope` delta is a MODIFIED "Hard authority ceilings bound every action class".
-   It carries the close-memory-loop changes and adds: when the caller resolves to the owner and v2 is not activated, an entity-type or category save, a relation-extension save, an entity creation and an agent-authored typed edge are `proactive_capture`.
-2. Provenance, surfacing and revert (decision 5) replace the confirmation question.
-3. Family fit: a relation extension fits by construction (close-memory-loop task 5.12); a parentless entity type promotes too (R1).
-4. `link_acceptance` keeps covering acceptance of a relation that the server's queue suggested (R3).
-5. `restructure_execution` keeps merge, supersession, deletion, meaning changes, alias edits on existing entries and deprecation, and gains a scoped edge removal:
-   - an `edit_memory` `remove_relation` operation (decision 3, item 5);
-   - a removal of an edge from a page that the current write does not author.
-
-   A user's revert request is the confirmation of either.
-   Any other `edit_memory` operation that drops a `## Relations` bullet from the page it writes is part of that write, not an edge removal that asks.
-   Replacing a generic edge in place with a specific predicate (decision 3, item 7) is an authored typed edge, not a removal.
-6. A resolved non-owner's registry save stays a pending item; its creations stay inside its write scope.
-   A limited owner's save that needs withheld private registry definitions reports `unavailable`, never a success.
-7. In a v2-activated vault every promotion passes the v2 effect classifier. No upgrade, migration or default activates v2, and T13 routes no v1 owner promotion to approval.
-8. Task 1.1 rewrites all nine served texts.
-   `CONFIRM_REQUIRED` names the owner's promotions as `proactive_capture` and the scoped edge removal as confirm-required, and `relation_outside_curation` names the class of an owner-authored edge.
-9. The served envelope also carries `promotion_classes`, a structured map from each promotion action to the class that governs it for the caller: entity creation, typed edge, registry save, queue acceptance, edge removal and promotion revert.
-   The keys are the product's own closed action kinds, which this change defines and code implements, and the values are the closed `ACTION_CLASSES`; neither holds vault data, so C4 holds.
-   For a resolved non-owner, a registry save maps to `structural_suggestions`, because it becomes a pending item for the owner; a v2-activated vault serves its grant rule instead of the map.
-   The map exists so that a test can check class coverage on the payload rather than on phrases.
-   One table in `envelope.py` is the single source: the map is served from it, and the promotion sentence of `CONFIRM_REQUIRED` is generated from it, so the rule lives in one place.
-   The map costs about 230 bytes, an estimate. Two limits bind it:
-   - the compact core ceiling of 15,000 bytes (`tests/test_bootstrap_compact_budget.py:37`), with a 512-byte warning band at the default level and a 256-byte floor at `maximal`; at `maximal` on claude-code at `42c807797`, 361 bytes are spendable (15,000 − 256 − 14,383);
-   - the compact reference bound of 63,300 bytes for `op_bootstrap(profile="compact", section="all")` over 200 extensions (`tests/test_relation_bootstrap_contract.py:143-157`), which keeps 2 bytes of headroom once PR #1659 merges (measured on that PR, not re-measured here).
-
-   Task 1.1 pays for the map by trimming the confirm-first texts it replaces, so that its net change on each limit is zero or negative, and records the measured bytes against both.
-   Neither limit is raised for it.
-10. This change amends now:
-    - the `complete-recurring-entity-lifecycle` envelope delta, so an owner's type save follows `proactive_capture` and only a queue-suggested relation keeps `link_acceptance`;
-    - the `capture-durable-personal-baselines` envelope delta, whose affiliation scenario now reads as queue acceptance;
-    - the `write-time-identity-candidates` requirement "The write that creates a candidate delivers it", from "The server SHALL never create an Entity" to "Detection SHALL never create an Entity".
-
-The authority text and structured map in task 1.1 form an independent correctness delivery.
-They restore the already approved O2/R3 distinction without enabling the deferred referent machinery.
-The f33 cases, answer keys, measures, thresholds, acknowledgement, model and spend holds remain intact.
-A later measurement must reconcile the immutable pre-O2 source with preregistration before generation.
-This delivery selects no new baseline and claims no baseline run or C>B result.
-Task 4.3 and programme closure remain open.
-
-### 3. Specific relations (T2)
-
-**Evidence.**
-- `link.py:391` renders every `create-entity` connection as `relates_to`.
-- `source_kinds` and `target_kinds` scope node kinds, not entity families (`relation_registry.py:163-168`, `relation_queue.py:119`, `epistemic_graph.py:10762-10763`).
-- Code compares the `relates_to` key at `mutation_terminal.py:1402`, `vocabulary_signals.py:71` and `relation_census.py:60` (C4 debt).
-- The compact envelope already carries `relation_advisory` (`mutation_terminal.py:1975`).
-- The generic save delta knows `upsert`, `alias` and `deprecate` only (`vocabulary/registry.py:54`); relation deprecation needs a replacement (`relation_registry.py:1237`).
-
-**Decision.**
-1. `generic: true` marks the core pack's one generic relation, and `endpoints: {subject, object}` lists entity families or the closed token `any_entity`. Both are registry data; extensions inherit `endpoints` but not `generic`.
-2. R2 adds a symmetric kinship relation and an affiliation relation to the core pack, with endpoints.
-3. `create-entity` `connections` accept `{target, relation}` items beside strings; a string keeps the generic relation.
-4. `connect_memory(operation="add-relation", path, requested_relation, target, expected_hash, why)` appends one bullet under the subject page's `## Relations`, idempotent by `exists`, hash-guarded, with a log entry.
-   It uses existing `connect_memory` parameters, and `connect_memory` stays additive.
-5. `edit_memory(path, why, operation={kind: "remove_relation", relation, target})` removes the bullets of that triple from the subject page.
-   It is keyed by subject, predicate and target, takes no hash, and returns `absent` when no such edge exists.
-   The removal rides a tool that is already destructive (`command_surface.py:240-264`, `DESTRUCTIVE_OPS`), so every tool's MCP `destructiveHint` stays truthful; `connect_memory` keeps its registry-defined non-destructive classification.
-   `add-relation` and `remove_relation` are also curation step kinds that compensate each other.
-6. Endpoints never refuse a write; a mismatch adds a non-blocking `endpoint_mismatch` finding.
-7. When a committed write authors the generic relation between two entity pages, `relation_advisory` carries at most 4 `specific_options`.
-   Each option's route replaces the generic bullet in place with one hash-guarded `edit_memory` `replace_string`, so accepting an option never leaves a second edge.
-   A predicate with no endpoints is never offered; dismissal uses the write-advisory fingerprints.
-
-**Budget.** Measured with `scripts/measure-tool-schema-bytes.py` at `e8e5ae2b3`:
-
-| Tool | Bytes | Ceiling | Adds |
+| Tool | Measured bytes | Ceiling | Change |
 |---|---|---|---|
-| `connect_memory` | 4,292 | 4,300 | `add-relation` and the `connections` item union |
-| `edit_memory` | 6,714 | 6,725 | the `remove_relation` operation kind |
-| `maintain_memory` | 3,836 | 3,850 | the `revert` curation action (decision 5) |
-| `schema_memory` | 3,987 | 4,000 | the `remove` delta verb (decision 5) |
+| `connect_memory` | 4,470 | 4,475 | No additive operation or connections union |
+| `edit_note` | 6,906 | 6,950 | No removal operation |
+| `maintain_memory` | 3,729 | 3,734 | One `revert` enum value |
+| `schema_memory` | 4,185 | 4,200 | Description includes the registry `remove` verb |
 
-Each needs a measured raise of its ceiling, recorded with its reason beside the ceiling by the task that adds the bytes.
+The measured full surface is 102,358 bytes under a 103,089-byte ceiling.
+The `revert` enum adds nine bytes; its per-tool and total raises have reasons beside their source ceilings.
+Rerun the measurement after integration changes the wire objects.
 
 ### 4. Typed activation (T3, conditional)
 
-This decision is scheduled only when the shipped arm misses the pass line of decision 8 and its trigger holds: an owner-anchored question fails while its entity and edge exist.
-When every miss is such an activation miss, it runs before decision 1B; otherwise it runs after decision 1B (decision 8, item 9).
+The paired development rounds in decision 8 decide whether this conditional mechanism is needed.
+Its trigger remains an owner-anchored recall miss while the entity and edge exist; the final comparison evaluates the complete candidate once.
 
 **Evidence.**
 - The built-in profiles are a dict in code (`traversal_profiles.py:143-180`), which is C4 debt.
@@ -283,11 +250,13 @@ When every miss is such an activation miss, it runs before decision 1B; otherwis
      The `revert_fingerprint` is the registry's current `expected_hash`; the save takes no `vocabulary_ref` or `vocabulary_fingerprint`.
      Curation cannot target schema state, so the registry's own destructive door carries this revert.
      The server decides at save time from current usage: with no dependants it removes the key; with dependants it deprecates the key (a relation to its parent), and the result lists the dependants.
-     The `remove` verb is allowed only in a registry whose adapter declares a usage check (today entity types, relations and semantic categories) and only for a vault-added entry; every other registry refuses it.
+     The `remove` verb is allowed only for a vault-added entry in a registry whose adapter declares a usage check.
+     The adapters cover entity types, relations, semantic categories, note types, homes, source kinds and domains; statuses has no usage check.
+     Unknown usage refuses removal instead of reporting an unused key.
      A revert never restores an older version and never rolls back a later save.
 6. A revert is `restructure_execution`. It runs on the user's request, which is its confirmation; the entry's item context is its preview.
    History and logs keep both the promotion and its revert.
-   The leaves stay callable on their own: the `edit_memory` `remove_relation` operation for any edge, and an ordinary curation plan for any wider undo.
+   An ordinary curation plan uses the same internal removal step for a wider undo.
 7. No revert or removal lands on `triage_memory` or `connect_memory`, so both stay non-destructive and their marketplace text stays true.
 8. Active local and Cloud surfaces must expose `curation_action="revert"` through the command registry.
 
@@ -307,8 +276,8 @@ When every miss is such an activation miss, it runs before decision 1B; otherwis
 
 ### 7. Order against the programme (T6)
 
-The measurement comes first: the case set, its answer key and the baseline on `main` exist before any part of this change merges.
-Then the smallest prompt ships, and each larger mechanism is built only when the shipped arm misses the preregistered pass line of decision 8.
+PR A delivers the substrate first. The case author files the revised amendment before PR B is built, and PR B merges only after decision 8.
+Declarations and typed activation remain conditional on misses observed in development.
 
 This change does not wait for close-memory-loop task 4.3.
 Origin accounting is needed only for recurrence-based promotion, where the server must know that two mentions come from independent originals.
@@ -339,96 +308,99 @@ A first-mention prompt and an agent's declaration need no origin count: the deci
 
 ### 8. Proof plan (T7)
 
-The workflow that this change alters is ordinary capture followed by later activation.
-The highest-level check is the agent-track measurement of group 4, and it runs first.
+PR A delivers the organisation substrate without a model-measurement gate.
+PR B changes authoring behaviour and needs the revised paired proof before merge.
+The earlier f33 amendment stays filed, sealed and unrun; the new amendment supersedes its acceptance role.
+No implementer reads the held-out cases or keys.
 
-**Measurement.**
-1. A case-authoring lane, never an implementation lane, files a new §7 amendment in `benchmarks/epistemic/PREREGISTRATION.md`: the next free family (`f33` on this base) as sequence 7, following the f27 entry's rules (`PREREGISTRATION.md:323-339`).
-   The same lane authors the case set and its answer key from source truth, never from a measured session.
-   It records their SHA-256 digests in the amendment before groups 2 and 3 are built.
-   Implementation lanes never read the cases, and every arm run checks the digests.
-   A measurement lane, the case-authoring lane's sibling and never an implementation lane, runs every arm.
-   Before the baseline, it extends the f27 driver, which resumes one session per run (`benchmarks/epistemic/journeys/f27_replay.py:451-509`).
-   The extension opens a second, fresh `claude -p` session per run for the owner-anchored question, and records in the run file the activation packet that this session receives, from its `activate_context` call or its hook.
-2. The owner is asked to acknowledge the amendment as soon as it lands.
-   Until he does, every comparative result and the gate of task 5.2 read as pending (`benchmarks/epistemic/amendments.py:95-107`).
-3. Cases:
-   - Positives cover the owner's list: pet and owner, person and kin, equipment and its consumable, supplier and operator, community and membership, and a sparse existing entity.
-   - Each positive has a negative twin that differs by durability, not by mention count: the same name mentioned as often, but as a passing or one-off thing.
-   - One owner-anchored question per positive asks about the referent in a fresh session by naming the person.
-   - The key states each answer fact as an exact value, such as a name, a number or a date.
-   - No case shares a name or wording with the examples in this change's artifacts, nor a type pair or relation pair with the CI replay of task 3.2.
-4. The pass line is ruling R6 of the owner delegate. The amendment states it before the baseline runs, and the owner acknowledges it with the amendment. The shipped arm meets it when:
-   - the pet-and-owner positive passes in both client shapes;
-   - at least 5 of the 6 positives pass, counted in each client shape;
-   - no twin repeat is a false positive, in either client shape.
+**Independent references and filing.** A case-authoring evaluator writes invented, product-shaped source truth, cases and keys before PR B is built.
+The evaluator files a new amendment under the next free family in `benchmarks/epistemic/PREREGISTRATION.md`, with case and key digests.
+The owner acknowledges the amendment before the final run.
+A separate measurement lane runs the arms and checks their captured inputs, outputs and digests before scoring.
 
-   A positive case passes when it passes 2 of its 3 repeats.
-   A twin case passes only when all of its repeats pass: one false-positive repeat on any twin misses the pass line.
-5. A positive passes a repeat when three things hold:
-   - the entity exists with a type that fits the answer key;
-   - the answer-key edge exists;
-   - the fresh-session answer uses them.
+**Reuse.** Use `benchmarks/epistemic/journeys/f33_referent_replay.py` for the two-session workflow, f27 client isolation, and existing tool-surface capture through a thin adapter.
+Do not reuse f33's cases.
+Each situation has a capture session and a fresh-recall session.
+Pin the model, client, product revision, prominence and captured configuration for both arms.
 
-   "Uses" is decided deterministically where it can be:
-   - it fails when the activation packet does not serve the entity's ref;
-   - it passes when the packet serves the ref and the answer contains the key's exact value.
+**Development.** Each round asks one question on at most four paired situations, with one repeat per arm.
+Change at most one thing between rounds and use fresh situations after checking a repair on the cases that exposed it.
+At most five rounds use eighty actor sessions in total.
+Observed misses decide whether the conditional declaration and typed-activation mechanisms are needed.
+These rounds diagnose failures; they do not establish a gain.
 
-   One case is left: the packet serves the ref, but the answer does not contain the exact value.
-   Only then a blind judge from another model family decides whether the answer states the key fact in other words, with the same reference view for every arm.
-   A judge never overturns a deterministic pass or fail.
-   A twin passes a repeat when no entity, edge or notice exists for its name.
-6. Every arm runs with the f27 driver, hookless and hooked, 3 repeats per case per client shape, on the same authored turns.
-   Its manifest pins the client version, the model, the product version and the prominence level (`PREREGISTRATION.md:333`). The arms:
-   - baseline: `main` at the base revision;
-   - arm B1: the authority text and the typed-edge leaves (groups 1 and 2);
-   - arm B2: arm B1 plus the receipt block (group 3);
-   - arm C: the shipped B arm plus `referents` (group 5), run only on escalation, with the shipped B arm run again beside it under the same pins.
+**Final held-out comparison.** Run forty independent situations once per arm:
 
-   The hookless Claude arm is a proxy for a hookless client such as ChatGPT, not a ChatGPT result; ChatGPT stays with close-memory-loop task 6.2.
-7. Arm X beats arm Y when X passes at least one positive case that Y fails, fails no case that Y passes, and has no false-positive twin repeat in either client shape.
-8. The keep rule for the receipt block: the block ships, and B2 is the shipped arm, only if one of these holds:
-   - B2 beats B1;
-   - the run files show the agent acting on a listed name through its route, and B2 fails no case that B1 passes.
+- Sixteen relation situations: ten with a fitting specific relation and six where generic or no edge is correct.
+- Twelve referent situations: six positives and six durability twins.
+- Six placement situations.
+- Six vocabulary-freshness situations where a later session uses a promoted entry.
 
-   Otherwise B1 is the shipped arm, and group 3 leaves the branch with its requirement and with the dismissed-name sentence of the MODIFIED `entity_candidate` requirement.
-   For B2 the report gives the block emissions per write (the share of writes that carry a block, and names per block) and the shares of listed names acted on, dismissed and left alone.
-9. Escalation: when the shipped arm misses the pass line, the change stays open, and the next mechanism depends on the misses.
-   An activation miss is a positive whose entity and edge exist but whose fresh-session answer does not use them.
-   - When every miss in the shipped arm is an activation miss, decision 4 runs first, then decision 1B.
-   - Otherwise decision 1B runs first: build `referents` and run arm C, which becomes the shipped arm only if it beats the B arm run beside it. Decision 4 follows when its trigger holds.
+The baseline is pinned main with PR A; the candidate adds the complete PR B batch.
+Twenty situations use the hooked client and twenty use the hookless client, balanced across categories.
+Label the hookless arm as a proxy, not a result for another client.
+The forty paired situations take 160 actor sessions.
+Use deterministic source-derived scoring wherever possible.
+Only residual uses-the-fact cases go to a blind judge from another model family, with the same reference view for both arms.
+Use at most two judge lanes; neither receives the arm key.
 
-   When the line is still missed after both, a report to the owner with the per-case tables follows.
+**Decision.** Report the per-situation paired success difference and its 95% Newcombe paired-proportion interval.
+A gain is established only when the lower bound exceeds zero.
+False precision may rise by no more than one situation out of forty.
+Also report omissions, duplicated reasons, abandoned writes, extra calls and re-sent bytes.
+An interval containing zero means no established gain: PR B does not merge, and the per-case tables go to the owner for a ruling.
+Do not expand the batch after seeing that result.
 
-   Tasks 9.1 and 9.2 cannot close the change until the shipped arm meets the pass line or the owner rules.
-10. The trigger for decision 4: at least one owner-anchored question fails in the shipped arm while its entity and edge exist.
+**Route and holds.** Actors use the approved Claude subscription through `claude -p`; judges use the Codex subscription.
+No API or credit spend is authorized.
+Development and final runs use the manager's serial laptop evaluation slot after the tool-surface evaluation.
+The final run also waits for PR A's release, the common tool-surface delivery, amendment acknowledgement and allocated actor room.
+A transfer of implementation custody changes none of these holds.
 
-**Boundary tests.** Each names the failure that only it catches.
-- CI replay (task 3.2): the shipped flow through the real doors, publication and a fresh `activate_context`, with twins. It catches a break between prompt, creation, publication and activation.
-  Its invented scenario differs from every f33 case: a person keeps a named sailing boat at a named harbour.
-  If decision 1B ships, the replay starts from the declaration, with no pre-saved type.
-- Served text (task 9.1): the case-authoring lane checks that no case wording appears in a changed core line, tool description or scaffold text. Only a lane that holds the cases can check this.
-- Authority (task 1.2): a non-owner or v2 vault cannot use the new routes to bypass its gate.
-- Disclosure twin (task 3.3): a withheld same-name entity at another path, and at the same path, gives a restricted caller the same receipt block, advisory and notices as a vault without it, read through MCP egress. The existing `create-entity` same-path refusal (`link.py:232-248`) stays reported debt until R4.
-- Revert (task 6.2): each entry reverts with one call on a destructive tool, only with its current `revert_fingerprint`, and leaves history; a changed dependant list or content hash refuses the call, while the entry's review fingerprint stays stable.
-- Surfacing (task 6.1): an entry is counted once, in the right session, and a hook never settles it.
+**Boundary proof.** Keep the real-door capture, publication and fresh-activation replay with its negative twins.
+Keep authority, disclosure, one-call revert and once-per-session surfacing checks.
+The case author checks that changed prompts, descriptions and guidance contain no held-out case wording.
+
+### 9. Health cohorts
+
+Keep the historical graph cohort unchanged and add a new authored-edge cohort split by endpoint class.
+Use exact governed write deltas and server UTC timestamps from the existing atomic operation log, including its rotation archives.
+The timestamp records the first server preparation of the committing attempt and survives a pending retry through its existing recovery record.
+The recovery record holds only that bounded timestamp; semantic deltas are recomputed and the original auxiliary digest still guards replay.
+Approval operations and structural writes without a durable timestamp binding omit optional provenance and remain a visible coverage gap.
+An authored date never establishes that an uninstrumented write falls outside the server-time window.
+Page dates, graph rebuild times and promotion settlement do not establish edge creation time.
+Stable resolved endpoint identity prevents a spelling change or inherited predecessor edge from becoming a new authored edge.
+
+Each metric reports its numerator, denominator, window, source and coverage; missing instrumentation is `unavailable`, never zero.
+Report raw generic share, unreasoned generic edges, exact-normalized duplicate reasons, referents acted on, dismissed or ignored, and placement by actual basis.
+A mutation's general rationale does not count as an edge-review reason.
+Referent outcomes need correlated observations; clearing a review item does not prove that an agent acted.
+Legacy periods and unsupported writers remain visible coverage gaps.
+
+The default review target is fifteen percent generic among new authored edges that touch an entity over thirty UTC days.
+The vault may configure the target and window; crossing it raises only an audit or upkeep signal.
+Note-to-note edges have no target, and no metric refuses a write.
 
 ## Risks / Trade-offs
 
 - The receipt block could become noise → at most 3 names, only newly linked unpaged names, fingerprint dismissal and family quiet, and the keep rule drops it unless it earns its place.
-- The measurement costs agent runs → the baseline, B1 and B2 take 216 runs (3 arms × 12 cases × 2 client shapes × 3 repeats), and escalation adds 144.
-  They run serially on the laptop, one at a time, on the subscription: roughly a day of wall-clock time, an estimate rather than a measurement.
+- Measurement uses at most eighty development sessions and 160 final sessions, plus residual blind judging.
+  The manager allocates the serial laptop slot and subscription room; no runtime estimate establishes readiness.
 - `referents` could be built and then dropped → it is built only when the shipped arm misses the pass line, and its budget raise is never taken without the gate.
 - A revert can strand dependants → the item context lists them, and the `revert_fingerprint` that the revert requires covers them.
 - Bootstrap bytes are nearly spent → task 1.1 pays for `promotion_classes` by trimming the confirm-first texts it replaces, on both the compact core ceiling and the compact reference bound, and raises neither (decision 2, item 9).
 
 ## Migration Plan
 
-1. The case-authoring lane files the amendment and freezes the cases; run the baseline.
-2. Ship the authority text and typed-edge leaves, build the receipt block, and run arms B1 and B2; apply the keep rule.
-3. When the shipped arm misses the pass line, escalate in the order of decision 8.
-4. Ship surfacing, revert and labels.
-5. Rollback: older releases ignore the new optional registry fields, the receipt block and the new due-state category; pages keep their bytes.
+1. Deliver PR A through independent review, green CI and the ordinary release; the substrate becomes the comparison baseline.
+2. File the revised amendment and independent source-derived cases before building PR B; preserve the held-out set.
+3. Run the permitted development rounds, then the acknowledged final comparison; record the decision and release only an accepted batch.
+4. Deliver the remaining note-type, root and Studio work in the approved order; keep the sensor follow-on gated on its readings ledger.
+5. Before rollback, move homed pages to their type folders if the previous writer must edit them.
+6. Reinstall the previous release; retained history and overlay tolerance preserve pages and registry additions.
+
+The previous writer can move a homed page to its type folder, but it refuses edits while the page remains in the home.
 
 ## Rulings (owner delegate, 2026-10-10)
 
@@ -437,7 +409,7 @@ The highest-level check is the agent-track measurement of group 4, and it runs f
 - **R3. Queue acceptance:** `link_acceptance` keeps its confirm ceiling for queue suggestions in this slice. The agent's own declared edges do not need it.
 - **R4. Path occupancy for restricted writers:** suffixed filenames for restricted writers, delivered with the connector-ceiling work of `add-governed-vault-consolidation`.
 - **R5. More writers:** measure the four writers first. `record_memory`, `replace_memory` and `episode_memory record` follow on evidence.
-- **R6. Pass line:** set by the owner delegate (p44) on 2026-10-10 under the owner's standing authority; it is not the owner's own ruling, and the owner acknowledges it with the amendment. The line is decision 8, item 4.
+- **R6. Pass line:** the 2026-10-26 approved revision replaces the former f33 pass line for this delivery with decision 8. The filed f33 amendment remains sealed.
 
 ## Open items
 

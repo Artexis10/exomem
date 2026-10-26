@@ -1,4 +1,4 @@
-"""Held uploads: a local client's file bytes, waiting for a command to commit them.
+"""Held uploads: a verified session's bytes, waiting for a command to commit them.
 
 `preserve-attachment-originals`. A same-machine client holds an attachment as a
 local file, and no tool argument may name a local path. It sends the bytes to
@@ -33,11 +33,14 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from filelock import FileLock
+
 from . import local_ingress, private_state
+from .governance import principal
 
 #: The `download_url` scheme of a held handle. Never fetched.
 HELD_SCHEME = "exomem-held:"
@@ -81,12 +84,34 @@ def is_held_reference(value: object) -> bool:
     return isinstance(value, str) and value.startswith(HELD_SCHEME)
 
 
-def _binding() -> str | None:
-    """The verified local session of the live request, or None off local ingress."""
-    grant = local_ingress.current_grant()
-    if grant is None or not grant.session_id:
+def principal_binding(who: principal.RequestPrincipal) -> str | None:
+    """Bind an upload to a client, login generation and verified authorization context."""
+    if (not who.resolved or not who.issuer_family
+            or who.client_binding is None or who.origin_session is None):
         return None
-    return f"mcp-local:{grant.session_id}"
+    values = asdict(who)
+    # These fields define authority across MCP and its delegated byte transport.
+    fields = ("audience_id", "issuer_family", "client_binding", "origin_session",
+              "session_id", "authorization_session_id", "verified_authorization_session")
+    encoded = json.dumps({field: values[field] for field in fields}, sort_keys=True, separators=(",", ":"))
+    return "mcp-session:" + hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _bindings() -> tuple[str, ...]:
+    """The verified session, plus its older local-grant binding when present."""
+    bindings = []
+    bound = principal_binding(principal.effective_principal())
+    if bound is not None:
+        bindings.append(bound)
+    grant = local_ingress.current_grant()
+    if grant is not None and grant.session_id:
+        bindings.append(f"mcp-local:{grant.session_id}")
+    return tuple(bindings)
+
+
+def _binding() -> str | None:
+    bindings = _bindings()
+    return bindings[0] if bindings else None
 
 
 def _store(vault_root: Path) -> Path:
@@ -160,12 +185,13 @@ def hold(
     filename: str,
     content_type: str | None,
     max_bytes: int,
+    expected_sha256: str | None = None,
 ) -> dict:
-    """Hold one upload for the live local session and return its file handle."""
+    """Hold one upload for the verified session and return its file handle."""
     binding = _binding()
     if binding is None:
         raise HeldUploadError(
-            "HELD_UPLOAD_LOCAL_ONLY", "uploads are held only for a local client session"
+            "HELD_UPLOAD_LOCAL_ONLY", "uploads need a verified client session"
         )
     if lane not in LANE_COMMANDS:
         raise HeldUploadError("INVALID_UPLOAD", f"lane must be one of {sorted(LANE_COMMANDS)}")
@@ -173,48 +199,51 @@ def hold(
     kind = (content_type or "").split(";", 1)[0].strip()[:255] or None
 
     store = _store(vault_root)
-    now = _now()
-    _sweep(store, now)
-    held_count, held_bytes = _usage(store, binding)
-    if held_count >= HOLD_MAX_COUNT:
-        raise _quota()
-    # The route spools the body before it runs, so its length is known before a byte is copied.
-    start = stream.tell()
-    length = stream.seek(0, os.SEEK_END) - start
-    stream.seek(start)
-    if length > shutil.disk_usage(store).free:
-        raise HeldUploadError("HELD_UPLOAD_NO_SPACE", "not enough free disk space to hold this upload")
-    secret = secrets.token_urlsafe(32)
-    key = _key(secret)
-    fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
-    part = Path(raw)
-    digest = hashlib.sha256()
-    size = 0
-    try:
-        with os.fdopen(fd, "wb") as sink:
-            while chunk := stream.read(_CHUNK):
-                size += len(chunk)
-                if size > max_bytes:
-                    raise HeldUploadError("TOO_LARGE", "upload exceeds the configured limit")
-                # The session's held total is the largest single hold, so one such hold always fits.
-                if held_bytes + size > max_bytes:
-                    raise _quota()
-                digest.update(chunk)
-                sink.write(chunk)
-        os.replace(part, store / f"{key}.bin")
-        record = {
-            "binding": binding,
-            "lane": lane,
-            "sha256": digest.hexdigest(),
-            "size": size,
-            "content_type": kind,
-            "filename": name,
-            "expires": now + HOLD_TTL_SECONDS,
-        }
-        _write_record(store, key, record)
-    except BaseException:
-        _remove(part, store / f"{key}.bin")
-        raise
+    with FileLock(store / ".lock"):
+        now = _now()
+        _sweep(store, now)
+        held_count, held_bytes = _usage(store, binding)
+        if held_count >= HOLD_MAX_COUNT:
+            raise _quota()
+        # The route spools the body before it runs, so its length is known before a byte is copied.
+        start = stream.tell()
+        length = stream.seek(0, os.SEEK_END) - start
+        stream.seek(start)
+        if length > shutil.disk_usage(store).free:
+            raise HeldUploadError("HELD_UPLOAD_NO_SPACE", "not enough free disk space to hold this upload")
+        secret = secrets.token_urlsafe(32)
+        key = _key(secret)
+        fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
+        part = Path(raw)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with os.fdopen(fd, "wb") as sink:
+                while chunk := stream.read(_CHUNK):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise HeldUploadError("TOO_LARGE", "upload exceeds the configured limit")
+                    # The session's held total is the largest single hold, so one such hold always fits.
+                    if held_bytes + size > max_bytes:
+                        raise _quota()
+                    digest.update(chunk)
+                    sink.write(chunk)
+            if expected_sha256 is not None and not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+                raise HeldUploadError("SOURCE_HASH_MISMATCH", "upload bytes do not match expected_sha256")
+            os.replace(part, store / f"{key}.bin")
+            record = {
+                "binding": binding,
+                "lane": lane,
+                "sha256": digest.hexdigest(),
+                "size": size,
+                "content_type": kind,
+                "filename": name,
+                "expires": now + HOLD_TTL_SECONDS,
+            }
+            _write_record(store, key, record)
+        except BaseException:
+            _remove(part, store / f"{key}.bin")
+            raise
     expires_at = dt.datetime.fromtimestamp(record["expires"], tz=dt.UTC)
     return {
         "state": "held",
@@ -243,70 +272,71 @@ def redeem(
     lane: str | None,
     admit: Callable[[int], None] | None = None,
 ) -> Redeemed:
-    """Claim one hold for the live local session through a command of `lane`.
+    """Claim one hold for the verified session through a command of `lane`.
 
     `admit` sees the held size before the claim, so a caller's byte budget can
     refuse a hold without spending it.
     """
     secret = reference[len(HELD_SCHEME) :] if is_held_reference(reference) else ""
-    binding = _binding()
-    if binding is None or _SECRET.fullmatch(secret) is None or lane is None:
+    bindings = _bindings()
+    if not bindings or _SECRET.fullmatch(secret) is None or lane is None:
         raise _unavailable()
     store = _store(vault_root)
-    _sweep(store, _now())
-    key = _key(secret)
-    meta_path = store / f"{key}.json"
-    try:
-        record = json.loads(meta_path.read_text(encoding="utf-8"))
-        bound = str(record["binding"])
-        expires = float(record["expires"])
-    except (OSError, ValueError, KeyError, TypeError):
-        raise _unavailable() from None
-    if not hmac.compare_digest(bound.encode("utf-8"), binding.encode("utf-8")):
-        raise _unavailable()
-    payload = store / f"{key}.bin"
-    if expires <= _now():
-        _remove(meta_path, payload)
-        raise _unavailable()
-    if record.get("lane") != lane:
-        # Only the holding session gets here, so naming the lane discloses
-        # nothing it does not already know.
-        raise HeldUploadError(
-            "HELD_UPLOAD_LANE",
-            f"this upload is held for {LANE_COMMANDS.get(str(record.get('lane')), 'another lane')}",
+    with FileLock(store / ".lock"):
+        _sweep(store, _now())
+        key = _key(secret)
+        meta_path = store / f"{key}.json"
+        try:
+            record = json.loads(meta_path.read_text(encoding="utf-8"))
+            bound = str(record["binding"])
+            expires = float(record["expires"])
+        except (OSError, ValueError, KeyError, TypeError):
+            raise _unavailable() from None
+        if not any(hmac.compare_digest(bound.encode("utf-8"), binding.encode("utf-8")) for binding in bindings):
+            raise _unavailable()
+        payload = store / f"{key}.bin"
+        if expires <= _now():
+            _remove(meta_path, payload)
+            raise _unavailable()
+        if record.get("lane") != lane:
+            # Only the holding session gets here, so naming the lane discloses
+            # nothing it does not already know.
+            raise HeldUploadError(
+                "HELD_UPLOAD_LANE",
+                f"this upload is held for {LANE_COMMANDS.get(str(record.get('lane')), 'another lane')}",
+            )
+        if admit is not None:
+            admit(int(record.get("size") or 0))
+        claimed = store / f"{key}.claimed-{secrets.token_hex(8)}"
+        try:
+            os.rename(payload, claimed)  # exactly one redemption wins
+        except OSError:
+            raise _unavailable() from None
+        _remove(meta_path)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with claimed.open("rb") as source:
+                while chunk := source.read(_CHUNK):
+                    size += len(chunk)
+                    digest.update(chunk)
+        except OSError:
+            _remove(claimed)
+            raise _unavailable() from None
+        if size != record.get("size") or digest.hexdigest() != record.get("sha256"):
+            _remove(claimed)
+            raise HeldUploadError(
+                "HELD_UPLOAD_CHANGED", "the held bytes no longer match what was held"
+            )
+        return Redeemed(
+            path=claimed,
+            size=size,
+            sha256=digest.hexdigest(),
+            content_type=record.get("content_type") or None,
+            filename=str(record.get("filename") or ""),
+            key=key,
+            record=record,
         )
-    if admit is not None:
-        admit(int(record.get("size") or 0))
-    claimed = store / f"{key}.claimed-{secrets.token_hex(8)}"
-    try:
-        os.rename(payload, claimed)  # exactly one redemption wins
-    except OSError:
-        raise _unavailable() from None
-    _remove(meta_path)
-    digest = hashlib.sha256()
-    size = 0
-    try:
-        with claimed.open("rb") as source:
-            while chunk := source.read(_CHUNK):
-                size += len(chunk)
-                digest.update(chunk)
-    except OSError:
-        _remove(claimed)
-        raise _unavailable() from None
-    if size != record.get("size") or digest.hexdigest() != record.get("sha256"):
-        _remove(claimed)
-        raise HeldUploadError(
-            "HELD_UPLOAD_CHANGED", "the held bytes no longer match what was held"
-        )
-    return Redeemed(
-        path=claimed,
-        size=size,
-        sha256=digest.hexdigest(),
-        content_type=record.get("content_type") or None,
-        filename=str(record.get("filename") or ""),
-        key=key,
-        record=record,
-    )
 
 
 def restore(vault_root: Path, redeemed: Redeemed) -> None:
@@ -321,14 +351,15 @@ def restore(vault_root: Path, redeemed: Redeemed) -> None:
         return
     try:
         store = _store(vault_root)
-        if float(record["expires"]) <= _now():
-            raise OSError("hold expired")
-        payload = store / f"{redeemed.key}.bin"
-        os.rename(redeemed.path, payload)
-        try:
-            _write_record(store, redeemed.key, record)
-        except BaseException:
-            _remove(payload)
-            raise
+        with FileLock(store / ".lock"):
+            if float(record["expires"]) <= _now():
+                raise OSError("hold expired")
+            payload = store / f"{redeemed.key}.bin"
+            os.rename(redeemed.path, payload)
+            try:
+                _write_record(store, redeemed.key, record)
+            except BaseException:
+                _remove(payload)
+                raise
     except (OSError, ValueError, KeyError, TypeError):
         _remove(redeemed.path)

@@ -37,6 +37,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
     """Every vocabulary registry, keyed by its `schema_memory` subject."""
     from .. import (
         entity_types,
+        homes,
         lifecycle_statuses,
         note_types,
         planning_values,
@@ -57,6 +58,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             lifecycle_statuses.SPEC,
             planning_values.SPEC,
             note_types.SPEC,
+            homes.SPEC,
             sync_providers.SPEC,
         )
     }

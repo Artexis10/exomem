@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: f7fbd77d0c0aafbcd827d75989e51f78e29b8e1e83b875dbe6b57187f4d87ac4
+  skill_contract: fc9d37af0217a7d58efa4796564a7b382e0d40082b1cfc1f6fafedb29e43894d
   version: "0.1.0"
 ---
 
@@ -40,7 +40,9 @@ identity after an uncertain commit.
 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
-2. Preserve the raw source first with `capture_source` — `content` for text, `files` for an attached transcript, article, or screenshot. Reach for `preserve_evidence`, `preserve_artifacts`, or the `transfer_artifact` fallback only when the artifact is proof-bearing rather than raw material.
+2. Preserve raw material with `capture_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
+   Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
+   Use `preserve_evidence` or `preserve_artifacts` for proof-bearing material.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
@@ -58,18 +60,19 @@ identity after an uncertain commit.
    `schema_memory(subject="note-types", operation="inspect")` lists as compiled, and
    `project` or `domain` where that type needs one. Each Markdown file in the folder keeps
    its Source and also gets a draft note that cites it and keeps its original body. Other
-   files stay Sources. A draft is not live and does not compile its Source: promote it after
-   review with the usual writers, and expect its Source to stay in the backlog until then.
-3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `search_memory`.
-4. If distilling, reuse the returned proposal, or call `prepare_note` when none exists, to obtain a draft.
-
-   Request `compile_guidance=true` during capture to get the proposal in that call.
-   Include the captured path in `sources:` to link provenance and mark the Source processed.
-
-5. Reuse known connections; use `connect_memory(operation="suggest-links")` only for missing candidates, then review them.
-6. Write with `create_note`, carrying sources and accepted links in the first write.
-7. After a bulk import, the Sources that no live note cites are the backlog. Work it in
-   batches as `exomem-review` describes; a dismissal is not completion.
+   files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
+   after review with the usual writers; a live citation still does not prove semantic coverage.
+3. Inspect available original media or extracted content; record the scope actually read.
+   Media processing is automatic. Use `process_media` for reconciliation, status or retry,
+   and `read_media` or the exposed source-read route for inspection. Pending extraction
+   does not prevent using an available original. Extraction completion says nothing
+   about semantic compilation. Respect source-version guards on dependent writes.
+4. When preparing compiled knowledge, request `compile_guidance=true` or use `prepare_note`; the optional scaffold is available.
+   A proposal prepares one note, not a source-wide semantic plan. Its opening excerpt
+   covers only the opening; use the returned read route for the full available source.
+   Adjacent pages and `suggested_connections` are unreviewed candidates, never accepted edges.
+5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
+   Raw capture may end after custody when compilation is outside the request and live policy.
 
 ## Vocabulary
 
@@ -88,7 +91,9 @@ meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
+Report preserved originals, compiled outputs and the scope actually inspected.
+Distinguish custody, extraction, citation linkage and the agent's semantic coverage judgment.
+Name unread, unavailable or uncompiled material without claiming that counts prove completion.
 
 ## Save rules
 Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typed compiled notes with source links.
@@ -96,7 +101,7 @@ Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typ
 ## Mistakes to avoid
 Do not skip raw preservation. Do not paste large raw artifacts into compiled notes. Do not claim media content was inspected unless an extraction, frame, transcript, OCR, or artifact view was actually used.
 
-<!-- exomem-semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090 -->
+<!-- exomem-semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -120,7 +125,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict and check_by; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
 - Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_memory(include_history=true), optionally for unit_ref, using history_limit and history_continuation. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
-- Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
+- Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `schema_memory(subject="homes", operation="inspect")` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
 - Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `observe_memory` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
