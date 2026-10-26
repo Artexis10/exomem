@@ -25,6 +25,11 @@ CI SHALL run historical Full coverage alongside ordinary checks for each ready n
 - **AND** aggregation verifies complete case coverage and common source, runtime, encoder, and corpus provenance before comparing the whole series once
 - **AND** raw fragments carry no statistical verdict and no shard confidence intervals are averaged
 
+#### Scenario: A package download uses its allowance
+- **WHEN** package acquisition approaches its bounded allowance during CI setup
+- **THEN** local installation retains a separate allowance and does not download packages
+- **AND** a failed acquisition prevents installation while a failed installation stops without automatic replay
+
 ### Requirement: Reuse complete evidence for the actual tested tree
 
 Release acceptance SHALL reuse successful full CI when its actual tested tree equals the selected source tree. The evidence SHALL identify the repository, workflow, run, attempt, tested commit, tree, and full scope. Partial or unavailable evidence SHALL select a full run. Release metadata validation and a short integration check SHALL still run.

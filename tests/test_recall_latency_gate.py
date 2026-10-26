@@ -1633,13 +1633,18 @@ def test_raw_case_shards_preserve_unsharded_order_warmup_and_one_comparison(
         return original_compare(samples, **kwargs)
     monkeypatch.setattr(gate, "compare_pairs", compare)
     monkeypatch.setattr(gate, "read_accept", original_accept)
-    aggregate = gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40)
+    aggregate = gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
     assert len(comparisons) == 1
     assert aggregate["samples"] == unsharded["samples"]
     assert aggregate["series"] == unsharded["series"]
     assert aggregate["state"] == unsharded["state"]
     assert aggregate["raw_fragments"] == fragments
     gate.validate_document(aggregate, "summary.schema.json")
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads((gate.BENCHMARK / "summary.schema.json").read_text())
+    Draft202012Validator(schema).validate(aggregate)
+    Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/paired_fragment"}).validate(fragments[0])
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -1647,7 +1652,7 @@ def test_aggregate_cli_keeps_missing_or_corrupt_fragments_a_visible_refusal(tmp_
     if corrupt:
         (tmp_path / "recall-latency-fragment-hybrid-1.json").write_text("{")
     output = tmp_path / "final.json"
-    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40) == 1
+    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success") == 1
     report = json.loads(output.read_text())
     assert report["state"] == "refused" and report["samples"] == []
     assert report["phase"] == "paired-aggregation"
@@ -1709,7 +1714,7 @@ def test_aggregation_refuses_incomplete_or_mixed_raw_evidence(tmp_path, paired_f
     elif damage == "refused":
         fragments[0]["state"] = "refused"
     with pytest.raises(gate.MeasurementRefused):
-        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40)
+        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
 
 
 @pytest.mark.parametrize("retry", ["replacement", "latest_refused", "same_attempt_duplicate", "future", "foreign_run"])
@@ -1740,7 +1745,7 @@ def test_failed_shard_replacement_keeps_inherited_success_and_latest_producer(
         (directory / "recall-latency-fragment-hybrid.json").write_text(json.dumps(fragment))
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     output = tmp_path / "aggregate.json"
-    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40) == (0 if retry == "replacement" else 1)
+    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success") == (0 if retry == "replacement" else 1)
     report = json.loads(output.read_text())
     if retry == "replacement":
         assert {row["shard"]: row["run_attempt"] for row in report["raw_fragments"]} == {1: "2", 2: "1", 3: "1", 4: "1"}
@@ -1763,7 +1768,49 @@ def test_pinned_label_must_match_its_commit_before_sampling_or_comparison(
                            shard=1, shards=4) == 1
     assert json.loads(output.read_text())["reason"] == "pinned-release-tag-mismatch"
     with pytest.raises(gate.MeasurementRefused, match="pinned-release-tag-mismatch"):
-        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40)
+        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
+
+
+@pytest.mark.parametrize("producer_outcome", ["failure", None])
+def test_elapsed_only_retry_cannot_pass_from_inherited_old_fragments(
+    tmp_path, monkeypatch, paired_fragments, producer_outcome
+):
+    profile, cases, base, _calls, _workers = paired_fragments
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    for shard in range(1, 5):
+        fragment = gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile=profile,
+                                   cases=cases, series="hybrid", shard=shard, shards=4,
+                                   base_commit="b" * 40)
+        directory = tmp_path / f"original-{shard}"
+        directory.mkdir()
+        (directory / "recall-latency-fragment-hybrid.json").write_text(json.dumps(fragment))
+    retry = tmp_path / "latest-attempt-2"
+    retry.mkdir()
+    (retry / "recall-latency-job-elapsed.json").write_text('{"elapsed_seconds":2400}')
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setattr(gate, "compare_pairs", lambda *_args, **_kwargs: pytest.fail("compared a failed producer matrix"))
+    output = tmp_path / "aggregate.json"
+    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40,
+                                    producer_outcome=producer_outcome) == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["samples"] == []
+    assert report["reason"] == ("paired-producer-result-unavailable" if producer_outcome is None else "paired-producer-result-not-success")
+    assert len(list(tmp_path.rglob("recall-latency-fragment-*.json"))) == 4
+
+
+def test_invalid_shard_cli_retains_a_schema_valid_refusal(tmp_path, monkeypatch, paired_fragments):
+    import subprocess
+
+    _profile, _cases, _base, _calls, workers = paired_fragments
+    monkeypatch.setattr(subprocess, "run", lambda arguments, **kwargs: subprocess.CompletedProcess(arguments, 0))
+    output = tmp_path / "refused.json"
+    assert gate.main(["--paired", "--series", "hybrid", "--base-tag", "v1.0.0", "--base-commit", "b" * 40,
+                      "--shard", "-1", "--shards", "4", "--output", str(output)]) == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["shard"] == -1
+    assert report["reason"] == "paired-shard-outside-case-range"
+    assert workers == []
+    gate.validate_document(report, "summary.schema.json", definition="paired_fragment")
 
 
 @pytest.mark.parametrize("changed_lock, reason", [

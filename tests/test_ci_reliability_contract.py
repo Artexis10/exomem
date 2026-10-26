@@ -502,37 +502,6 @@ def test_the_bounded_install_helper_bounds_each_attempt_not_just_the_loop() -> N
     assert "Acquire::https::Timeout=15" in script
 
 
-@pytest.mark.parametrize("job_id", [job_id for job_id, _shards, _tier in PR_TIER_JOBS])
-def test_the_install_helper_budget_fits_inside_its_caller_timeout(job_id: str) -> None:
-    """A step cap below the helper's worst case would cut retries off again."""
-    script = (ROOT / "scripts/ci-apt-install.sh").read_text(encoding="utf-8")
-
-    def _default(name: str) -> int:
-        match = re.search(rf'\$\{{{name}:=(\d+)\}}', script)
-        assert match, f"{name} has no default in the helper"
-        return int(match.group(1))
-
-    worst_case_seconds = (
-        _default("CI_APT_ATTEMPTS") * _default("CI_APT_UPDATE_TIMEOUT_SECONDS")
-        + _default("CI_APT_INSTALL_TIMEOUT_SECONDS")
-    )
-
-    workflow = _workflow()
-    step = next(
-        step
-        for step in workflow["jobs"][job_id]["steps"]
-        if step.get("name") == "Install process-isolation runtime"
-    )
-    cap_seconds = step["timeout-minutes"] * 60
-    assert cap_seconds > worst_case_seconds, (
-        f"the step cap is {cap_seconds}s but the helper can legitimately spend "
-        f"{worst_case_seconds}s, so a healthy retry would be killed as a stall"
-    )
-    assert cap_seconds < workflow["jobs"][job_id]["timeout-minutes"] * 60, (
-        "the step cap must stay under the job budget it exists to protect"
-    )
-
-
 def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     jobs = _workflow()["jobs"]
 
@@ -569,6 +538,9 @@ def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> N
     assert sampler["steps"][-1]["with"]["name"].endswith("${{ github.run_id }}-${{ github.run_attempt }}")
     download = next(step for step in aggregate["steps"] if "download-artifact" in step.get("uses", ""))
     assert download["with"]["merge-multiple"] is False
+    compare = next(step for step in aggregate["steps"] if "--aggregate-paired" in step.get("run", ""))
+    assert compare["env"]["PRODUCER_OUTCOME"] == "${{ needs.recall-latency-paired.result }}"
+    assert '--producer-outcome "$PRODUCER_OUTCOME"' in compare["run"]
     assert aggregate["steps"][-1]["with"]["name"] == "recall-latency-paired-${{ matrix.series }}"
     for name in ("recall-latency-series", "recall-latency-paired", "recall-latency-aggregate"):
         assert name in jobs["gate"]["needs"]

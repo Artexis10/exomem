@@ -890,13 +890,8 @@ def validate_document(document: dict, schema: str, *, directory: Path = BENCHMAR
     from jsonschema import Draft202012Validator, FormatChecker
 
     shape = json.loads((directory / schema).read_text())
-    if schema == "summary.schema.json":
-        # Fragment evidence reuses the canonical sample and environment schemas in memory.
-        fragment = shape["$defs"]["paired_fragment"]
-        for key in ("schema_version", "contract_revision", "source_digest", "samples", "environment", "reason", "phase"):
-            fragment["properties"][key] = shape["properties"][key]
     if definition is not None:
-        shape = {**shape, **shape["$defs"][definition]}
+        shape = {"$defs": shape["$defs"], "$ref": f"#/$defs/{definition}"}
     validator = Draft202012Validator(shape, format_checker=FormatChecker())
     validator.validate(document)
     if schema == "summary.schema.json" and definition in (None, "paired_fragment"):
@@ -1602,6 +1597,7 @@ def _paired_report(samples: list[dict], *, tag: str, profile: dict, accept_path:
 
 
 def aggregate_paired(fragments: list[dict], *, series: str, tag: str, base_commit: str,
+                     producer_outcome: str | None,
                      accept_path: Path = BENCHMARK / "accept.json") -> dict:
     """Refuse incomplete or mixed experiments before computing one complete comparison.
 
@@ -1610,6 +1606,11 @@ def aggregate_paired(fragments: list[dict], *, series: str, tag: str, base_commi
     """
     import hashlib
 
+    # The Actions matrix result covers current attempts that emitted no raw report.
+    if not producer_outcome:
+        raise MeasurementRefused("paired-producer-result-unavailable")
+    if producer_outcome != "success":
+        raise MeasurementRefused("paired-producer-result-not-success")
     profile = json.loads((BENCHMARK / "profile.json").read_text())
     all_cases, _digest = reference_cases(profile)
     cases = [case for case in all_cases if case["series"] == series]
@@ -1918,7 +1919,8 @@ def paired_cli(output: Path, *, series: str | None = None, base_tag: str | None 
     return int(report["state"] != ("collected" if shard is not None else "passed"))
 
 
-def aggregate_paired_cli(directory: Path, output: Path, *, series: str, tag: str, base_commit: str) -> int:
+def aggregate_paired_cli(directory: Path, output: Path, *, series: str, tag: str, base_commit: str,
+                         producer_outcome: str | None = None) -> int:
     import subprocess
 
     from jsonschema.exceptions import ValidationError
@@ -1928,7 +1930,8 @@ def aggregate_paired_cli(directory: Path, output: Path, *, series: str, tag: str
     try:
         # This filename is the raw Actions artifact protocol; elapsed records are separate files.
         fragments = [json.loads(path.read_text()) for path in sorted(directory.rglob("recall-latency-fragment-*.json"))]
-        report = aggregate_paired(fragments, series=series, tag=tag, base_commit=base_commit)
+        report = aggregate_paired(fragments, series=series, tag=tag, base_commit=base_commit,
+                                  producer_outcome=producer_outcome)
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError, ValidationError) as error:
         report["reason"] = error.code if isinstance(error, MeasurementRefused) else type(error).__name__
         report["phase"] = "paired-aggregation"
@@ -1951,6 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--validate-summary", type=Path, help="validate a content-free stored summary")
     source.add_argument("--paired", action="store_true", help="compare with the latest release")
     source.add_argument("--aggregate-paired", type=Path, help="compare one complete series from raw shard artifacts")
+    parser.add_argument("--producer-outcome", help="current Actions sampler matrix result, required for aggregation")
     parser.add_argument("--series", help="limit --paired to one series of the case file")
     parser.add_argument("--base-tag", help="release label resolved once before sampling")
     parser.add_argument("--base-commit", help="peeled release commit resolved before sampling")
@@ -2008,7 +2012,8 @@ def main(argv: list[str] | None = None) -> int:
         if not all((args.series, args.base_tag, args.base_commit)):
             parser.error("aggregation requires --series, --base-tag and --base-commit")
         return aggregate_paired_cli(args.aggregate_paired, args.output, series=args.series,
-                                    tag=args.base_tag, base_commit=args.base_commit)
+                                    tag=args.base_tag, base_commit=args.base_commit,
+                                    producer_outcome=args.producer_outcome)
     if args.reference:
         return absolute_cli(args.output, quiescence_bound=args.quiescence_bound)
     if args.mcp_url:

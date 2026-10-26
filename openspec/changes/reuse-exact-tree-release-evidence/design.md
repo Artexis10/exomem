@@ -38,6 +38,14 @@ Reuse the existing paired runner and comparison. Add a case partition to that ru
 
 Upload raw fragments with no statistical verdict. Bind their case definitions, profile, source commits, locks, encoder, and corpus. An aggregation job verifies exact case, principal, arm, and repeat coverage before calling the existing comparison once per complete series. It rejects missing, duplicate, foreign, or mixed-provenance samples. It never averages shard verdicts or confidence intervals. Retain the raw fragments and their provenance with the final series evidence. No calibration or acceptance threshold changes.
 
+### Separate package downloads from installation
+
+A [failed setup job](https://github.com/Artexis10/exomem/actions/runs/40356598877/job/121690618843) downloaded a package in about 149 seconds. The shared 150-second deadline then interrupted package configuration before pytest started.
+
+Keep the existing bounded index-update loop. Use apt's maintained `--download-only` operation before one `--no-download` installation, each with its own deadline. A failed download must not start installation. An interrupted installation returns failure without automatic replay or package repair. Verify the requested packages are installed before reporting success.
+
+The default helper allowance totals 500 seconds, including update backoffs and timeout kill grace. Give each caller nine minutes and retain its existing job cap. Prove that budget by executing the helper with isolated fake external commands and reading every workflow caller through the YAML parser. Do not parse shell source with a regex or add a downloader framework.
+
 ### Stop the supported merge command on failure
 
 Keep current-base verification and `gh pr merge` in one checked process. Verify required checks and evidence, then reread the base and head immediately before merging with `--match-head-commit`. One regression drives a failed preflight through this command and proves that merge never runs.

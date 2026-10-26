@@ -73,8 +73,8 @@ jobs:
           test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
       - name: Install the PostgreSQL 16 server binaries the fixture runs
         # Bounded and retried by the helper; the step cap is the backstop
-        # (see tests/test_ci_reliability_contract.py).
-        timeout-minutes: 6
+        # (see tests/test_ci_apt_install.py).
+        timeout-minutes: 9
         run: |
           scripts/ci-apt-install.sh postgresql-16
           test -x /usr/lib/postgresql/16/bin/postgres
@@ -246,8 +246,8 @@ jobs:
           test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
       - name: Install the PostgreSQL 16 server binaries the fixture runs
         # Bounded and retried by the helper; the step cap is the backstop
-        # (see tests/test_ci_reliability_contract.py).
-        timeout-minutes: 6
+        # (see tests/test_ci_apt_install.py).
+        timeout-minutes: 9
         run: |
           scripts/ci-apt-install.sh postgresql-16
           test -x /usr/lib/postgresql/16/bin/postgres

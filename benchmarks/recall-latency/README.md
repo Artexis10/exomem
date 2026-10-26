@@ -52,7 +52,8 @@ commits, worker locks, runtime recipes, encoder identity, and the stored corpus.
 The corpus digest folds each deterministic path and its raw-byte hash into
 the existing page-read loop. It adds no separate corpus scan.
 
-`--aggregate-paired DIR --series NAME --base-tag TAG --base-commit SHA` recomputes
+`--aggregate-paired DIR --series NAME --base-tag TAG --base-commit SHA`
+with `--producer-outcome RESULT` recomputes
 those identities from the current head and verifies the supplied tag's commit.
 It selects the latest producer attempt for each shard in the current run,
 then requires exactly every case, principal, arm, and repeat. A failed shard's
@@ -61,6 +62,9 @@ refusal; aggregation never falls back to older samples. Missing, corrupt,
 same-attempt duplicates, foreign runs, future attempts, or mixed provenance
 produce a visible refusal. All raw versions remain in the artifact, and the
 report identifies the selected producers explicitly.
+The trusted current sampler matrix result must be successful. A failed or
+missing result refuses even when older fragments are complete, including a
+retry that crashes before writing raw JSON.
 The aggregate retains original fragments and their actual CPU IDs. Comparisons
 across runners use stable properties rather than CPU identifiers.
 
@@ -112,6 +116,8 @@ clocks remain unknown. `--corpus-counts` reads actual counts on the served host
 and rounds them down to buckets of 500; it never loads a model.
 
 `summary.schema.json` rejects content fields and unknown report fields.
+Standard references share one sample and environment definition. Ordinary
+Draft 2020-12 validators can validate fragments and aggregate reports directly.
 Validate every live summary before publishing it. The summary includes only
 case codes, measurements, counts, versions, digests and closed states.
 Each worker records `runtime_lock_digest`, the SHA-256 of that arm's source `uv.lock`.

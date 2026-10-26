@@ -7,6 +7,7 @@
 - [x] 1.3 Bind PR merge-tree receipts and inherited gate attempts; prove identical-tree reuse and partial/mismatched proof rejection.
 - [ ] 1.4 Balance K3s shards with measured case durations; prove complete disjoint collection and record actual CI job times.
 - [ ] 1.5 Partition paired recall sampling without changing its cases or statistics; prove complete provenance-bound aggregation and record actual CI job times.
+- [ ] 1.6 Separate bounded package downloads from one installation; prove failure propagation and caller budgets, then observe hosted setup reaching pytest.
 
 ## 2. Python qualification
 

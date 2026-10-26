@@ -168,19 +168,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - name: Install process-isolation runtime
-        # A stalled package mirror is not a test failure, but it presented as
-        # one. `apt-get update` has no wall-clock bound, so when
-        # azure.archive.ubuntu.com went dark on a single runner this step sat
-        # for 29m26s, consumed the job's entire 30-minute budget, and the shard
-        # ended `cancelled` without reaching a line of test code. The gate below
-        # asserts every dependency is `success`, and `cancelled` is not
-        # `success` -- so a mirror outage fails the required check exactly like
-        # a red test, and blocked the 0.55.0 release twice before anyone looked
-        # past the job name. The helper bounds each attempt and retries; this is
-        # the outer backstop only. It must exceed the helper's own worst case
-        # (3 x 45s of update, then 150s of install = 285s) with margin, and stay
-        # far under the 30-minute job budget it exists to protect.
-        timeout-minutes: 6
+        # The helper separates download and installation deadlines. This cap
+        # covers its update retries, backoffs, and kill grace with margin.
+        timeout-minutes: 9
         run: |
           # age: the protected-import suite skips without the real age and age-keygen.
           scripts/ci-apt-install.sh bubblewrap age
@@ -330,11 +320,8 @@ jobs:
         with:
           bun-version: 1.3.14
       - name: Install process-isolation runtime
-        # Same bounded install as core-tests, and this tier is the one that
-        # needs it most: the epistemic broker suites sandbox provider work
-        # with bwrap. See the core-tests step for the full mirror-outage
-        # rationale behind the helper + step timeout pairing.
-        timeout-minutes: 6
+        # The shared helper bounds download and installation separately.
+        timeout-minutes: 9
         run: |
           scripts/ci-apt-install.sh bubblewrap
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
@@ -809,12 +796,14 @@ jobs:
           SERIES: ${{ matrix.series }}
           BASE_TAG: ${{ needs.recall-latency-series.outputs.base_tag }}
           BASE_COMMIT: ${{ needs.recall-latency-series.outputs.base_commit }}
+          PRODUCER_OUTCOME: ${{ needs.recall-latency-paired.result }}
           UV_PYTHON: /usr/bin/python3
           UV_PYTHON_DOWNLOADS: never
         run: >-
           uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py
           --aggregate-paired paired-fragments --series "$SERIES"
           --base-tag "$BASE_TAG" --base-commit "$BASE_COMMIT"
+          --producer-outcome "$PRODUCER_OUTCOME"
           --output "recall-latency-paired-$SERIES.json"
       - name: Retain the complete verdict and its original raw provenance
         if: always()
