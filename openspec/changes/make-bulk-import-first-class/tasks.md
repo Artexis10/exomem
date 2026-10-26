@@ -1,0 +1,29 @@
+## 1. Coverage and surfacing (D4, D5, D6)
+
+- [ ] 1.1 Replace the `unprocessed_source` predicate with the live-derivative rule: select Sources by registry role, resolve each `ingested_into` entry against the parsed pages, require a live status class and a resolved reciprocal claim, list failing derivatives with their reason, and fingerprint the derivative states. Verify: `tests/test_pending_derivative_source_coverage.py` (red on main) passes, with cases for live, missing and dismissed-then-changed derivatives.
+- [ ] 1.2 Add `unprocessed_source` to the due-state projection with its capture-date due date and a page-local check; refresh the cited Sources' rows on every governed create, edit, supersede and delete from the source-closure plan; derive the post-write category bound from the projection's list. Verify: a test creates a live note and sees the served count fall with no reconcile; a draft citation leaves it unchanged.
+- [ ] 1.3 Add `outstanding_total` and `outstanding` to the served block, counted before review state under the same egress rule. Verify: a test dismisses items and sees `categories` fall while `outstanding` holds.
+- [ ] 1.4 Carry title, bounded excerpt, recorded grouping metadata and derivative states on `unprocessed_source` findings; add bounded Source excerpts to `review_memory(mode="compilation")`. Verify: a test over an imported collection checks the fields and the bounds.
+- [ ] 1.5 Report per-category visible and outstanding counts and the generic `next` route in bootstrap's compact due summary, and teach the batch loop in the engagement guidance within the byte ceiling. Verify: the bootstrap contract and byte-ceiling tests pass with the new fields.
+
+## 2. Own-note adoption (D1, D2, D2a, D3)
+
+- [ ] 2.1 Accept `adopt_as` and `note_type` (with `project` or `domain` where the type needs one) on `select` folder rules, validated against the registry and the note leaf's placement, as part of the selection identity. Verify: a test refuses an unregistered type with no selection change.
+- [ ] 2.2 Plan own-note items with a frozen note target, title, front matter, body, import identity and `sources:` citation; resolve own-note-to-own-note links to planned notes; record `already-applied` notes and `previous_note`. Verify: a test plans a mixed collection and checks note targets, link targets and `plan_id` change on a rule change.
+- [ ] 2.3 After each Source chunk, create each own-note item's draft note through the two-phase governed creation, record its outcome with its commit, honour the budget continuation between notes, and recover a committed-but-unrecorded note through the identity check. Verify: tests cover a full apply, a tiny-budget apply over several calls, a crash between note commit and outcome record, and an unchanged re-run that creates nothing.
+
+## 3. Local staging and the Cloud CLI (D7, D8)
+
+- [ ] 3.1 Refuse an absolute or outside `start` path with `IMPORT_PATH_OUTSIDE_VAULT`, detected before path normalization. Verify: a test passes the absolute path of a temporary folder outside the vault and gets the code and the route.
+- [ ] 3.2 Add `exomem import <folder>`: no-follow enumeration, preflight against free space and engine limits, streaming copy into `_Imports/<import_id>/<folder name>/`, manifest with per-path codes, re-hash, progress, resume from the manifest, and the printed `start` path. Verify: tests stage a folder with a symbolic link and an unreadable file, refuse an oversized folder before copying, and resume an interrupted copy without recopying.
+- [ ] 3.3 Default the `exomem cloud` endpoints to production in one module, keep the flag and variable overrides, and report preflight, per-phase progress and coded failures in `exomem cloud import`. Verify: a test runs the parser with no environment, and a test with an injected failing upload checks the phase, code and import id.
+
+## 4. Guidance (D6)
+
+- [ ] 4.1 Teach own-note rules, `exomem import` and the backlog batch loop in the scaffold's `exomem-ingest` skill and the review reference, and update the `adoption_studio` and `review_memory` descriptions; regenerate the tool schema fixtures and generated documents with their generators. Verify: `tests/test_scaffold_no_leak.py`, the tool schema tests and the generator checks pass.
+
+## 5. Proof and delivery
+
+- [ ] 5.1 Run the isolated outcome check: an invented collection outside the vault with own notes, documents, an image and pre-existing review debt goes through `exomem import`, adoption with an own-note rule, and `finish`. Record original hashes, draft notes, outstanding Sources with `pending` derivatives, served outstanding counts, one draft promoted to live leaving the projection, one dismissal that leaves `outstanding` unchanged, and one pre-existing Source compiled. Verify: the recorded run file shows each value with its command.
+- [ ] 5.2 Re-run `benchmarks/collection_ingest/` with an own-note rule over its note folder on the same seed. Verify: every item is complete or refused with a code, every apply call stays under the request budget, and a re-run creates no page.
+- [ ] 5.3 Run the scoped tests, the full suite, the privacy gate and strict OpenSpec validation; record results and the independent review on the PR.
