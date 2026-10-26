@@ -344,7 +344,7 @@
         },
         "compile_guidance": {
           "default": false,
-          "description": "Reusable compilation proposal.",
+          "description": "Optional scaffold or source read routes.",
           "type": "boolean"
         },
         "suggested_title": {
