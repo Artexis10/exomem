@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import sqlite3
@@ -84,16 +85,26 @@ class Proof:
 def declarations(root, conn, *, generation=1):
     """Validate the complete immutable declaration namespace, also at verified ingestion boundaries."""
     sid = conn.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_STORE_ID,)).fetchone()[0]
-    entries, declarations = [], []
-    # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
-    planning_values = PlanningValues(root, server_side=True)
-    for cid, path, source, layout, text, digest in conn.execute(
+    rows = conn.execute(
         "SELECT c.collection_id,c.manifest_path,c.source_path,c.layout,m.manifest_text,m.manifest_hash "
         "FROM collections c LEFT JOIN collection_manifests m ON m.collection_id=c.collection_id "
         "AND m.manifest_version=c.manifest_version ORDER BY c.collection_id"
-    ):
-        if text is None or tokens.manifest_hash(text) != digest:
-            raise unavailable()
+    ).fetchall()
+    if any(text is None or tokens.manifest_hash(text) != digest for _cid, _path, _source, _layout, text, digest in rows):
+        raise unavailable()
+    # Every call rereads and rechecks the rows, so a re-proof still sees any change; within a
+    # request, the parse of an unchanged namespace is reused. Each caller gets its own marker.
+    key = (str(root), sid, generation, tuple((*row[:4], row[5]) for row in rows))
+    marker, declared = state_paths.request_memo(
+        "ownership_declarations", key, lambda: _declarations(root, sid, rows, generation))
+    return copy.deepcopy(marker), declared
+
+
+def _declarations(root, sid, rows, generation):
+    entries, declarations = [], []
+    # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
+    planning_values = PlanningValues(root, server_side=True)
+    for cid, path, source, layout, text, _digest in rows:
         manifest = collections.parse_manifest_bytes(root, path, text.encode(), planning_values=planning_values)
         if (manifest.collection_id, manifest.storage.source, manifest.storage.strategy) != (cid, source, layout):
             raise unavailable()
