@@ -10,7 +10,7 @@ The Records and Planning pilot exposes exact operation inputs and separates read
 - Update MCP guidance, generated artifacts and hook classifications together.
 - Clarify collection selectors and type query filter items from the existing query contract.
 - Share identical completed field schemas across operation variants without changing their accepted inputs.
-- Measure the new surface against the grouped baseline with harder, source-derived workflows. Remove the temporary baseline option after a qualifying decision.
+- Check the new surface against the grouped baseline with ten source-derived smoke pairs. Decide the catalogue through engineering judgement and that check.
 
 ## Capabilities
 

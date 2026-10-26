@@ -89,9 +89,9 @@ Keep adoption schema changes after the containing collection-adoption merge. Pre
 
 Extend the tool-selection harness rather than introduce another runner or telemetry service. Use harder workflows across the converted families, with source-derived end-state keys authored outside measured sessions. Keep grouped and nested arms on the same bytes while measuring.
 
-Start with free contract checks and a small complete development round. Freeze the decision protocol and fresh held-out cases before the decision run. Reuse the approved non-inferiority floor of 0.10 and inspect every wrong write. Report per-case paired differences and intervals. An interval containing zero means no change. Remove the grouped baseline option only after a qualifying decision and its last required measurement.
+Start with free contract checks and a small complete development round. The current smoke amendment below replaces the statistical acceptance gate. Preserve earlier protocols and results as retired evidence. Remove the grouped baseline option only after the smoke check and a recorded catalogue decision.
 
-Each revised candidate receives a separately frozen decision. Preserve earlier inputs, scores and decisions without expanding or rebalancing their cohorts. Independently author the new source and keys, and check novelty against every previous development and decision source. Freeze the new size, sampling recipe, statistic, retry rules, date assumptions and resource forecast before generating its decision items. Retain the existing loss margin and wrong-write rule.
+Freeze each run's cases, source-derived keys, candidate, client and budget before execution. Preserve earlier inputs, scores and decisions without expanding their cohorts. The current smoke check makes no population quality claim.
 
 ### Scoring amendment R2-S1
 
@@ -102,6 +102,8 @@ Apply this policy to every captured read answer in both arms. Preserve the origi
 Resolve operational files through their source owners. Keep the role-store SQLite family and the emission ledger in raw evidence rather than authored quality facts. The role store is rebuildable support; the emission ledger records persistent telemetry. Keep due-state decisions, review state, preferences, registry history, logical governance rows and all other machine files in the existing checks.
 
 ### Decision amendment R2-S2
+
+This historical decision protocol is retired. The current smoke amendment below controls acceptance.
 
 Use 70 fresh independent case pairs, with one actor run per arm and case. Draw each case independently from a frozen mixture: 75% new workflow intents and 25% existing Records or Planning templates. Select uniformly within each component. The new component contains the ten source-derived development intents; the existing component contains the eight established templates. Author new substantive fixtures, questions and source-derived keys after freezing this recipe. Do not reuse development source bundles or rebalance the draw. Each case has its own fixture and sampling unit. Report missing families as coverage limits.
 
@@ -125,15 +127,21 @@ Free admission rejected five append fixtures because their live compiled pages c
 
 ### Fresh candidate decision R2-C2
 
-The first candidate failed its fixed decision rule. Preserve that cohort and decision without expansion or rescoring. Evaluate the compact representation as a separate candidate. Keep the existing mixture, exact interval, loss margin, wrong-write rule, client, model, call budget and retry policy.
+The first candidate failed its fixed decision rule. Preserve that cohort and decision without expansion or rescoring. The proposed 375-pair protocol is retired before any decision actor ran. Preserve its source, admissions and reviews as evidence; do not resume its scripts after a reset.
 
-Freeze 375 independent case pairs with one run per arm. The exact rule permits at most 26 candidate-only failures at this size. Its quality-gate power is about 81% if the true candidate-only failure probability is 6%. That assumption is uncertain; it is not an estimate for the revised candidate. Missing pairs or excess wrong writes can still prevent a pass. Smaller cohorts have low power near the loss rate observed in the first candidate.
+### Current smoke amendment R2-C2-S2
 
-Independently author fresh source bundles after freezing this protocol. Check substantive novelty against all previous development and decision sources. Preserve each independent draw without quotas, replacement or rebalancing. Run a small development check before decision dispatch. Keep its cases outside the decision cohort.
+Run exactly ten pairs after the actor account's actual weekly reset, on the designated evaluation host, with one evaluation at a time. Each pair uses the grouped and compact surfaces, the same source fixture and one Sonnet session per arm. Keep the existing client, model, call budget, subscription account and isolation boundaries. Cap execution at twenty actor attempts, with no automatic retries, replacements or expansion.
 
-Freeze one local calendar date for adoption fixtures and verify it against the host before admission. Start the decision with enough time to finish before that date ends. A date mismatch blocks dispatch; it does not permit a key rewrite. Pin the final source, installed candidate, dependencies, cases and request configuration after generation checks and before actors start.
+Select the first unused source case for each of the ten existing new-workflow intents, in the original source order. This gives purposeful coverage rather than a random population sample. Preserve the source-derived prompts and keys. Record any mechanical date changes separately and review them before fresh same-day admission; retain the old admissions unchanged.
 
-Forecast resources from the complete prior run, including capture overhead and working files. Record subscription availability without attributing shared quota points to this session. Use only the existing subscription launcher. Keep the cohort fixed and report an incomplete or failed run without another draw.
+Use the existing runner and scorer. Record each pair's success, wrong writes, refusals, missing captures and concrete failures. Investigate candidate-only failures before the catalogue decision. Missing results remain unavailable, and a partial run is not a clean smoke check. Do not add actor attempts without operator approval.
+
+Decide the catalogue through engineering judgement, the smoke evidence and the existing contract proof. The report must state that ten pairs cannot certify the 10-point loss bound. Do not report statistical non-inferiority, a population gain or a representative confidence interval from this purposeful sample.
+
+Record fresh weekly-meter readings before and after execution, with their timestamps, reset identity and source. Count meter probes separately from the twenty Sonnet attempts. Request a quiet account window, record any competing use and report native token totals. Attribute quota per session only when the window, meter resolution and charge timing support it; otherwise report the observed shared delta and the attribution limit.
+
+Obtain one fresh independent review of this amendment before execution. Stop on a native limit, an approval prompt or the run deadline. Preserve partial results and do not restart the retired large protocol.
 
 ### Pre-actor source amendment R2-C2-S1
 
@@ -152,7 +160,7 @@ Four collection-creation prompts promised an offset-bearing datetime. The existi
 1. Build the renderer foundation and verify that the pilot schemas remain unchanged.
 2. Add shared public variants and regenerate the active guidance and packages.
 3. Integrate the merged adoption contract and compact repeated operation fields.
-4. Run the paired decision on independently authored fresh sources under its frozen protocol.
+4. Run the ten-pair smoke check, then record the catalogue decision and its evidence.
 5. Review the exact integrated batch, pass full CI and merge the ready PR.
 6. Let the release owner publish and qualify the ordinary containing release.
 7. Keep Cloud rollout and rescan pending the operator's existing authority boundary.

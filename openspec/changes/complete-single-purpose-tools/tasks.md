@@ -16,12 +16,12 @@
 - [ ] 3.2 Build one installed candidate and exercise the complete workflows through MCP. Verify read tasks make no writes, guarded changes and exact retries preserve state, and shared routes retain the expected result types.
 - [ ] 3.3 Share identical completed operation fields after compaction. Verify full-schema acceptance and refusals, nested alternatives, defaults and nullability; measure actual ordinary and Cloud discovery.
 
-## 4. Paired evaluation
+## 4. Smoke check and catalogue decision
 
 - [ ] 4.1 Extend the existing harness with harder cross-family workflows and independently authored source-derived keys. Verify the source-to-seed-to-captured-request chain and offline scoring before any actor run.
-- [ ] 4.2 Run a small development round for the compact representation, resolve exposed failures and freeze its fresh decision protocol and sources. Preserve prior decisions and record subscription use, date assumptions and unavailable hosts.
-- [ ] 4.3 Run the revised candidate's paired held-out decision once and independently re-derive it. Verify the lower bound exceeds the approved loss margin and wrong-write excess stays within the approved rule; report intervals without claiming an unproved gain.
-- [ ] 4.4 Remove the temporary grouped baseline option after a qualifying decision and its last required measurement. Verify ordinary compatibility calls remain available and rerun the affected contract checks.
+- [ ] 4.2 Preserve the completed development proof and retire the unrun 375-pair protocol. Freeze the ten-pair smoke amendment and sources, obtain a fresh independent review and record date and subscription limits.
+- [ ] 4.3 After the actual weekly reset, run at most twenty Sonnet attempts for ten pairs with no automatic retries. Record per-case outcomes and weekly-meter readings before and after. State that this smoke check cannot certify the 10-point bound; decide the catalogue through engineering judgement and the evidence.
+- [ ] 4.4 Remove the temporary grouped baseline option after the smoke check and recorded catalogue decision. Verify ordinary compatibility calls remain available and rerun the affected contract checks.
 
 ## 5. Delivery and closure
 
