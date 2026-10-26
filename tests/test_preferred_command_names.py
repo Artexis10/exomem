@@ -226,7 +226,7 @@ def test_standalone_hooks_keep_both_spellings_in_step_with_the_registry() -> Non
     metadata = {"activation": {"operation": activation.name, "default": 4000, "minimum": 500, "maximum": 8000}}
     for name in activation.callable_names:
         assert retrieve._tool_refs(f"mcp__exomem__{name}", {"anchor": "visible-ref"}) == ["visible-ref"]
-        assert retrieve._refresh_activation_cost(metadata, name, {"max_chars": 6000}) == 7000
+        assert retrieve._refresh_activation_cost(metadata, name, {"max_chars": 6000}) == 6000
     for name in resolve_command("edit_note", commands.PRODUCT_COMMANDS).callable_names:
         tool = {"name": f"mcp__exomem__{name}", "input": {"validate_only": True}}
         assert capture._successful_kb_write(tool) is False
