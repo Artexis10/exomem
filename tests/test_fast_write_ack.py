@@ -308,6 +308,38 @@ def test_components_share_one_absolute_post_commit_deadline(
     assert terminal["derived_sync"] == "pending"
 
 
+def test_observed_failure_and_completion_survive_acknowledgement_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spent observation budget must not erase a failure or revive completed work."""
+    fake = DerivedReceiptProtocolFake()
+    _install_protocol(monkeypatch, fake)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(vault, "_fast_ack_monotonic", lambda: clock["now"])
+    monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", lambda: clock["now"])
+    callback = _status_callback({derived_receipts.DerivedComponent.RESOLVER: "failed"})
+
+    def failure_then_expiry(root, receipt, component):  # noqa: ANN001
+        status = callback(root, receipt, component)
+        if component is derived_receipts.DerivedComponent.RESOLVER:
+            clock["now"] = 102.1
+        return status
+
+    fake.inject("component_status", *(failure_then_expiry for _ in range(64)))
+    terminal, target = _invoke_batch(tmp_path, response_detail="full")
+
+    assert target.exists()
+    assert terminal["derived_sync"] == "failed"
+    assert "resolver" in terminal["derived_sync_components"]
+    assert "memory_refs" not in terminal["derived_sync_components"]
+    assert "freshness" not in terminal["derived_sync_components"]
+    assert {
+        "component": "resolver", "state": "failed", "code": "component_failed",
+    } in terminal["diagnostics"]["derived_components"]
+    assert terminal["advisory_sync"] == "pending"
+    assert terminal["advisory_result_ref"].startswith("exomem://write-advisory-result/")
+
+
 def test_settled_component_snapshot_never_invokes_timed_wait(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
