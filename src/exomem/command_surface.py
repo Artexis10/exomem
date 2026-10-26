@@ -855,41 +855,39 @@ def bind_vault(
             t0 = time.perf_counter()
             returned_from_invoke = False
             try:
-                call_spans.mark("command.leaf_start")
-                result = invoke_command(
-                    command,
-                    *injected,
-                    mutation_request_id=request_id,
-                    implicit_idempotency_scope=retry_scope if explicit_key is None else None,
-                    **retry_options,
-                    **kwargs,
-                )
-                returned_from_invoke = True
-                # Two spans that together are the leaf's `duration_ms`: the
-                # command itself, and the MCP-layer post-filter and scrub that
-                # run on its result. A slow call then says which side it was on.
-                call_spans.record_span_since("command.leaf", "command.leaf_start")
-                call_spans.mark("command.leaf_done")
-                # MCP-layer second pass (design D1): defense in depth where
-                # the FastMCP context is live. `postfilter` is idempotent —
-                # an already-replaced credential matches nothing — so running
-                # it again after the dispatcher's pass costs a walk, not a
-                # second rewrite.
-                #
-                # Ordered BEFORE the success log on purpose: the timing the
-                # log reports should include the egress pass, and nothing
-                # should be recorded as successfully served until the result
-                # has actually cleared the boundary.
+                from .collection_store import connection, ownership
+                from .collection_store.governance import _StaleQueryHistoryProjection
                 from .governance.egress import is_vault_root, postfilter
 
-                if injected and is_vault_root(injected[0]):
-                    from .collection_store import ownership
-
-                    # One ownership proof for the pass, as in the dispatcher's;
-                    # outside a scope every path decision proved its own.
-                    with ownership.read_scope(injected[0]) as ownership_scope:
-                        result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
-                        ownership_scope.finish()
+                # One whole reread handles ordinary movement without holding old authority or retrying writes.
+                for refreshed in (False, True):
+                    try:
+                        call_spans.mark("command.leaf_start")
+                        result = invoke_command(
+                            command,
+                            *injected,
+                            mutation_request_id=request_id,
+                            implicit_idempotency_scope=retry_scope if explicit_key is None else None,
+                            **retry_options,
+                            **kwargs,
+                        )
+                        returned_from_invoke = True
+                        # Measure the dispatcher and MCP's independent terminal pass separately.
+                        call_spans.record_span_since("command.leaf", "command.leaf_start")
+                        call_spans.mark("command.leaf_done")
+                        if injected and is_vault_root(injected[0]):
+                            with ownership.read_scope(injected[0]) as ownership_scope:
+                                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                                ownership_scope.finish()
+                    except _StaleQueryHistoryProjection:
+                        if not invocation_read_only:
+                            raise
+                        budget = request_budget.current()
+                        if refreshed or (budget is not None and budget.remaining() <= 0):
+                            raise connection.busy("the collection changed during its release checks") from None
+                        # Discard every old field; both passes must admit the original read again.
+                    else:
+                        break
                 from .governance import scrubber as governance_scrubber
 
                 if governance_scrubber._issuance_projection_context(result) is not None:

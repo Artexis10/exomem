@@ -145,6 +145,86 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store, 
                 governance._seal_metadata_projection(duplicate, evidence)
 
 
+@pytest.mark.parametrize("keeps_changing", [False, True])
+def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(store, monkeypatch, keeps_changing):
+    """An edit between release passes yields a fresh read, or bounded BUSY under continuous edits."""
+    from test_collection_store_edit_back import SETTLED, passes
+
+    from exomem import command_surface, commands, writer_lease
+    from exomem.collection_store import capability
+
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.COLLECTION_VIEWS_V1})
+    text = manifest_text().replace("\n---\n", "\nviews:\n  recent:\n    query:\n      columns: [title, count]\n---\n")
+    store.create_collection(manifest_path(), text, why="create")
+    receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    page = store.root / receipt["affected_paths"][0]
+    invoke = writer_lease.invoke_command
+    reads = 0
+
+    def edit_after_read(*args, **kwargs):
+        nonlocal reads
+        result = invoke(*args, **kwargs)
+        reads += 1
+        if reads == 1 or keeps_changing:
+            before, after = ("One", "Two") if reads == 1 else ("Two", "Three")
+            page.write_text(page.read_text().replace(f"title: {before}", f"title: {after}", 1))
+            passes(store, 0.0, SETTLED)
+        return result
+
+    monkeypatch.setattr(writer_lease, "invoke_command", edit_after_read)
+    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    bound = command_surface.bind_vault(command.leaf, store.root, command=command)
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        result = bound(action="query", collection=CID, view="recent", include_agent_history=True)
+    assert reads == 2
+    if keeps_changing:
+        assert result["success"] is False
+        assert result["error"]["code"] == "COLLECTION_STORE_BUSY"
+        assert result["error"]["committed"] is False
+    else:
+        assert result["rows"][0]["title"] == "Two"
+        assert result["total_matched"] == 1
+        assert [event["operation"] for event in result["agent_history"]["events"]].count("update") == 1
+    adopted = store.connection.execute("SELECT count(*) FROM txns WHERE operation='view_edit'").fetchone()[0]
+    assert adopted == (2 if keeps_changing else 1)
+
+
+def test_mcp_history_refresh_drops_a_row_that_loses_authority_between_passes(store, monkeypatch):
+    """A still-readable collection cannot disclose stale rows or history after row authority changes."""
+    from exomem import command_surface, commands, writer_lease
+
+    store.create_collection(manifest_path(), manifest_text(), why="create")
+    restricted = store.append_record(CID, item={"title": "Restricted value"}, item_key=KEY,
+                                     why="Restricted rationale")
+    store.append_record(CID, item={"title": "Public value"}, item_key=OTHER, why="Public rationale")
+    store.reconcile_views()
+    path = restricted["affected_paths"][0]
+    invoke = writer_lease.invoke_command
+    reads = 0
+
+    def revoke_after_read(*args, **kwargs):
+        nonlocal reads
+        result = invoke(*args, **kwargs)
+        reads += 1
+        if reads == 1:
+            write_scope(store.root, paths=path.removeprefix("Knowledge Base/"))
+            write_rule(store.root, ceiling=0)
+        return result
+
+    monkeypatch.setattr(writer_lease, "invoke_command", revoke_after_read)
+    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    bound = command_surface.bind_vault(command.leaf, store.root, command=command)
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        result = bound(action="query", collection=CID, include_agent_history=True)
+    assert reads == 2
+    assert [row["title"] for row in result["rows"]] == ["Public value"]
+    assert result["total_matched"] == 1
+    assert result["agent_history"]["complete"] is False
+    assert result["agent_history"]["status"] == "history_incomplete"
+    assert all(secret not in str(result) for secret in ("Restricted value", "Restricted rationale", KEY, path))
+
+
 def test_global_inventory_keeps_canonical_metadata_without_authorizing_stale_manifest_bytes(store):
     """The MCP adapter must retain inventory metadata without granting a wire copy the same authority."""
     import json
