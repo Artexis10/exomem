@@ -39,6 +39,7 @@ def import_test_sql(fixtures: Path) -> str:
             "redirect_uris jsonb, redirect_uris_digest bytea);",
             (fixtures / "exomem_cloud_imports.sql").read_text(encoding="utf-8"),
             (fixtures / "exomem_cloud_import_cleanup.sql").read_text(encoding="utf-8"),
+            _committed_sql(fixtures, "imports_migration"),
         ]
     )
 

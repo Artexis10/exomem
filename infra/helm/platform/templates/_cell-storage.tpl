@@ -40,12 +40,22 @@ are this chart's own: templates/cell-array-exporter.yaml renders them.
     "device_class" $deviceClass
     "topology_key" "topology.topolvm.io/node"
     "backup_concurrency_per_node" $local.backupConcurrencyPerNode
-    "max_cell_gib" $local.maxCellGib
     "metrics_namespace" .Release.Namespace
     "thin_pool_selector" (include "exomem.labelSelector" $metrics.thin_pool.labels)
     "thin_pool_port" $metrics.thin_pool.port
     "array_selector" (include "exomem.labelSelector" $metrics.array.labels)
     "array_port" $metrics.array.port -}}
 {{- $domain := ternary $config.class_name .Values.cloudStorage.className (eq .Values.cellStorage.domain "local") -}}
-{{- dict "domain" $domain "local" $config | toJson -}}
+{{- $storage := dict "domain" $domain -}}
+{{- if $local.enabled -}}{{- $_ := set $storage "local" $config -}}{{- end -}}
+{{- if ne .Values.cellStorage.maxCellGib nil -}}
+{{- $_ := set $storage "max_cell_gib" .Values.cellStorage.maxCellGib -}}
+{{- end -}}
+{{- if ne $local.maxCellGib nil -}}
+{{- if and (ne .Values.cellStorage.maxCellGib nil) (ne (int .Values.cellStorage.maxCellGib) (int $local.maxCellGib)) -}}
+{{- fail "cellStorage.maxCellGib and cellStorage.local.maxCellGib must agree" -}}
+{{- end -}}
+{{- $_ := set $storage "max_cell_gib" $local.maxCellGib -}}
+{{- end -}}
+{{- $storage | toJson -}}
 {{- end -}}

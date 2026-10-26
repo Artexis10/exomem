@@ -50,19 +50,28 @@ class FakeCloud:
         self.registration_refusal = (503, "STORE_UNAVAILABLE")
         self.fail_part_once: int | None = None
         self.after_registration = lambda: None
+        self.after_prepare = lambda: None
+        self.listing = {}
+        self.refusal_limit = None
+        self.prepare_refusal = None
 
     def _api(self, request):
         self.requests.append((request.method, request.url.path))
         assert request.headers["authorization"] == "Bearer example-session"
+        if request.method == "GET" and request.url.path == "/api/exomem/cloud/imports":
+            return httpx2.Response(200, json={"imports": [], **self.listing})
         if request.method == "POST":
             body = json.loads(request.content)
             if request.url.path.endswith("/prepare-upload"):
+                if self.prepare_refusal:
+                    return httpx2.Response(422, json={"error": {"code": self.prepare_refusal, "limit": self.refusal_limit}})
                 self.row.update(body)
                 size = body["ciphertext_bytes"]
                 self.row["part_urls"] = [
                     {"part_number": n + 1, "part_size_bytes": min(5000, size - offset),
                      "url": f"https://storage.example/part/{n + 1}"}
                     for n, offset in enumerate(range(0, size, 5000))]
+                self.after_prepare()
             elif request.url.path.endswith("/complete"):
                 combined = b"".join(self.uploaded[n] for n in sorted(self.uploaded))
                 assert hashlib.sha256(combined).hexdigest() == body["ciphertext_sha256"]
@@ -70,7 +79,7 @@ class FakeCloud:
                 self.row.update(requested_state="uploaded", observed_state="done")
             elif self.refuse_registration:
                 status, code = self.registration_refusal
-                return httpx2.Response(status, json={"error": {"code": code}})
+                return httpx2.Response(status, json={"error": {"code": code, "limit": self.refusal_limit}})
             else:
                 self.declared = body
                 self.row["import_id"] = body["import_id"]
@@ -172,7 +181,7 @@ def test_a_folder_with_nothing_left_to_import_is_refused_before_anything_is_sent
         asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
 
     assert (refused.value.phase, refused.value.code) == ("preflight", "NOTHING_TO_IMPORT")
-    assert cloud.requests == []
+    assert cloud.requests == [("GET", "/api/exomem/cloud/imports")]
 
 
 def test_a_folder_with_more_entries_than_the_cell_accepts_is_refused_before_encrypting(tmp_path, monkeypatch):
@@ -189,7 +198,7 @@ def test_a_folder_with_more_entries_than_the_cell_accepts_is_refused_before_encr
 
     assert (refused.value.phase, refused.value.code) == ("preflight", "ARCHIVE_TOO_LARGE")
     assert "3 entries" in refused.value.message and "at most 2" in refused.value.message
-    assert cloud.requests == [] and not (tmp_path / "checkpoint/archive.age").exists()
+    assert cloud.requests == [("GET", "/api/exomem/cloud/imports")] and not (tmp_path / "checkpoint/archive.age").exists()
 
 
 @needs_age
@@ -228,7 +237,7 @@ def test_missing_age_is_refused_before_anything_is_sent(tmp_path, monkeypatch):
         asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
 
     assert (refused.value.phase, refused.value.code) == ("preflight", "AGE_MISSING")
-    assert cloud.requests == []
+    assert cloud.requests == [("GET", "/api/exomem/cloud/imports")]
     assert not (tmp_path / "checkpoint/checkpoint.json").exists()
 
 
@@ -244,7 +253,7 @@ def test_too_little_disk_for_the_ciphertext_is_refused_before_anything_is_sent(t
 
     assert (refused.value.phase, refused.value.code) == ("preflight", "INSUFFICIENT_DISK")
     assert "50000 bytes are free" in refused.value.message
-    assert cloud.requests == []
+    assert cloud.requests == [("GET", "/api/exomem/cloud/imports")]
     assert not (tmp_path / "checkpoint/checkpoint.json").exists()
     assert not list((tmp_path / "checkpoint").glob("archive*"))
 
@@ -455,3 +464,102 @@ def test_production_mcp_url_is_the_cloud_plugin_resource():
     definition = Path(__file__).resolve().parents[1] / "plugins/cloud/definition.json"
 
     assert json.loads(definition.read_text(encoding="utf-8"))["resource"] == PRODUCTION_MCP_URL
+
+
+@pytest.mark.parametrize("published", ["absent", None, {"max_members": 1, "reserve_bytes": 0}])
+def test_published_limits_control_preflight_before_registration(tmp_path, monkeypatch, published):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "one.md").write_text("one")
+    (folder / "two.md").write_text("two")
+    cloud = FakeCloud("age1unused")
+    cloud.listing = {} if published == "absent" else {"limits": published}
+    monkeypatch.setattr(cloud_import_client.shutil, "which", lambda name: "age")
+    cloud.refuse_registration = True
+    lines = []
+    with pytest.raises(CloudImportError) as failed:
+        asyncio.run(cloud.run(folder, tmp_path / "checkpoint", free_bytes=lambda path: 0,
+                              progress=Progress(lines.append)))
+    if published == "absent":
+        assert failed.value.code == "INSUFFICIENT_DISK"
+        assert cloud.declared == {}
+    elif published is None:
+        assert failed.value.code == "STORE_UNAVAILABLE"
+        assert any("not published" in line for line in lines)
+    else:
+        assert failed.value.code == "ARCHIVE_TOO_LARGE"
+        assert "2 entries" in failed.value.message and "at most 1" in failed.value.message
+        assert cloud.declared == {}
+
+
+@needs_age
+@pytest.mark.parametrize("code,phase", [("IMPORT_TOO_MANY_FILES", "register"),
+                                       ("IMPORT_STORAGE_LIMIT", "register"), ("IMPORT_PARTS_LIMIT", "upload")])
+def test_typed_refusals_name_the_phase_and_cannot_resume(tmp_path, code, phase):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "one.md").write_text("one")
+    _, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    cloud.refuse_registration = phase == "register"
+    cloud.registration_refusal = (422, code)
+    cloud.prepare_refusal = code if phase == "upload" else None
+    cloud.refusal_limit = {"unit": "bytes", "value": 100, "requested": 101}
+    checkpoint = tmp_path / "checkpoint"
+    with pytest.raises(CloudImportError) as failed:
+        asyncio.run(cloud.run(folder, checkpoint))
+    assert (failed.value.code, failed.value.phase, failed.value.resume) == (code, phase, False)
+    assert "100 bytes" in failed.value.message and "101 bytes" in failed.value.message
+    if phase == "upload":
+        assert "Cancel" in failed.value.message and "start a new run" in failed.value.message
+        assert not (checkpoint / "checkpoint.json").exists()
+        assert not (checkpoint / "archive.age").exists()
+
+
+@needs_age
+@pytest.mark.parametrize("broken", ["size", "order", "short"])
+def test_invalid_upload_copy_or_parts_abandons_checkpoint(tmp_path, monkeypatch, broken):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "one.md").write_text("one")
+    _, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    checkpoint = tmp_path / "checkpoint"
+    ciphertext = checkpoint / "archive.age"
+    opened = []
+    original_open, original_unlink = Path.open, Path.unlink
+    def open_file(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if path == ciphertext:
+            opened.append(stream)
+        return stream
+    def unlink_file(path, *args, **kwargs):
+        # Model Windows sharing rules on every platform: an open copy cannot be removed.
+        if path == ciphertext and any(not stream.closed for stream in opened):
+            raise PermissionError("file is open")
+        return original_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(Path, "unlink", unlink_file)
+    def break_upload():
+        if broken == "size":
+            cloud.row["part_urls"][0]["part_size_bytes"] += 1
+        elif broken == "order":
+            cloud.row["part_urls"][0]["part_number"] = 2
+        else:
+            (checkpoint / "archive.age").write_bytes(b"")
+    cloud.after_prepare = break_upload
+    with pytest.raises(CloudImportError) as failed:
+        asyncio.run(cloud.run(folder, checkpoint))
+    assert (failed.value.phase, failed.value.resume) == ("upload", False)
+    assert failed.value.code == ("CIPHERTEXT_SHORT" if broken == "short" else "PARTS_INVALID")
+    assert "Cancel" in failed.value.message and "start a new run" in failed.value.message
+    assert not (checkpoint / "checkpoint.json").exists() and not (checkpoint / "archive.age").exists()
+
+
+@pytest.mark.parametrize("counts", [{}, {"staged_files": 0, "staged_bytes": 0}, {"staged_files": 12, "staged_bytes": 3400}])
+def test_final_cli_json_includes_only_available_staged_counts(tmp_path, monkeypatch, capsys, counts):
+    async def completed(*args, **kwargs):
+        return {"import_id": "example-import", "observed_state": "done", **counts}
+    monkeypatch.setattr(cloud_import_client, "import_source", completed)
+    assert cloud_import_client.main(["import", str(tmp_path / "notes")]) == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "import_id": "example-import", "state": "done", **counts}
