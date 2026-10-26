@@ -31,13 +31,8 @@ TARGET = "Knowledge Base/Notes/target.md"
 
 
 @pytest.fixture
-def vault(store):
-    """A store collection that names its views by title, a marker routing it, and a policy.
-
-    The policy withholds the secret row from the external audience by its reference,
-    which the view's bytes do not carry, so only the item's own authorization withholds
-    it. A hold is its own subject: it keeps its candidate's tags but not the reference.
-    """
+def routed(store):
+    """A store collection that names its views by title, and a marker routing it."""
     text = manifest_text().replace(
         "    count:", "    tags: {type: array, items: {type: string}}\n    count:")
     text = text.replace("storage:\n", "item_filename:\n  version: 1\n  fields: [title]\nstorage:\n")
@@ -55,6 +50,18 @@ def vault(store):
                          "source_path": ITEMS, "layout": "markdown-items"}],
         "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
     }))
+    return store
+
+
+@pytest.fixture
+def vault(routed):
+    """The routed collection under a policy.
+
+    The policy withholds the secret row from the external audience by its reference,
+    which the view's bytes do not carry, so only the item's own authorization withholds
+    it. A hold is its own subject: it keeps its candidate's tags but not the reference.
+    """
+    store = routed
     write_scope(store.root, paths="Unrelated/**")
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\ntags: [secret]\n")
@@ -319,6 +326,26 @@ def test_inventory_counts_omit_a_withheld_row_and_its_hold(vault):
     assert _as(vault, _external(), observe) == absent
     owner = _as(vault, owner_principal(), observe)
     assert (owner[0]["committed"], owner[0]["held"]) == (2, 1)
+
+
+def test_the_records_inventory_sweeps_every_file_but_the_store_views_for_trackers(routed, monkeypatch):
+    beside = f"{WORK}/Log.md"
+    elsewhere = "Knowledge Base/Records/Legacy/Log.md"
+    for path in (beside, elsewhere):
+        (routed.root / path).parent.mkdir(parents=True, exist_ok=True)
+        (routed.root / path).write_text("---\ntype: tracker\n---\n\n| Date | Entry |\n|---|---|\n")
+    inspected = []
+    inspect = collections.inspect_legacy_tracker
+
+    def counted(root, path, **kwargs):
+        inspected.append(path.relative_to(root).as_posix())
+        return inspect(root, path, **kwargs)
+
+    monkeypatch.setattr(collections, "inspect_legacy_tracker", counted)
+    found = _as(routed, owner_principal(), lambda: _call(routed, "record_memory", action="inspect"))
+    assert {row["path"] for row in found["legacy_trackers"]} == {beside, elsewhere}
+    views = {path for (path,) in routed.connection.execute("SELECT view_path FROM items")}
+    assert views == {OPEN} and not views & set(inspected)
 
 
 def test_a_sync_conflict_copy_of_a_withheld_view_is_absent(vault):

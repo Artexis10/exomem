@@ -1269,8 +1269,14 @@ def discover_legacy_trackers(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     max_raw_candidates: int = 4_096,
+    owned_views: Container[str] = frozenset(),
 ) -> tuple[tuple[LegacyCollection, ...], bool]:
-    """Discover bounded exact-Records-layer tracker manifests without parsing items."""
+    """Discover bounded exact-Records-layer tracker manifests without parsing items.
+
+    ``owned_views`` are the exact vault-relative files a collection store publishes as
+    views. The store wrote them, so none is a legacy tracker, and the sweep skips them
+    before authorizing or parsing. Every other file, even beside a view, is still swept.
+    """
     if type(max_raw_candidates) is not int or not 1 <= max_raw_candidates <= 16_384:
         raise CollectionError(
             "INVALID_DISCOVERY_LIMIT", "legacy discovery limit is outside supported bounds"
@@ -1282,6 +1288,8 @@ def discover_legacy_trackers(
     authorize = authorize_path or (lambda _path: True)
     candidates = []
     for candidate in records_root.rglob("*.md"):
+        if candidate.relative_to(root).as_posix() in owned_views:
+            continue
         safe = _safe_candidate_rel(root, candidate)
         if safe is None or not authorize(safe[1]):
             continue
