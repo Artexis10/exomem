@@ -6,6 +6,19 @@ Release reviewed source with reusable test evidence and independently qualified 
 
 ## ADDED Requirements
 
+### Requirement: Ready pull requests run historical full coverage
+
+CI SHALL run historical Full coverage alongside ordinary checks for each ready non-release PR. This includes both supported Python runtimes and specialized Full jobs. Draft PRs MAY retain partial feedback. Ready docs-only PRs SHALL retain Full coverage. The release PR SHALL retain targeted metadata and integration checks backed by source evidence.
+
+#### Scenario: Draft becomes ready
+- **WHEN** a source PR becomes ready for review
+- **THEN** its ordinary and Full-only jobs run against the same PR merge checkout
+- **AND** its receipt claims Full only after every required Full dependency succeeds
+
+#### Scenario: Long jobs keep their cases
+- **WHEN** CI divides long-running Full work using measured case durations
+- **THEN** every collected case runs exactly once and the receipt retains observed timing, including queue time
+
 ### Requirement: Reuse complete evidence for the actual tested tree
 
 Release acceptance SHALL reuse successful full CI when its actual tested tree equals the selected source tree. The evidence SHALL identify the repository, workflow, run, attempt, tested commit, tree, and full scope. Partial or unavailable evidence SHALL select a full run. Release metadata validation and a short integration check SHALL still run.
@@ -21,6 +34,10 @@ Release acceptance SHALL reuse successful full CI when its actual tested tree eq
 #### Scenario: Changed tree needs fresh evidence
 - **WHEN** the merged tree differs from the tested tree, or complete proof cannot be established
 - **THEN** the release obtains a full run for the selected tree
+
+#### Scenario: A retry retains an earlier successful gate
+- **WHEN** the latest successful workflow attempt inherits an earlier successful Full gate and receipt
+- **THEN** acceptance retains the receipt's issuing attempt and names the successful retry separately
 
 ### Requirement: Failed merge preflight stops the release command
 
@@ -44,7 +61,7 @@ Python qualification SHALL bind the exact tag, source commit, publisher run and 
 
 ### Requirement: Report delivery boundaries separately
 
-A release receipt SHALL record observed source readiness, artifact qualification, and consumer verification separately. It SHALL name each timestamp's source. It SHALL distinguish Python qualification from complete image qualification. Missing consumer proof SHALL remain unverified and SHALL NOT be replaced with publication time.
+A release receipt SHALL record the ready PR/head event, all-green CI, artifact qualification, and consumer verification separately. It SHALL name each timestamp's source. It SHALL report ready-to-green and ready-to-qualified intervals with queue time and retries included. Python qualification SHALL remain distinct from complete image qualification. Missing consumer proof SHALL remain unverified.
 
 #### Scenario: Package exists before consumer verification
 - **WHEN** official artifacts qualify but no consumer verification exists

@@ -178,16 +178,26 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 
 ## Release flow
 
-A normal PR run is partial. It omits Python 3.11, the specialized Full jobs,
-and the nightly latency gate. It cannot qualify a release source by itself.
+A ready source PR runs historical Full coverage in parallel with ordinary
+checks. This includes Python 3.11 and 3.13, every specialized Full job, and the
+latency gate. Draft PRs retain partial feedback. Becoming ready starts Full
+coverage; a later source or readiness change supersedes the prior PR run.
+Ready docs-only PRs also run the complete corpus. Release metadata keeps its
+targeted checks backed by source evidence.
 
-Full CI runs on schedule or dispatch. After its required gate passes, it retains
-`full-ci-evidence-RUN-ATTEMPT` with the actual checkout commit and Git tree.
-The shared selector verifies the repository, workflow, run, attempt, full scope,
-and tree. A dispatch on a source branch can qualify its identical squash tree
-on main. A changed tree, expired receipt, or incomplete proof uses the Full
-fallback. Legacy scheduled or dispatched runs remain eligible only at their
-exact main commit, under their original event contract.
+One scope job selects the CI policy. Full CI also runs on schedule or dispatch.
+After its required gate passes, it retains `full-ci-evidence-RUN-ATTEMPT` with
+the actual checkout commit and Git tree. For a PR, this is the synthetic merge
+commit, with its source head and base recorded separately.
+The selector verifies repository, workflow, issuer gate, full scope, and merge
+parents. It compares that tested tree with merged main. Identical trees reuse
+proof after squash; a changed tree, expired receipt, or incomplete proof uses
+the Full fallback. Legacy receipt-free evidence remains eligible only for a
+scheduled or dispatched Full run at its exact main commit.
+
+A retry can inherit an earlier successful gate. The receipt keeps its issuing
+attempt and names the latest successful attempt separately. Qualification does
+not rerun Full solely because a retry copied the successful gate.
 
 1. Merge the reviewed source PR; expect Release Please to update its release PR.
 2. Inspect that release PR and its source; expect only managed release metadata and generated Cloud packages.
@@ -198,9 +208,9 @@ read -r release_pr source_commit reviewed_head < <(gh pr view release-please--br
 printf 'Release PR: %s\nSource: %s\nReviewed head: %s\n' "$release_pr" "$source_commit" "$reviewed_head"
 ```
 
-Record the source-ready timestamp and the review or CI evidence behind it in
-the release handoff. This timestamp describes the reviewed source, rather than
-a later publication or installation.
+Record the ready PR/head event and its source in the release handoff. Measure
+ready-to-all-green CI and ready-to-qualified artifacts separately, including queue
+time and retries. Retain the earlier Python qualification time separately.
 
 4. Request evidence for the selected source; expect reuse or one Full fallback dispatch.
 

@@ -919,7 +919,7 @@ jobs:
           provenance: mode=min,version=v0.2
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
-          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_CUDA) || '' }}
+          # Cache export added 27 minutes after the build and push took five minutes.
 
       - name: Attest the exact cuda image
         id: cuda-attestation

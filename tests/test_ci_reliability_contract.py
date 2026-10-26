@@ -141,8 +141,7 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     # nightly/manual full runs. The runtime matrix never names the release
     # branch (see test_expensive_ci_runs_nightly_and_manually_only).
     versions = " ".join(str(matrix["python-version"]).split())
-    assert "github.event_name == 'schedule'" in versions
-    assert "github.event_name == 'workflow_dispatch'" in versions
+    assert "needs.scope.outputs.full == 'true'" in versions
     assert "release-please" not in versions
     assert "head_ref" not in versions
     assert '["3.11", "3.13"]' in versions
@@ -329,7 +328,7 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     assert timing_job["strategy"]["matrix"] == {
         "python-version": core_job["strategy"]["matrix"]["python-version"]
     }
-    assert "needs" not in timing_job, "timing checks must overlap the worker pools"
+    assert timing_job["needs"] == core_job["needs"] == "scope", "timing checks must overlap the worker pools"
     serial_selections = list(core_job["env"].values())
     pooled_exclusions = []
     for variable, selection in core_job["env"].items():
@@ -641,60 +640,22 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
     ]
 
 
-def test_expensive_ci_runs_nightly_and_manually_only() -> None:
-    """Full-CI evidence comes from the schedule and explicit dispatch — only.
-
-    The guard used to include `head_ref == 'release-please--branches--main'`,
-    which re-ran the full 46-job tier on every push to main (release-please
-    force-updates its PR each time): 61% of a measured day's runner-minutes
-    went to those stampedes while ordinary PRs queued behind a 20-concurrent-
-    job account cap. Release evidence is one green dispatched full run on
-    main, documented as a required step in docs/release.md, and the release PR
-    itself runs no test job: its diff is version strings, the changelog and the
-    regenerated Cloud archives.
-    """
+def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() -> None:
     workflow = _workflow()
-    triggers = _triggers(workflow)
-
-    assert triggers["schedule"] == [{"cron": "17 2 * * *"}]
-    assert "workflow_dispatch" in triggers
-
+    assert _triggers(workflow)["pull_request"]["types"] == [
+        "opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft",
+    ]
     jobs = workflow["jobs"]
-    assert FULL_CI_JOBS < set(jobs)
-    conditions = {
-        " ".join(str(jobs[name].get("if", "")).split()) for name in FULL_CI_JOBS
-    }
-    assert len(conditions) == 1
-    condition = conditions.pop()
-    assert "github.event_name == 'schedule'" in condition
-    assert "github.event_name == 'workflow_dispatch'" in condition
-    assert "pull_request" not in condition
-    assert "head_ref" not in condition
-    assert "release-please" not in condition
-
-    # The clause must not creep back into the expensive tier. It appears
-    # twice: the release-evidence job's own guard (pinned exactly in
-    # test_release_evidence_is_enforced_on_the_release_pr) and the one anchor
-    # that keeps the release PR off the test jobs.
-    assert _workflow_text().count("release-please--branches--main") == 2
-
-    # quality is the shared engineering-practices check, kept out of the required gate so the
-    # required checks stay unchanged; the merge guard reads it.
-    fast_jobs = (
-        set(jobs)
-        - FULL_CI_JOBS
-        - {
-            "gate",
-            "release-evidence",
-            "release-evidence-landed",
-            "cancel-superseded-push-run",
-            "quality",
-        }
-    )
-    assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
-    (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
-    assert "github.head_ref != 'release-please--branches--main'" in skip
-    assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
+    assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
+    assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
+    for name in FULL_CI_JOBS:
+        assert jobs[name]["needs"] == "scope"
+        assert jobs[name]["if"] == "${{ needs.scope.outputs.full == 'true' }}"
+    for name in RELEASE_PR_SKIPPED_JOBS:
+        assert jobs[name]["needs"] == "scope"
+        assert jobs[name]["if"] == "${{ needs.scope.outputs.release != 'true' }}"
+    assert jobs["cloud-cellctl"]["with"]["full"] == "${{ needs.scope.outputs.full == 'true' }}"
+    assert "if" not in jobs["release-evidence"]
 
 
 def _scope_fixture_git(repository: Path, *args: str) -> None:
@@ -720,7 +681,7 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
 SCOPED_JOBS = ("core-tests", "harness-tests", "product-e2e")
 
 
-def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
+def _change_scope(repository: Path, event: str, *, full: bool = False) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
@@ -729,6 +690,7 @@ def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
         env={
             **os.environ,
             "EVENT_NAME": event,
+            "FULL_CI": str(full).lower(),
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
         },
@@ -801,11 +763,11 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
 
 
 @pytest.mark.parametrize(
-    "event,has_parent",
-    [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
+    "event,has_parent,full",
+    [("pull_request", False, False), ("push", True, False), ("schedule", True, False), ("workflow_dispatch", True, False), ("pull_request", True, True)],
 )
 def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
-    tmp_path: Path, event: str, has_parent: bool
+    tmp_path: Path, event: str, has_parent: bool, full: bool
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -819,7 +781,7 @@ def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
         path.write_text("changed\n")
         _scope_fixture_git(repository, "commit", "-am", "spec change")
 
-    decision, summary = _change_scope(repository, event)
+    decision, summary = _change_scope(repository, event, full=full)
 
     assert decision == {"docs_only": "false", "pytest_args": ""}
     assert not summary
@@ -851,12 +813,12 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     """Release checks use the same tested-tree selector as evidence automation."""
     workflow = _workflow()
     job = workflow["jobs"]["release-evidence"]
-    checkout, scope, step = job["steps"]
+    report, checkout, scope, step = job["steps"]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert "scripts/release_evidence.py" in checkout["with"]["sparse-checkout"]
     assert scope["shell"] == "bash"
     assert "scripts/check_release_pr_files.py" in scope["run"]
-    assert step["if"] == "github.event_name == 'pull_request'"
+    assert step["if"] == "needs.scope.outputs.release == 'true'"
     assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert step["env"]["GH_REPO"] == "${{ github.repository }}"
     assert step["run"] == 'python3 scripts/release_evidence.py select --source "$BASE_SHA"'
@@ -868,7 +830,7 @@ def test_full_receipt_records_the_checkout_only_after_required_dependencies_pass
     check, checkout, record, upload = steps
     assert check["name"] == "Require the selected CI tier to succeed"
     for step in (checkout, record, upload):
-        assert step["if"] == "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+        assert step["if"] == "needs.scope.outputs.full == 'true'"
     assert record["run"] == "python3 scripts/release_evidence.py record --output full-ci-evidence.json"
     assert upload["with"]["name"] == "full-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
     assert upload["with"]["if-no-files-found"] == "error"
@@ -906,8 +868,7 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     assert "test" not in gate["needs"]
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ toJSON(needs) }}"
     full_ci = " ".join(str(gate["steps"][0]["env"]["FULL_CI"]).split())
-    assert "github.event_name == 'schedule'" in full_ci
-    assert "github.event_name == 'workflow_dispatch'" in full_ci
+    assert full_ci == "${{ needs.scope.outputs.full == 'true' }}"
     assert "release-please" not in full_ci
 
 

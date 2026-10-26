@@ -25,6 +25,28 @@ RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
 
 
+def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
+    """One policy owns ready PR, release metadata, and scheduled/manual Full scope."""
+    pr = event.get("pull_request", {})
+    # GitHub's PR schema fixes these types; malformed receipts cannot claim ready scope.
+    if event_name == "pull_request" and (
+        not isinstance(pr, dict)
+        or not isinstance(pr.get("draft"), bool)
+        or not isinstance(pr.get("head"), dict)
+    ):
+        raise ValueError("pull request scope requires the GitHub PR schema")
+    release = event_name == "pull_request" and pr.get("head", {}).get("ref") == RELEASE_BRANCH
+    full = event_name in FULL_EVENTS or (
+        event_name == "pull_request" and not pr.get("draft", True) and not release
+    )
+    return {"full": full, "release": release}
+
+
+def event_payload() -> dict:
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    return json.loads(Path(path).read_text()) if path else {}
+
+
 def command(*args: str) -> bytes:
     return subprocess.check_output(args)
 
@@ -46,7 +68,7 @@ def runs(commit: str) -> list[dict]:
 
 def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
     return (
-        run.get("event") in FULL_EVENTS
+        run.get("event") in (*FULL_EVENTS, "pull_request")
         and run.get("path") == WORKFLOW
         and run.get("workflow_id") == workflow_id
         and (run.get("repository") or {}).get("full_name") == repository
@@ -64,48 +86,102 @@ def legacy_workflow(commit: str) -> bool:
 
 
 def read_receipt(run: dict, repository: str) -> dict | None:
-    run_id, attempt = str(run["id"]), str(run["run_attempt"])
-    name = f"full-ci-evidence-{run_id}-{attempt}"
+    run_id, latest_attempt = str(run["id"]), int(run["run_attempt"])
+    prefix = f"full-ci-evidence-{run_id}-"
     artifacts = [
         artifact
         for page in api(f"actions/runs/{run_id}/artifacts?per_page=100", pages=True)
         for artifact in page["artifacts"]
-        if artifact["name"] == name
+        if artifact["name"].startswith(prefix)
     ]
     if not artifacts:
         return None
-    if len(artifacts) != 1:
-        raise ValueError("ambiguous Full evidence artifact")
-    artifact = artifacts[0]
-    identity = artifact.get("workflow_run") or {}
-    if (
-        artifact["expired"]
-        or identity.get("id") != run["id"]
-        or identity.get("head_sha") != run["head_sha"]
-    ):
-        raise ValueError("Full evidence artifact identity is unavailable or mismatched")
-    archive = command("gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip")
-    if (
-        artifact.get("digest")
-        and artifact["digest"] != "sha256:" + hashlib.sha256(archive).hexdigest()
-    ):
-        raise ValueError("Full evidence archive digest differs")
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        receipt = json.loads(files.read("full-ci-evidence.json"))
-    if not isinstance(receipt, dict):
-        raise ValueError("Full evidence receipt must be an object")
-    expected = {
-        "repository": repository,
-        "workflow": WORKFLOW,
-        "run_id": run_id,
-        "run_attempt": attempt,
-        "event": run["event"],
-        "scope": "full",
-        "tested_commit": run["head_sha"],
-    }
-    if any(receipt.get(key) != value for key, value in expected.items()):
-        raise ValueError("Full evidence receipt does not match its producer")
-    return {**receipt, "artifact_id": artifact["id"]}
+    for artifact in reversed(artifacts):
+        try:
+            # Artifact names encode the issuing attempt, not the successful retry.
+            attempt = int(artifact["name"].removeprefix(prefix))
+            identity = artifact.get("workflow_run") or {}
+            if (
+                artifact["expired"]
+                or not 1 <= attempt <= latest_attempt
+                or identity.get("id") != run["id"]
+                or identity.get("head_sha") != run["head_sha"]
+            ):
+                raise ValueError("Full evidence artifact identity is unavailable or mismatched")
+            issuer = api(f"actions/runs/{run_id}/attempts/{attempt}")
+            if (
+                issuer["id"] != run["id"]
+                or issuer["run_attempt"] != attempt
+                or issuer["head_sha"] != run["head_sha"]
+                or not trusted_full(issuer, repository, run["workflow_id"])
+            ):
+                raise ValueError("Full evidence issuing attempt differs")
+            gates = [
+                job
+                for page in api(
+                    f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30", pages=True
+                )
+                for job in page["jobs"]
+                if job["name"] == "required CI gate" and job["conclusion"] == "success"
+            ]
+            if (
+                len(gates) != 1
+                or gates[0]["started_at"] < issuer["run_started_at"]
+                or not gates[0]["started_at"] <= artifact["created_at"] <= gates[0]["completed_at"]
+            ):
+                raise ValueError("Full receipt has no successful issuing gate")
+            archive = command(
+                "gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"
+            )
+            if (
+                artifact.get("digest")
+                and artifact["digest"] != "sha256:" + hashlib.sha256(archive).hexdigest()
+            ):
+                raise ValueError("Full evidence archive digest differs")
+            with zipfile.ZipFile(io.BytesIO(archive)) as files:
+                receipt = json.loads(files.read("full-ci-evidence.json"))
+            if not isinstance(receipt, dict):
+                raise ValueError("Full evidence receipt must be an object")
+            expected = {
+                "repository": repository,
+                "workflow": WORKFLOW,
+                "run_id": run_id,
+                "run_attempt": str(attempt),
+                "event": run["event"],
+                "scope": "full",
+            }
+            if any(receipt.get(key) != value for key, value in expected.items()):
+                raise ValueError("Full evidence receipt does not match its producer")
+            tested = api(f"commits/{receipt['tested_commit']}")
+            if tested["commit"]["tree"]["sha"] != receipt.get("tested_tree"):
+                raise ValueError("Full receipt tree differs from its tested commit")
+            if run["event"] == "pull_request":
+                pr = receipt["pull_request"]
+                if (
+                    not ci_scope("pull_request", {"pull_request": pr})["full"]
+                    or pr["head"]["sha"] != run["head_sha"]
+                    or [parent["sha"] for parent in tested["parents"]]
+                    != [pr["base"]["sha"], pr["head"]["sha"]]
+                ):
+                    raise ValueError("Full receipt does not bind the PR merge parents")
+            elif receipt["tested_commit"] != run["head_sha"]:
+                raise ValueError("Full receipt commit differs from its producer")
+            return {
+                **receipt,
+                "artifact_id": artifact["id"],
+                "successful_attempt": str(latest_attempt),
+            }
+        except (
+            subprocess.CalledProcessError,
+            ValueError,
+            KeyError,
+            TypeError,
+            zipfile.BadZipFile,
+        ) as error:
+            print(
+                f"artifact {artifact['id']} cannot supply Full evidence: {error}", file=sys.stderr
+            )
+    raise ValueError("no authentic Full receipt remains for this run")
 
 
 def select_evidence(source: str, repository: str) -> dict | None:
@@ -143,7 +219,8 @@ def select_evidence(source: str, repository: str) -> dict | None:
                     if receipt.get("tested_tree") == tree:
                         return {**receipt, "source_commit": source}
                 elif (
-                    candidate == source
+                    exact["event"] in FULL_EVENTS
+                    and candidate == source
                     and exact["head_branch"] == "main"
                     and legacy_workflow(source)
                 ):
@@ -231,7 +308,9 @@ def refresh_checks(repository: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     # The command names are this helper's closed CLI protocol.
-    parser.add_argument("command", choices=("record", "select", "intent", "refresh", "merge"))
+    parser.add_argument(
+        "command", choices=("scope", "record", "select", "intent", "refresh", "merge")
+    )
     parser.add_argument("--source")
     parser.add_argument("--pr", type=int)
     parser.add_argument("--expected-base")
@@ -242,9 +321,15 @@ def main() -> int:
     args = parser.parse_args()
     repository = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     os.environ["GH_REPO"] = repository
-    if args.command == "record":
-        if os.environ["GITHUB_EVENT_NAME"] not in FULL_EVENTS or args.output is None:
-            parser.error("record requires a Full event and --output")
+    if args.command == "scope":
+        selected = ci_scope(os.environ["GITHUB_EVENT_NAME"], event_payload())
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            for key, value in selected.items():
+                output.write(f"{key}={str(value).lower()}\n")
+    elif args.command == "record":
+        event = event_payload()
+        if not ci_scope(os.environ["GITHUB_EVENT_NAME"], event)["full"] or args.output is None:
+            parser.error("record requires Full scope and --output")
         receipt = {
             "repository": repository,
             "workflow": WORKFLOW,
@@ -255,6 +340,19 @@ def main() -> int:
             "tested_commit": command("git", "rev-parse", "HEAD").decode().strip(),
             "tested_tree": command("git", "rev-parse", "HEAD^{tree}").decode().strip(),
         }
+        if receipt["tested_commit"] != os.environ["GITHUB_SHA"]:
+            raise ValueError("actual checkout differs from GITHUB_SHA")
+        if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
+            pr = event["pull_request"]
+            receipt["pull_request"] = {
+                "number": event["number"],
+                "draft": pr["draft"],
+                "head": {"sha": pr["head"]["sha"], "ref": pr["head"]["ref"]},
+                "base": {"sha": pr["base"]["sha"]},
+            }
+            parents = command("git", "show", "-s", "--format=%P", "HEAD").decode().split()
+            if parents != [pr["base"]["sha"], pr["head"]["sha"]]:
+                raise ValueError("actual checkout differs from the PR merge parents")
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     elif args.command == "select":
         if not args.source:

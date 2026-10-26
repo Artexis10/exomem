@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
@@ -23,7 +24,18 @@ env:
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      release: ${{ steps.scope.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: scope
+        run: python3 scripts/release_evidence.py scope
+
   timing-tests:
+    needs: scope
     name: serial timing checks (py${{ matrix.python-version }})
     # Keep timing checks on an idle runner while every core worker pool starts.
     env: &serial-core-selections
@@ -34,13 +46,13 @@ jobs:
       EXOMEM_SERIAL_SENSING_MODULE: tests/test_sensed_write_burst_probe.py
       # Real-clock attribution needs an idle process, outside the worker pool.
       EXOMEM_SERIAL_RECALL_NODE: tests/test_recall_integration.py::test_every_request_shape_attributes_its_time
-    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
+    if: &not-release-pr ${{ needs.scope.outputs.release != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        python-version: &test-python-versions ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
+        python-version: &test-python-versions ${{ needs.scope.outputs.full == 'true' && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +61,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ needs.scope.outputs.full }}
         run: python3 scripts/ci_change_scope.py "serial timing checks on a docs-only change"
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -111,6 +124,7 @@ jobs:
   # The 180-second per-test limit leaves room for CPU sharing. Disable worker
   # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
+    needs: scope
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/24)
     env: *serial-core-selections
     # The release PR runs no test job: `release-evidence` requires a green
@@ -147,6 +161,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ needs.scope.outputs.full }}
         run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
@@ -239,6 +254,7 @@ jobs:
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
   recall-structural-reference:
+    needs: scope
     name: structural recall (system SQLite)
     if: *not-release-pr
     runs-on: ubuntu-24.04
@@ -256,6 +272,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ needs.scope.outputs.full }}
         run: python3 scripts/ci_change_scope.py "structural recall on a docs-only change"
       - name: Install uv
         if: steps.scope.outputs.docs_only != 'true'
@@ -283,6 +300,7 @@ jobs:
           if-no-files-found: warn
 
   harness-tests:
+    needs: scope
     name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     if: *not-release-pr
     runs-on: ubuntu-latest
@@ -305,6 +323,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ needs.scope.outputs.full }}
         run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
@@ -379,6 +398,7 @@ jobs:
           path: *duration-snapshot-path
 
   windows-held-filesystem:
+    needs: scope
     name: Windows held filesystem (native NTFS)
     if: *not-release-pr
     runs-on: windows-latest
@@ -483,6 +503,7 @@ jobs:
           --session-timeout=600
 
   tui:
+    needs: scope
     name: terminal UI (textual, headless + snapshots)
     if: *not-release-pr
     runs-on: ubuntu-latest
@@ -500,6 +521,7 @@ jobs:
         run: uv run --frozen --extra tui --group tui-dev python -m pytest "$EXOMEM_TUI_TEST_DIRECTORY" tests/test_tui_entry.py -q
 
   product-e2e:
+    needs: scope
     name: product E2E (installed wheel, stdio + HTTP)
     if: *not-release-pr
     runs-on: ubuntu-latest
@@ -515,6 +537,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ needs.scope.outputs.full }}
         run: python3 scripts/ci_change_scope.py "the installed journey"
       - name: Install uv
         if: steps.scope.outputs.docs_only != 'true'
@@ -553,16 +576,21 @@ jobs:
 
   # Reuse the specialized suites so release evidence includes them at its base.
   frozen-verifier:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: scope
+    if: ${{ needs.scope.outputs.full == 'true' }}
     uses: ./.github/workflows/frozen-verifier.yml
 
   cloud-cellctl:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: scope
+    if: ${{ needs.scope.outputs.full == 'true' }}
     uses: ./.github/workflows/cloud-cellctl.yml
+    with:
+      full: ${{ needs.scope.outputs.full == 'true' }}
 
   retrieval-quality:
+    needs: scope
     name: retrieval quality (golden gate, embeddings)
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     # A cold cache fetches bge-m3 and, until its artefact is published, builds
     # the int8 artefact on the runner (minutes, ~9 GB peak) before the
@@ -594,8 +622,9 @@ jobs:
         run: uv run --frozen --extra embeddings python -m pytest -m embeddings -v
 
   retrieval-latency:
+    needs: scope
     name: retrieval latency (2k synthetic vault, shard ${{ matrix.shard }}/4)
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
     runs-on: ubuntu-24.04
     # Green CI took 9m38s; one case allows 15m. Let the remaining suite report
@@ -625,7 +654,8 @@ jobs:
         run: >-
           uv run --frozen python -m pytest tests/test_latency_gate.py -q
           --splits=4 --group=${{ matrix.shard }} --splitting-algorithm=least_duration
-          --durations-path="$EXOMEM_DURATIONS_PATH" --store-durations --clean-durations
+          --durations-path="$EXOMEM_DURATIONS_PATH"
+          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
           --durations=20 --junitxml=test-results/retrieval-latency-${{ matrix.shard }}.xml
       - name: Upload latency timing evidence
         if: always()
@@ -635,14 +665,16 @@ jobs:
           path: test-results/retrieval-latency-${{ matrix.shard }}.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-latency-shard-${{ matrix.shard }}
           path: *duration-snapshot-path
 
   governance-projection-wire:
+    needs: scope
     name: governance projected wire characterization (${{ matrix.route }})
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     strategy:
@@ -671,8 +703,9 @@ jobs:
           --session-timeout=360
 
   governance-projection-wire-vector-cpu:
+    needs: scope
     name: governance projected vector CPU wire (${{ matrix.route }})
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     strategy:
@@ -712,8 +745,9 @@ jobs:
           --session-timeout=600
 
   semantic-write-latency:
+    needs: scope
     name: semantic write latency (2k and 8k)
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -731,8 +765,9 @@ jobs:
         run: uv run --frozen python scripts/semantic_write_latency.py --check
 
   graph-convergence:
+    needs: scope
     name: graph convergence (concurrent writer)
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -760,6 +795,7 @@ jobs:
           --pages 400 --seconds 45 --drain-interval 0.5 --check --max-blocking 0
 
   onboarding:
+    needs: scope
     name: onboarding (wheel path)
     runs-on: ubuntu-latest
     steps:
@@ -775,8 +811,9 @@ jobs:
         run: uv run --frozen python scripts/time-to-value.py --budget-seconds 120
 
   docker:
+    needs: scope
     name: docker (lean build + smoke)
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -816,6 +853,7 @@ jobs:
           docker stop exomem-smoke
 
   specs:
+    needs: scope
     name: OpenSpec validation
     runs-on: ubuntu-latest
     steps:
@@ -832,6 +870,7 @@ jobs:
         run: python scripts/check_openspec_archive_discipline.py
 
   build:
+    needs: scope
     name: package build
     runs-on: ubuntu-latest
     steps:
@@ -867,6 +906,7 @@ jobs:
         run: python scripts/validate-public-artifacts.py dist
 
   capabilities:
+    needs: scope
     name: capabilities doc
     runs-on: ubuntu-latest
     steps:
@@ -879,6 +919,7 @@ jobs:
         run: uv run --frozen python scripts/generate-capabilities.py --check
 
   lint:
+    needs: scope
     name: lint + targeted types
     runs-on: ubuntu-latest
     steps:
@@ -945,20 +986,21 @@ jobs:
           src/exomem/entity_types.py
 
   release-evidence:
+    needs: scope
     name: release evidence
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Runs on the release PR (where it enforces) and on every non-PR event
-    # (where it is a trivial success, so the gate's skip-intolerant full-CI
-    # arm never sees a skip). Ordinary PRs skip it and the gate accepts the
-    # skip outside full CI. The release branch name appears here and in the
-    # one anchor that keeps the release PR off the test jobs; the contract
-    # test pins the count, so the full-CI stampede cannot return.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'release-please--branches--main' }}
+    # Release metadata validates its source; every other context succeeds here
+    # while the selected ordinary and Full jobs supply their own evidence.
     steps:
+      - name: Report the selected source scope
+        if: needs.scope.outputs.release != 'true'
+        env:
+          FULL_CI: ${{ needs.scope.outputs.full }}
+        run: echo "Full source scope is $FULL_CI"
       - name: Check out the release checker at the release base
         # The base revision, so a release PR cannot edit its own check.
-        if: github.event_name == 'pull_request'
+        if: needs.scope.outputs.release == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -971,7 +1013,7 @@ jobs:
         # The release PR runs no test job, which is sound only while its diff
         # is release-please's own work (scripts/check_release_pr_files.py).
         # `shell: bash` adds pipefail; a failed API call must refuse.
-        if: github.event_name == 'pull_request'
+        if: needs.scope.outputs.release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -987,7 +1029,7 @@ jobs:
             > "$RUNNER_TEMP/pr-files.jsonl"
           python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl"
       - name: Require complete Full evidence for the release source tree
-        if: github.event_name == 'pull_request'
+        if: needs.scope.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -999,8 +1041,9 @@ jobs:
   # cancelled so the same proof does not take the shared job slots twice.
   # Best effort: an API error must not turn the full run's evidence red.
   cancel-superseded-push-run:
+    needs: scope
     name: cancel the push run this full run supersedes
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
@@ -1023,9 +1066,9 @@ jobs:
   # fails on dead code a pull request adds and posts the Quality report. It informs
   # review and is deliberately outside the required CI gate below.
   quality:
-    if: ${{ github.event_name == 'pull_request' && !cancelled() }}
+    if: ${{ github.event_name == 'pull_request' && !cancelled() && needs.scope.result == 'success' }}
     # The test jobs named in .github/quality.yml, so their runtime is known.
-    needs: [timing-tests, core-tests, recall-structural-reference, harness-tests, windows-held-filesystem, tui, product-e2e]
+    needs: [scope, timing-tests, core-tests, recall-structural-reference, harness-tests, windows-held-filesystem, tui, product-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -1047,6 +1090,7 @@ jobs:
     # Surface dependency failures, but let superseded PR runs release the runner.
     if: ${{ !cancelled() }}
     needs:
+      - scope
       - release-evidence
       - timing-tests
       - core-tests
@@ -1074,7 +1118,7 @@ jobs:
       - name: Require the selected CI tier to succeed
         env:
           RESULTS: ${{ toJSON(needs) }}
-          FULL_CI: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          FULL_CI: ${{ needs.scope.outputs.full == 'true' }}
         run: |
           failures=$(jq -r --argjson full_ci "$FULL_CI" '
             to_entries[]
@@ -1086,12 +1130,14 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@v4
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.full == 'true'
+        with:
+          fetch-depth: 2
       - name: Record the actual checkout after the Full gate passes
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.full == 'true'
         run: python3 scripts/release_evidence.py record --output full-ci-evidence.json
       - name: Retain immutable Full evidence for this run and attempt
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.full == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: full-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}

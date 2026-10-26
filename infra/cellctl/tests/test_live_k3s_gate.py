@@ -133,13 +133,13 @@ def _git(repo: Path, *args: str) -> str:
                           text=True, env=env).stdout.strip()
 
 
-def _run_scope(repo: Path, event: str, base: str, head: str, tmp_path: Path) -> str:
+def _run_scope(repo: Path, event: str, base: str, head: str, tmp_path: Path, *, full: bool = False) -> str:
     """Run the step exactly as GitHub's `shell: bash` does (-eo pipefail)."""
     step = _scope_step()
     output = tmp_path / "github_output"
     output.write_text("")
     env = {**os.environ, **{k: str(v) for k, v in step["env"].items()},
-           "EVENT": event, "BASE": base, "HEAD": head, "GITHUB_OUTPUT": str(output)}
+           "EVENT": event, "BASE": base, "HEAD": head, "GITHUB_OUTPUT": str(output), "FULL_CI": str(full).lower()}
     subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
                    cwd=repo, env=env, check=True, capture_output=True, text=True)
     (line,) = [line for line in output.read_text().splitlines() if line.startswith("run=")]
@@ -215,3 +215,13 @@ def test_every_live_path_matches_the_pattern(path: str) -> None:
     import re
 
     assert re.search(_scope_step()["env"]["LIVE_K3S_PATTERN"], path), path
+
+
+def test_full_caller_runs_live_suites_even_when_pr_paths_are_unrelated(repo, tmp_path):
+    root, base = repo
+    assert _run_scope(root, "pull_request", base, base, tmp_path, full=True) == "true"
+    workflow = _workflow()
+    triggers = workflow.get("on", workflow.get(True))
+    assert triggers["workflow_call"]["inputs"]["full"]["type"] == "boolean"
+    assert "github.workflow" in workflow["concurrency"]["group"]
+    assert "inputs.full" in workflow["jobs"]["live-k3s-scope"]["if"]
