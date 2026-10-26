@@ -3962,7 +3962,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+          "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
           "type": "string"
         },
         "project": {

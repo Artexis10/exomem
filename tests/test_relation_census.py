@@ -31,6 +31,12 @@ PEOPLE = "Knowledge Base/Entities/People"
 ORGS = "Knowledge Base/Entities/Organizations"
 SOURCE = "Knowledge Base/Sources/Articles/source-one"
 
+
+@pytest.fixture(autouse=True)
+def _same_cohort_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = relation_census.dt.datetime.now(relation_census.dt.UTC)
+    monkeypatch.setattr(relation_census, "_cohort_now", lambda: now)
+
 _REGISTRY = """\
 schema_version: 1
 extensions:

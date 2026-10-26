@@ -80,7 +80,8 @@ A link from the promotion's originating write SHALL NOT be a dependant, because 
 A registry addition SHALL revert through one `schema_memory` save of that key with a `remove` delta, `expected_hash=<revert_fingerprint>` and `why`, where the `revert_fingerprint` is the registry's current `expected_hash`.
 The save SHALL take no `vocabulary_ref` or `vocabulary_fingerprint`.
 The server SHALL decide at save time from current usage: it SHALL remove the key when the key is vault-added and nothing uses it, and otherwise SHALL deprecate the key, to its parent for a relation, and list the dependants.
-The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check, which today means entity types, relations and semantic categories, and every other registry SHALL refuse it.
+The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check: entity types, relations, semantic categories, note types, homes, source kinds and domains.
+Every other registry SHALL refuse it, and unavailable usage SHALL refuse removal instead of reporting an unused key.
 No revert SHALL land on `triage_memory` or `connect_memory`.
 A revert SHALL NOT restore an older registry version or drop a later save.
 A revert SHALL run only on the user's request, which is its confirmation, and history and logs SHALL keep both the promotion and its revert.

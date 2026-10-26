@@ -1036,6 +1036,8 @@ def link(
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     try:
+        from .relation_census import operation_provenance
+
         log_plan = plan_log_writes(
             vault_root,
             date_iso=stamp_iso,
@@ -1051,6 +1053,7 @@ def link(
                 origin=origin,
             ),
             operation_token=token,
+            provenance=operation_provenance(preflight),
         )
     except (OSError, UnicodeError, ValueError) as error:
         raise LinkError(

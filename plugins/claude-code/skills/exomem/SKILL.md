@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: ac474fcb9f3a55e9874eaa30195e5cfb88c8b31fb8c1d05c42935b624ee3fed8
+  skill_contract: d760e268c467bfd846bce5afdf3ef0c88ed279c215f87c3bb0c6a44ea624e6fb
   version: "0.32.0"
 ---
 
@@ -248,6 +248,10 @@ server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
 Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, execute at most one step per request, let resume continue that approval, and confirm compensation separately.
+
+Curation `revert` uses `restructure_execution`. After the user requests that
+promotion's undo, pass its current `revert_fingerprint` as
+`expected_plan_fingerprint`; the item context supplies the preview and call.
 
 **Standing delegation does not exist in v1.** "Always allow this" or "do this
 kind of thing from now on" for restructure execution is refused by name: it

@@ -1,7 +1,7 @@
 """Usage counts for vocabulary registries, read from maintained projections.
 
 Counts come only from projections the indexer already keeps current: the
-published graph snapshot (entity types, note types, relations, semantic
+published graph snapshot (entity types, note types, homes, relations, semantic
 categories) and the lexical catalogue (source kinds, domains). Nothing here
 parses Markdown.
 
@@ -188,6 +188,31 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
         )
 
     return _guarded(vault_root, "graph authored edges", read)
+
+
+def homes(vault_root: Path, snapshot: Snapshot) -> Usage:
+    """Pages within each registered home, from one current graph snapshot."""
+    from ..kbdir import kb_prefix
+
+    source = "graph file pages in home folders"
+
+    def read() -> Usage:
+        rows = _graph_rows(vault_root, "SELECT path FROM graph_nodes WHERE kind = 'file'")
+        if isinstance(rows, str):
+            return _unavailable(rows, source)
+        pages = sorted(str(path) for (path,) in rows)
+        holders: dict[str, tuple[str, ...]] = {}
+        for key, entry in snapshot.entries.items():
+            folder = f"{kb_prefix()}{entry.attributes['folder']}/".casefold()
+            holders[key] = tuple(path for path in pages if path.casefold().startswith(folder))
+        return Usage(
+            True,
+            MappingProxyType({key: len(paths) for key, paths in holders.items()}),
+            source=source,
+            holders=lambda key, limit: holders.get(key, ())[:limit],
+        )
+
+    return _guarded(vault_root, source, read)
 
 
 def categories(vault_root: Path, snapshot: Snapshot) -> Usage:

@@ -912,34 +912,6 @@ def commit_edit(
     if changed:
         log_body_parts.append(f"Changed: {', '.join(changed)}.")
     log_body = " ".join(log_body_parts)
-    try:
-        log_plan = plan_log_writes(
-            vault_root,
-            date_iso=date_iso,
-            op=op,
-            rel_path_no_ext=rel_no_ext,
-            body=log_body,
-            operation_token=(
-                "edit:"
-                + content_hash(
-                    # Keyed on the calendar day, not the stamp: this token is
-                    # what makes a replayed edit idempotent, and a
-                    # second-granularity value would mint a fresh key on every
-                    # attempt and defeat the dedup entirely.
-                    f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
-                )
-            ),
-        )
-    except (OSError, UnicodeError, ValueError) as error:
-        raise EditError(
-            "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
-        ) from error
-    writes.extend(log_plan.writes)
-    derived_auxiliary_writes.extend(("operation-log", write) for write in log_plan.writes)
-    if log_plan.warning is not None:
-        warnings.append(log_plan.warning)
-    if log_plan.rotation_note is not None:
-        warnings.append(log_plan.rotation_note)
 
     semantic_operation = "edit" if op in {"edit", "multi_edit"} else op
     # One collector spans preflight+commit so the envelope accounts for the
@@ -982,6 +954,37 @@ def commit_edit(
                 stamp=date_iso,
                 timings=timings,
             )
+            try:
+                from .relation_census import operation_provenance
+
+                log_plan = plan_log_writes(
+                    vault_root,
+                    date_iso=date_iso,
+                    op=op,
+                    rel_path_no_ext=rel_no_ext,
+                    body=log_body,
+                    provenance=operation_provenance(preflight),
+                    operation_token=(
+                        "edit:"
+                        + content_hash(
+                            # Keyed on the calendar day, not the stamp: this token is
+                            # what makes a replayed edit idempotent, and a
+                            # second-granularity value would mint a fresh key on every
+                            # attempt and defeat the dedup entirely.
+                            f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                        )
+                    ),
+                )
+            except (OSError, UnicodeError, ValueError) as error:
+                raise EditError(
+                    "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
+                ) from error
+            writes.extend(log_plan.writes)
+            derived_auxiliary_writes.extend(("operation-log", write) for write in log_plan.writes)
+            if log_plan.warning is not None:
+                warnings.append(log_plan.warning)
+            if log_plan.rotation_note is not None:
+                warnings.append(log_plan.rotation_note)
             committed = semantic_writes.commit_existing(
                 vault_root,
                 preflight=preflight,

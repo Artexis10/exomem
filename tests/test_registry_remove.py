@@ -81,6 +81,56 @@ def test_an_unused_key_is_removed_and_a_later_save_stays(
     ], "history keeps the promotion and its removal"
 
 
+def test_an_unused_home_can_be_removed_through_its_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    _save(
+        call, "homes",
+        {"upsert": {"workshop": {
+            "label": "Workshop",
+            "attributes": {"folder": "Notes/Workshop", "topics": ["equipment"]},
+        }}},
+        "Group equipment notes",
+    )
+    assert graph_sync.drain_active_rebuilds(timeout=60)
+
+    removed = _save(call, "homes", {"remove": ["workshop"]}, "Undo the unused home")
+
+    assert removed.get("valid") is True, removed
+    assert removed["removal"]["workshop"]["action"] == "removed"
+    current = call("schema_memory", {"subject": "homes", "operation": "inspect"})
+    assert current["entries"] == []
+
+
+def test_a_home_with_notes_is_deprecated_without_moving_its_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    _save(
+        call, "homes",
+        {"upsert": {"workshop": {
+            "label": "Workshop",
+            "attributes": {"folder": "Notes/Workshop", "topics": ["equipment"]},
+        }}},
+        "Group equipment notes",
+    )
+    path = call("create_note", {
+        "note_type": "insight", "title": "Seal inspection", "topics": ["equipment"],
+        "status": "draft", "content": "## Observations\n\n- [finding] The seal holds pressure.\n",
+    })["path"]
+    before = (vault / path).read_bytes()
+    assert graph_sync.drain_active_rebuilds(timeout=60)
+
+    removed = _save(call, "homes", {"remove": ["workshop"]}, "Stop filing notes in this home")
+
+    outcome = removed["removal"]["workshop"]
+    assert outcome["action"] == "deprecated"
+    assert outcome["dependants"]["count"] == 1
+    assert outcome["dependants"]["pages"] == [path]
+    assert (vault / path).read_bytes() == before
+
+
 def test_a_used_key_is_deprecated_and_its_pages_are_listed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

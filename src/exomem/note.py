@@ -2130,6 +2130,8 @@ def note(
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     try:
+        from .relation_census import operation_provenance
+
         log_plan = plan_log_writes(
             root,
             date_iso=stamp_iso,
@@ -2151,6 +2153,10 @@ def note(
                 duration=duration,
             ),
             operation_token=encoded_token,
+            provenance=operation_provenance(
+                preflight, predecessor_path=_predecessor_path,
+                predecessor_content_hash=_predecessor_content_hash,
+            ),
         )
     except (OSError, UnicodeError, ValueError) as error:
         raise NoteError(

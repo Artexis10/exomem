@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
+from markdown_it import MarkdownIt
 from slugify import slugify as _slugify
 
 from . import (
@@ -8131,6 +8132,7 @@ def prepend_log_entry(
     op: str,
     rel_path_no_ext: str,
     body: str,
+    provenance: Mapping[str, Any] | None = None,
 ) -> str:
     """Insert a `## [date] <op> | <rel>` block after the log's `---` separator.
 
@@ -8143,7 +8145,13 @@ def prepend_log_entry(
     if title.startswith(kb_prefix()):
         title = title[len(kb_prefix()) :]
     newline = document_newline(log_text)
-    new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
+    # Quote caller prose so it cannot mint activity sections or provenance fences.
+    quoted_body = "\n".join("> " + line for line in escape_wikilinks_for_log(body).splitlines())
+    new_entry = f"## [{date_iso}] {op} | {title}\n\n{quoted_body}\n"
+    if provenance is not None:
+        # The fixed fence token versions the operation-log protocol, not vocabulary.
+        encoded = json.dumps(provenance, ensure_ascii=False, sort_keys=True).replace("`", "\\u0060")
+        new_entry += f"\n```exomem-operation-v1\n{encoded}\n```\n"
     new_entry = with_newline(new_entry, newline)
     if new_entry in log_text:
         return log_text
@@ -8263,18 +8271,29 @@ def plan_log_writes(
     rel_path_no_ext: str,
     body: str,
     operation_token: str,
+    provenance: Mapping[str, Any] | None = None,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
     log_file = kb_root(vault_root) / "log.md"
     if not log_file.is_file():
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
+    if provenance is not None:
+        provenance = {
+            **provenance,
+            "version": 1,
+            "operation_id": hashlib.sha256(json.dumps(
+                [operation_token, provenance.get("before_hash"), provenance.get("after_hash")],
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+        }
     updated = prepend_log_entry(
         current,
         date_iso=date_iso,
         op=op,
         rel_path_no_ext=rel_path_no_ext,
         body=body,
+        provenance=provenance,
     )
     return _plan_log_content(
         vault_root,
@@ -8282,6 +8301,55 @@ def plan_log_writes(
         live_guard=live_guard,
         operation_token=operation_token,
     )
+
+
+def read_operation_log(vault_root: Path) -> dict[str, Any]:
+    """Read activity sections and structured provenance from live and rotated logs."""
+    root = kb_root(vault_root)
+    live = root / "log.md"
+    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
+    paths = [live, *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    entries: list[dict[str, Any]] = []
+    failed = 0
+    read = 0
+    parser = MarkdownIt("commonmark")
+    for path in paths:
+        try:
+            text, _guard = read_guarded_text(vault_root, path)
+        except (OSError, UnicodeError, ValueError):
+            failed += 1
+            continue
+        read += 1
+        tokens = parser.parse(text)
+        sections = [i for i, token in enumerate(tokens)
+                    if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
+        for index, at in enumerate(sections):
+            header = tokens[at + 1].content
+            stamp, separator, rest = header.removeprefix("[").partition("] ")
+            op, bar, title = rest.partition(" | ")
+            if not header.startswith("[") or not separator or not bar:
+                continue
+            stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
+            entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
+            for token in tokens[at:stop]:
+                if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
+                    continue
+                try:
+                    value = json.loads(token.content)
+                except (ValueError, TypeError):
+                    entry["provenance_invalid"] = True
+                    continue
+                if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+                    entry["provenance"] = value
+                else:
+                    entry["provenance_invalid"] = True
+            entries.append(entry)
+    return {
+        "entries": entries,
+        "live_log_present": live.is_file(),
+        "files_read": read,
+        "files_unreadable": failed,
+    }
 
 
 def plan_log_writes_many(

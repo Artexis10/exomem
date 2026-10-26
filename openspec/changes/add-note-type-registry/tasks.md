@@ -28,7 +28,7 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 - [ ] 2A.4 Refuse a home whose governance or vocabulary-instance scope differs from the type default's (`HOME_CHANGES_SCOPE`), then run `page_scope` on the final path. Check: the refusal writes nothing.
 - [ ] 2A.5 Report `placement` in the creation draft, with the folder, the basis and the home-making call; route a near-miss topic with a home through the vocabulary decision.
 - [ ] 2A.6 Count notes by top-level Notes folder with registry labels and give homes index sections; make the research-folder contradiction demotion a project-key rule. Check: a home's pages appear in `Notes/index.md` and in `index_drift`.
-- [ ] 2A.7 Update the authoring contract's role rule and homes text, bump the contract version once, and regenerate the scaffold, plugin and Cloud copies through their producers; frozen v1 to v4 keep their bytes.
+- [ ] 2A.7 Update the authoring contract's role rule and homes text, bump the contract version once, and regenerate the scaffold, plugin and Cloud copies through their producers. Hosted v1 to v4 were retired in #1691, so no frozen carrier remains to verify.
 
 ## 2. S4b: write side and promotion
 

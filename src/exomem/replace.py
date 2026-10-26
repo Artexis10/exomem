@@ -675,6 +675,8 @@ def replace(
         if write.path != log_file and write.path.parent != log_archive_dir
     ]
     try:
+        from .relation_census import operation_provenance
+
         log_plan = plan_log_writes(
             root,
             date_iso=stamp_iso,
@@ -682,6 +684,10 @@ def replace(
             rel_path_no_ext=rel_new_no_ext,
             body=replacement_body,
             operation_token=prepared.draft_token,
+            provenance=operation_provenance(
+                prepared.preflight, predecessor_path=rel_old_with_ext,
+                predecessor_content_hash=predecessor_hash,
+            ),
         )
     except (OSError, UnicodeError, ValueError) as error:
         raise ReplaceError(

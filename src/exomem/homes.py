@@ -148,7 +148,13 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
                 )
 
 
-SPEC = registry.RegistrySpec(
+def _usage(vault_root: Path, snapshot: registry.Snapshot) -> Any:
+    from .vocabulary import usage
+
+    return usage.homes(vault_root, snapshot)
+
+
+SPEC: registry.RegistrySpec = registry.RegistrySpec(
     name="homes",
     stem="homes",
     overlay=registry_path,
@@ -158,6 +164,7 @@ SPEC = registry.RegistrySpec(
     attributes=frozenset({"folder", "topics", "projects"}),
     # Pages already sit in a home's folder, so moving it would strand them.
     immutable=frozenset({"attributes.folder"}),
+    usage=_usage,
     # A write response and the draft's `placement` name the home; the bootstrap row stays small.
     summarize_keys=False,
 )

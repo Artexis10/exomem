@@ -308,6 +308,9 @@ class FixedPackAdapter:
         row.pop("origin")
         document["entries"][key] = row
 
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document["entries"].pop(key, None)
+
     def render(self, document: Mapping[str, Any]) -> str:
         return yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=True)
 
