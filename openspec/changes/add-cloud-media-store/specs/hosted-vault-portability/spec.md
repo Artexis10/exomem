@@ -48,7 +48,7 @@ sidecar of an evicted original.
 
 ### Requirement: Export writes evicted originals byte-identical
 
-A Cloud export SHALL include every original that the media store has evicted, at its vault-relative path, with the exact stored bytes. The export SHALL fetch each evicted original through the media edge, decrypt it inside the export Job, and verify its SHA-256 against the sidecar before it writes the manifest entry. A mismatch or an unreadable object SHALL fail the export without publishing it as complete.
+A Cloud export SHALL include every original that the media store has evicted, at its vault-relative path, with the exact stored bytes. A packing step SHALL fetch each evicted original through the media edge, decrypt it, and verify its SHA-256 against the sidecar before it writes the manifest entry. The packing step SHALL have no egress except the media edge. A separate upload step that mounts no media key SHALL transfer the archive. A mismatch or an unreadable object SHALL fail the export without publishing it as complete.
 
 #### Scenario: A vault with evicted recordings is exported
 
@@ -59,3 +59,8 @@ A Cloud export SHALL include every original that the media store has evicted, at
 
 - **WHEN** a fetched original's SHA-256 differs from its sidecar
 - **THEN** the export fails with no completed archive published
+
+#### Scenario: The media key stays out of the egress pod
+
+- **WHEN** an export of a vault with evicted originals runs
+- **THEN** the pod that decrypts originals reaches only the media edge, and the pod that uploads the archive holds no media key

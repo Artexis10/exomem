@@ -62,13 +62,18 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 ### Requirement: Hydration verifies an original before it reappears
 
-The cell SHALL hydrate an evicted original by fetching its stored object through the media edge, decrypting it to a temporary file, verifying size and SHA-256 against the sidecar, and renaming it into place with the recorded modification time. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL NOT create a processing job, rewrite the sidecar or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
+The cell SHALL hydrate an evicted original by fetching its stored object through the media edge, decrypting it to a temporary file, verifying size and SHA-256 against the sidecar, and renaming it into place. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
 
 #### Scenario: Playback of an evicted lecture
 
 - **WHEN** an owner opens an evicted recording
 - **THEN** the cell hydrates it, verifies the digest and serves it
-- **AND** the original returns to the cached state with no new job or sidecar change
+- **AND** the original returns to the cached state with no new job and no sidecar change
+
+#### Scenario: A hydrated file has a new change time
+
+- **WHEN** reconciliation runs over a hydrated original whose inode and change time differ from those recorded at ingest but match its cache identity
+- **THEN** reconciliation treats it as unchanged and does not rewrite the sidecar
 
 #### Scenario: The stored object is corrupt
 
@@ -77,7 +82,7 @@ The cell SHALL hydrate an evicted original by fetching its stored object through
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
-The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload, and SHALL name each stored object with HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. cellctl SHALL mint the media key bundle (identity and name key) per cell. It SHALL store the bundle once on the cell row, wrapped with AES-GCM under the same master key that wraps the backup key, with cell ID, purpose and version as additional data. It SHALL render the bundle into the cell's Secret. Only the cell runtime and the cell's export Job SHALL mount the bundle. A restore needs no media key, because evicted originals stay in the store. The media edge, the gateway and the provider SHALL NOT receive it.
+The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload, and SHALL name each stored object with HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. cellctl SHALL mint the media key bundle (identity and name key) per cell. It SHALL store the bundle once on the cell row, wrapped with AES-GCM under the same master key that wraps the backup key, with cell ID, purpose and version as additional data. It SHALL render the bundle into the cell's Secret. Only the cell runtime and the export packing step SHALL mount the bundle, and no pod that has public egress SHALL mount it. A restore needs no media key, because evicted originals stay in the store. The media edge, the gateway and the provider SHALL NOT receive it.
 
 #### Scenario: The bucket is listed
 
@@ -89,14 +94,28 @@ The cell SHALL encrypt each original with `age` to its own X25519 recipient befo
 - **WHEN** the media edge's environment, mounts and Secrets are listed
 - **THEN** none holds a media key bundle or a name key
 
+#### Scenario: The export upload step is inspected
+
+- **WHEN** the export's upload step, which has public egress, is rendered
+- **THEN** it mounts no media key bundle
+
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size, ranged read, head and hide, and nothing else. It SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify it with cellctl's public key only. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request. A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export Job SHALL reach it on the same terms.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size, ranged read, head, listing of the caller's own prefix and hide, and nothing else.
+
+The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report the set generation it has loaded. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
+
+A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no other egress.
 
 #### Scenario: A cell asks for another cell's object
 
 - **WHEN** a request presents a valid credential for one cell and names an object of another cell
 - **THEN** the edge resolves the name under the credential's own prefix and the other cell's object is never read
+
+#### Scenario: A credential outlives its cell
+
+- **WHEN** a captured credential of a deleted or rotated cell is presented with a valid signature
+- **THEN** the edge refuses it, because that cell and version are no longer in the loaded active set
 
 #### Scenario: A compromised cell tries to destroy history
 
@@ -108,19 +127,19 @@ A media edge service SHALL move ciphertext between cells and the media bucket. I
 - **WHEN** a selected runtime connects to any destination other than the media edge or, if selected for it, the artifact broker
 - **THEN** the network policy refuses the connection
 
-### Requirement: The media bucket keeps hidden versions longer than backups
+### Requirement: No stored version that a retained backup references is destroyed
 
-Media SHALL be stored in a dedicated bucket, separate from backup prefixes. The bucket SHALL keep versions, and a lifecycle rule SHALL delete hidden versions no sooner than 35 days after hiding, which exceeds the 4-weekly backup retention. The bucket SHALL NOT use object lock.
+Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions and uses no object lock. A hidden version SHALL be destroyed only when every retained backup snapshot of its cell is newer than the moment the version was hidden. No fixed age SHALL decide destruction. After each successful prune, cellctl SHALL record the time of the cell's oldest retained snapshot, and only cellctl's key-management authority SHALL destroy versions. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete hidden versions.
+
+#### Scenario: A stopped cell keeps an old backup
+
+- **WHEN** a cell's retained snapshots include one taken months ago, and an original that snapshot references was hidden after it
+- **THEN** the hidden version stays until that snapshot is pruned
 
 #### Scenario: The oldest backup is restored
 
 - **WHEN** a cell is restored from its oldest retained backup
 - **THEN** every stored-object reference in the restored sidecars still resolves to a readable version
-
-#### Scenario: An original is hidden by mistake
-
-- **WHEN** an object is hidden and the error is found within 35 days
-- **THEN** its version is still present and can be restored with key-management authority
 
 ### Requirement: Owners retrieve originals only with their own authority
 
@@ -143,7 +162,7 @@ The gateway SHALL serve a download route for originals that works only with the 
 
 ### Requirement: The media allowance is checked before bytes arrive
 
-Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. cellctl SHALL meter stored bytes from the bucket listing. An upload or import whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. An original that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media.
+Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. cellctl SHALL meter stored bytes from the bucket listing. An upload or import whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. An original that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media. Status SHALL report two separately named figures: vault storage, which counts the volume's use without cached copies of stored originals, against the volume size; and media storage, which counts each stored original once, against the allowance. A figure that cannot be read SHALL be reported as unknown, never as zero.
 
 #### Scenario: An upload exceeds the allowance
 
@@ -155,19 +174,47 @@ Each cell SHALL have a media allowance, separate from its volume size, set as a 
 - **WHEN** an original's offload would exceed the remaining allowance
 - **THEN** the original stays local and status names it as not offloaded for lack of allowance
 
+#### Scenario: An owner reads their storage
+
+- **WHEN** a cell holds cached and evicted originals and the owner reads storage status
+- **THEN** vault storage excludes the cached originals, media storage counts each stored original once, and each figure names its limit
+
+#### Scenario: The bucket listing fails
+
+- **WHEN** cellctl cannot list the media bucket
+- **THEN** media storage is reported as unknown, not as zero
+
 ### Requirement: Deleting originals and cells removes their stored objects
 
-When the last sidecar that references a stored object leaves the vault, including when trash is emptied, the cell SHALL hide that object through the media edge. An orphan sweep SHALL hide objects that no sidecar has referenced for a configured grace period. When a cell row becomes `deleted`, cellctl SHALL delete every object version under the cell's media prefix and destroy the wrapped media key bundle. It SHALL report `deleted` only after it observes that both are absent. A failed listing MUST NOT count as absence.
+A collector in the cell SHALL list the cell's own prefix through the media edge and hide each object that no sidecar in the vault (trash included) and no offload in flight on the media job ledger references. The collector and offload SHALL be serialized on that ledger. An offload of identical bytes whose object is hidden SHALL upload a new current version. Hidden versions are destroyed only as the retention requirement allows.
+
+When a cell row becomes `deleted`, cellctl SHALL:
+1. remove the cell from the edge's active set;
+2. observe that the edge has loaded that set;
+3. abort every unfinished multipart upload under the cell's prefix;
+4. delete every object version under the prefix and destroy the wrapped media key bundle.
+
+It SHALL report `deleted` only after it observes that the versions and the bundle are absent. A failed listing or an unobserved edge generation MUST NOT count as done.
 
 #### Scenario: An owner deletes a recording
 
 - **WHEN** an owner deletes a recording and empties trash
-- **THEN** its stored object is hidden, and the lifecycle rule deletes it after retention
+- **THEN** the collector hides its stored object, and the object is destroyed once no retained snapshot predates the hide
+
+#### Scenario: An upload is confirmed but not yet referenced
+
+- **WHEN** the collector runs between a confirmed upload and the write of its reference into the sidecar
+- **THEN** the object is not hidden, because the ledger records the offload in flight
+
+#### Scenario: Two sidecars share an object
+
+- **WHEN** one of two sidecars that reference the same object is deleted and trash is emptied
+- **THEN** the object stays current
 
 #### Scenario: A tenant deletes their account
 
 - **WHEN** a cell row is set to `deleted`
-- **THEN** every version under its media prefix and its wrapped media key bundle are absent before the row reports `deleted`
+- **THEN** the edge stops accepting the cell's credential before any version is deleted, and every version under its media prefix and its wrapped media key bundle are absent before the row reports `deleted`
 
 #### Scenario: The version listing fails during deletion
 
