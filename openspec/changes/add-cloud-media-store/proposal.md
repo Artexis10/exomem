@@ -46,4 +46,4 @@ No server-side model is added. Extraction keeps running inside the cell, before 
 - **Terraform:** a media bucket with versioning, no version-deleting lifecycle, and its edge key.
 - **Substrate (its own change):** the signed-in download link, the tus upload proxy and the split import admission. This change fixes the contract they build to.
 - **Storage plan:** phase 7 of `move-cloud-cells-to-local-storage` depends on this change for any media-heavy cell. Phases 1–6 do not.
-- **Privacy:** the operator holds the media key, as it holds the volume and backup keys. On the media-storage path, the provider and the media edge see only ciphertext. Playback through the gateway and the export archive keep their existing, disclosed exposure.
+- **Privacy:** the media bundle shares the volume and backup keys' cell root, following `cloud-cell-key-custody`. The operator can recover it in standard mode. Tenant-locked custody follows that contract and is not claimed before `lock_complete_at`. The provider and media edge see ciphertext; playback and authorized exports retain their disclosed plaintext exposure.
