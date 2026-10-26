@@ -567,12 +567,18 @@ class LocalRuntimeActivation:
             )
             if not drained:
                 shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
+        from . import service_standby, writer_lease
+
+        if not self._deferred:
+            # After every worker that writes has stopped, so the final flush cannot move the head.
+            try:
+                await anyio.to_thread.run_sync(writer_lease.stop_server_lifecycle)
+            except Exception:  # noqa: BLE001 - an unreleased lease expires on its TTL; the rest of shutdown goes on
+                log.warning("writer lease handback at stop failed", exc_info=True)
         # A discarded standby must not leave the catalogue it built
         # behind; a no-op for any worker that is not an unpromoted one.
         # Off the loop: it may wait, bounded, for a build to stop, and
         # shielded so a cancelled shutdown still finishes the removal.
-        from . import service_standby
-
         await anyio.to_thread.run_sync(service_standby.discard)
         if shutdown_error is not None:
             raise shutdown_error

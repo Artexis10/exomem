@@ -335,9 +335,10 @@ def test_changed_inputs_refuse_proof_or_event_exposure_without_rewriting_sources
             path = root / manifest.path
             path.write_text(path.read_text() + "\nmanual edit")
         expected = log.read_bytes()
-        with pytest.raises(CollectionStoreError, match="INVALID"):
+        # A changed input is the refreshable refusal, and it stays the refusal for every later call.
+        with pytest.raises(CollectionStoreError, match="SOURCE_CHANGED"):
             next(audit.iter_reachable(proof))
-        with pytest.raises(CollectionStoreError, match="INVALID"):
+        with pytest.raises(CollectionStoreError, match="SOURCE_CHANGED"):
             _verify(audit, manifest, _hash(1))
         assert log.read_bytes() == expected
     assert list(stage.iterdir()) == []

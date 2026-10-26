@@ -842,11 +842,11 @@ def test_vault_creation_lock_timeout_covers_thread_wait(tmp_path: Path) -> None:
             entered.set()
             assert release.wait(5)
 
-    thread = threading.Thread(target=hold_lock)
+    thread = threading.Thread(target=hold_lock, name="lock-holder")
     thread.start()
     assert entered.wait(5)
     try:
-        with pytest.raises(vault.VaultLockTimeout):
+        with pytest.raises(vault.VaultLockTimeout) as lost:
             with vault.vault_creation_lock(tmp_path, "semantic-creation", timeout=0.01):
                 pass
     finally:
@@ -854,6 +854,50 @@ def test_vault_creation_lock_timeout_covers_thread_wait(tmp_path: Path) -> None:
         thread.join(5)
 
     assert not thread.is_alive()
+    # The timeout names the thread it lost to and where each side called from, without a path.
+    details = lost.value.details
+    assert (details["lock"], details["namespace"]) == ("mutex", "semantic-creation")
+    assert details["wait_site"].split(":")[1] == "test_vault_creation_lock_timeout_covers_thread_wait"
+    holder = details["holder"]
+    assert (holder["scope"], holder["thread"], holder["phase"], holder["verified"]) == (
+        "in_process", "lock-holder", "held", True)
+    assert holder["site"].split(":")[1] == "hold_lock" and holder["held_seconds"] > 0
+    assert str(tmp_path) not in str(details) and str(lost.value) == "VAULT_LOCK_TIMEOUT: timed out acquiring vault lock"
+
+
+def test_vault_creation_lock_timeout_names_the_process_holding_the_file_lock(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    holder_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from exomem import vault\n"
+        "with vault.vault_creation_lock(Path(sys.argv[1]), 'semantic-creation'):\n"
+        "    print('locked', flush=True)\n"
+        "    sys.stdin.readline()\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", holder_script, str(tmp_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        with pytest.raises(vault.VaultLockTimeout) as lost:
+            with vault.vault_creation_lock(tmp_path, "semantic-creation", timeout=0.2):
+                pass
+    finally:
+        child.communicate("\n", timeout=30)
+
+    details = lost.value.details
+    assert details["lock"] == "flock" and details["waited_ms"] >= 150
+    # Another process can only publish who it is; the waiter cannot verify it.
+    assert details["holder"]["scope"] == "other_process" and details["holder"]["pid"] == child.pid
+    assert details["holder"]["verified"] is False and details["holder"]["phase"] == "held"
+    assert str(tmp_path) not in str(details)
+    # A released lock leaves no record behind to blame.
+    _, digest = vault._lock_key(tmp_path, "semantic-creation")
+    assert vault._read_flock_holder(vault._private_lock_directory() / f"{digest}.lock") is None
 
 
 posix_only = pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")

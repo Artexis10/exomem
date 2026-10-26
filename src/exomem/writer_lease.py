@@ -4645,6 +4645,28 @@ class LeaseManager:
             and not (self._store_publishing and exempt)
         )
 
+    def await_store_admission(self, deadline: float) -> None:
+        """Wait, holding nothing, for a store handoff to end before a request joins the store thread's queue.
+
+        A handoff drains store borrowers, authority guards and the vault mutation boundary before it
+        flushes, so a thread holding any of them must not wait on it, and returns at once to meet the
+        deep refusals as before. A wait that reaches ``deadline`` also returns: the deep refusals then
+        answer. Both ends of a handoff notify, so the poll below only bounds a missed wakeup.
+        """
+        thread = threading.get_ident()
+        with self._store_condition:
+            if not self._store_handoff:
+                return
+            fence = _ACTIVE_WRITE_FENCE.get()
+            if (thread in self._store_borrowers or (fence is not None and fence[0] is self)
+                    or (self._collection_store is not None
+                        and self._mutation_coordinator_for(
+                            self._collection_store.root).current_thread_holds_boundary())):
+                return
+            while (self._store_handoff and not self._store_closed
+                   and (remaining := deadline - time.monotonic()) > 0):
+                self._store_condition.wait(min(0.05, remaining))
+
     def _require_store_admitted(self) -> None:
         """With the lock held: raise COLLECTION_STORE_BUSY while a closure or handoff excludes this thread."""
         if self._store_refused():
@@ -6723,6 +6745,7 @@ class LeaseManager:
             if release and self.config.enabled and runtime.releases_without_head(token):
                 return self._release_unadmitted_store(token, closing=closing)
             return False
+        started = time.monotonic()
         with self._store_condition:
             # A coalesced publication finishes within its own deadline.
             while self._store_publishing and (remaining := deadline - time.monotonic()) > 0:
@@ -6791,6 +6814,10 @@ class LeaseManager:
                         self._store_released = True
                         runtime._handed_off = True
                 self._record_lease_op("release", "ok")
+                # `closing` is only set by `close()`; every other release is the idle handoff.
+                self._log_lease_event(
+                    "lease_released", cause="shutdown" if closing else "idle",
+                    commit_seq=head.commit_seq, duration_ms=round((time.monotonic() - started) * 1000))
                 return True
         finally:
             with self._store_condition:
@@ -7063,6 +7090,7 @@ class LeaseManager:
                     try:
                         self.client.release(token)
                         self._record_lease_op("release", "ok")
+                        self._log_lease_event("lease_released", cause="shutdown")
                     except OpError as error:
                         self._record_coordinator_error(error.code)
                         self._record_lease_op("release", "error")
@@ -7736,6 +7764,30 @@ def start_server_lifecycle() -> LeaseManager:
     except Exception:  # noqa: BLE001 - file collections serve regardless; store routes refuse
         logger.warning("collection store serving did not start", exc_info=True)
     return manager
+
+
+def stop_server_lifecycle() -> None:
+    """Hand the writer lease back at a clean service stop, so the next process takes it at once.
+
+    uvicorn re-raises the stop signal after its graceful shutdown, so the `atexit` close
+    never runs on that path; the lifespan end calls this instead. A flush that cannot finish
+    inside the mutation timeout leaves the lease to expire on its TTL, as a crash would.
+    """
+    with _MANAGERS_LOCK:
+        manager = _MANAGERS.get(LeaseConfig.from_env())
+    if manager is None or not manager._serves_collection_store:
+        return
+    try:
+        manager.close()
+    except OpError as error:
+        if error.code != "COLLECTION_STORE_FLUSH_PENDING":
+            raise
+        logger.warning("lease handback at stop is pending; the lease expires on its TTL")
+    finally:
+        # A stopped manager is not reusable; the next lifecycle builds a fresh one.
+        with _MANAGERS_LOCK:
+            if _MANAGERS.get(manager.config) is manager:
+                del _MANAGERS[manager.config]
 
 
 def reset_managers_for_tests() -> None:
