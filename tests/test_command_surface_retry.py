@@ -1795,14 +1795,16 @@ def test_identical_retry_without_replay_identity_contends_normally(
     ("read_only", "code", "committed"),
     [(False, "MUTATION_ACKNOWLEDGEMENT_PENDING", None), (True, "COLLECTION_STORE_BUSY", False)],
 )
-def test_second_pass_store_refusal_after_a_write_leaf_reports_an_unknown_outcome(
+@pytest.mark.parametrize("refusing_pass", [1, 2])
+def test_store_filter_refusal_after_a_write_leaf_reports_an_unknown_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     read_only: bool,
     code: str,
     committed: bool | None,
+    refusing_pass: int,
 ) -> None:
-    """A store read that misses its deadline in the MCP second pass never reads as "nothing committed" on a write.
+    """A deadline refusal in either result filter never reports that a completed write committed nothing.
 
     The same-identity retry then replays the stored terminal without running the leaf again.
     """
@@ -1827,14 +1829,14 @@ def test_second_pass_store_refusal_after_a_write_leaf_reports_an_unknown_outcome
     filter_passes = egress.postfilter
     seen = 0
 
-    def second_pass_misses_its_deadline(*args, **kwargs):
+    def filter_misses_its_deadline(*args, **kwargs):
         nonlocal seen
         seen += 1
-        if seen != 2:  # the dispatcher's own pass, and every pass of the retry
+        if seen != refusing_pass:
             return filter_passes(*args, **kwargs)
         raise connection.busy("the collection store did not finish this read within its completion deadline")
 
-    monkeypatch.setattr(egress, "postfilter", second_pass_misses_its_deadline)
+    monkeypatch.setattr(egress, "postfilter", filter_misses_its_deadline)
     result = command_surface.bind_vault(leaf, vault, command=command)(value=7)
 
     assert written.read_text(encoding="utf-8") == "done"
