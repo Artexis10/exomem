@@ -2,7 +2,7 @@
 
 ### Requirement: Bound originals are written through to the cell's media store
 
-On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type or size. The cell SHALL encrypt the original, upload it, confirm the stored size and digest, and only then record the stored-object reference in the sidecar. Offload work SHALL run on the durable media job ledger. Identical originals in one cell SHALL share one stored object. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded.
+On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type or size. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger, which SHALL record each upload's object name before the upload starts. An offload SHALL reuse an existing version only when a live sidecar already references that version. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded.
 
 #### Scenario: A recording is captured on a selected cell
 
@@ -17,12 +17,17 @@ On a cell selected for the media store, every original that a governed sidecar b
 
 #### Scenario: The same file is stored twice
 
-- **WHEN** two sidecars in one cell bind the same SHA-256
-- **THEN** the cell stores one object and both sidecars reference it
+- **WHEN** a second sidecar binds the same SHA-256 as a live sidecar that already references a stored version
+- **THEN** both sidecars reference that one version
+
+#### Scenario: The same file returns after deletion
+
+- **WHEN** an original arrives whose bytes match a version that no live sidecar references
+- **THEN** the cell uploads a new version and references it
 
 ### Requirement: One state function decides where an original is
 
-The system SHALL decide an original's state through one function, from the presence of its file and the stored-object reference in its sidecar: `local` (present, no reference), `cached` (present, reference), `evicted` (absent, reference) or `missing` (absent, no reference). Reconciliation, the governance companion check, the deletion fan-out, media processing, export, download and frame reads SHALL use this function and MUST NOT treat an evicted original as deleted. A reference whose store identity is not the current cell's store SHALL count as no reference. No stub file SHALL be written at an evicted original's path.
+The system SHALL decide an original's state through one function, from the presence of its file and the stored-object reference in its sidecar. The reference SHALL hold the store identity, key version, object name and version ID. The states are: `local` (present, no reference), `cached` (present, reference), `evicted` (absent, reference) or `missing` (absent, no reference). Reconciliation, the governance companion check, the deletion fan-out, media processing, export, download and frame reads SHALL use this function and MUST NOT treat an evicted original as deleted. A reference whose store identity is not the current cell's store SHALL count as no reference. No stub file SHALL be written at an evicted original's path.
 
 #### Scenario: Reconciliation meets an evicted original
 
@@ -62,7 +67,7 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 ### Requirement: Hydration verifies an original before it reappears
 
-The cell SHALL hydrate an evicted original by fetching its stored object through the media edge, decrypting it to a temporary file, verifying size and SHA-256 against the sidecar, and renaming it into place. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
+The cell SHALL hydrate an evicted original by fetching the version its reference names through the media edge, decrypting it to a temporary file, verifying size and SHA-256 against the sidecar, and renaming it into place. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
 
 #### Scenario: Playback of an evicted lecture
 
@@ -101,7 +106,7 @@ The cell SHALL encrypt each original with `age` to its own X25519 recipient befo
 
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size, ranged read, head, listing of the caller's own prefix and hide, and nothing else.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT hide, list or delete.
 
 The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report the set generation it has loaded. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
@@ -129,17 +134,36 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 ### Requirement: No stored version that a retained backup references is destroyed
 
-Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions and uses no object lock. A hidden version SHALL be destroyed only when every retained backup snapshot of its cell is newer than the moment the version was hidden. No fixed age SHALL decide destruction. After each successful prune, cellctl SHALL record the time of the cell's oldest retained snapshot, and only cellctl's key-management authority SHALL destroy versions. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete hidden versions.
+Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions.
+
+Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list every version that the captured sidecars reference, trash included, and every object name that the captured media job ledger lists as uploading, or uploaded and not yet referenced. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
+
+Only cellctl's key-management authority SHALL destroy versions. It SHALL destroy them only within a backup hold, after that hold's backup and prune succeed, and only a version that meets all of these:
+- it was uploaded before the capture of the newest retained snapshot;
+- no retained snapshot's manifest names it or lists its object name as in flight;
+- every retained snapshot of the cell has a readable manifest.
+
+No age or time cutoff SHALL decide destruction. cellctl SHALL delete the manifests of pruned snapshots.
 
 #### Scenario: A stopped cell keeps an old backup
 
-- **WHEN** a cell's retained snapshots include one taken months ago, and an original that snapshot references was hidden after it
-- **THEN** the hidden version stays until that snapshot is pruned
+- **WHEN** a cell's retained snapshots include one taken months ago that references a version the vault no longer references
+- **THEN** that version stays until that snapshot is pruned
 
-#### Scenario: The oldest backup is restored
+#### Scenario: A sidecar is deleted while its clone is being backed up
 
-- **WHEN** a cell is restored from its oldest retained backup
-- **THEN** every stored-object reference in the restored sidecars still resolves to a readable version
+- **WHEN** a clone captures a sidecar, the owner then deletes that sidecar, and restic backs up the clone afterwards
+- **THEN** the snapshot's manifest names the version, and the version is not destroyed while that snapshot is retained
+
+#### Scenario: An old backup is restored into the same cell
+
+- **WHEN** a cell is restored from its oldest retained backup and later backups follow
+- **THEN** every restored reference reads its pinned version, and no version that any retained manifest names is destroyed
+
+#### Scenario: A snapshot has no manifest
+
+- **WHEN** any retained snapshot of a cell lacks a readable manifest
+- **THEN** cellctl destroys no version of that cell
 
 ### Requirement: Owners retrieve originals only with their own authority
 
@@ -162,7 +186,7 @@ The gateway SHALL serve a download route for originals that works only with the 
 
 ### Requirement: The media allowance is checked before bytes arrive
 
-Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. cellctl SHALL meter stored bytes from the bucket listing. An upload or import whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. An original that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media. Status SHALL report two separately named figures: vault storage, which counts the volume's use without cached copies of stored originals, against the volume size; and media storage, which counts each stored original once, against the allowance. A figure that cannot be read SHALL be reported as unknown, never as zero.
+Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. The cell SHALL meter media storage from the versions its sidecars reference, counting each version once. Versions kept only for retained backups SHALL NOT count against the allowance. cellctl SHALL meter each prefix's physical bytes from the bucket listing for the operator. An upload or import whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. An original that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media. Status SHALL report two separately named figures: vault storage, which counts the volume's use without cached copies of stored originals, against the volume size; and media storage, which counts each stored original once, against the allowance. A figure that cannot be read SHALL be reported as unknown, never as zero.
 
 #### Scenario: An upload exceeds the allowance
 
@@ -179,14 +203,14 @@ Each cell SHALL have a media allowance, separate from its volume size, set as a 
 - **WHEN** a cell holds cached and evicted originals and the owner reads storage status
 - **THEN** vault storage excludes the cached originals, media storage counts each stored original once, and each figure names its limit
 
-#### Scenario: The bucket listing fails
+#### Scenario: A meter cannot be read
 
-- **WHEN** cellctl cannot list the media bucket
-- **THEN** media storage is reported as unknown, not as zero
+- **WHEN** the cell cannot read its sidecar references, or its volume use, during a status call
+- **THEN** the affected figure is reported as unknown, not as zero
 
 ### Requirement: Deleting originals and cells removes their stored objects
 
-A collector in the cell SHALL list the cell's own prefix through the media edge and hide each object that no sidecar in the vault (trash included) and no offload in flight on the media job ledger references. The collector and offload SHALL be serialized on that ledger. An offload of identical bytes whose object is hidden SHALL upload a new current version. Hidden versions are destroyed only as the retention requirement allows.
+An original that the owner deletes SHALL leave the media store once the vault no longer references its version and every retained snapshot whose manifest names that version has been pruned, as the retention requirement allows.
 
 When a cell row becomes `deleted`, cellctl SHALL:
 1. remove the cell from the edge's active set;
@@ -198,18 +222,13 @@ It SHALL report `deleted` only after it observes that the versions and the bundl
 
 #### Scenario: An owner deletes a recording
 
-- **WHEN** an owner deletes a recording and empties trash
-- **THEN** the collector hides its stored object, and the object is destroyed once no retained snapshot predates the hide
+- **WHEN** an owner deletes a recording, empties trash, and the backups that referenced it are later pruned
+- **THEN** its version is destroyed in the next backup hold after the last such snapshot is pruned
 
 #### Scenario: An upload is confirmed but not yet referenced
 
-- **WHEN** the collector runs between a confirmed upload and the write of its reference into the sidecar
-- **THEN** the object is not hidden, because the ledger records the offload in flight
-
-#### Scenario: Two sidecars share an object
-
-- **WHEN** one of two sidecars that reference the same object is deleted and trash is emptied
-- **THEN** the object stays current
+- **WHEN** a backup captures the cell between a confirmed upload and the write of its reference into the sidecar
+- **THEN** the manifest lists the object name as in flight, and the version is not destroyed
 
 #### Scenario: A tenant deletes their account
 
