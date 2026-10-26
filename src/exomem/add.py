@@ -172,8 +172,10 @@ class SourceArtifact:
     content_type: str | None = None
 
 
-def _artifact_pair(folder: Path, stem: str, suffix: str, *, vault_root: Path) -> tuple[Path, Path]:
-    """A free `<stem><suffix>` / `<stem><suffix>.md` pair under `folder`.
+def _artifact_pair(
+    folder: Path, stem: str, suffix: str, *, vault_root: Path, protected: bool = False
+) -> tuple[Path, Path]:
+    """A free artifact and its canonical companion under `folder`.
 
     `unique_path` guarantees one free name; a captured artifact needs two, and
     an orphaned binary with no page would otherwise be silently overwritten.
@@ -181,11 +183,13 @@ def _artifact_pair(folder: Path, stem: str, suffix: str, *, vault_root: Path) ->
     case-insensitive collision test rather than a second copy of it here, and
     keeps `add`'s uniquify semantics rather than introducing a refusal.
     """
+    from .preserve import _sidecar_path
+
     for attempt in range(1, 51):
         seed = stem if attempt == 1 else f"{stem}-{attempt}"
-        page = unique_path(folder, seed, suffix=f"{suffix}.md", vault_root=vault_root)
-        artifact = page.with_name(page.name[:-3])
-        if not artifact.exists():
+        artifact = unique_path(folder, seed, suffix=suffix, vault_root=vault_root)
+        page = _sidecar_path(artifact, protected=protected)
+        if unique_path(folder, page.stem, suffix=page.suffix, vault_root=vault_root) == page:
             return artifact, page
     raise AddError(
         code="INVALID_SOURCE",
@@ -523,10 +527,9 @@ def add(
         artifact_path: Path | None = None
         source_path = unique_path(folder_path, stem, vault_root=vault_root)
     else:
-        # The page is `<stem><ext>.md` beside `<stem><ext>`, the same convention
-        # Evidence uses, so the media pipeline addresses both lanes with no
-        # change and the citation resolver is fixed once rather than per layout.
-        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix, vault_root=vault_root)
+        artifact_path, source_path = _artifact_pair(
+            folder_path, stem, artifact_suffix, vault_root=vault_root, protected=raw_protection
+        )
 
     adoption_receipt: dict[str, object] | None = None
     if adoption_seed is not None:

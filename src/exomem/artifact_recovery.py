@@ -100,14 +100,22 @@ def native_max_bytes() -> int:
 
 def _companion(root: Path, path: str) -> tuple[str, dict]:
     from .governance import raw_protection
-    from .preserve import _sidecar_path
+    from .preserve import _sidecar_paths
 
-    companion = _sidecar_path(Path(path), protected=raw_protection.marked(path)).as_posix()
-    raw = reserved_paths.read_generic_bytes(root, companion).data
-    frontmatter, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
-    if marker is None:
-        raise RecoveryUnavailable
-    return companion, frontmatter
+    source = Path(path).is_relative_to(vault.kb_root(root).relative_to(root) / "Sources")
+    for candidate in _sidecar_paths(Path(path), protected=raw_protection.marked(path), source=source):
+        companion = candidate.as_posix()
+        try:
+            raw = reserved_paths.read_generic_bytes(root, companion).data
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+            continue
+        frontmatter, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
+        if marker is None:
+            raise RecoveryUnavailable
+        return companion, frontmatter
+    raise reserved_paths.ReservedPathLeafError("MISSING")
 
 
 def _resolve(root: Path, selected: str) -> tuple[str, dict]:

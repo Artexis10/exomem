@@ -8203,8 +8203,9 @@ def op_capture_source(
     """Save authored text or exact original file handles in Sources/.
 
     For material you did not author, send original bytes through `files`.
-    Without a handle, request transfer_artifact(upload, lane=source, hold=true,
+    On personal HTTP MCP, request transfer_artifact(upload, lane=source, hold=true,
     expected_sha256=...) and use exomem attach --handoff-file. Do not retype originals.
+    Cloud currently needs a client file handle. Standalone stdio needs an HTTP transfer endpoint.
 
     Proof goes to preserve_evidence or preserve_artifacts. source_kind is
     required; domain is optional. Both accept new slugs. compile_guidance

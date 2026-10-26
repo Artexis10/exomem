@@ -8,13 +8,16 @@ from contextvars import copy_context
 from dataclasses import replace
 
 import pytest
+import yaml
 
 from exomem import (
     add,
     artifact_recovery,
+    client_artifacts,
     compile_proposal,
     corpus_aware,
     memory_refs,
+    preserve,
     reserved_paths,
     source_closure,
     source_corrections,
@@ -156,3 +159,46 @@ def test_legacy_identity_requires_explicit_repair(vault, source_schema):
     with pytest.raises(ValueError, match="SOURCE_CORRECTION_ID_REQUIRED"):
         add.add(vault, source_schema, source_type="session", title="Correction", content="Correct body", correction={"supersedes": path.relative_to(vault).as_posix(), "expected_hash": vault_module.content_hash(path.read_text()), "reason": "Restore original"})
     assert "exomem_id" not in path.read_text()
+
+
+def test_legacy_markdown_source_receipt_replays_and_original_cannot_claim_identity(vault, source_schema, tmp_path, monkeypatch):
+    original = b"---\ntype: source\nsource_identity: malformed-untrusted-value\n---\nOriginal Markdown\n"
+
+    def stage(file, _budget, **kwargs):
+        staged = tmp_path / "original.md"
+        staged.write_bytes(original)
+        digest, size = add.artifact_identity(staged)
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"], path=staged, size=size, sha256=digest,
+            content_type="text/markdown", filename="original.md",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    inputs = {
+        "source_schema": source_schema, "title": "Legacy original", "source_type": "session",
+        "files": [{"file_id": "original", "file_name": "original.md", "mime_type": "text/markdown", "download_url": "https://files.example/original"}],
+        "adoption": {"key": "legacy-original", "trigger": "selected", "selected_file_id": "original"},
+    }
+    captured = client_artifacts.capture_source_artifacts(vault, **inputs)
+    receipt = captured["files"][0]["adoption"]
+    artifact = vault / receipt["stored_path"]
+    page = vault / receipt["page_path"]
+    legacy = preserve._sidecar_path(artifact, protected=True)
+    assert legacy != page
+    metadata, body, _ = vault_module.parse_frontmatter(page.read_text())
+    metadata["artifact_adoption"]["page_path"] = legacy.relative_to(vault).as_posix()
+    page.rename(legacy)
+    legacy.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\n" + body)
+
+    replay = client_artifacts.capture_source_artifacts(vault, **inputs)
+    assert replay["files"][0]["outcome"] == "replayed"
+    assert replay["files"][0]["adoption"]["page_path"] == legacy.relative_to(vault).as_posix()
+    who = owner_principal(surface="mcp")
+    with request_scope(who):
+        with artifact_recovery.stage(vault, artifact.relative_to(vault).as_posix(), who) as (copied, _):
+            assert copied.private_path.read_bytes() == original
+        captured_identity = add.add(
+            vault, source_schema, title="Independent capture", source_type="session", content="Trusted authored text",
+            source_identity={"system": "archive", "record_id": "independent", "revision": "one"},
+        )
+    assert captured_identity.capture_outcome == "created"

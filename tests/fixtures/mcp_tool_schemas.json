@@ -309,7 +309,7 @@
     }
   },
   "capture_source": {
-    "description": "Save authored text or exact original file handles in Sources/.\n\nFor material you did not author, send original bytes through `files`.\nWithout a handle, request transfer_artifact(upload, lane=source, hold=true,\nexpected_sha256=...) and use exomem attach --handoff-file. Do not retype originals.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
+    "description": "Save authored text or exact original file handles in Sources/.\n\nFor material you did not author, send original bytes through `files`.\nOn personal HTTP MCP, request transfer_artifact(upload, lane=source, hold=true,\nexpected_sha256=...) and use exomem attach --handoff-file. Do not retype originals.\nCloud currently needs a client file handle. Standalone stdio needs an HTTP transfer endpoint.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

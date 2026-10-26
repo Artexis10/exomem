@@ -879,10 +879,13 @@ def _canonical_page_lane(vault_root: Path, page_path: Path) -> str | None:
     return None
 
 
-def _expected_companion_path(stored: PurePosixPath, *, lane: str) -> PurePosixPath:
-    if lane == "evidence" and stored.name.lower().endswith(".md"):
-        return stored.with_name(f"{stored.name[:-3]}-notes.md")
-    return PurePosixPath(f"{stored}.md")
+def _expected_companion_paths(stored: PurePosixPath, *, lane: str) -> tuple[PurePosixPath, ...]:
+    from .governance import raw_protection
+    from .preserve import _sidecar_paths
+
+    return tuple(PurePosixPath(path.as_posix()) for path in _sidecar_paths(
+        Path(stored), protected=raw_protection.marked(stored.as_posix()), source=lane == "source"
+    ))
 
 
 def _validate_receipt(
@@ -952,7 +955,7 @@ def _validate_receipt(
         or not valid_depth
         or stored.parent != destination
         or page.parent != destination
-        or page != _expected_companion_path(stored, lane=actual_lane)
+        or page not in _expected_companion_paths(stored, lane=actual_lane)
     ):
         raise _receipt_error(
             "ADOPTION_KEY_REUSED", "stored adoption receipt companion pairing is inconsistent"

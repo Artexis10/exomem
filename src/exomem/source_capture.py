@@ -114,7 +114,7 @@ def capture_digest(root: Path, *, content: str, title: str, source_type: str, ur
 
 def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
     """Scan under the caller's mutation guard; derived state cannot prove absence."""
-    from .client_artifacts import _expected_companion_path
+    from .client_artifacts import _expected_companion_paths
     from .governance import companions, raw_protection
     from .preserve import _sidecar_path
 
@@ -189,9 +189,9 @@ def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -
                 if Path(target).suffix.lower() != ".md":
                     continue
                 # The Source and Evidence producers define these companion layouts.
-                source_owner = _expected_companion_path(PurePosixPath(target), lane="source").as_posix()
+                source_owners = tuple(path.as_posix() for path in _expected_companion_paths(PurePosixPath(target), lane="source"))
                 evidence_owner = _sidecar_path(Path(target), protected=raw_protection.marked(target)).as_posix()
-                if owner != source_owner and owner != evidence_owner:
+                if owner not in source_owners and owner != evidence_owner:
                     errors.add(owner)
                     continue
                 if (target not in edges or not isinstance(digest, str)
