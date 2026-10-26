@@ -600,7 +600,7 @@ def _relation_census(
             relation_counts["deprecated"] += 1
         elif status == "unregistered":
             relation_counts["unregistered"] += 1
-        elif canonical == "relates_to":
+        elif canonical == relation_registry.generic_relation_key():
             relation_counts["generic"] += 1
         elif status == "core":
             relation_counts["core"] += 1
@@ -1052,6 +1052,8 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         value["direction"] = item.direction
         if item.presentation_role is not None:
             value["presentation_role"] = item.presentation_role
+        if item.label is not None:
+            value["label"] = item.label
         scope = {}
         if item.projects:
             scope["projects"] = sorted(item.projects)

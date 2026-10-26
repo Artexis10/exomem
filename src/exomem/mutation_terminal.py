@@ -1441,7 +1441,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             normalized = relation_registry.normalize_relation(raw)
             if (
                 normalized
-                and normalized != "relates_to"
+                and normalized != relation_registry.generic_relation_key()
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)

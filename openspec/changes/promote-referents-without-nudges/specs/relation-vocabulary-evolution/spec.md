@@ -1,31 +1,59 @@
 ## ADDED Requirements
 
-### Requirement: A generic edge between entities offers fitting predicates
+### Requirement: A new generic edge touching an entity needs an attributable choice
 
-When a committed write authors the registry's generic relation between two entity pages, its `relation_advisory` SHALL carry `specific_options`.
-The options SHALL be at most 4 active predicates whose declared endpoints contain both endpoint families, each with its display label and description.
-Each option's route SHALL replace the generic bullet in place with one hash-guarded edit, so that accepting an option leaves one edge, not two.
-A predicate without declared endpoints SHALL NOT be offered.
-The generic edge SHALL stay committed, the offer SHALL refuse nothing, and the existing write-advisory fingerprints SHALL dismiss it.
-The offer SHALL use the two endpoint pages' families and the in-memory registry only, with no corpus scan.
+A governed live write that adds a generic edge SHALL refuse before commit when an endpoint is an entity and a specific predicate fits both visible endpoints.
+The refusal SHALL carry at most four active specific options, each with its label, description and parent, and a ready retry hash.
+The agent SHALL commit in one retry by choosing a specific predicate or supplying `relation_disposition="generic"`, `relation_review_reason` and the hash.
+A generic `create-entity` relation item MAY supply its reason directly.
+The committed log SHALL retain the attributable edge choice; the reason SHALL NOT prove semantic correctness.
 
-#### Scenario: A generic edge from a person to a vessel is offered ownership
+Added edges SHALL be compared by stable resolved target identity against the pre-write or predecessor state.
+Drafts, pending pages, the declared bulk operation classes, frozen surfaces and inherited predecessor edges SHALL NOT trigger the barrier.
+An unresolved or withheld target SHALL NOT trigger it, and both states SHALL produce the same observable refusal shape.
+A predicate without fitting endpoint declarations SHALL NOT be offered.
 
-- **WHEN** an agent writes `relates_to` from a person entity to a vessel entity and `owns` declares `subject: [person]` and `object: [any_entity]`
-- **THEN** the response's `relation_advisory.specific_options` lists `owns` with its label and route
-- **AND** the `relates_to` edge stays written
+#### Scenario: One reasoned retry keeps generic
+
+- **WHEN** a live write adds a generic edge touching an entity with fitting specific options
+- **THEN** the first call refuses before commit with the options and retry hash
+- **AND** a retry with that hash and a recorded generic reason commits the edge once
+
+#### Scenario: A draft stays writable
+
+- **WHEN** a draft or imported pending page adds the same generic edge
+- **THEN** the barrier does not refuse the write
+
+#### Scenario: A carried edge is not newly authored
+
+- **WHEN** a superseding page retains its predecessor's generic edge
+- **THEN** the barrier does not treat it as an addition
+
+### Requirement: Note-to-note generic edges offer non-blocking specific options
+
+A note-to-note generic edge SHALL remain writable and count as connectivity rather than a typed edge.
+The existing non-blocking typed-edge warning SHALL apply.
+When fitting predicates exist, the post-commit `relation_advisory` SHALL offer at most four `specific_options` with in-place replacement routes.
+A predicate without endpoint declarations SHALL NOT be offered.
+Each route SHALL replace the generic bullet with one hash-guarded edit, leaving one edge rather than two.
+Write-advisory fingerprints SHALL support dismissal.
 
 #### Scenario: Accepting an option replaces the generic edge
 
-- **WHEN** the agent runs the `owns` option's route
-- **THEN** the page holds one `owns` bullet to that entity and no `relates_to` bullet to it
+- **WHEN** the agent accepts a post-commit specific option for a note-to-note generic edge
+- **THEN** the page holds one specific bullet to that target and no generic bullet to it
 
-#### Scenario: A note's generic edge is not offered predicates
+#### Scenario: Honest generic stays available
 
-- **WHEN** an agent writes `relates_to` from a research note to an entity
-- **THEN** the response carries no `specific_options`
+- **WHEN** no predicate's declared endpoints fit
+- **THEN** the response offers no specific predicate and does not demand a new relation
 
-#### Scenario: Honest generic stays honest
+### Requirement: Generators leave relation choice to the agent
 
-- **WHEN** no predicate's declared endpoints fit the two entity families
-- **THEN** the response carries no `specific_options` and asks for no new relation
+Queue acceptance SHALL require an explicit requested predicate when fitting specific options exist.
+Compile proposals and question-pair suggestions SHALL carry options rather than default to the generic relation.
+
+#### Scenario: A generated proposal does not choose generic implicitly
+
+- **WHEN** a generator finds fitting specific options
+- **THEN** its output carries those options and leaves the predicate choice to the agent

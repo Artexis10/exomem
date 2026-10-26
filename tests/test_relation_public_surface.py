@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, relation_queue, server, writer_lease
+from exomem import commands, relation_queue, relation_registry, server, writer_lease
 from exomem.__main__ import main
 from exomem.governance import egress
 from exomem.governance.principal import library_scope
@@ -43,7 +43,7 @@ def test_connect_relation_resolution_reaches_the_shared_vocabulary_leaf(
     )
 
     assert result["exact_matches"][0]["canonical"] == "part_of"
-    assert len(result["core_vocabulary"]) == 33
+    assert len(result["core_vocabulary"]) == len(relation_registry.core_registry().core)
     assert result["selected_relation"] is None
     assert result["proposed_relation"] is None
 

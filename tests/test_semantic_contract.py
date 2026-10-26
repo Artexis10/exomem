@@ -490,8 +490,9 @@ def test_configured_kb_root_preserves_compiled_destination_contract(
     assert semantic_contract.compiled_structure_finding(valid) is None
     assert semantic_contract.requires_semantic_unit(valid) is True
 
-    wrong_type = replace(valid, page_type="insight")
-    finding = semantic_contract.compiled_structure_finding(wrong_type)
+    # A type folder holds any compiled type; only a page without one is off its route.
+    assert semantic_contract.compiled_structure_finding(replace(valid, page_type="insight")) is None
+    finding = semantic_contract.compiled_structure_finding(replace(valid, page_type="memo"))
     assert finding is not None
     assert finding.code == "COMPILED_TYPE_MISMATCH"
 
@@ -505,8 +506,9 @@ def test_configured_kb_root_preserves_compiled_destination_contract(
     ("path", "page_type", "code"),
     (
         ("Knowledge Base/Notes/Insights/missing.md", "memo", "COMPILED_TYPE_MISMATCH"),
-        ("Knowledge Base/Notes/Failures/wrong.md", "insight", "COMPILED_TYPE_MISMATCH"),
-        ("Knowledge Base/Notes/Misc/wrong-place.md", "insight", "COMPILED_DESTINATION_MISMATCH"),
+        ("Knowledge Base/Notes/Failures/missing.md", "memo", "COMPILED_TYPE_MISMATCH"),
+        ("Knowledge Base/Elsewhere/wrong-place.md", "insight", "COMPILED_DESTINATION_MISMATCH"),
+        ("Knowledge Base/Notes/wrong-place.md", "insight", "COMPILED_DESTINATION_MISMATCH"),
     ),
 )
 def test_compiled_path_type_mismatches_are_structural_findings(

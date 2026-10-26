@@ -449,7 +449,7 @@ def observe_memory(
             raise ObserveMemoryError(
                 "STALE_UNIT_TARGET", "exact corrective target fingerprints do not match"
             )
-        preflight = replace(preflight, unit_target_guards=tuple(guards))
+        preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
     if op == "validate":
         return _result(

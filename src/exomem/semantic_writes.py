@@ -30,6 +30,7 @@ from . import (
     metrics,
     note_types,
     origin_bindings,
+    promotions,
     provenance,
     relation_registry,
     relation_review,
@@ -905,6 +906,15 @@ class DraftToken:
         return decoded
 
 
+def _new_provenance_time(vault_root: Path) -> str | None:
+    from . import vocabulary_gate
+
+    if vocabulary_gate.requires_stable_provenance(vault_root):
+        # Approval digests have no durable timestamp preimage; omit optional metrics.
+        return None
+    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+
+
 @dataclass(frozen=True, slots=True)
 class CreationPreflight:
     applicability: Literal["full", "structural", "not_semantic"]
@@ -931,6 +941,9 @@ class CreationPreflight:
     relation_attempt: relation_review._PrevalidatedAttempt | None = field(
         default=None, compare=False, repr=False
     )
+    #: Where the typed writer filed the page and why; absent for writers that do not place pages.
+    placement: dict[str, Any] | None = None
+    provenance_server_at: str | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -962,6 +975,8 @@ class CreationPreflight:
             value["applicability"] = self.applicability
         if self.vocabulary_binding is not None:
             value["vocabulary_resolution"] = self.vocabulary_binding.as_dict()
+        if self.placement is not None:
+            value["placement"] = self.placement
         return value
 
 
@@ -1065,7 +1080,8 @@ class ExistingPreflight:
     census_token: tuple | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
-    unit_target_guards: tuple[vault.PathGuard, ...] = ()
+    read_dependency_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
+    provenance_server_at: str | None = None
 
     @property
     def before_hash(self) -> str:
@@ -2098,6 +2114,22 @@ def _preflight_existing(
             "transition token does not match the exact before and after state",
         )
     transition_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    provenance_server_at = _new_provenance_time(root) if applicability == "full" else None
+    if transition_token is not None and applicability == "full" and after.identity_kind == "exomem_id":
+        prepared = relation_review.load_lifecycle_prepared(root, after.identity, admission=admission)
+        if (
+            prepared is not None
+            and prepared.transition_id == token_value["transition_id"]
+            and prepared.operation == operation
+            and prepared.page_identity == after.identity
+            and prepared.before_path == path
+            and prepared.before_source_hash == token_value["before_hash"]
+            and prepared.after_path == path
+            and prepared.after_source_hash == after.source_hash
+            and prepared.after_fingerprint == after.review_fingerprint
+            and prepared.transition_token_hash == transition_hash
+        ):
+            provenance_server_at = prepared.provenance_server_at
     requested_decision: relation_review.LifecycleDecision | None = None
     if relation_disposition == "reviewed_none":
         if applicability != "full":
@@ -2208,6 +2240,7 @@ def _preflight_existing(
         census_token,
         closure_plan,
         origin_inputs,
+        provenance_server_at=provenance_server_at,
     )
 
 
@@ -2377,6 +2410,7 @@ def _commit_existing_locked(
                 decision=preflight.requested_decision,
                 transition_token=preflight.transition_token,
                 auxiliary_hash=relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
+                provenance_server_at=preflight.provenance_server_at,
             )
             current = relation_review.LifecyclePrimaryBinding(
                 preflight.before.path,
@@ -2468,7 +2502,7 @@ def _commit_existing_locked(
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
-                required_guards=(*required_guards, *origin_guards, *preflight.unit_target_guards),
+                required_guards=(*required_guards, *origin_guards, *preflight.read_dependency_guards),
                 index_reports=reports,
                 semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
                 _vocabulary_auxiliaries=manifest,
@@ -2538,7 +2572,10 @@ def _revalidate_existing_preflight(
             relation_review_reason=relation_review_reason,
             status_basis=status_basis,
         )
-        return replace(refreshed, unit_target_guards=preflight.unit_target_guards)
+        return replace(
+            refreshed, read_dependency_guards=preflight.read_dependency_guards,
+            provenance_server_at=preflight.provenance_server_at,
+        )
 
 
 def _prepare_markdown_catalog_publication(
@@ -2910,6 +2947,13 @@ def commit_existing(
             history_reason=history_reason,
             timings=timings,
             status_basis=status_basis,
+        )
+    if not preflight.committed_replay:
+        promotions.record_page_write(
+            vault_root, preflight.path,
+            before_source=preflight.before_source, after_source=preflight.after_source,
+            corpus=preflight.after_corpus,
+            transition_id=_existing_transition_id(preflight.transition_token),
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
@@ -4422,6 +4466,21 @@ def _preflight_creation(
         finally:
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
         validation = attempt.validation
+        artifact = attempt.artifact
+        provenance_server_at = _new_provenance_time(root)
+        if (
+            artifact is not None
+            and artifact.schema_version == 2
+            and artifact.page_identity == draft_id
+            and artifact.page_path_at_review == path
+            and artifact.content_fingerprint == validation.content_fingerprint
+            and artifact.draft_hash == validation.draft_hash
+            and artifact.operation == operation
+            and artifact.draft_token_hash == relation_review.draft_token_hash(draft_token)
+            and artifact.predecessor_path == predecessor_path
+            and artifact.predecessor_content_hash == predecessor_content_hash
+        ):
+            provenance_server_at = artifact.provenance_server_at
         # This stamp also guards the relation-review verdict: both evaluations
         # read this page's definitions and the status basis after the entry
         # generation, so a change between or after them leaves it stale.
@@ -4454,6 +4513,7 @@ def _preflight_creation(
             ) if vocabulary_binding is not None else (),
             origin_inputs,
             relation_review.prevalidated_attempt(attempt, census_token),
+            provenance_server_at=provenance_server_at,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4578,8 +4638,13 @@ def commit_creation(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    promotion_origin: Mapping[str, Any] | None = None,
 ) -> CreationCommit:
-    """Commit a page creation, then attach advisory structural feedback."""
+    """Commit a page creation, then attach advisory structural feedback.
+
+    `promotion_origin` names the readable page whose content led to this
+    creation; the recent-promotions entry keeps it (see `promotions.py`).
+    """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     committed = _commit_creation(
         vault_root,
@@ -4594,6 +4659,12 @@ def commit_creation(
         predecessor_content_hash=predecessor_content_hash,
         status_basis=status_basis,
     )
+    if predecessor_path is None:
+        # A successor page is a new version of an entity, not a new entity.
+        promotions.record_page_write(
+            vault_root, preflight.destination, before_source=None, after_source=preflight.source,
+            origin=promotion_origin, corpus=preflight.corpus, source_state=preflight.semantic_state,
+        )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
@@ -4752,6 +4823,7 @@ def _commit_creation(
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
                 prevalidated=preflight.relation_attempt,
+                provenance_server_at=preflight.provenance_server_at,
             )
             measured[prepared.preliminary_outcome] = 1
     with call_spans.span("commit.embedding_prewarm"):
