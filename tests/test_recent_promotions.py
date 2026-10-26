@@ -227,7 +227,7 @@ def _record_after_loading(vault: Path, loaded, finish, ready, proceed) -> None:
     review_state.ReviewStateStore.load = paused_load
     with library_scope():
         ready.set()
-        proceed.wait()
+        assert proceed.wait(60)
         assert promotions.record(vault, "entity", [{"path": "second.md"}], write="second")
 
 
@@ -238,7 +238,7 @@ def _settle_from_another_process(
 
     with library_scope():
         ready.set()
-        proceed.wait()
+        assert proceed.wait(60)
         started.set()
         promotions.settle(vault, promotion_id, "settled by delivery")
         finished.set()
