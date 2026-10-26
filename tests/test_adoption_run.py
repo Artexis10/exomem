@@ -143,6 +143,32 @@ def test_scoped_status_has_a_complete_zero_before_any_adoption(tmp_path: Path) -
     assert scoped["complete"] is True
 
 
+@pytest.mark.parametrize(("source_root", "original", "valid_original"), [
+    ("", "", "kept.md"),
+    ("_Imports/batch", "_Imports/batch", "_Imports/batch/kept.md"),
+    ("_Imports/batch", "_Imports/other/outside.md", "_Imports/batch/kept.md"),
+])
+def test_scoped_status_rejects_malformed_historical_original_paths(
+    tmp_path: Path, source_root: str, original: str, valid_original: str,
+) -> None:
+    folder = adoption_run.AdoptionRunStore(tmp_path).run_dir("historical")
+    folder.mkdir(parents=True)
+    run = {"source_root": source_root, "outcomes": {
+        valid_original: {"status": "applied"}, original: {"status": "applied"},
+    }}
+    (folder / "run.json").write_text(json.dumps(run), encoding="utf-8")
+
+    scoped = adoption_run.status(tmp_path, path=".")
+    assert scoped["adopted_files"] is None
+    assert scoped["complete"] is False
+
+    del run["outcomes"][original]
+    (folder / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    historical = adoption_run.status(tmp_path, path=".")
+    assert historical["adopted_files"] == 1
+    assert historical["complete"] is True
+
+
 def test_run_directory_read_failure_stays_visible_to_legacy_and_scoped_callers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

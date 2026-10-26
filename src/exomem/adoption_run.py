@@ -300,7 +300,8 @@ class AdoptionRunStore:
                 original_path = _status_path(original)
                 # Apply's writers define these fixed protocol states, not vault vocabulary.
                 if (
-                    original_path is None or not isinstance(outcome, dict)
+                    original_path is None or original_path == source_root
+                    or not original_path.is_relative_to(source_root) or not isinstance(outcome, dict)
                     or outcome.get("status") not in (*_APPLIED_STATUSES, _SOURCE_ONLY, "failed")
                 ):
                     complete = False
