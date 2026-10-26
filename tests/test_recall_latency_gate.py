@@ -1446,6 +1446,50 @@ def test_worker_uses_the_selected_runtime_and_preserves_closed_failures(tmp_path
 
 
 @pytest.mark.skipif(gate.os.name != "posix", reason="The paired runtime uses the Linux reference profile")
+def test_a_paused_arm_cannot_hold_the_other_arms_governance_guard(tmp_path: Path, monkeypatch) -> None:
+    """A background read frozen in one arm must not refuse the other arm's next recall."""
+    (tmp_path / "home").mkdir()
+    (tmp_path / "vault").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.2")
+    script = tmp_path / "worker.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT / 'src')!r})\n"
+        "from exomem.writer_lease import LeaseConfig, LeaseManager, OpError\n"
+        "json.loads(sys.stdin.readline())\n"
+        "root = Path(sys.argv[sys.argv.index('--worker-vault') + 1])\n"
+        "try:\n"
+        "    manager = LeaseManager(LeaseConfig.from_env())\n"
+        "    with manager.reserved_identity_guard(root, domains=('governance-store',), "
+        "exclusive=False, advance_generation=False):\n"
+        "        print(json.dumps({'state': 'ready', 'runtime_prefix': sys.prefix, "
+        "'environment': {}}), flush=True)\n"
+        "        for line in sys.stdin:\n"
+        "            print(json.dumps({'state': 'held'}), flush=True)\n"
+        "except OpError as error:\n"
+        "    print(json.dumps({'state': 'worker-error', 'error_class': type(error).__name__, "
+        "'reason': error.code}), flush=True)\n"
+    )
+    monkeypatch.setattr(gate, "__file__", str(script))
+    profile = {"worker_environment": ["PATH", "HOME", "EXOMEM_MUTATION_TIMEOUT"]}
+    workers = []
+    try:
+        for arm in ("base", "head"):
+            workers.append(gate._Worker(ROOT, tmp_path / "vault", tmp_path / arm, [], profile))
+        # Each worker can run while its paused peer retains its own policy guard.
+        for worker in workers:
+            try:
+                assert worker.exchange({})["state"] == "held"
+            finally:
+                worker.pause()
+    finally:
+        for worker in workers:
+            worker.close()
+
+
+@pytest.mark.skipif(gate.os.name != "posix", reason="The paired runtime uses the Linux reference profile")
 def test_tag_runtime_ignores_the_callers_project_and_operation_settings(tmp_path: Path, monkeypatch) -> None:
     import shutil
     import subprocess

@@ -21,6 +21,8 @@ The paired run samples only the principals that the contract's `paired.principal
 lists, today the owner. Full CI runs one `recall-latency-paired` job per series of
 the case file (`--paired --series NAME`), so each comparison fits its job budget.
 The inactive worker stops outside measurement so its native pool cannot slow the other arm.
+Each arm has its own index state and writer-lease directory.
+A paused worker therefore cannot retain the other arm's policy or mutation locks.
 The adapter wraps real timing boundaries and delegates their original bodies.
 It does not replace principal resolution or release decisions.
 Each worker resolves `ask_memory` from its own command registry and binds it once.

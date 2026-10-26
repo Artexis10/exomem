@@ -1467,6 +1467,8 @@ class _Worker:
         # Only declared cache and resource settings cross into disposable workers.
         environment = {key: os.environ[key] for key in profile["worker_environment"] if key in os.environ}
         environment.update(EXOMEM_STATE_ROOT=str(state), EXOMEM_VAULT_PATH=str(vault),
+                           # A paused peer must not retain this arm's policy or mutation locks.
+                           EXOMEM_WRITER_LEASE_STATE_DIR=str(state / "writer-lease"),
                            EXOMEM_EMBED_BACKEND="onnx", EXOMEM_DISABLE_RANKING="1",
                            EXOMEM_DISABLE_CLIP="1", EXOMEM_DISABLE_MEDIA_EXTRACTION="1")
         environment.pop("EXOMEM_DISABLE_EMBEDDINGS", None)
