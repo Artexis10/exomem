@@ -70,6 +70,10 @@ def test_parallel_live_groups_run_every_collected_case_once(tmp_path: Path) -> N
     """Parallel import shards must not omit or repeat any platform or import case."""
     live = _workflow()["jobs"]["live-k3s"]
     step = next(step for step in live["steps"] if step.get("name") == "Live K3s suite")
+    setup = next(step for step in live["steps"] if step.get("name") == "Start the MinIO for the export transport tests")
+    transport = next(step for step in live["steps"] if step.get("name") == "Export transport suite")
+    assert setup["if"] == transport["if"] == "matrix.export_transport == true"
+    assert sum(bool(row.get("export_transport")) for row in live["strategy"]["matrix"]["include"]) == 1
     # The real shell step and pytest select cases; this hook records collection without running fixtures.
     (tmp_path / "ci_collection_receipt.py").write_text(
         "import json, os\nfrom pathlib import Path\n"

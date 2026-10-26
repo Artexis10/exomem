@@ -47,7 +47,7 @@ jobs:
   checks:
     name: cellctl tests, pinned ruff and platform chart
     # Base-controlled release validation permits only version changes; full CI proves the base.
-    if: &not-release-pr ${{ inputs.full || (github.head_ref != 'release-please--branches--main' && (github.event_name != 'pull_request' || github.workflow != 'Cloud cellctl' || github.event.pull_request.draft)) }}
+    if: &not-release-pr ${{ inputs.full || (github.head_ref != 'release-please--branches--main' && (github.event_name != 'pull_request' || github.event.pull_request.draft)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -220,6 +220,8 @@ jobs:
           - suite: platform
             shard: 2
             shards: 2
+            # One shorter runner owns S3 setup and the unsharded transport suite.
+            export_transport: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -280,7 +282,7 @@ jobs:
       # The export transport tests need a real S3 store with encryption at
       # rest; this MinIO uses the live suite's pinned image and a KMS key.
       - name: Start the MinIO for the export transport tests
-        if: matrix.suite == 'platform'
+        if: matrix.export_transport == true
         working-directory: infra/cellctl
         shell: bash
         run: |
@@ -325,7 +327,7 @@ jobs:
       # C6's transport tests read a real S3 store, not the cluster, so one group runs them.
       # A skip (no store) must fail the job here too.
       - name: Export transport suite
-        if: matrix.suite == 'platform'
+        if: matrix.export_transport == true
         working-directory: infra/cellctl
         shell: bash
         env:
