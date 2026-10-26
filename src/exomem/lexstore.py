@@ -963,7 +963,8 @@ class _SelectedUnits:
     """
 
     def __init__(
-        self, vault_root: Path, conn: sqlite3.Connection, *, admitted: set[str] | None = None
+        self, vault_root: Path, conn: sqlite3.Connection, *, admitted: set[str] | None = None,
+        released: set[str] | None = None,
     ) -> None:
         from . import semantic_index
         from .governance import egress
@@ -975,6 +976,8 @@ class _SelectedUnits:
         def allowed(path: str) -> bool:
             if admitted is not None and path not in admitted:
                 return False
+            if released is not None:
+                return path in released
             if not keep:
                 keep.append(egress.page_release_filter(vault_root))
             return keep[0] is None or bool(keep[0](path))
@@ -3252,6 +3255,7 @@ def search_semantic_units(
     allowed_unit_refs: set[str] | None = None,
     allowed_parent_paths: set[str] | None = None,
     admitted_parent_paths: set[str] | None = None,
+    released_parent_paths: set[str] | None = None,
     literal_all: bool = False,
     _repair_stale: bool = False,
     _validate_current: bool = True,
@@ -3294,6 +3298,7 @@ def search_semantic_units(
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
             admitted_parent_paths=admitted_parent_paths,
+            released_parent_paths=released_parent_paths,
             literal_all=literal_all,
             _repair_stale=_repair_stale,
             _validate_current=_validate_current,
@@ -3325,6 +3330,7 @@ def search_semantic_units(
         clauses=clauses,
         allowed_parent_paths=allowed_parent_paths,
         admitted_parent_paths=admitted_parent_paths,
+        released_parent_paths=released_parent_paths,
         registry_scope=registry_scope,
     )
     if hits is None:
@@ -3384,6 +3390,7 @@ def search_semantic_units(
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
             admitted_parent_paths=admitted_parent_paths,
+            released_parent_paths=released_parent_paths,
             literal_all=literal_all,
             _repair_stale=False,
             repair=repair,
@@ -3413,6 +3420,7 @@ def search_semantic_units_result(
     allowed_unit_refs: set[str] | None = None,
     allowed_parent_paths: set[str] | None = None,
     admitted_parent_paths: set[str] | None = None,
+    released_parent_paths: set[str] | None = None,
     literal_all: bool = False,
     _repair_stale: bool = False,
     _validate_current: bool = True,
@@ -3463,6 +3471,7 @@ def search_semantic_units_result(
         allow_delta=allow_delta,
         allowed_parent_paths=allowed_parent_paths,
         admitted_parent_paths=admitted_parent_paths,
+        released_parent_paths=released_parent_paths,
         registry_scope=registry_scope,
     )
     if not result.readiness.complete or not _validate_current:
@@ -3518,6 +3527,7 @@ def search_semantic_units_result(
                 allowed_unit_refs=allowed_unit_refs,
                 allowed_parent_paths=allowed_parent_paths,
                 admitted_parent_paths=admitted_parent_paths,
+                released_parent_paths=released_parent_paths,
                 literal_all=literal_all,
                 _repair_stale=False,
                 repair=repair,
@@ -9780,6 +9790,7 @@ class LexicalStore:
         clauses: tuple | None = None,
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
+        released_parent_paths: set[str] | None = None,
         registry_scope: str | None = None,
     ) -> list[SemanticUnitLexicalHit] | None:
         from .vocabulary.registry import RegistryError
@@ -9802,6 +9813,7 @@ class LexicalStore:
                 literal_tokens,
                 clauses=clauses,
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
+                released_parent_paths=released_parent_paths,
                 registry_scope=registry_scope,
             )
             return result.value if result.readiness.complete else None
@@ -9825,6 +9837,7 @@ class LexicalStore:
                     allowed_unit_refs,
                     literal_tokens,
                     allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
+                    released_parent_paths=released_parent_paths,
                     registry_scope=registry_scope,
                 ),
             )
@@ -9853,6 +9866,7 @@ class LexicalStore:
         allow_delta: bool = True,
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
+        released_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
         query_units: list | None = None,
         term_budget: QueryTermBudget | None = None,
@@ -9871,7 +9885,9 @@ class LexicalStore:
 
         def query(conn: sqlite3.Connection) -> list[SemanticUnitLexicalHit]:
             tokens: list[str] = []
-            view = _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
+            view = _SelectedUnits(
+                self.vault_root, conn, admitted=admitted_parent_paths, released=released_parent_paths,
+            )
             statistics = None
             if query_units is not None and term_budget is not None:
                 measured = [stem for unit in query_units for stem in unit.stems]
@@ -9895,6 +9911,7 @@ class LexicalStore:
                 conn, tokens, k, categories, kinds, scope, allowed_unit_refs,
                 literal_tokens, dnf_clauses=clauses,
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
+                released_parent_paths=released_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
                 registry_scope=registry_scope,
                 selected_units=view, statistics=statistics,
@@ -9923,6 +9940,7 @@ class LexicalStore:
         *,
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
+        released_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
         registry_scope: str | None = None,
         selected_units: _SelectedUnits | None = None,
@@ -9941,7 +9959,9 @@ class LexicalStore:
         if not conn.in_transaction:
             conn.execute("BEGIN")
         col = "in_vault" if scope == "vault" else "in_kb"
-        view = selected_units or _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
+        view = selected_units or _SelectedUnits(
+            self.vault_root, conn, admitted=admitted_parent_paths, released=released_parent_paths,
+        )
         plans = view.plans(
             categories=categories, kinds=kinds, clauses=dnf_clauses, registry_scope=registry_scope
         )

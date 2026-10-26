@@ -258,3 +258,35 @@ Each question's fixture set SHALL contain English, same-language non-English and
 
 - **WHEN** the pinned model gives any fixture pair the wrong label
 - **THEN** the instrument is refused and no reading is appended under it
+
+### Requirement: Request status is bounded and waits for rebuild readiness
+
+A request SHALL load at most 512 distinct non-neutral pair details across its anchors and traversals.
+Only released edges SHALL consume the bound.
+SQL SHALL omit neutral details while preserving each released partner's stale-edge count.
+Truncation SHALL report `evidence_complete: false`, including when no nonzero count survives.
+
+A request SHALL serve no sensed status while the dreamer's checkpoint is unavailable or its reseed has pending pages.
+A sensed tick SHALL preserve existing pages and defer its watermark while the dreamer's seen map is incomplete.
+Projection initialization SHALL publish schema and seeding state atomically.
+A request SHALL serve no status when the live ledger genesis differs from the projection or reprojection remains unfinished.
+
+#### Scenario: Withheld edges do not spend the status budget
+
+- **WHEN** withheld partners would exceed the request's detail bound
+- **THEN** the visible status matches the absent twin, including its completeness
+
+#### Scenario: A released hub exceeds the detail budget
+
+- **WHEN** released non-neutral edges exceed the request's detail bound
+- **THEN** the bounded status reports incomplete evidence rather than exhaustive counts
+
+#### Scenario: A reseed does not erase an unseen contradiction
+
+- **WHEN** the dreamer reseeds and has not yet seen a previously projected contradicting page
+- **THEN** the sensed tick retains that page and requests serve no partial status
+
+#### Scenario: A replacement ledger invalidates the request before the next tick
+
+- **WHEN** a ledger with another genesis replaces the current ledger
+- **THEN** requests serve no sensed status until reprojection follows that ledger completely

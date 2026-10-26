@@ -2661,6 +2661,7 @@ class EmbeddingIndex:
         *,
         allowed_unit_refs: set[str] | None = None,
         allowed_parent_paths: set[str] | None = None,
+        released_parent_paths: set[str] | None = None,
         validate: bool = True,
         incomplete_out: list[str] | None = None,
         encoded_for: recall_space.SpaceIdentity | None | object = _UNSPECIFIED_SPACE,
@@ -2681,10 +2682,14 @@ class EmbeddingIndex:
 
         refs = None if allowed_unit_refs is None else frozenset(allowed_unit_refs)
         paths = None if allowed_parent_paths is None else frozenset(allowed_parent_paths)
-        keep = egress.page_release_filter(self.vault_root)
+        released = None if released_parent_paths is None else frozenset(released_parent_paths)
+        keep = (egress.page_release_filter(self.vault_root, pages=paths)
+                if released is None else None)
 
         def allowed(path: str) -> bool:
-            return (paths is None or path in paths) and (keep is None or bool(keep(path)))
+            return ((paths is None or path in paths)
+                    and (released is None or path in released)
+                    and (keep is None or bool(keep(path))))
 
         filtered = refs is not None or paths is not None
         query = query_vec.astype(np.float32, copy=False)

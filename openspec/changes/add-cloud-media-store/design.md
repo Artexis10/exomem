@@ -27,7 +27,7 @@ The planned node-local storage reserves twice the largest cell per concurrent ba
 - State truthfully who can read stored originals.
 
 **Non-Goals**
-- Re-rooting key custody. `make-cloud-cells-operator-resistant` owns that work (D5).
+- Defining another key hierarchy or unlock channel. `cloud-cell-key-custody` owns those rules (D5).
 - A second copy at another provider (D7).
 - Connector sync from third-party drives.
 - Moving notes, sidecars, indexes or datasets off the volume.
@@ -93,21 +93,30 @@ On the media-storage path, the media edge and the provider see only ciphertext. 
 
 ### D5. Key custody follows the cell's key hierarchy
 
-cellctl mints a per-cell media key bundle: the `age` identity and the name key. It stores the bundle wrapped with AES-GCM under the same master key that wraps the backup key, with the cell ID, purpose and version bound as additional data. It renders the bundle into the cell's Secret.
+cellctl mints a per-cell media key bundle: the `age` identity and the name key.
+It wraps the bundle with AES-GCM under that cell's root key, binding the cell ID, purpose and version as additional data.
+The platform master key does not wrap the media bundle directly.
 
-Only the runtime and the export packing step (D8) mount the bundle. Neither has public egress. A restore needs no media key, because evicted originals stay in the store. The edge never receives it.
+In standard mode, cellctl stores the wrapped bundle on the cell row and renders the bundle into the cell's Secret.
+Tenant-locked storage and delivery follow `cloud-cell-key-custody`; the bundle never enters a Kubernetes Secret in that mode.
+Only the runtime and the export packing step (D8) receive an unwrapped bundle, and neither has public egress.
+A restore needs no media key, because evicted originals stay in the store.
+The edge never receives the bundle.
 
-The media key is one more per-cell data key in that hierarchy, and it has no custody path of its own. `make-cloud-cells-operator-resistant` re-roots the backup, volume and media keys under one per-cell root key. That change also owns the tenant-locked state, in which the media key is unavailable and media work reports `locked`.
+The media bundle shares the backup and volume keys' cell root and has no separate custody or recovery path.
+The platform can unwrap that root in standard mode.
+In tenant-locked mode, the tenant holds the root; media work reports `locked` until the tenant unlocks it.
+This contract does not imply that tenant lock or its delivery channel is implemented.
 
 ### Who can read an original
 
 | Where the original is | Who can read the plaintext |
 |---|---|
 | In the store, any version | Nobody without the media key. The provider and the edge hold only ciphertext and keyed names. |
-| The media key | The operator, who holds the master key that wraps it. After the re-root, whoever can unwrap the cell root key can read it. That is still the operator in standard mode, but not in tenant-locked mode while the cell is locked. |
-| In the cell during processing, hydration or playback | The cell runtime. The operator could reach it only through audited break-glass access. |
+| The media key | Whoever can unwrap the cell root: the platform in standard mode, or the tenant in tenant-locked mode. The tenant-held claim applies only after `lock_complete_at`. |
+| In the cell during processing, hydration or playback | The cell runtime. An operator with live node access can deliberately read unlocked content; the access record does not prevent that attack. |
 | On its way to the owner | The public TLS edge and the gateway, which see requests and responses in transit, as the privacy copy already discloses. |
-| In an export | The packing step decrypts without public egress (D8). The archive itself then follows the export contract: today a plain ZIP over presigned parts, under `add-cloud-owner-export`. Ciphertext-only delivery belongs to the operator-resistant change. |
+| In an export | The packing step decrypts without public egress (D8). The archive follows `hosted-vault-portability`: a plain ZIP over the owner's authorized export path. Key custody does not change that delivery contract. |
 
 The privacy copy states this custody truthfully (`cloud-operator-access`).
 
@@ -178,11 +187,13 @@ Collection is new lifecycle logic. No existing sweep supplies it: the archive me
   cellctl then deletes the manifests of pruned snapshots.
 - **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. Only versions in a listing that cellctl completed before the newest capture are candidates, so no clocks are compared. A restic restore brings back sidecars whose versions some retained manifest names.
 - **Owner deletion.** An original the owner deletes leaves the store when the last retained backup that references it is pruned, as deleted vault files leave restic today.
-- **Cell deletion.** cellctl works in this order:
+- **Cell deletion.** Media content-key retirement follows `cloud-cell-key-custody` and does not wait for edge or provider cleanup.
+  Live-copy absence and retention evidence still govern completion; removing the database bundle alone proves neither.
+  Cleanup keeps only the non-content credentials it needs. Its provider steps retain this order:
   1. Remove the cell from the edge's active set.
   2. Observe that the edge has loaded that set.
   3. Abort every unfinished multipart upload under the cell's prefix.
-  4. Delete every version under the prefix and destroy the wrapped media key bundle.
+  4. Delete every version under the prefix.
 
   It reports `deleted` only after it observes that the versions and the bundle are absent. A revoked credential cannot repopulate the prefix after the absence check.
 
@@ -243,7 +254,7 @@ Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change
   - An end-to-end test evicts, runs reconciliation, governance and the deletion fan-out, and asserts that nothing is purged.
 - **Edge outage.** Offload queues and eviction stalls; the volume grows toward its cap. Mitigation: an alert on offload backlog age.
 - **Cold playback.** A large evicted original hydrates in full before ranged playback starts, which takes seconds to tens of seconds; the spike measures it.
-- **Key loss.** Losing both the wrapped bundle and the master key loses evicted originals. The bundle shares the backup key's escrow, but more depends on it.
+- **Key loss.** Media recovery follows the cell root's custody and recovery rules in `cloud-cell-key-custody`. This change adds no separate escrow or bypass.
 - **Sidecar edits.** An edit could drop or alter the reference. Mitigations: the descriptor key is governed, and a version stays in the store while any retained snapshot references it.
 - **Compromised edge.** It holds a bucket-wide credential, so it can bypass its own active-set check. It sees every cell's ciphertext and object names, can write new versions under any prefix (a revoked cell's included), and can deny service or run up storage. It cannot decrypt, destroy versions or change a version that a reference pins. A captured *cell* credential is narrower: the edge refuses it once revoked. Mitigations: the edge holds no media key, version destruction stays with cellctl, and cellctl's metering alerts on unexpected bytes.
 - **Hydration storms.** An export or a CLIP model change can hydrate many originals. Concurrency and temporary space are bounded (D3).

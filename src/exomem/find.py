@@ -3442,6 +3442,7 @@ def _vector_unit_candidates(
     candidate_limit: int,
     allowed_unit_refs: set[str] | None,
     allowed_parent_paths: set[str],
+    released_parent_paths: set[str] | None = None,
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
     timings: FindTimings | None,
@@ -3502,6 +3503,7 @@ def _vector_unit_candidates(
             k=candidate_limit,
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
             validate=False,
             incomplete_out=incomplete,
             encoded_for=encoded_for,
@@ -3631,6 +3633,16 @@ def _find_semantic_units(
         _record_filter_eligibility_cache_hit(timings)
         _set_catalog_timing_profile(timings, cache_hit=True)
         return []
+    from .governance import egress
+
+    parents = set(snapshot.recall_paths(scope))
+    if allowed_parent_paths is not None:
+        parents.intersection_update(allowed_parent_paths)
+    keep = egress.page_release_filter(vault_root, pages=parents)
+    # Ranking reuses checkpoint-proved release, while selected hydration decides afresh.
+    released_parent_paths = (
+        parents if keep is None else snapshot._published_admitted_paths(scope, keep, parents)
+    )
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
@@ -3676,6 +3688,7 @@ def _find_semantic_units(
                             recall_checkpoint=exact_checkpoint,
                             allowed_parent_paths=allowed_parent_paths,
                             admitted_parent_paths=allowed_parent_paths,
+                            released_parent_paths=released_parent_paths,
                             _repair_stale=True,
                             repair=exact_repair,
                             allow_delta=exact_allow_delta,
@@ -3717,6 +3730,7 @@ def _find_semantic_units(
                         recall_checkpoint=exact_checkpoint,
                         allowed_parent_paths=allowed_parent_paths,
                         admitted_parent_paths=allowed_parent_paths,
+                        released_parent_paths=released_parent_paths,
                         literal_all=mode == "keyword" and bool(query.strip()),
                         _repair_stale=True,
                         repair=exact_repair,
@@ -3740,6 +3754,7 @@ def _find_semantic_units(
                 k=candidate_limit + 1,
                 allowed_parent_paths=allowed_parent_paths,
                 admitted_parent_paths=allowed_parent_paths,
+                released_parent_paths=released_parent_paths,
                 scope=scope,
                 freshness=snapshot.for_scope(scope),
                 literal_all=mode == "keyword" and bool(query.strip()),
@@ -3870,6 +3885,7 @@ def _find_semantic_units(
             candidate_limit=vector_candidate_limit,
             allowed_unit_refs=vector_allowed_refs,
             allowed_parent_paths=vector_parent_paths,
+            released_parent_paths=released_parent_paths,
             degraded_out=degraded_out,
             failed_out=failed_out,
             timings=timings,
@@ -3934,6 +3950,7 @@ def _find_semantic_units(
             freshness=snapshot.for_scope(scope),
             allowed_unit_refs=set(records),
             admitted_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
             _repair_stale=True,
             repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
             _validate_current=False,
