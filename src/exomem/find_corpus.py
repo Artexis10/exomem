@@ -414,20 +414,33 @@ def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
 def walk_md_admits(
     root: Path, path: Path, listings: dict[Path, frozenset[str] | None]
 ) -> bool:
-    """Whether `walk_md(root)` yields exactly `path`, by visiting only its ancestry.
+    """Whether `walk_md(root)` yields exactly `path`, by visiting only its ancestry."""
+    from . import reserved_paths
+
+    return walk_entry_admits(
+        root, path, listings,
+        lambda anchor, child: _walk_md_entry(anchor, child, reserved_paths),
+    )
+
+
+def walk_entry_admits(
+    root: Path,
+    path: Path,
+    listings: dict[Path, frozenset[str] | None],
+    entry_kind: Callable[[Path, Path], str | None],
+) -> bool:
+    """Apply a scanner's entry rule to exactly one listed path's ancestry.
 
     The walk yields a page when every directory above it lists (a directory it
     cannot list contributes nothing), every step is an entry its parent lists
     under exactly that name (the walk yields listed names, so on a
     case-insensitive filesystem a differently-cased spelling that would still
-    stat is not one of them), each ancestor passes `_walk_md_entry` as a
+    stat is not one of them), each ancestor passes `entry_kind` as a
     directory and the page itself as Markdown. Admission is decided before a
     directory is listed, so a reserved tree is never enumerated -- the same
     order the walk keeps. `listings` memoizes directory listings (None for a
     directory the walk would not enter) across calls on one pass.
     """
-    from . import reserved_paths
-
     anchor = Path(root)
     try:
         parts = Path(path).relative_to(anchor).parts
@@ -444,11 +457,11 @@ def walk_md_admits(
             return False
         current = current / part
         if depth == len(parts) - 1:
-            return _walk_md_entry(anchor, current, reserved_paths) == "md"
+            return entry_kind(anchor, current) == "md"
         if current not in listings:
             listings[current] = (
                 _listed_names(current)
-                if _walk_md_entry(anchor, current, reserved_paths) == "dir"
+                if entry_kind(anchor, current) == "dir"
                 else None
             )
         names = listings[current]

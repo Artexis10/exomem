@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.145.0](https://github.com/Artexis10/exomem/compare/v0.144.4...v0.145.0) (2026-10-26)
+
+
+### Features
+
+* **import:** stage outside folders and report Cloud import phases ([#2110](https://github.com/Artexis10/exomem/issues/2110)) ([69e8812](https://github.com/Artexis10/exomem/commit/69e88121a94ec700ea426287ba75404f3b22f1a9))
+
+## [0.144.4](https://github.com/Artexis10/exomem/compare/v0.144.3...v0.144.4) (2026-10-25)
+
+
+### Bug Fixes
+
+* bound relationship lookup and retry lexical contention ([#2109](https://github.com/Artexis10/exomem/issues/2109)) ([3d9ed53](https://github.com/Artexis10/exomem/commit/3d9ed5343b7bc53d13a6479299f53ea5c7b23271))
+* **recall:** prove finite mixed result completeness ([#2107](https://github.com/Artexis10/exomem/issues/2107)) ([22cf9c5](https://github.com/Artexis10/exomem/commit/22cf9c5c83f551eb60db2dae44edb0e8f295d1c8))
+
 ## [0.144.3](https://github.com/Artexis10/exomem/compare/v0.144.2...v0.144.3) (2026-10-25)
 
 
