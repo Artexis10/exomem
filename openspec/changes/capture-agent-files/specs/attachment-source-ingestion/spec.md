@@ -31,6 +31,12 @@ The upload SHALL enforce the byte cap while receiving, including requests withou
 - **THEN** it returns a held file handle with the verified SHA-256 and byte count
 - **AND** only the later capture receipt proves durable Source custody
 
+#### Scenario: The published tool returns a usable capability
+
+- **WHEN** normal response filtering projects an issued handoff
+- **THEN** the client receives its usable opaque token unchanged
+- **AND** the implementation retains mandatory response filtering
+
 #### Scenario: Cloud implements the same handoff
 
 - **WHEN** the Cloud gateway implements upload handoffs
@@ -62,7 +68,7 @@ The assertion SHALL NOT describe the rendered Source page. Omitting it SHALL pre
 Tool guidance SHALL direct agents to original handles or upload handoffs for material they did not author.
 The CLI SHALL refuse traversal, symlinks and special files outside its selected read root.
 The service SHALL receive bytes rather than a caller-selected server path.
-Standalone stdio without a transfer endpoint and Cloud without a gateway bridge SHALL report that limitation explicitly.
+Standalone stdio without a verified HTTP session and Cloud without a gateway bridge SHALL report that limitation explicitly.
 
 #### Scenario: A file path escapes the selected root
 

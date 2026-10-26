@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -112,8 +113,16 @@ def capture_digest(root: Path, *, content: str, title: str, source_type: str, ur
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
-    """Scan under the caller's mutation guard; derived state cannot prove absence."""
+@dataclass(frozen=True, slots=True)
+class CanonicalCapturePages:
+    canonical: frozenset[str]
+    snapshots: dict[str, bytes]
+    parsed: dict[str, dict]
+    frontmatter_free: frozenset[str]
+
+
+def canonical_pages(root: Path) -> CanonicalCapturePages:
+    """Classify raw-lane pages without trusting declarations from bound originals."""
     from .client_artifacts import _expected_companion_paths
     from .governance import companions, raw_protection
     from .preserve import _sidecar_path
@@ -123,7 +132,6 @@ def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -
     frontmatter_free: set[str] = set()
     errors: set[str] = set()
     edges: dict[str, set[str]] = {}
-    match: tuple[str, str, str] | None = None
     types = note_types.Basis(root)
 
     def unavailable(_error: object = None) -> None:
@@ -225,6 +233,22 @@ def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -
 
         if canonical & errors:
             unavailable()
+        return CanonicalCapturePages(frozenset(canonical), snapshots, parsed, frozenset(frontmatter_free))
+    except (OSError, UnicodeError, vault.PathGuardError, vault.FrontmatterError, ValidationError):
+        unavailable()
+
+
+def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
+    """Scan under the caller's mutation guard; derived state cannot prove absence."""
+    classified = canonical_pages(root)
+    canonical, snapshots, parsed, frontmatter_free = classified.canonical, classified.snapshots, classified.parsed, classified.frontmatter_free
+    match: tuple[str, str, str] | None = None
+    types = note_types.Basis(root)
+
+    def unavailable(_error: object = None) -> None:
+        raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
+
+    try:
         for page in canonical:
             if page in frontmatter_free:
                 lines = snapshots[page].decode("utf-8").splitlines()

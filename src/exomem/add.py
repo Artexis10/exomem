@@ -356,6 +356,9 @@ def add(
                 reason="artifact filename is empty or only invalid characters",
             )
         artifact_suffix = Path(safe_name).suffix
+        if artifact_suffix.lower() == ".md":
+            # Original Markdown bytes are not governed UTF-8 pages, including during a full index rebuild.
+            artifact_suffix = ".md.bin"
         artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
         source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
@@ -575,6 +578,7 @@ def add(
         ),
         artifact_digest=artifact_digest,
         artifact_size=artifact_size,
+        artifact_content_type=artifact.content_type if artifact is not None else None,
         adoption_receipt=adoption_receipt,
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
@@ -1234,6 +1238,7 @@ def _render_source(
     artifact_rel: str | None = None,
     artifact_digest: str | None = None,
     artifact_size: int | None = None,
+    artifact_content_type: str | None = None,
     adoption_receipt: Mapping[str, object] | None = None,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
@@ -1278,6 +1283,8 @@ def _render_source(
             lines.append("extracted_by: pending")
         if artifact_name:
             lines.append(f"original_filename: {yaml_scalar(artifact_name)}")
+        if artifact_content_type:
+            lines.append(f"original_content_type: {yaml_scalar(artifact_content_type)}")
         if artifact_digest:
             lines.append(f"binary_sha256: {artifact_digest}")
         if artifact_size is not None:

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+from types import SimpleNamespace
 
 from test_agent_upload_handoff import _ASGISyncTransport
 from test_agent_upload_handoff import upload_env as upload_env
 
-from exomem import artifact_recovery, server
+from exomem import artifact_recovery, server, upload_handoff
 from exomem.__main__ import _attach_main
 from exomem.governance import principal
 
@@ -21,6 +23,11 @@ def test_mcp_handoff_cli_capture_and_original_recovery(upload_env, tmp_path, mon
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    # This synthetic entropy produces one uninterrupted mixed-case run in the former encoding.
+    monkeypatch.setattr(upload_handoff, "secrets", SimpleNamespace(
+        token_hex=lambda count: bytes(range(count)).hex(),
+        token_urlsafe=lambda count: base64.urlsafe_b64encode(bytes(range(count))).decode().rstrip("="),
+    ))
     mcp = server.build_server(require_auth=False)
 
     def call(name, arguments):
@@ -33,6 +40,7 @@ def test_mcp_handoff_cli_capture_and_original_recovery(upload_env, tmp_path, mon
     descriptor = call("transfer_artifact", {
         "operation": "upload", "lane": "source", "hold": True, "expected_sha256": digest,
     })
+    assert descriptor["token"].startswith(upload_handoff.TOKEN_PREFIX), "the published tool blocked its own handoff"
     handoff = tmp_path / "handoff.json"
     handoff.write_text(json.dumps(descriptor))
     path = tmp_path / "original.bin"

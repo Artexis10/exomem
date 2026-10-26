@@ -13,7 +13,6 @@ from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
 from . import access, memory_refs, note_types, reserved_paths, source_capture, vault
-from .governance import connector_boundary, egress
 
 RECEIPT_MAX_BYTES = 16 * 1024
 MAX_HOPS = 32
@@ -78,6 +77,41 @@ def _read_page(root: Path, path: str, authorize: Callable[[str], bool]):
     text, guard = vault.read_guarded_text(root, root / path)
     metadata, _, marker = vault.parse_frontmatter(text, strict=True)
     return text, guard, metadata, marker
+
+
+def _require_canonical_page(root: Path, path: str, source: str, *, scan: bool = False) -> None:
+    from .governance import raw_protection
+    from .preserve import _sidecar_paths
+
+    if not scan:
+        for companion in _sidecar_paths(Path(path), protected=raw_protection.marked(path), source=True):
+            try:
+                (root / companion).lstat()
+            except FileNotFoundError:
+                continue
+            break
+        else:
+            return
+    classified = source_capture.canonical_pages(root)
+    if path not in classified.canonical or classified.snapshots.get(path) != source.encode("utf-8"):
+        raise SourceCorrectionUnavailable
+    if scan:
+        identity = memory_refs.normalize_id(classified.parsed.get(path, {}).get(memory_refs.ID_FIELD))
+        if identity is not None and sum(
+            memory_refs.normalize_id(classified.parsed.get(owner, {}).get(memory_refs.ID_FIELD)) == identity
+            for owner in classified.canonical
+        ) != 1:
+            raise SourceCorrectionUnavailable
+
+
+def _canonical_reference_path(root: Path, reference: str) -> str:
+    classified = source_capture.canonical_pages(root)
+    identity = memory_refs.parse_memory_ref(reference)
+    paths = [path for path in classified.canonical
+             if memory_refs.normalize_id(classified.parsed.get(path, {}).get(memory_refs.ID_FIELD)) == identity]
+    if identity is None or len(paths) != 1:
+        raise SourceCorrectionUnavailable
+    return paths[0]
 
 
 def _receipt(root: Path, reference: str) -> tuple[dict | None, vault.PathGuard]:
@@ -157,7 +191,11 @@ def resolve_current(
             text, guard, metadata, marker = _read_page(root, selected, authorize)
             reference = memory_refs.ref_from_markdown(text)
             if expected_ref is not None and reference != expected_ref:
-                raise SourceCorrectionUnavailable
+                selected = _canonical_reference_path(root, expected_ref)
+                text, guard, metadata, marker = _read_page(root, selected, authorize)
+                reference = memory_refs.ref_from_markdown(text)
+                if reference != expected_ref:
+                    raise SourceCorrectionUnavailable
             if predecessor_ref is not None and metadata.get("supersedes") != predecessor_ref:
                 raise SourceCorrectionUnavailable
             if hop == 0:
@@ -168,6 +206,7 @@ def resolve_current(
                 if hop:
                     raise SourceCorrectionUnavailable
                 return CurrentSourceResolution(requested, requested_ref, selected, reference, text, guard, tuple(guards))
+            _require_canonical_page(root, selected, text)
             if reference in seen:
                 raise SourceCorrectionUnavailable
             seen.add(reference)
@@ -188,7 +227,7 @@ def resolve_current(
             except reserved_paths.ReservedPathLeafError as error:
                 if error.code != "MISSING":
                     raise SourceCorrectionUnavailable from None
-                selected = _path(root, expected_ref)
+                selected = _canonical_reference_path(root, expected_ref)
         raise SourceCorrectionUnavailable
     except (OSError, ValueError, TypeError, KeyError, memory_refs.ReferenceError, reserved_paths.ReservedPathLeafError):
         raise SourceCorrectionUnavailable from None
@@ -203,6 +242,8 @@ class CorrectionPlan:
     guards: tuple[vault.PathGuard, ...]
 
     def require_authority(self, root: Path) -> None:
+        from .governance import connector_boundary, egress
+
         if (not _authorizer(root)(self.old_path)
                 or access.writable_reason(root, self.old_path) is not None
                 or egress.write_target_withheld(root, self.old_path)):
@@ -231,6 +272,7 @@ def prepare_correction(root: Path, value: SourceCorrection) -> CorrectionPlan:
         text, guard, metadata, marker = _read_page(root, path, _authorizer(root))
         if marker is None or not note_types.Basis(root).selects(metadata.get("type"), note_types.captured_source):
             raise SourceCorrectionUnavailable
+        _require_canonical_page(root, path, text, scan=True)
         reference = memory_refs.ref_from_markdown(text)
         if reference is None or metadata.get(memory_refs.ID_FIELD) != memory_refs.parse_memory_ref(reference):
             raise ValueError("SOURCE_CORRECTION_ID_REQUIRED: use maintain_memory(mode='backfill-ids', dry_run=false) with maintenance authority, then read the Source again and retry")
@@ -242,5 +284,5 @@ def prepare_correction(root: Path, value: SourceCorrection) -> CorrectionPlan:
         plan = CorrectionPlan(correction, path, reference, text, (guard, receipt_guard))
         plan.require_authority(root)
         return plan
-    except (OSError, memory_refs.ReferenceError, vault.PathGuardError, reserved_paths.ReservedPathLeafError):
+    except (OSError, memory_refs.ReferenceError, vault.PathGuardError, reserved_paths.ReservedPathLeafError, source_capture.SourceCaptureError):
         raise SourceCorrectionUnavailable from None

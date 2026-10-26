@@ -831,8 +831,7 @@ def _attach_handoff(args, *, transport=None) -> int:
         if not isinstance(descriptor, dict) or set(descriptor) != fields:
             raise ValueError("expected an upload handoff descriptor")
         token = descriptor["token"]
-        if (not isinstance(token, str) or not token.startswith(upload_handoff.TOKEN_PREFIX)
-                or held_uploads._SECRET.fullmatch(token.removeprefix(upload_handoff.TOKEN_PREFIX)) is None
+        if (upload_handoff.parse_ticket(token) is None
                 or descriptor["hold"] is not True or descriptor["committed"] is not False
                 or descriptor["handoff_status"] != "handoff_prepared"
                 or descriptor["lane"] not in upload_tokens.UPLOAD_LANES

@@ -21,6 +21,7 @@ from . import artifact_recovery, auth_sessions, held_uploads, private_state, upl
 from .governance import principal, raw_protection
 
 TOKEN_PREFIX = "exomem-upload:"
+_TICKET_BYTES = 32
 MAX_BYTES = 100 * 1024 * 1024
 STORE_DIRNAME = "upload-handoffs"
 UNAVAILABLE_REASON = "no usable upload handoff"
@@ -29,6 +30,20 @@ _now = time.time
 
 def _unavailable() -> ValueError:
     return ValueError("UPLOAD_HANDOFF_UNAVAILABLE: " + UNAVAILABLE_REASON)
+
+
+def parse_ticket(value: object) -> str | None:
+    """Return the canonical nonce from an upload ticket, or None for any other shape."""
+    if not isinstance(value, str) or not value.startswith(TOKEN_PREFIX):
+        return None
+    nonce = value[len(TOKEN_PREFIX):]
+    # The wire format fixes 256 bits as 64 lowercase hexadecimal characters.
+    try:
+        if len(nonce) == 2 * _TICKET_BYTES and bytes.fromhex(nonce).hex() == nonce:
+            return nonce
+    except ValueError:
+        pass
+    return None
 
 
 def upload_endpoint(value: str) -> str:
@@ -115,7 +130,8 @@ def prepare_upload(
                     private_state.remove(path)
             if count >= held_uploads.HOLD_MAX_COUNT:
                 raise ValueError("UPLOAD_HANDOFF_QUOTA: redeem or let previous handoffs expire")
-            secret = secrets.token_urlsafe(32)
+            # Lowercase hex survives the terminal scrubber without reducing the ticket's 256-bit entropy.
+            secret = secrets.token_hex(_TICKET_BYTES)
             key = hashlib.sha256(secret.encode("ascii")).hexdigest()
             private_state.write_record(store, key, {
                 "principal": asdict(who), "binding": binding,
@@ -142,8 +158,8 @@ def prepare_upload(
 
 async def claim_upload(vault_root: Path, token: str) -> dict:
     """Consume a ticket before reading a request body, or give one content-free refusal."""
-    secret = token.removeprefix(TOKEN_PREFIX)
-    if not token.startswith(TOKEN_PREFIX) or held_uploads._SECRET.fullmatch(secret) is None:
+    secret = parse_ticket(token)
+    if secret is None:
         raise _unavailable()
     store = private_state.store(vault_root, STORE_DIRNAME)
     key = hashlib.sha256(secret.encode("ascii")).hexdigest()

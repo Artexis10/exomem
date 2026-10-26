@@ -309,7 +309,7 @@
     }
   },
   "capture_source": {
-    "description": "Save authored text or exact original file handles in Sources/.\n\nFor material you did not author, send original bytes through `files`.\nOn personal HTTP MCP, request transfer_artifact(upload, lane=source, hold=true,\nexpected_sha256=...) and use exomem attach --handoff-file. Do not retype originals.\nCloud currently needs a client file handle. Standalone stdio needs an HTTP transfer endpoint.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
+    "description": "Save Source text or original files.\n\nNever retype originals: use files, or transfer_artifact(upload, lane=source,\nhold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.\nCloud needs handles; stdio needs HTTP MCP. source_kind is required.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -318,7 +318,7 @@
         },
         "content": {
           "default": "",
-          "description": "Raw text. Supply this or `files`, not both.",
+          "description": "Authored text, or supply files.",
           "type": "string"
         },
         "slug": {
@@ -326,49 +326,49 @@
         },
         "source_type": {
           "type": "string",
-          "description": "Alias of source_kind; conflicts are refused."
+          "description": "source_kind alias."
         },
         "url": {
           "type": "string",
-          "description": "Required when the source kind declares it."
+          "description": "Source URL."
         },
         "tags": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "Secondary labels; not for kind, domain or project."
+          "description": "Labels."
         },
         "why_captured": {
           "type": "string"
         },
         "compile_guidance": {
           "default": false,
-          "description": "Return a reusable proposal.",
+          "description": "Reusable compilation proposal.",
           "type": "boolean"
         },
         "suggested_title": {
           "type": "string",
-          "description": "Title hint for the proposal."
+          "description": "Proposal title."
         },
         "source_kind": {
           "type": "string",
-          "description": "What it IS; open lowercase slug, including new kinds."
+          "description": "What it is; open slug."
         },
         "domain": {
           "type": "string",
-          "description": "What it is ABOUT, lowercase slug."
+          "description": "Subject slug."
         },
         "projects": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "Project keys served; never affects storage."
+          "description": "Projects."
         },
         "files": {
           "default": [],
-          "description": "Up to eight temporary client file handles (raw material such as a transcript, article, screenshot or recording), captured as Sources instead of `content`. Each needs `download_url` and `file_id`; Exomem fetches it server-side. Proof-bearing artifacts go to `preserve_artifacts`.",
+          "description": "Up to eight original handles with download_url and file_id; Exomem retrieves their bytes. Proof uses preserve_artifacts.",
           "items": {
             "properties": {
               "download_url": {
@@ -421,11 +421,11 @@
             "selected_file_id"
           ],
           "type": "object",
-          "description": "Selects exactly one supplied handle. Establishes eligibility,\nnot write consent; agent-initiated use obeys proactive_capture."
+          "description": "Select one handle; not write consent."
         },
         "raw_protection": {
           "default": false,
-          "description": "Keep the original owner-only until a whole-artifact release.",
+          "description": "Owner-only original.",
           "type": "boolean"
         },
         "source_identity": {
@@ -450,11 +450,11 @@
             "revision"
           ],
           "type": "object",
-          "description": "Opaque text identity; identical inputs reuse the Source indefinitely."
+          "description": "Durable text-capture identity."
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of intended UTF-8 content or one original file's bytes. A mismatch refuses capture before storage. This is not the rendered page hash."
+          "description": "Original SHA-256 (UTF-8 for content)."
         },
         "correction": {
           "additionalProperties": false,
@@ -481,7 +481,7 @@
             "reason"
           ],
           "type": "object",
-          "description": "Capture a corrected Source with supersedes, expected_hash and reason. The historical page hash guards the predecessor; its original bytes stay unchanged."
+          "description": "Correct a Source; expected_hash is its page hash."
         },
         "response_detail": {
           "default": "compact",
@@ -3218,7 +3218,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a selected page, semantic unit or view.\n\nunit_ref returns the current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
+    "description": "Read a page, exact semantic unit, or exomem://map view.\n\nunit_ref includes bounded parent context. Missing or stale units report\nstatus; no substitution.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3269,7 +3269,7 @@
         },
         "follow_corrections": {
           "default": true,
-          "description": "Follow corrected Sources; false reads the exact historical page. Unit reads always stay exact.",
+          "description": "False reads the historical Source; unit reads stay exact.",
           "type": "boolean"
         }
       },
@@ -4504,7 +4504,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nTo send a local original without another credential, use upload with\nhold=true and expected_sha256, then exomem attach --handoff-file.\nRedeem its held handle through capture_source for raw material.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
+    "description": "Prepare an original upload or download; a handoff does not prove custody.\n\nUpload: hold=true with expected_sha256, then exomem attach --handoff-file.\nCapture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4523,11 +4523,11 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of intended upload bytes, or the original version to recover."
+          "description": "Intended original SHA-256."
         },
         "hold": {
           "default": false,
-          "description": "Prepare a one-use upload bound to this MCP session; requires expected_sha256.",
+          "description": "One-use upload bound to this session; requires expected_sha256.",
           "type": "boolean"
         },
         "response_detail": {

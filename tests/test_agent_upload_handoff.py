@@ -123,7 +123,7 @@ def test_revoked_expired_and_foreign_tickets_share_one_refusal(upload_env, monke
     assert refused.status_code == 401
     monkeypatch.setattr(upload_handoff, "_now", lambda: 10**12)
     timed_out = _post(upload_env, expired)
-    foreign = _post(upload_env, {"token": upload_handoff.TOKEN_PREFIX + "x" * 43})
+    foreign = _post(upload_env, {"token": upload_handoff.TOKEN_PREFIX + "0" * 64})
     assert refused.json() == timed_out.json() == foreign.json()
 
 

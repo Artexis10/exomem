@@ -112,8 +112,10 @@ def _companion(root: Path, path: str) -> tuple[str, dict]:
                 raise
             continue
         frontmatter, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
-        if marker is None:
-            raise RecoveryUnavailable
+        binding = frontmatter.get("governance_companion")
+        bound_path = binding.get("artifact_path") if isinstance(binding, dict) else None
+        if marker is None or path not in (bound_path, frontmatter.get("data_file"), frontmatter.get("evidence_file")):
+            continue
         return companion, frontmatter
     raise reserved_paths.ReservedPathLeafError("MISSING")
 
@@ -145,6 +147,8 @@ def _resolve(root: Path, selected: str) -> tuple[str, dict]:
 
 
 def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCopy) -> dict:
+    from .client_artifacts import _MAX_CONTENT_TYPE_CHARS
+
     binding = metadata.get("governance_companion")
     if isinstance(binding, dict):
         if (
@@ -166,13 +170,13 @@ def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCop
     ):
         raise RecoveryUnavailable
     # Older custody pages stored MIME only in transcription/adoption provenance. Keep inference explicit.
-    provenance = metadata.get("transcription") or metadata.get("adoption") or {}
-    mime = provenance.get("content_type") if isinstance(provenance, dict) else None
+    provenance = metadata.get("transcription") or metadata.get("artifact_adoption") or metadata.get("adoption") or {}
+    mime = metadata.get("original_content_type") or (provenance.get("content_type") if isinstance(provenance, dict) else None)
     source = "stored" if isinstance(mime, str) and mime else "filename"
     mime = mime if source == "stored" else mimetypes.guess_type(name)[0]
     if not mime:
         mime, source = "application/octet-stream", "fallback"
-    if not isinstance(mime, str) or any(ord(c) < 32 or ord(c) > 126 for c in mime):
+    if not isinstance(mime, str) or len(mime) > _MAX_CONTENT_TYPE_CHARS or any(ord(c) < 32 or ord(c) > 126 for c in mime):
         raise RecoveryUnavailable
     return {
         "path": path,

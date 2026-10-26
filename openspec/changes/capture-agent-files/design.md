@@ -6,7 +6,7 @@ Compiled supersession rewrites predecessor metadata, which cannot implement immu
 ## Goals / Non-Goals
 
 **Goals:** Accept original files through existing HTTP MCP authority, reject altered text, and retain auditable Source corrections.
-**Non-Goals:** Read arbitrary server paths, start another listener, change folder import, or enable an unimplemented Cloud upload bridge.
+**Non-Goals:** Read arbitrary server paths, start another listener, bridge stdio authorization to HTTP, change folder import, or enable an unimplemented Cloud upload bridge.
 
 ## Decisions
 
@@ -20,6 +20,14 @@ The rendered Source hash remains the optimistic concurrency hash for correction 
 Create the successor and a canonical receipt in the existing atomic capture batch.
 Key each receipt by the predecessor's immutable identity. Resolve chains through bounded point reads, with independent authorization at each hop.
 Keep historical page reads explicit and exact artifact downloads stable. Export receipts as canonical data.
+
+Store new Markdown originals with an opaque `.md.bin` suffix and retain their original filename.
+The metadata page remains Markdown. Graph rebuilds cannot reinterpret original bytes as page metadata or reject a valid UTF-16 original.
+Keep both legacy Markdown companion formats readable without migration.
+
+Correction admission reuses the existing canonical owner classification before trusting a legacy page identity.
+That rare write scans captured material; ordinary current reads use receipt point reads unless a legacy companion creates ambiguity.
+Path hints accelerate resolution, but canonical identity decides when a renamed path is reused.
 
 The Cloud gateway implements the same portable handoff fields and tenant/session checks in its separate upload bridge.
 Until then, Cloud supports hash-checked client file handles and reports upload handoffs as unavailable.

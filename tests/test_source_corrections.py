@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
@@ -183,12 +184,7 @@ def test_legacy_markdown_source_receipt_replays_and_original_cannot_claim_identi
     receipt = captured["files"][0]["adoption"]
     artifact = vault / receipt["stored_path"]
     page = vault / receipt["page_path"]
-    legacy = preserve._sidecar_path(artifact, protected=True)
-    assert legacy != page
-    metadata, body, _ = vault_module.parse_frontmatter(page.read_text())
-    metadata["artifact_adoption"]["page_path"] = legacy.relative_to(vault).as_posix()
-    page.rename(legacy)
-    legacy.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\n" + body)
+    artifact, legacy = _legacy_markdown_pair(vault, artifact, page)
 
     replay = client_artifacts.capture_source_artifacts(vault, **inputs)
     assert replay["files"][0]["outcome"] == "replayed"
@@ -202,3 +198,110 @@ def test_legacy_markdown_source_receipt_replays_and_original_cannot_claim_identi
             source_identity={"system": "archive", "record_id": "independent", "revision": "one"},
         )
     assert captured_identity.capture_outcome == "created"
+
+
+def _legacy_original(vault, source_schema, tmp_path, original, *, title="Legacy original"):
+    staged = tmp_path / "legacy.md"
+    staged.write_bytes(original)
+    result = add.add(vault, source_schema, content="", title=title, source_type="session", artifact=add.SourceArtifact(staged, "legacy.md"))
+    artifact = vault / result.artifact_path
+    page = vault / result.path
+    legacy_artifact, legacy_page = _legacy_markdown_pair(vault, artifact, page)
+    return replace(result, path=legacy_page.relative_to(vault).as_posix(), artifact_path=legacy_artifact.relative_to(vault).as_posix())
+
+
+def _legacy_markdown_pair(vault, artifact, page):
+    legacy_artifact = artifact.with_suffix("") if artifact.name.endswith(".md.bin") else artifact
+    legacy_page = preserve._sidecar_path(legacy_artifact, protected=True)
+    metadata, body, _ = vault_module.parse_frontmatter(page.read_text())
+    metadata["evidence_file"] = legacy_artifact.relative_to(vault).as_posix()
+    if "artifact_adoption" in metadata:
+        metadata["artifact_adoption"]["stored_path"] = legacy_artifact.relative_to(vault).as_posix()
+        metadata["artifact_adoption"]["page_path"] = legacy_page.relative_to(vault).as_posix()
+    if artifact != legacy_artifact:
+        artifact.rename(legacy_artifact)
+    if page != legacy_page:
+        page.rename(legacy_page)
+    legacy_page.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\n" + body)
+    return legacy_artifact, legacy_page
+
+
+def test_legacy_original_uuid_cannot_redirect_canonical_source(vault, source_schema, tmp_path):
+    victim = add.add(vault, source_schema, title="Trusted original", content="Trusted content", source_type="session")
+    original = f"---\ntype: source\nexomem_id: {memory_refs.parse_memory_ref(victim.ref)}\n---\nUploaded bytes\n".encode()
+    captured = _legacy_original(vault, source_schema, tmp_path, original)
+    before = {path: path.read_bytes() for path in vault.rglob("*.md")}
+    with pytest.raises(source_corrections.SourceCorrectionUnavailable):
+        add.add(vault, source_schema, title="Attempted redirect", content="Other text", source_type="session", correction={"supersedes": captured.artifact_path, "expected_hash": hashlib.sha256(original).hexdigest(), "reason": "Correct the upload"})
+    assert {path: path.read_bytes() for path in vault.rglob("*.md")} == before
+    assert source_corrections.resolve_current(vault, victim.path).selected_ref == victim.ref
+    with pytest.raises(source_corrections.SourceCorrectionUnavailable):
+        source_corrections.resolve_current(vault, captured.artifact_path)
+    corrected = add.add(vault, source_schema, title="Correct wrapper", content="Correct original", source_type="session", correction={"supersedes": captured.path, "expected_hash": vault_module.content_hash((vault / captured.path).read_text()), "reason": "Correct the captured Source"})
+    assert source_corrections.resolve_current(vault, captured.path).selected_ref == corrected.ref
+
+
+def test_renamed_successor_uses_identity_when_hint_is_reused(vault, source_schema):
+    old = add.add(vault, source_schema, title="Earlier original", content="Earlier content", source_type="session")
+    current = add.add(vault, source_schema, title="Current original", content="Current content", source_type="session", correction={"supersedes": old.path, "expected_hash": vault_module.content_hash((vault / old.path).read_text()), "reason": "Restore original"})
+    renamed = (vault / current.path).with_name("renamed-current.md")
+    (vault / current.path).rename(renamed)
+    unrelated = add.add(vault, source_schema, title="Current original", content="Unrelated content", source_type="session")
+    assert unrelated.path == current.path
+    resolved = source_corrections.resolve_current(vault, old.path)
+    assert resolved.selected_path == renamed.relative_to(vault).as_posix()
+    assert resolved.selected_ref == current.ref
+    assert "Current content" in resolved.source
+    assert resolved.guard.target == renamed.relative_to(vault).as_posix()
+
+
+def test_duplicate_canonical_uuid_cannot_publish_a_correction(vault, source_schema):
+    old = add.add(vault, source_schema, title="Canonical original", content="Original text", source_type="session")
+    source = (vault / old.path).read_text()
+    duplicate = (vault / old.path).with_name("duplicate-original.md")
+    duplicate.write_text(source)
+    before = {path: path.read_bytes() for path in vault.rglob("*.md")}
+    with pytest.raises(source_corrections.SourceCorrectionUnavailable):
+        add.add(vault, source_schema, title="Correction", content="Correct text", source_type="session", correction={"supersedes": old.path, "expected_hash": vault_module.content_hash(source), "reason": "Restore original"})
+    assert {path: path.read_bytes() for path in vault.rglob("*.md")} == before
+
+
+def test_legacy_custody_skips_an_unrelated_occupied_companion_name(vault, source_schema, tmp_path):
+    original = b"# Legacy original\nExact historical bytes.\n"
+    captured = _legacy_original(vault, source_schema, tmp_path, original)
+    unrelated = add.add(vault, source_schema, title="Legacy original notes", content="Unrelated page", source_type="session")
+    assert vault / unrelated.path == preserve._sidecar_path(vault / captured.artifact_path, protected=False)
+    who = owner_principal(surface="mcp")
+    with request_scope(who):
+        with artifact_recovery.stage(vault, captured.artifact_path, who) as (copied, _):
+            assert copied.private_path.read_bytes() == original
+
+
+def test_utf16_markdown_capture_keeps_bytes_outside_page_indexes(vault, source_schema, tmp_path):
+    from exomem import epistemic_graph
+
+    original = "---\ntype: source\n---\n# Original Ω\r\n".encode("utf-16")
+    staged = tmp_path / "original.md"
+    staged.write_bytes(original)
+    captured = add.add(vault, source_schema, title="UTF16 document", content="", source_type="session", artifact=add.SourceArtifact(staged, "original.md", "text/markdown; charset=utf-16"), expected_sha256=hashlib.sha256(original).hexdigest())
+    assert captured.artifact_path.endswith(".md.bin")
+    assert captured.path == captured.artifact_path + ".md"
+    assert (vault / captured.artifact_path).read_bytes() == original
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    who = owner_principal(surface="mcp")
+    with request_scope(who):
+        with artifact_recovery.stage(vault, captured.path, who) as (copied, descriptor):
+            assert copied.private_path.read_bytes() == original
+            assert descriptor["file_name"] == "original.md"
+            assert descriptor["mime_type"] == "text/markdown; charset=utf-16"
+
+
+@pytest.mark.parametrize("content_type", ["text/plain\r\nX-Injected: 1", "x" * 256])
+def test_original_content_type_keeps_recovery_header_bounds(vault, source_schema, tmp_path, content_type):
+    staged = tmp_path / "original.md"
+    staged.write_bytes(b"# Original\n")
+    captured = add.add(vault, source_schema, title="Original headers", content="", source_type="session", artifact=add.SourceArtifact(staged, "original.md", content_type))
+    who = owner_principal(surface="mcp")
+    with request_scope(who), pytest.raises(artifact_recovery.RecoveryUnavailable):
+        with artifact_recovery.stage(vault, captured.path, who):
+            pytest.fail("invalid MIME reached original delivery")

@@ -612,11 +612,8 @@ _OptionalClientArtifactFiles = Annotated[
     Field(
         max_length=8,
         description=(
-            "Up to eight temporary client file handles (raw material such as a "
-            "transcript, article, screenshot or recording), captured as Sources "
-            "instead of `content`. Each needs `download_url` and `file_id`; "
-            "Exomem fetches it server-side. Proof-bearing artifacts go to "
-            "`preserve_artifacts`."
+            "Up to eight original handles with download_url and file_id; "
+            "Exomem retrieves their bytes. Proof uses preserve_artifacts."
         ),
     ),
 ]
@@ -7508,13 +7505,10 @@ def op_read_memory(
     continuation: _OptionalViewContinuation = None,
     follow_corrections: bool = True,
 ) -> dict:
-    """Read a selected page, semantic unit or view.
+    """Read a page, exact semantic unit, or exomem://map view.
 
-    unit_ref returns the current unit, parent citation/lifecycle and up to
-    2,400 context characters. Missing/stale/ambiguous/superseded refs report
-    status; never substituted. Without unit_ref, returns the page.
-    Also reads the paged views exomem://map, exomem://map/topic/<domain key>
-    and exomem://map/unfiled.
+    unit_ref includes bounded parent context. Missing or stale units report
+    status; no substitution.
 
     Args:
         path: Vault-relative path or KB shorthand.
@@ -7527,7 +7521,7 @@ def op_read_memory(
         history_limit: Retained revisions per page, from 1 to 50.
         history_continuation: Position from the previous revision_history envelope.
         continuation: Next-page token of a view.
-        follow_corrections: Follow corrected Sources; false reads the exact historical page. Unit reads always stay exact.
+        follow_corrections: False reads the historical Source; unit reads stay exact.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
@@ -8200,36 +8194,28 @@ def op_capture_source(
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
 ) -> dict:
-    """Save authored text or exact original file handles in Sources/.
+    """Save Source text or original files.
 
-    For material you did not author, send original bytes through `files`.
-    On personal HTTP MCP, request transfer_artifact(upload, lane=source, hold=true,
-    expected_sha256=...) and use exomem attach --handoff-file. Do not retype originals.
-    Cloud currently needs a client file handle. Standalone stdio needs an HTTP transfer endpoint.
-
-    Proof goes to preserve_evidence or preserve_artifacts. source_kind is
-    required; domain is optional. Both accept new slugs. compile_guidance
-    returns a proposal; reuse it instead of calling prepare_note.
+    Never retype originals: use files, or transfer_artifact(upload, lane=source,
+    hold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.
+    Cloud needs handles; stdio needs HTTP MCP. source_kind is required.
 
     Args:
-        content: Raw text. Supply this or `files`, not both.
-        source_type: Alias of source_kind; conflicts are refused.
-        url: Required when the source kind declares it.
-        tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Return a reusable proposal.
-        suggested_title: Title hint for the proposal.
-        source_kind: What it IS; open lowercase slug, including new kinds.
-        domain: What it is ABOUT, lowercase slug.
-        projects: Project keys served; never affects storage.
-        files: Client file handles, captured instead of `content`.
-        adoption: Selects exactly one supplied handle. Establishes eligibility,
-            not write consent; agent-initiated use obeys proactive_capture.
-        raw_protection: Keep the original owner-only until a whole-artifact release.
-        source_identity: Opaque text identity; identical inputs reuse the Source indefinitely.
-        expected_sha256: SHA-256 of intended UTF-8 content or one original file's bytes.
-            A mismatch refuses capture before storage. This is not the rendered page hash.
-        correction: Capture a corrected Source with supersedes, expected_hash and reason.
-            The historical page hash guards the predecessor; its original bytes stay unchanged.
+        content: Authored text, or supply files.
+        source_type: source_kind alias.
+        url: Source URL.
+        tags: Labels.
+        compile_guidance: Reusable compilation proposal.
+        suggested_title: Proposal title.
+        source_kind: What it is; open slug.
+        domain: Subject slug.
+        projects: Projects.
+        files: Original handles.
+        adoption: Select one handle; not write consent.
+        raw_protection: Owner-only original.
+        source_identity: Durable text-capture identity.
+        expected_sha256: Original SHA-256 (UTF-8 for content).
+        correction: Correct a Source; expected_hash is its page hash.
     """
     if correction is not None:
         correction = source_corrections.validate_correction(correction)
@@ -8650,20 +8636,15 @@ def op_transfer_artifact(
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False,
 ) -> dict:
-    """Prepare binary transfer when client file handles are unavailable.
+    """Prepare an original upload or download; a handoff does not prove custody.
 
-    Returns a short-lived handoff; issuance does not prove consumption.
-    To send a local original without another credential, use upload with
-    hold=true and expected_sha256, then exomem attach --handoff-file.
-    Redeem its held handle through capture_source for raw material.
-    For a stored original, download with artifact and optional expected_sha256.
-    Use the bounded native MCP resource where supported, or open the HTTPS link.
-    Note reads and exports remain separate.
+    Upload: hold=true with expected_sha256, then exomem attach --handoff-file.
+    Capture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
-        expected_sha256: SHA-256 of intended upload bytes, or the original version to recover.
-        hold: Prepare a one-use upload bound to this MCP session; requires expected_sha256.
+        expected_sha256: Intended original SHA-256.
+        hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """

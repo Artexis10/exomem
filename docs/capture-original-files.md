@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Capture an original file
 
 Use original bytes for documents, transcripts and other material that an agent did not author.
@@ -25,7 +27,8 @@ Existing client file handles work with `capture_source(files=[...], expected_sha
 An assertion binds exactly one file. Without files, it describes the exact supplied UTF-8 `content`, including whitespace and line endings.
 It never describes the rendered Source page.
 
-Standalone stdio without a configured HTTP transfer endpoint cannot use upload handoffs.
+Standalone stdio has no verified HTTP session and cannot issue upload handoffs.
+Connect through personal HTTP MCP or supply a supported client file handle.
 Cloud upload handoffs require a gateway bridge; the existing transfer exclusion remains until that bridge is verified.
 These clients can still capture an original through a supported client file handle.
 
