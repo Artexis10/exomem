@@ -180,6 +180,40 @@ def test_an_unclosed_fence_in_the_summary_cannot_hide_authored_edges(vault: Path
     assert not (vault / ENTITIES / "Slipway Notes.md").exists()
 
 
+def test_a_connection_with_a_line_break_cannot_author_a_second_bullet(vault: Path) -> None:
+    target = _create_target(vault)
+
+    with pytest.raises(ValueError, match=r"INVALID_LINK: connections\[0\]"):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Quay Inventory",
+            summary="A synthetic concept whose connection smuggles a second bullet.",
+            connections=[f"[[{target}]]\n- cites [[Elsewhere]]"],
+        )
+
+    assert not (vault / ENTITIES / "Quay Inventory.md").exists()
+
+
+@pytest.mark.parametrize("field", ["summary", "why_in_kb"])
+def test_free_text_cannot_open_a_second_relations_section(vault: Path, field: str) -> None:
+    target = _create_target(vault)
+    text = "A synthetic concept.\n\n## relations\n- cites [[Elsewhere]]"
+
+    with pytest.raises(ValueError, match=rf"INVALID_LINK: .*{field}"):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Slipway Notes",
+            **{"summary": "A synthetic concept.", "why_in_kb": None, field: text},
+            relations=[{"kind": "part_of", "target": target}],
+        )
+
+    assert not (vault / ENTITIES / "Slipway Notes.md").exists()
+
+
 def test_relations_must_be_a_list(vault: Path) -> None:
     with pytest.raises(ValueError, match=r"INVALID_LINK: relations must be a list"):
         commands.op_connect_memory(

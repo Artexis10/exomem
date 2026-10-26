@@ -179,7 +179,7 @@ def test_compact_and_rich_typed_creates_each_satisfy_the_minimum(vault: Path) ->
     ("frontmatter", "code"),
     (
         ({"status": "active"}, "COMPILED_TYPE_MISMATCH"),
-        ({"type": "failure", "status": "active"}, "COMPILED_TYPE_MISMATCH"),
+        ({"type": "memo", "status": "active"}, "COMPILED_TYPE_MISMATCH"),
     ),
 )
 def test_tier2_canonical_compiled_path_cannot_bypass_with_frontmatter(

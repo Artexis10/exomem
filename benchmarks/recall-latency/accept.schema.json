@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tag": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:[.-][A-Za-z0-9.-]+)?$"
+    },
+    "series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "hybrid",
+              "keyword",
+              "filtered_hybrid",
+              "temporal",
+              "mixed",
+              "unit"
+            ]
+          },
+          "maximum_ratio": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "name",
+          "maximum_ratio"
+        ]
+      },
+      "minItems": 1
+    },
+    "full_ci_run": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github.com/[^/]+/[^/]+/actions/runs/[0-9]+$"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "pull_request": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github.com/[^/]+/[^/]+/pull/[0-9]+$"
+    }
+  },
+  "required": [
+    "tag",
+    "series",
+    "full_ci_run",
+    "reason",
+    "pull_request"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

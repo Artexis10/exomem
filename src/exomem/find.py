@@ -345,7 +345,9 @@ def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
     nothing, so registering its real interval keeps the number honest without
     inventing clock noise, and the source says why it was free.
     """
-    with _span(timings, "filter_eligibility", source=find_types.SOURCE_CACHE, cache_hit=True):
+    with _span(
+        timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_CACHE, cache_hit=True
+    ):
         pass
 
 
@@ -1842,7 +1844,7 @@ def find(
         # base reads only the vault-scope set, so it never decides the other.
         if admit_path is None:
             return None
-        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+        with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
             return snapshot.admitted_paths(admission_scope, admit_path, page_of=_page_of)
 
     resolved_config = config if config is not None else _active_ranking()
@@ -1947,26 +1949,28 @@ def find(
                     return copy.deepcopy(cached_hits)
         if _cache_probe:
             return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
-        unit_hits = _find_semantic_units(
-            vault_root,
-            query=query,
-            limit=limit,
-            scope=walk_scope,
-            plan=filter_plan,
-            allowed_parent_paths=_admitted(walk_scope),
-            snapshot=snapshot,
-            prefer_active=prefer_active,
-            status_basis=status_basis,
-            config=resolved_config,
-            mode=mode,
-            degraded_out=degraded,
-            failed_out=failed,
-            retrieval_trace=retrieval_trace,
-            timings=timings,
-            prepared_queries=_prepared_queries,
-            parent_reads=unit_reads,
-            _defer_hydration=True,
-        )
+        unit_admitted = _admitted(walk_scope)
+        with _span(timings, "semantic_units"):
+            unit_hits = _find_semantic_units(
+                vault_root,
+                query=query,
+                limit=limit,
+                scope=walk_scope,
+                plan=filter_plan,
+                allowed_parent_paths=unit_admitted,
+                snapshot=snapshot,
+                prefer_active=prefer_active,
+                status_basis=status_basis,
+                config=resolved_config,
+                mode=mode,
+                degraded_out=degraded,
+                failed_out=failed,
+                retrieval_trace=retrieval_trace,
+                timings=timings,
+                prepared_queries=_prepared_queries,
+                parent_reads=unit_reads,
+                _defer_hydration=True,
+            )
         if relation_paths is not None:
             # A unit qualifies through its parent page (per-unit edge anchoring is
             # deferred); annotate the survivors with why the page participated.
@@ -2348,7 +2352,7 @@ def find(
     # map to a KB-only walk in the underlying rankers.
     eligible_paths: set[str] | None = None
     if filter_plan.root is not None:
-        with _span(timings, "filter_eligibility"):
+        with _span(timings, _nested_name(timings, "filter_eligibility")):
             eligible_paths = _resolve_eligible_filter_paths(
                 vault_root,
                 scope=walk_scope,
@@ -3438,6 +3442,7 @@ def _vector_unit_candidates(
     candidate_limit: int,
     allowed_unit_refs: set[str] | None,
     allowed_parent_paths: set[str],
+    released_parent_paths: set[str] | None = None,
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
     timings: FindTimings | None,
@@ -3498,6 +3503,7 @@ def _vector_unit_candidates(
             k=candidate_limit,
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
             validate=False,
             incomplete_out=incomplete,
             encoded_for=encoded_for,
@@ -3627,6 +3633,16 @@ def _find_semantic_units(
         _record_filter_eligibility_cache_hit(timings)
         _set_catalog_timing_profile(timings, cache_hit=True)
         return []
+    from .governance import egress
+
+    parents = set(snapshot.recall_paths(scope))
+    if allowed_parent_paths is not None:
+        parents.intersection_update(allowed_parent_paths)
+    keep = egress.page_release_filter(vault_root, pages=parents)
+    # Ranking reuses checkpoint-proved release, while selected hydration decides afresh.
+    released_parent_paths = (
+        parents if keep is None else snapshot._published_admitted_paths(scope, keep, parents)
+    )
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
@@ -3635,7 +3651,7 @@ def _find_semantic_units(
             # Exact eligibility is normal-table metadata only. Hybrid/vector
             # content ranking consumes this finite candidate set independently,
             # so FTS absence cannot change the catalog outcome.
-            with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
                 exact_freshness = snapshot.for_scope(scope)
                 exact_repair = (
                     _bounded_lexical_repair_allowed(exact_freshness)
@@ -3672,6 +3688,7 @@ def _find_semantic_units(
                             recall_checkpoint=exact_checkpoint,
                             allowed_parent_paths=allowed_parent_paths,
                             admitted_parent_paths=allowed_parent_paths,
+                            released_parent_paths=released_parent_paths,
                             _repair_stale=True,
                             repair=exact_repair,
                             allow_delta=exact_allow_delta,
@@ -3713,6 +3730,7 @@ def _find_semantic_units(
                         recall_checkpoint=exact_checkpoint,
                         allowed_parent_paths=allowed_parent_paths,
                         admitted_parent_paths=allowed_parent_paths,
+                        released_parent_paths=released_parent_paths,
                         literal_all=mode == "keyword" and bool(query.strip()),
                         _repair_stale=True,
                         repair=exact_repair,
@@ -3736,6 +3754,7 @@ def _find_semantic_units(
                 k=candidate_limit + 1,
                 allowed_parent_paths=allowed_parent_paths,
                 admitted_parent_paths=allowed_parent_paths,
+                released_parent_paths=released_parent_paths,
                 scope=scope,
                 freshness=snapshot.for_scope(scope),
                 literal_all=mode == "keyword" and bool(query.strip()),
@@ -3866,6 +3885,7 @@ def _find_semantic_units(
             candidate_limit=vector_candidate_limit,
             allowed_unit_refs=vector_allowed_refs,
             allowed_parent_paths=vector_parent_paths,
+            released_parent_paths=released_parent_paths,
             degraded_out=degraded_out,
             failed_out=failed_out,
             timings=timings,
@@ -3930,6 +3950,7 @@ def _find_semantic_units(
             freshness=snapshot.for_scope(scope),
             allowed_unit_refs=set(records),
             admitted_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
             _repair_stale=True,
             repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
             _validate_current=False,
@@ -8179,14 +8200,20 @@ def evict_resolver_caches(vault_root: Path) -> int:
     return removed
 
 
+def reset_result_cache() -> int:
+    """Clear completed answers and checkpoints, retaining every substrate cache."""
+    with _FIND_CACHE_LOCK:
+        count = len(_FIND_CACHE)
+        _FIND_CACHE.clear()
+        _FIND_CACHE_CHECKPOINTS.clear()
+    return count
+
+
 def reset_page_and_result_caches() -> dict[str, int]:
     """Narrow latency-harness reset: keep resolver/freshness/catalog state warm."""
     page_entries = len(_CACHE.entries)
     _CACHE.clear()
-    with _FIND_CACHE_LOCK:
-        hot_entries = len(_FIND_CACHE)
-        _FIND_CACHE.clear()
-        _FIND_CACHE_CHECKPOINTS.clear()
+    hot_entries = reset_result_cache()
     return {"pages": page_entries, "hot_find": hot_entries}
 
 

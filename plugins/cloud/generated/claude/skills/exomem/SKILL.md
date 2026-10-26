@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: f7fbd77d0c0aafbcd827d75989e51f78e29b8e1e83b875dbe6b57187f4d87ac4
+  skill_contract: 71e00a8d42a05a76bb189604d9e30d47a1245948bfaf92e4fc2ab5f65dc0693e
   version: "0.32.0"
 ---
 
@@ -224,8 +224,7 @@ Registry promotion covers additive entries only. Changes to existing meanings,
 aliases, deprecation or deletion remain `restructure_execution`. The served map
 does not expand write scope or bypass v2 grants. An absent map grants no v1 authority.
 
-**The decider protocol**, for actions covered by the envelope.
-Read-only recall follows governance, without a capture or restructure disposition.
+**The decider protocol.** Read-only recall follows governance without a capture or restructure disposition.
 
 1. **Name the action class.** `engagement.envelope.promotion_classes` gives each
    promotion's class for you. An action that fits no class has no envelope cell
@@ -248,6 +247,9 @@ server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
 Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, execute at most one step per request, let resume continue that approval, and confirm compensation separately.
+
+An explicit undo request authorizes curation `revert` as `restructure_execution`.
+Pass the item's `revert_fingerprint` as `expected_plan_fingerprint`.
 
 **Standing delegation does not exist in v1.** "Always allow this" or "do this
 kind of thing from now on" for restructure execution is refused by name: it

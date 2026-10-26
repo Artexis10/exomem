@@ -13,16 +13,18 @@ from __future__ import annotations
 
 import fnmatch
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from .. import find_corpus, memory_refs, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
 from . import companions
 from .policy import Policy, Scope
+from .policy import load as load_policy
 
 _MEMO_MAX = 4096
 #: The frontmatter fields `_evaluate_markdown_scopes` reads, through `ParsedPage`
@@ -233,6 +235,28 @@ def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str
                 f"{page.rel_path!r}"
             )
     return frozenset(matched)
+
+
+def prospective_scopes(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
+) -> frozenset[str]:
+    """The scope ids a page would belong to at `rel_path` with `frontmatter`, before it exists.
+
+    Raises `MembershipUnresolved` when the policy cannot decide the page's membership.
+    """
+    compiled = load_policy(vault_root)
+    if compiled.empty or not compiled.scopes:
+        return frozenset()
+    page = ParsedPage(
+        path=Path(vault_root) / rel_path,
+        rel_path=rel_path,
+        frontmatter=dict(frontmatter),
+        body="",
+        title="",
+        mtime=0,
+        vault_root=Path(vault_root),
+    )
+    return _evaluate_markdown_scopes(page, compiled) | _registry_scopes(vault_root, rel_path, compiled)
 
 
 def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) -> bool:

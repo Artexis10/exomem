@@ -465,7 +465,7 @@ def refuse_identity_preparation(leaf_result: object) -> None:
 
 def _resulting_versions(vault_root, binding: ApplicationBinding, terminal: Mapping[str, Any]) -> dict[str, str]:
     """Read the canonical postcondition; never trust caller result fields."""
-    from . import get_page, vocabulary_review
+    from . import get_page, relation_registry, vocabulary_review
 
     queued = vocabulary_review.registry_proposal(vault_root, binding.item.to_dict())
     if queued is not None:
@@ -486,8 +486,11 @@ def _resulting_versions(vault_root, binding: ApplicationBinding, terminal: Mappi
             if not all(isinstance(value, str) and value for value in (source, target, relation)):
                 raise ValueError("VOCABULARY_APPLICATION_INVALID: accepted relation postcondition absent")
             page = get_page.get_page(vault_root, path=source)
-            bullet = f"- {relation} [[{target.removesuffix('.md')}]]"
-            if bullet not in page.body:
+            # The page carries the bare label the owner chose; it must still mean this key.
+            label = leaf.get("authored_label") or relation
+            bullet = f"- {label} [[{target.removesuffix('.md')}]]"
+            meaning = relation_registry.load_for_page(vault_root, source, page.frontmatter)
+            if bullet not in page.body or meaning.resolve(str(label)).canonical != relation:
                 raise ValueError("VOCABULARY_APPLICATION_INVALID: accepted relation is not canonical")
             paths = dict(binding.item.paths)
             resulting = dict(binding.item.target_versions)

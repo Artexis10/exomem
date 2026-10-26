@@ -98,6 +98,70 @@ The downtime is one backup plus one restore, measured per size class in task 1.4
 
 **Content scratch.** Today a cell also writes content outside its volume. The runtime's `TMPDIR`, media job scratch (video frames, OCR images, transcripts) and import and export staging sit on disk-backed emptyDirs on the node, and Hetzner Cloud node disks carry no encryption. Every content-bearing scratch path therefore moves onto the cell's own encrypted volume, inside the inner layer when the cell is tenant-locked, or into a memory-backed emptyDir within the cell's memory limit. The same rule covers core dumps and swap: cell processes write no core dumps, and node swap is off or encrypted. A memory-backed emptyDir survives a container crash, so a crash-locked cell restarts in a new pod. Until all of this holds for a cell, the per-cell encryption claim and the tenant-lock claim are not claimable for it. Task 1.7 inventories the paths and moves them.
 
+#### Batch A implementation decisions
+
+The additive C1 contract stores the wrapped root and its platform master version together.
+`cellctl` locks the row while it creates the root and rewraps the existing restic password.
+It rechecks deletion under that lock and refuses partial key state.
+Root presence selects the content wrapping protocol; legacy reads exist only before conversion.
+HKDF derives the volume child with the cell, purpose and protocol version bound in its context.
+The independently wrapped B2 API credential remains available for cleanup.
+The media-store producer does not exist yet; its future implementation must use this root.
+
+The chart adds a configurable per-cell Hetzner class without editing the immutable legacy class.
+`cellStorage.domain=per-cell` selects it for fresh claims after the real CSI drill.
+An explicit `exomem.io/move-storage-class` destination extends the existing stopped-backup relocation machine.
+C1 records the destination and current transition pointer before claim removal, so a controller restart resumes the same move.
+The existing `custody_observation` JSON owns `retained_volumes`, an inventory of every retained copy.
+Each record contains `volume_id` and its original `storage_class`; either value can remain null when evidence is incomplete.
+The controller adopts earlier singular evidence and deduplicates complete identities without replacing a recorded class.
+Starting another planned or emergency move appends its source volume instead of overwriting earlier custody.
+The retained volume remains available for rollback until separate acceptance and soak evidence permits its destruction.
+After that cleanup, `exomem.io/move-accepted-volume` names the exact old volume.
+The controller removes only the matching inventory entry when its recorded Hetzner class and provider absence both match.
+It clears the transition pointer only when that pointer names the accepted entry.
+Ambiguous or incomplete custody remains unknown, and every remaining entry prevents finite destruction or compliance claims.
+An old local volume needs its own future absence proof; a Hetzner lookup cannot prove it absent.
+The existing local-storage and import-admission rules still apply.
+
+The canonical ZIP writer accepts a binary sink, and the canonical verifier accepts a seekable reader.
+The local Path wrapper keeps its local-file safety checks.
+The export Job stages one multipart part, uploads it, and reuses that file.
+After part verification, the controller completes a private object and persists its version and packing report.
+A separate cell-image Job verifies that exact version before C6 becomes ready.
+It uses maintained `fsspec[http]` with a known size, encoded URLs, a bounded block cache and Range reads.
+The Job receives no cell volume or cell key Secret.
+A per-export Secret supplies its short-lived GET capability without exposing it in routine-readable workload metadata.
+C6 cleanup removes only that export's Secret.
+Publication remains fenced against newer supersede and deletion requests, and failed cleanup retries from C6.
+
+| Content path | Batch A location | Boundary |
+|---|---|---|
+| Runtime `TMPDIR`, OCR images and media subprocess scratch | `/data/scratch/tmp` | Same volume; outside `/data/vault` and `/data/host` |
+| Import staging and age identity | Existing `/data/.import-*` and `/data/.import-keys` | Same volume; outside canonical backup roots |
+| Writable Job restic cache | `/data/scratch/cache` | Same volume; outside canonical backup roots |
+| Owner export part | `/data/scratch/export` | One reusable temporary file; no whole archive |
+| Read-only backup and clone Job cache and temporary files | Memory-backed emptyDirs whose caps use the existing Job memory limit | The shared Pod cgroup enforces the combined budget; never writes into the clone |
+| Fixed `/tmp` fallbacks and content-free logs | Memory-backed emptyDir capped at 64 MiB | Inside each Pod's memory limit |
+
+Cell commands disable core dumps before execution.
+K3s service templates also set `LimitCORE=0`, and the existing node sysctl file discards piped core streams.
+These are prepared node controls; this batch does not change the development host.
+Observed node swap and core policy remain unknown until the deployed node supplies evidence.
+The custody observation separates configured scratch from proven compliance and never blocks unrelated service.
+Tenant lock and its new-Pod crash recovery remain group 5 work.
+
+The real CSI create, mount, remount and `luksDump` drill remains open.
+Live capture/media/export canary inspection and per-size migration downtime also remain open.
+Static manifests, PostgreSQL tests and HTTP-boundary tests do not close those tasks.
+
+The lab compared one completed, canonically verified export per arm with the same fixture and TLS provider boundary.
+The process instrument was `/usr/bin/time`, including Python, pytest, fixture setup and the disposable storage endpoint.
+The baseline used the whole-archive path; the candidate used streaming plus remote verification.
+One paired sample recorded 2.74 s and 139668 KiB peak RSS before, then 4.42 s and 147288 KiB after.
+This is descriptive lab evidence, without a confidence interval or a performance conclusion.
+It measures no real CSI operation, encryption cost or migration downtime.
+
 ### D2. Deleting a cell destroys its live keys; platform backup copies expire by a stated date
 
 Cell deletion destroys every live copy of the cell root key, of the content keys under it and of any infrastructure key: control-database rows, cell Secrets and the tenant's wraps.
@@ -107,7 +171,18 @@ Platform backups still hold earlier copies:
 - cluster datastore snapshots hold the cell's Secrets;
 - the backup bucket holds hidden object versions until its lifecycle deletes them.
 
-These expire with their retention, and the platform master key alone cannot revoke them. The deletion record therefore carries `keys_expire_at`: the deletion time plus the longest of those retentions. cellctl reports the keys destroyed only after that time has passed. Until then, status says which platform backups still hold copies. The deletion runbook (`docs/runbooks/cloud-cell-deletion.md`) already says that snapshots retain deleted Secrets; it gains the date.
+These expire with their retention, and the platform master key alone cannot revoke them.
+The controller retires database content wraps before Kubernetes or provider reads.
+It independently deletes the cell's child Secret, while cleanup keeps the separately wrapped B2 credential.
+Namespace and workload absence must prove that no live process retains a child key.
+Only then can `last_live_key_destroyed_at` start the retention clock.
+
+`CELLCTL_KEY_RETENTION_SOURCES` records deployed control-database, cluster-datastore and object-version policies.
+Each source records its name, retention window and observation time.
+`keys_expire_at` uses the longest known window after the last live copy disappears.
+Missing policy or absence evidence stays unknown; past deleted rows receive no invented date.
+Legacy shared keys and retained old volumes also keep complete destruction unknown.
+The owner status exposes this evidence independently of cell availability.
 
 A shorter window needs master-key epoch rotation: re-wrap every live root key under a new master key, then destroy the old key and every escrowed copy. That is deferred to its own change, because it touches every cell and the escrow procedure.
 

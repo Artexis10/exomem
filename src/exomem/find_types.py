@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from . import call_spans, temporal
+from . import call_spans, recall_timing, temporal
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,15 @@ class GraphProvenance:
     relation_type: str | None
     direction: str
     seed: str
+    relation_label: str | None = None
+
+    def as_dict(self) -> dict[str, str | None]:
+        return {
+            "relation_type": self.relation_type,
+            "relation_label": self.relation_label,
+            "direction": self.direction,
+            "seed": self.seed,
+        }
 
 
 @dataclass
@@ -329,11 +338,7 @@ class Hit:
         if self.order_indeterminate:
             out["order_indeterminate"] = list(self.order_indeterminate)
         if self.graph_provenance is not None:
-            out["graph"] = {
-                "relation_type": self.graph_provenance.relation_type,
-                "direction": self.graph_provenance.direction,
-                "seed": self.graph_provenance.seed,
-            }
+            out["graph"] = self.graph_provenance.as_dict()
         if self.relation_match is not None:
             out["relation_match"] = self.relation_match
         if self.media_type:
@@ -400,11 +405,7 @@ class Hit:
             "updated": self.updated,
         }
         if self.graph_provenance is not None:
-            out["graph"] = {
-                "relation_type": self.graph_provenance.relation_type,
-                "direction": self.graph_provenance.direction,
-                "seed": self.graph_provenance.seed,
-            }
+            out["graph"] = self.graph_provenance.as_dict()
         if self.relation_match is not None:
             out["relation_match"] = self.relation_match
         if self.media_type:
@@ -683,6 +684,7 @@ class FindTimings:
 
     def __init__(self) -> None:
         self._t0 = time.perf_counter()
+        self._request_trace = recall_timing.CURRENT.get()
         self.stages = StagesTable()
         self.cache: dict[str, Any] = {"enabled": False, "hit": False}
         self.profile: dict[str, Any] = {}
@@ -712,6 +714,11 @@ class FindTimings:
             self._local.stack = stack
         return stack
 
+    def parallel(self):
+        """Record an explicit fork/join when whole-call diagnostics are active."""
+        return (self._request_trace.parallel() if self._request_trace is not None
+                else nullcontext(recall_timing.Parallel(None, None)))
+
     def current_stage(self) -> str | None:
         """The innermost span open on this thread, or None at the top level.
 
@@ -734,6 +741,7 @@ class FindTimings:
             if len(parents) > 1
         }
 
+    @recall_timing.collect_span
     @contextmanager
     def span(
         self,
@@ -777,6 +785,8 @@ class FindTimings:
                 declared = self._pending_sources.pop(name, source)
                 self._parents_seen.setdefault(name, set()).add(parent)
             entry = self.stages._entry(name)
+            if entry.pop("skipped", False):
+                entry.pop("source", None)
             elapsed_ms = (t1 - t0) * 1000.0
             elapsed = round(elapsed_ms, 3)
             if elapsed_ms_field is not None:
@@ -836,6 +846,8 @@ class FindTimings:
 
     def skipped(self, name: str) -> None:
         entry = self.stages._entry(name)
+        if "ms" in entry:
+            return
         entry["skipped"] = True
         entry["source"] = _widest_source(entry.get("source"), SOURCE_DECLINED)
 

@@ -197,8 +197,44 @@ A restore SHALL remove a promoted type without changing page bytes.
 Typed creation SHALL place a page of a registered compiled type in its declared folder.
 It SHALL apply the type's required fields, statuses, sections and typed fields from the registry.
 The notes index SHALL count each compiled folder, including a new one.
-Type-specific values SHALL reach `remember` and `replace_memory` through one generic `fields` parameter on the current local and Cloud tool surfaces.
+A promoted type that declares no typed fields of its own SHALL need no new tool parameter.
 
 #### Scenario: A new compiled folder enters the notes index
 - **WHEN** typed creation writes the first page of a vault-defined compiled type
 - **THEN** the notes index gains an entry and a count for its folder
+
+### Requirement: Vault homes place compiled notes by topic or project
+
+A vault SHALL be able to declare homes in an overlay-only `homes` registry on the vocabulary substrate, at `_Schema/homes.yaml`, with inspect, save, history and restore.
+Each home SHALL name one folder under the Notes root and the topic keys and project keys that it serves.
+A topic key or project key SHALL belong to at most one home.
+A save SHALL refuse a home folder that contains a segment the compiled router exempts.
+Typed creation SHALL choose the destination folder in this order:
+- for a research note, the home that serves its project, else the project's research folder;
+- for any other compiled type, the home that serves the first of its topics, in the order the caller gives, that has one;
+- otherwise, the type's default folder with its partitions and stems.
+A superseding page SHALL keep its predecessor's folder.
+Typed creation SHALL refuse a home whose governance scope or vocabulary-instance scope differs from the scope of the type's default destination, with `HOME_CHANGES_SCOPE`.
+The creation draft SHALL report the chosen folder, the basis for the choice, and the call that would make one of the page's topics a home.
+An older release SHALL ignore the homes registry and place new pages by type.
+
+#### Scenario: A topic home holds notes of several types
+- **WHEN** a vault declares a home `Notes/Equipment` for the topic `equipment`, and an agent creates an `insight` and a `failure` with that topic
+- **THEN** both pages land in `Notes/Equipment` and keep the obligations of their own types
+
+#### Scenario: Without a home, placement is unchanged
+- **WHEN** a vault declares no homes
+- **THEN** every compiled type lands in the same folder as before this change
+
+#### Scenario: A home cannot widen visibility
+- **WHEN** a home folder sits under a governance scope released to a wider audience than the type's default destination
+- **THEN** typed creation refuses with `HOME_CHANGES_SCOPE` and writes nothing
+
+#### Scenario: A reserved segment cannot become a home
+- **WHEN** a save declares a home whose folder contains a `Data`, `Templates`, `Sources` or `Evidence` segment
+- **THEN** the save refuses and the registry keeps its bytes
+
+#### Scenario: A topic serves one home
+- **WHEN** a save would assign one topic key to two homes
+- **THEN** the save refuses with the conflicting home named
+

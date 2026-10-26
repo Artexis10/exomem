@@ -167,6 +167,7 @@ def test_annotated_typed_hit_carries_the_triple(tmp_path, monkeypatch) -> None:
     graph = experiment.as_dict()["graph"]
     assert graph == {
         "relation_type": "evidenced_by",
+        "relation_label": "evidenced_by",
         "direction": "outbound",
         "seed": SEED,
     }
@@ -200,6 +201,7 @@ def test_compact_dict_also_carries_graph_annotation(tmp_path, monkeypatch) -> No
     compact = experiment.as_compact_dict()
     assert compact.get("graph") == {
         "relation_type": "evidenced_by",
+        "relation_label": "evidenced_by",
         "direction": "outbound",
         "seed": SEED,
     }

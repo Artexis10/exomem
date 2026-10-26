@@ -1044,6 +1044,9 @@ class _Adapter:
             row["replaced_by"] = entry.replaced_by
         rows[key] = row
 
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document["entity_types"].pop(key, None)
+
     def render(self, document: Mapping[str, Any]) -> str:
         return yaml.safe_dump(dict(document), sort_keys=False, allow_unicode=True)
 

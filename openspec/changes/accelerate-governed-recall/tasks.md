@@ -55,12 +55,16 @@ The slices follow the gate, so each one reports a before and an after on the sam
   - run as the vault owner through the product's owner-authority path with nothing patched, plus a separate admitted-principal series;
   - run the hybrid, keyword, filtered, dedicated temporal and `mixed` series, clear only the result cache between samples, and send query text unchanged;
   - check quiescence once, before the series, and record the load beside every percentile; on the live cell, have the served process record each request thread's run-queue delay from `/proc/self/task/<tid>/schedstat` in the timing diagnostics, apply the contract's contended-sample rule, and report the contended count and the p95 with contended samples included;
-  - time the `ask_memory` call, record wall time and `cpu_ms` per stage, plus `overlap_cpu_ms` and `unattributed_cpu_ms` per request, as the contract states; report every CPU field as unknown on a platform without `/proc/self/task`, and a stage with fewer than 20 samples as insufficient;
+  - time the entire registered in-process bound `ask_memory` command, including dispatcher ownership, terminal filtering, ownership completion, response scrubbing, logging and the due-state carrier; keep transport and installed MCP acceptance separate; record wall time and process-clock `cpu_ms` per stage, plus `overlap_cpu_ms` and `unattributed_cpu_ms` per request, as the contract states; report every CPU field as unknown on a platform without `/proc/self/task` or the process clock, and a stage with fewer than 20 samples as insufficient;
+  - reconcile persisted advisory state synchronously under the preparation owner before starting managed recall, verify that its normal loader accepts it, and retain catalogue admission and both principals' warm-up; preserve normal TTL refresh and request-local placement and invocation scopes;
   - before any budget is trusted, measure the query encode for each query-length band (1-3, 4-9 and 15-40 words) on one and on two intra-op threads, on the pinned profile, and store the figures under `verification/`;
   - ground the BM25 and keyword targets with a replay on a new connection per request, on SQLite 3.45.1 and 3.46.1, over the whole query mix with the 15-40 word band included, and with keyword recall's page reads and hit construction inside the keyword row; until then report both stages against 8 ms and apply no twice-budget rule to them;
   - record the SQLite version in every summary, and give no ceiling verdict for a workstation run on a SQLite outside the reference; keep the reference versions (today 3.45.1 in CI's system Python, 3.46.1 on Cloud cells) with the gate's other inputs under `benchmarks/recall-latency/`, so that a SQLite upgrade in CI or the Cloud image is a one-line data change;
   - in absolute mode, check the ceilings (200 ms p95 for every warm hybrid series, 100 ms p95 for keyword recall) and unknown samples; report each hybrid p95 beside the 100 ms target, the keyword p95 beside the 50 ms target and each p50 beside the 50 ms target, and record each target as met or missed; report each stage row against its budget, failing a row above twice its budget without failing the series; record the encode's measured floor when its p95 exceeds its budget; and write the content-free summary with the state that 5.6 and 6.9 record: passed, failed, refused or not measured; the state gates nothing;
-  - in paired mode, compare head with the most recent release tag in the `retrieval-latency` job (10% margin, 95% interval), report a stage that the tag does not span as "not comparable", and cache the encoder artifact by digest;
+  - in paired mode, compare head with the most recent release tag in one `recall-latency-paired` job per series (10% margin, 95% interval), report a stage that the tag does not span as "not comparable", and cache the encoder artifact by digest;
+  - load each arm's runtime dependencies from its source lock, prepare an isolated frozen tag environment, and record lock digests and environment policies; refuse a failed tag preparation without substituting head's dependencies;
+  - use one private measurement adapter for both arms, preserving their actual collectors, authority paths and public diagnostic suppression; pause only the inactive owned benchmark worker outside sample timers, and resume it during cleanup;
+  - conserve process CPU across row, overlap and unattributed buckets, including excluded waits; support explicit fork/join branch lifetimes, declare serial execution, and report unknown paths without inventing membership; verify internal gaps and shared setup/response work;
   - read the committed accept record `benchmarks/recall-latency/accept.json` (tag, series, maximum ratio, the full-CI run that measured the slowdown, reason, pull request): report a covered series within its maximum ratio as "accepted", fail an uncovered or exceeded series, report a record for an older tag as expired, and validate the record's shape;
   - add a `docs/release.md` step after the tag: the agent or operator who drives the release deletes an expired accept record in a pull request, unless the next accept record's pull request replaces it first;
   - validate the live-cell summary against its content-free schema before the runbook step uploads it.
@@ -93,6 +97,14 @@ The slices follow the gate, so each one reports a before and an after on the sam
 - [ ] 6.5 Ranking metadata from catalogue columns (fusion and multipliers 24.4 / 65.6 ms, temporal 43.6 / 124.4 ms, graph 26.3 / 135.4 ms, 92 hydrations and 126 page file reads per request; expected at or below 5, 3 and 9 ms): read type, status, `updated` and emitted parent from `pages` for the request's generation; add derived catalogue columns for the lexical guard's per-page `stem_set` and `letter_script` (`find_policy.py:754-809`); answer the graph seeds' `make_excerpt` and `stem_tokens_present` test (`find_candidates.py:702-708`) from catalogue text; hydrate Markdown only for returned hits; verify fused-order identity, identical guard decisions and graph seeds, and Markdown reads within the candidate count plus the fixed overfetch.
 - [ ] 6.6 Unit lanes (`mixed` and `unit` levels, baseline 647.4 / 2,142.9 ms and 442 page reads per request; expected at or below 12 ms): preserve the shipped generation-bound matrix, admitted lexical statistics and selected parent reads. Use thread-qualified measurements to profile the remaining admission cost before adding reuse. Verify unit-hit identity for the owner and an admitted principal, with mixed Markdown reads within the candidate count plus fixed overfetch.
 
+  The source path now reuses checkpoint-bound release verdicts before unit scoring.
+  Model-free unit and mixed checks compare the published path with live decisions
+  on the same corpus. They preserve results and remove corpus-wide policy passes.
+  Registry reassignment invalidates both content and release verdicts without a
+  page edit. Selected hydration and final egress retain their live checks.
+  The 12 ms budget and complete bound-command gain remain unverified; task 6.6
+  stays open until the reference measurement and remaining acceptance checks pass.
+
   Repair finite mixed completeness before qualifying the paired latency gate.
   Defer only the exhausted candidate-window verdict until relation survivors,
   parent capping and the finite mixed plan are known. Clear that verdict only
@@ -118,7 +130,7 @@ The slices follow the gate, so each one reports a before and an after on the sam
 - [ ] 6.10 Process CPU beside each request (CPU over wall 1.89 at p50 in R3 with the encoder loaded, 0.42 in model-free M1; design decision 11): attribute the spin with `cpu_ms` per span, then set the cell thread policy, covering ONNX intra-op spinning (`session.intra_op.allow_spinning`), OpenBLAS idle waiting, thread counts and `session.disable_prepacking` on cells that share weights; verify identical encoder output, no stage other than `vector.embed`, `vector.search` and `semantic_units` with `cpu_ms` above its wall time, and no encode slowdown on the paired comparison.
 - [ ] 6.11 Request setup (measured 9.4 / 28.1 ms against 4 ms: `recall_projection` 6.0 / 14.1, `pending_visibility` 2.2 / 4.5, `freshness` 1.1 / 2.7): profile the three spans, remove the per-request work that the profile names, and verify identical projection, freshness and pending-visibility outcomes and the row against its budget.
 - [ ] 6.12 Graph expand and resolver (measured `graph.expand` 13.9 / 31.4 ms and `graph.resolver` 5.1 / 16.3 ms; the lane's budget is 9 ms once 6.5 moves the seeds): profile both spans, remove the per-request work that the profile names, and verify identical expansions and graph-lane order and the lane against its budget.
-- [ ] 6.13 Query encode beside the lexical lanes (design decision 12; run one after another, the budgets sum to 133 ms, and a default hybrid request to 102 ms): after eligibility, run the encode branch (query encode, then dense search) and the lexical branch (BM25, keyword, CLIP where it is enabled, and the unit lanes, whose vector search waits for the query vector) at the same time, and start the stages after the lanes when both end. On the concurrent path, run the served encoder on one intra-op thread on a two-CPU cell. Give each branch its own connections, the lexical branch owning 6.4's catalogue session, and keep lane statuses, the degraded and failed lists and the retrieval trace in the serial order. Record each span's thread; span the time that `semantic_units` blocks on the query vector as `vector.wait` and exclude it from the unit-lane row; count a row's wall time as the union of its intervals and overlapping intervals once wherever they are added up; record each request's critical path; report `cpu_ms` outside the overlap only, plus `overlap_cpu_ms` and `unattributed_cpu_ms` per request, as the contract states. Update `tests/test_read_path_timing_attribution.py:176-183`, which asserts that the sum of the undotted stages is close to the covered time, to check the covered time against the union of the root-level intervals, overlapping intervals counted once, instead of their sum. Run the reference series serial and concurrent on the paired cases. Keep the concurrent path only when it helps: the upper bound of the 95% interval of the hybrid series' paired concurrent-to-serial ratios is below 1.0, and the concurrent encode p95 stays within 10% of a serial encode on one intra-op thread. If concurrency does not help on two CPUs, record that finding with both arms' figures, keep the serial path, and complete the slice with its finding. Verify:
+- [ ] 6.13 Query encode beside the lexical lanes (design decision 12; run one after another, the budgets sum to 133 ms, and a default hybrid request to 102 ms): after eligibility, run the encode branch (query encode, then dense search) and the lexical branch (BM25, keyword, CLIP where it is enabled, and the unit lanes, whose vector search waits for the query vector) at the same time, and start the stages after the lanes when both end. On the concurrent path, run the served encoder on one intra-op thread on a two-CPU cell. Give each branch its own connections, the lexical branch owning 6.4's catalogue session, and keep lane statuses, the degraded and failed lists and the retrieval trace in the serial order. Record each span's thread and explicit fork/join branch contexts, including gaps and the join; span the time that `semantic_units` blocks on the query vector as `vector.wait` and exclude it from the unit-lane row; count a row's wall time as the union of its intervals and overlapping intervals once wherever they are added up; record each request's critical path; report `cpu_ms` outside the overlap only, plus `overlap_cpu_ms` and `unattributed_cpu_ms` per request, as the contract states. Update `tests/test_read_path_timing_attribution.py:176-183`, which asserts that the sum of the undotted stages is close to the covered time, to check the covered time against the union of the root-level intervals, overlapping intervals counted once, instead of their sum. Run the reference series serial and concurrent on the paired cases. Keep the concurrent path only when it helps: the upper bound of the 95% interval of the hybrid series' paired concurrent-to-serial ratios is below 1.0, and the concurrent encode p95 stays within 10% of a serial encode on one intra-op thread. If concurrency does not help on two CPUs, record that finding with both arms' figures, keep the serial path, and complete the slice with its finding. Verify:
   - identical fused order, hits, excerpts and lane statuses against the serial path on the reference corpus;
   - the keep or serial decision and its figures, recorded under `verification/`;
   - one row per stage in the timing table, with wall time, `cpu_ms` and the share of requests on the critical path, no row counting `vector.wait`, and the attribution bounds holding with the branches overlapped;
@@ -141,7 +153,30 @@ unknown timings separately from typed warming and labels full acceptance as
 not measured. Later process load remains diagnostic after initial quiescence.
 Missed targets and stage budgets diagnose their rows without failing a ceiling.
 
-Task 6.1 remains open. The legacy runner still lacks the complete reference query
-mix, principal proof, served encoder proof, interval unions and live run-queue
-attribution that the owning contract requires. Model-free injected transport
-checks prove the runner's bar comparisons; they establish no live acceptance.
+Task 6.1 remains open. The source runner now defines the reference corpus and
+query mix, includes principal and encoder checks, and records interval unions
+and live run-queue attribution. Hosted execution must verify stored rows,
+worker execution, paired qualification and the complete job duration.
+Encoder thread profiling, SQL replay and absolute and live acceptance remain
+unmeasured. Model-free transport checks establish no live acceptance.
+
+The next correction uses each arm's maintained bound command rather than its
+direct leaf. It prepares persisted advisory state and spans unit-only selection.
+The five governed-recall bars move to boundary `recall-bound-command-v1` in
+contract revision `request-latency-v3`; thresholds, populations and budgets stay
+unchanged. Generic body work remains unbudgeted. One focused hosted proof must
+verify both principals, terminal work, persisted preparation and unit attribution
+before another full paired run. Earlier counter-wrapped calls remain diagnostics.
+
+The reference rule now releases the admitted principal at full disclosure. Its
+earlier ceiling of 3 was below the egress release floor. Every admitted hit was
+then a withheld notice and every unit result was empty, so that series timed
+notices instead of results. A model-free test checks that the admitted principal
+receives the owner's unit and mixed hits.
+
+At today's latency the paired step could not finish inside the 30-minute
+`retrieval-latency` shard: owner calls take 0.2-3.5 s and admitted unit and mixed
+calls about 21 s, so both principals need hours. Full CI now runs one
+`recall-latency-paired` job per case-file series, owner only, under a 45-minute
+cap. Contract revision `request-latency-v4` adds `paired.principals`; the
+admitted series stays in the absolute record until it gates.

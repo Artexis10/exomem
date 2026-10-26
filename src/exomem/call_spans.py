@@ -33,6 +33,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from . import recall_timing
+
 #: Unique per call, unlike the client-supplied request id, so concurrent calls
 #: sharing a request id can never cross-attribute their measurements.
 MCP_CALL_TOKEN: ContextVar[str | None] = ContextVar(
@@ -244,6 +246,7 @@ def cpu_fields(started: tuple[int, int]) -> dict[str, int]:
     }
 
 
+@recall_timing.collect_span
 @contextmanager
 def span(name: str, fields: dict[str, Any] | None = None):
     """Time one named phase of the current MCP call.
