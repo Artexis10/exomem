@@ -553,7 +553,9 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
             seen["hold_started_at"] = annotations.get(HOLD_STARTED_ANNOTATION)
         started = seen["hold_started_at"]
         if started:
-            request = FamilyRequest.parse(annotations.get(BACKUP_FAMILY_ANNOTATION))
+            # cellctl clears the family annotation at closure; the last observed names still apply.
+            raw = annotations.get(BACKUP_FAMILY_ANNOTATION)
+            request = FamilyRequest.parse(raw) if raw else None
             if request is not None or "snapshot_name" not in seen:
                 seen["snapshot_name"] = snapshot_backup_name(SNAPSHOT_NAME, cell.cell_id, started, request)
                 seen["clone_name"] = snapshot_backup_name(CLONE_CLAIM_NAME, cell.cell_id, started, request)

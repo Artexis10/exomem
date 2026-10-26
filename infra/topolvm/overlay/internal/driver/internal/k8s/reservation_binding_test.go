@@ -66,3 +66,48 @@ func TestReservationClonePersistsSnapshotBinding(t *testing.T) {
 		t.Fatalf("clone did not bind its immediate snapshot: %v", clone.Spec)
 	}
 }
+
+type refusingVolumeWriter struct {
+	client.Client
+	refuse *bool
+}
+
+func (w refusingVolumeWriter) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if *w.refuse {
+		lv := obj.(*topolvmv1.LogicalVolume)
+		lv.Status.Code = codes.ResourceExhausted
+		lv.Status.Message = "physical room is occupied"
+		return w.Client.Create(ctx, obj, opts...)
+	}
+	return readyVolumeWriter{w.Client}.Create(ctx, obj, opts...)
+}
+
+// A rescheduled WaitForFirstConsumer claim must not adopt a refused volume left on its first node.
+func TestReservationRefusedCreateLeavesNoVolumeForReschedule(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := topolvmv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	refuse := true
+	service := &LogicalVolumeService{writer: refusingVolumeWriter{kube, &refuse}, getter: newRetryMissingGetter(kube, kube)}
+	if _, err := service.CreateVolume(ctx, "node-a", "guarded", "", "claim", "", 20); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("refusal was not reported as no room: %v", err)
+	}
+	var volumes topolvmv1.LogicalVolumeList
+	if err := kube.List(ctx, &volumes); err != nil {
+		t.Fatal(err)
+	}
+	if len(volumes.Items) != 0 {
+		t.Fatalf("refused volume remained for a later request: %v", volumes.Items[0].Spec)
+	}
+	refuse = false
+	volume, err := service.CreateVolume(ctx, "node-b", "guarded", "", "claim", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if volume.Spec.NodeName != "node-b" {
+		t.Fatalf("rescheduled claim received a volume on %q", volume.Spec.NodeName)
+	}
+}

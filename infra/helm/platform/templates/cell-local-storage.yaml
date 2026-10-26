@@ -327,10 +327,15 @@ spec:
         request.operation == 'UPDATE' && request.subResource == '' &&
         object.spec.deviceClass == '{{ (include "exomem.cellStorage" . | fromJson).local.device_class }}' &&
         !has(oldObject.spec.source) &&
-        object.spec.all(key, key in ['backupFamilyRequest', 'reservationTargetBytes', 'reservationTargetPhysicalUUID'] ||
-          (key in oldObject.spec && object.spec[key] == oldObject.spec[key])) &&
-        oldObject.spec.all(key, key in ['backupFamilyRequest', 'reservationTargetBytes', 'reservationTargetPhysicalUUID'] ||
-          key in object.spec) &&
+        {{- /* CEL cannot iterate a schema-typed object, so every other field of the shipped CRD is compared by name. */}}
+        {{- $requestFields := list "backupFamilyRequest" "reservationTargetBytes" "reservationTargetPhysicalUUID" }}
+        {{- $crd := .Files.Get "files/topolvm/logicalvolumes.yaml" | fromYaml }}
+        {{- $specFields := (index $crd.spec.versions 0).schema.openAPIV3Schema.properties.spec.properties }}
+        {{- range $field := keys $specFields | sortAlpha }}
+        {{- if not (has $field $requestFields) }}
+        object.spec.?{{ $field }} == oldObject.spec.?{{ $field }} &&
+        {{- end }}
+        {{- end }}
         object.metadata.?labels == oldObject.metadata.?labels &&
         object.metadata.?annotations == oldObject.metadata.?annotations &&
         object.metadata.?finalizers == oldObject.metadata.?finalizers &&

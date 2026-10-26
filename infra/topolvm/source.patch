@@ -174,7 +174,7 @@ index 4395579..ebd8454 100644
  	// When lv.Status.Code is not codes.OK (== 0), CreateLV has already failed.
  	// LogicalVolume CRD will be deleted soon by the controller.
 -	if lv.Status.Code != codes.OK {
-+	if lv.Status.Code != codes.OK && lv.Status.Code != codes.ResourceExhausted && lv.Status.Code != codes.Unavailable && lv.Status.Code != codes.Aborted && lv.Status.Code != codes.DeadlineExceeded {
++	if lv.Status.Code != codes.OK && lv.Status.Code != codes.Unavailable && lv.Status.Code != codes.Aborted && lv.Status.Code != codes.DeadlineExceeded {
  		return nil
  	}
  
@@ -355,7 +355,7 @@ index 06af4d3..37852ad 100644
  			return true, nil
  		}
  
-+		if newLV.Status.Code == codes.ResourceExhausted || newLV.Status.Code == codes.Unavailable || newLV.Status.Code == codes.Aborted || newLV.Status.Code == codes.DeadlineExceeded {
++		if newLV.Status.Code == codes.Unavailable || newLV.Status.Code == codes.Aborted || newLV.Status.Code == codes.DeadlineExceeded {
 +			return false, status.Error(newLV.Status.Code, newLV.Status.Message)
 +		}
  		if newLV.Status.Code != codes.OK {

@@ -57,7 +57,7 @@ func (s *lvService) guardedCreate(ctx context.Context, dc *lvmdTypes.DeviceClass
 		}
 		volume = fresh.volumes[req.Name]
 		if volume == nil || uint64(volume.SizeBytes) < target {
-			return status.Error(codes.ResourceExhausted, "created volume awaits physical observation")
+			return status.Error(codes.Unavailable, "created volume awaits physical observation")
 		}
 		volume.ReservedTargetBytes = target
 		return nil
@@ -210,7 +210,7 @@ func (s *lvService) guardedSnapshot(ctx context.Context, dc *lvmdTypes.DeviceCla
 		}
 		volume = fresh.volumes[req.Name]
 		if volume == nil || volume.SizeBytes != int64(target) {
-			return status.Error(codes.ResourceExhausted, "snapshot awaits complete physical observation")
+			return status.Error(codes.Unavailable, "snapshot awaits complete physical observation")
 		}
 		if err := markSnapshotCaptured(ctx, b, root, family, child, fresh); err != nil {
 			return err
