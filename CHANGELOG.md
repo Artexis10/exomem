@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.146.1](https://github.com/Artexis10/exomem/compare/v0.146.0...v0.146.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* centralize pending-write retry guidance ([#2118](https://github.com/Artexis10/exomem/issues/2118)) ([4b019c3](https://github.com/Artexis10/exomem/commit/4b019c366a9bc9fe36fd9363928e0bccaed97433))
+
 ## [0.146.0](https://github.com/Artexis10/exomem/compare/v0.145.1...v0.146.0) (2026-10-26)
 
 
