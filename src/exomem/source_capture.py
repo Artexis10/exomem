@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -29,6 +31,21 @@ _IDENTITY = TypeAdapter(SourceIdentity)
 
 class SourceCaptureError(ValueError):
     """A coded refusal before a durable capture effect."""
+
+
+def validate_sha256(value: str) -> str:
+    """Validate the caller's SHA-256 assertion without changing its meaning."""
+    # SHA-256 hexadecimal is a fixed wire format, not a semantic vocabulary.
+    if (not isinstance(value, str) or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)):
+        raise SourceCaptureError("INVALID_SOURCE_HASH: expected_sha256 must contain 64 lowercase hexadecimal characters")
+    return value
+
+
+def verify_sha256(expected: str | None, actual: str) -> None:
+    """Refuse altered original bytes before the writer publishes anything."""
+    if expected is not None and not hmac.compare_digest(validate_sha256(expected), actual):
+        raise SourceCaptureError("SOURCE_HASH_MISMATCH: original bytes differ from expected_sha256; send the original file through an upload handoff or file handle")
 
 
 def validate_identity(value: object) -> SourceIdentity:
@@ -96,9 +113,17 @@ def capture_digest(root: Path, *, content: str, title: str, source_type: str, ur
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
-    """Scan under the caller's mutation guard; derived state cannot prove absence."""
-    from .client_artifacts import _expected_companion_path
+@dataclass(frozen=True, slots=True)
+class CanonicalCapturePages:
+    canonical: frozenset[str]
+    snapshots: dict[str, bytes]
+    parsed: dict[str, dict]
+    frontmatter_free: frozenset[str]
+
+
+def canonical_pages(root: Path) -> CanonicalCapturePages:
+    """Classify raw-lane pages without trusting declarations from bound originals."""
+    from .client_artifacts import _expected_companion_paths
     from .governance import companions, raw_protection
     from .preserve import _sidecar_path
 
@@ -107,7 +132,6 @@ def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -
     frontmatter_free: set[str] = set()
     errors: set[str] = set()
     edges: dict[str, set[str]] = {}
-    match: tuple[str, str, str] | None = None
     types = note_types.Basis(root)
 
     def unavailable(_error: object = None) -> None:
@@ -173,9 +197,9 @@ def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -
                 if Path(target).suffix.lower() != ".md":
                     continue
                 # The Source and Evidence producers define these companion layouts.
-                source_owner = _expected_companion_path(PurePosixPath(target), lane="source").as_posix()
+                source_owners = tuple(path.as_posix() for path in _expected_companion_paths(PurePosixPath(target), lane="source"))
                 evidence_owner = _sidecar_path(Path(target), protected=raw_protection.marked(target)).as_posix()
-                if owner != source_owner and owner != evidence_owner:
+                if owner not in source_owners and owner != evidence_owner:
                     errors.add(owner)
                     continue
                 if (target not in edges or not isinstance(digest, str)
@@ -209,6 +233,22 @@ def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -
 
         if canonical & errors:
             unavailable()
+        return CanonicalCapturePages(frozenset(canonical), snapshots, parsed, frozenset(frontmatter_free))
+    except (OSError, UnicodeError, vault.PathGuardError, vault.FrontmatterError, ValidationError):
+        unavailable()
+
+
+def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
+    """Scan under the caller's mutation guard; derived state cannot prove absence."""
+    classified = canonical_pages(root)
+    canonical, snapshots, parsed, frontmatter_free = classified.canonical, classified.snapshots, classified.parsed, classified.frontmatter_free
+    match: tuple[str, str, str] | None = None
+    types = note_types.Basis(root)
+
+    def unavailable(_error: object = None) -> None:
+        raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
+
+    try:
         for page in canonical:
             if page in frontmatter_free:
                 lines = snapshots[page].decode("utf-8").splitlines()

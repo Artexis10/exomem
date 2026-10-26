@@ -981,24 +981,26 @@ class ClaudeSessionExecutor:
                     break
         finally:
             try:
-                proc.stdin.close()
-            except OSError:
-                pass
-            if timed_out or quota is not None:
-                _end_process_group(proc)
-            else:
                 try:
-                    proc.wait(timeout=_EXIT_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+                if timed_out or quota is not None:
                     _end_process_group(proc)
-            reader.join(timeout=10)
-            stderr.close()
+                else:
+                    try:
+                        proc.wait(timeout=_EXIT_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        _end_process_group(proc)
+                reader.join(timeout=10)
+                stderr.close()
+            finally:
+                orphan = _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
         runtime_copy = attempt_dir / "runtime"
         shutil.copytree(slot.runtime, runtime_copy, dirs_exist_ok=True)
         if slot.hook_home.exists():
             shutil.copytree(slot.hook_home, attempt_dir / "hook-home", dirs_exist_ok=True)
         tap_events = _read_jsonl(runtime_copy / "tap.jsonl")
-        orphan = _end_orphan_server(tap_events)
         records = [
             _turn_record(i, tl, te, tt, tap_events, end - start, ready_wait(tap_events, start, end))
             for i, tl, te, tt, start, end in turn_slices
