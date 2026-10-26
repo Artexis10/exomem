@@ -18,6 +18,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -465,6 +466,91 @@ def test_flag_default_is_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shipped default stays off until live acceptance flips it."""
     monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
     assert writer_lease.fast_durable_ack_active() is False
+
+
+@pytest.mark.parametrize("flag", [None, "0"])
+def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    """A slow sidecar fan-out must not hold the default import reply."""
+    from exomem import adoption_run, commands, freshness, media_jobs, media_processing
+
+    if flag is None:
+        monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", flag)
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "documents")
+    original = vault / "Collection/custodyprobe.pdf"
+    original.parent.mkdir()
+    content = b"%PDF-1.4\n1 0 obj\n<< >>\nendobj\n%%EOF\n"
+    original.write_bytes(content)
+    (original.parent / "own-note.md").write_text("# Own note\n\nRetain this observation.\n")
+    started = commands.op_adoption_studio(vault, action="start", path="Collection")
+    run_id = started["run_id"]
+    commands.op_adoption_studio(
+        vault, action="select", run_id=run_id,
+        include=[{"path": "Collection", "adopt_as": "note", "note_type": "insight"}],
+    )
+    plan = commands.op_adoption_studio(vault, action="plan", run_id=run_id)["plan"]
+    freshness.seed(vault, "vault", [
+        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
+    ])
+    find_module.shared_resolver(vault)
+    command = next(cmd for cmd in commands.PRODUCT_COMMANDS if cmd.name == "adoption_studio")
+    manager = _manager(tmp_path)
+    arguments = {"action": "apply", "run_id": run_id, "plan_id": plan["plan_id"]}
+    entered = threading.Event()
+    release = threading.Event()
+    fanout = media_processing.post_commit_batch_fanout
+
+    def slow_fanout(*args, **kwargs):
+        entered.set()
+        assert release.wait(15), "test did not release the slow derived operation"
+        return fanout(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "post_commit_batch_fanout", slow_fanout)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            manager.invoke, command, (vault,), arguments,
+            idempotency_key="import-media-custody",
+        )
+        try:
+            if flag == "0":
+                assert entered.wait(8), "explicit rollback did not run the synchronous fan-out"
+                assert not future.done()
+                release.set()
+            terminal = future.result(timeout=8)
+        finally:
+            release.set()
+    assert terminal["status"] == "committed"
+    outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
+    assert outcomes["Collection/own-note.md"]["status"] == "applied"
+    outcome = outcomes["Collection/custodyprobe.pdf"]
+    artifact = vault / outcome["artifact_path"]
+    assert original.read_bytes() == artifact.read_bytes() == content
+    job = media_jobs.MediaJobStore(vault).get_by_binary(artifact)
+    assert job is not None and job.sidecar_path.is_file()
+    assert "pending" in job.sidecar_path.read_text(encoding="utf-8")
+    if flag is None:
+        assert not entered.is_set()
+        assert terminal["derived_sync"] == "pending"
+        snapshot = derived_receipts.snapshot_pending_visibility(vault, limit=64)
+        assert snapshot.outcome == "complete", snapshot.failure_code
+        assert any(
+            row.rel_path == outcome["target_path"] and row.state == "live"
+            for batch in snapshot.batches for row in batch.rows
+        )
+        assert outcome["target_path"] in _keyword(vault, "custodyprobe")
+        assert _drain(vault) > 0
+        assert derived_receipts.recoverable_batch_count(vault) == 0
+    else:
+        assert derived_receipts.recoverable_batch_count(vault) == 0
+    pages = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.md")}
+    assert manager.invoke(
+        command, (vault,), arguments, idempotency_key="import-media-custody"
+    ) == terminal
+    assert {path: path.read_bytes() for path in pages} == pages
+    assert media_jobs.MediaJobStore(vault).get_by_binary(artifact).id == job.id
 
 
 def test_flag_rollback_drains_outstanding_custody_before_old_behaviour(

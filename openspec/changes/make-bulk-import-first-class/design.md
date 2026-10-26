@@ -138,6 +138,16 @@ Alternative rejected: letting `start` read an outside path on a local install. I
 
 It prints human-readable progress to standard error for archive and encryption (bytes written), upload (parts and bytes), and server import (state). Every failure names its phase, a content-free reason code and the import id, and never a file name or a presigned address. The final standard-output line stays one JSON object, and fields are only added. The existing checkpoint keeps resume, except that a checkpoint that cannot resume is removed and the failure says so: a file that changes while it is archived fails the run with `SOURCE_CHANGED`, and the message says that a rerun starts a new import and names the routes that stop the open Cloud import: Home's Cancel, and the `import_cancel` action, which an older cell may lack. A registration that Cloud refuses because another import is open (the cell allows one) keeps the checkpoint and does not say to resume: it says to cancel the open import in Home or wait for it to expire, and then to run the command again. When the run ends, it reports the ciphertext bytes that stay on the disk, states that they duplicate the data until the import finishes, and names the discard route: delete the checkpoint folder and ask the assistant to cancel or discard the import through `transfer_memory`.
 
+### D9. Media apply uses existing durable derived batches
+
+Media import already commits its sidecar and queues extraction. Its post-terminal fan-out can still join graph work before the reply returns. `adoption_studio(action="apply")` uses the existing durable acknowledgement session when `EXOMEM_FAST_DURABLE_ACK` is absent. This removes that join without another queue, worker or custody scope.
+
+The existing receipts bind pending visibility and replay to the committed bytes. Governance commits stay synchronous. Before note preflight, the importer registers its committed Source in the writer resolver so that the same call can cite it. The note leaf still checks that Source's custody and authorization. The existing drain owns graph and index convergence. Extraction can remain pending or blocked, and the response reports that state without claiming completion.
+
+The flag retains its global behavior: `1` enables eligible writes, and every explicit value other than `1` restores synchronous fan-out. Other mutations keep their current default. Bulk apply retains its own request budget for canonical writes; this change makes no two-second bulk-call claim.
+
+The boundary proof blocks sidecar fan-out and checks that default apply returns with bytes, a sidecar, an extraction job and pending recall intact. It also checks exact replay, convergence and the explicit synchronous rollback. The own-note benchmark repeats the existing seed with caller-supplied selection rules and checks every page after the rerun.
+
 ## Risks / Trade-offs
 
 - **Existing backlogs grow.** Sources whose only derivatives are drafts, or whose back-reference is stale, reappear in `unprocessed_source`. This is the honest count; the release notes say so.

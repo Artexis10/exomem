@@ -459,19 +459,24 @@ def _with_post_terminal_fanout_acknowledgement(
     )
 
 
-def _fast_ack_enabled() -> bool:
-    return os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
+def _fast_ack_enabled(command: str | None = None, action: str | None = None) -> bool:
+    flag = os.environ.get("EXOMEM_FAST_DURABLE_ACK")
+    if flag is not None:
+        return flag == "1"
+    # Fixed command/action protocol: bulk apply uses existing durable custody by
+    # default; an explicit flag still provides the synchronous rollback.
+    return command == "adoption_studio" and action == "apply"
 
 
 def fast_durable_ack_active() -> bool:
     """Whether the fast durable acknowledgement capability is currently active.
 
-    ``EXOMEM_FAST_DURABLE_ACK=1`` enables the fast path. Any other value --
-    including the shipped default of absent -- restores the prior wide
-    synchronous fanout and declares this capability, and its latency SLO,
-    inactive. It is deliberately not a knob that widens the enabled path's
-    fixed 2.0-second budget (design decision 3); it only chooses which of the
-    two behaviours is in force.
+    ``EXOMEM_FAST_DURABLE_ACK=1`` enables the fast path globally. An absent
+    value enables it only for bulk import apply. This global predicate remains
+    false for that operation-specific default. Every explicit value other than
+    ``1`` restores synchronous fan-out. The flag does not widen the fast path's
+    fixed 2.0-second acknowledgement budget; bulk apply retains its own request
+    budget for canonical writes.
     """
     return _fast_ack_enabled()
 
@@ -5323,7 +5328,7 @@ class LeaseManager:
                 + (expires_after or _IMPLICIT_RETRY_TTL_SECONDS),
                 advisory_required=True,
             )
-            if _fast_ack_enabled()
+            if _fast_ack_enabled(command.name, kwargs.get("action"))
             and not kwargs.get("suggestions")
             and receipt_vault_root is not None
             and _is_receipt_vault_root(receipt_vault_root)

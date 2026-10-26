@@ -478,7 +478,12 @@ def create_draft_note(
     one the plan froze. Returns the leaf's result; the leaf's `NoteError` reaches
     the caller unchanged.
     """
+    from . import find as find_module
     from . import note as note_module
+
+    # The Source is committed, but deferred fan-out has not updated the writer
+    # resolver. Register its namespace; the note leaf still checks its custody.
+    find_module.shared_resolver(root).add_pending(source_path.removesuffix(".md"))
 
     note = planned["note"]
     arguments: dict[str, Any] = {

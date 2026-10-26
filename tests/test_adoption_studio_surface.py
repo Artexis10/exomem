@@ -53,7 +53,8 @@ def _post(client: TestClient, command: str, body: dict) -> dict:
     payload = response.json()
     assert payload["success"] is True, response.text
     data = payload["data"]
-    return data.get("diagnostics", data)
+    diagnostics = data.get("diagnostics", data)
+    return diagnostics.get("leaf_result", diagnostics)
 
 
 def _post_error(client: TestClient, command: str, body: dict) -> tuple[int, dict]:

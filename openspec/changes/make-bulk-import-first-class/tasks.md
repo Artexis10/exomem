@@ -24,6 +24,7 @@
 
 ## 5. Proof and delivery
 
+- [ ] 5.0 Use existing durable derived custody for default media apply, with truthful pending visibility and an explicit synchronous rollback. Verify: a real invocation returns while sidecar fan-out is blocked, preserves bytes and the extraction job, replays exactly, and converges after the drain.
 - [ ] 5.1 Run the isolated outcome check: an invented collection outside the vault with own notes, documents, an image and pre-existing review debt goes through `exomem import`, adoption with an own-note rule, and `finish`. Record original hashes, draft notes, outstanding Sources with `pending` derivatives, served outstanding counts, one draft promoted to live leaving the projection, one dismissal that leaves `outstanding` unchanged, and one pre-existing Source compiled. Verify: the recorded run file shows each value with its command.
 - [ ] 5.2 Re-run `benchmarks/collection_ingest/` with an own-note rule over its note folder on the same seed. Verify: every item is complete or refused with a code, every apply call stays under the request budget, and a re-run creates no page.
 - [ ] 5.3 Run the scoped tests, the full suite, the privacy gate and strict OpenSpec validation; record results and the independent review on the PR.

@@ -37,6 +37,23 @@ Own-note creation SHALL only create pages that did not exist; it SHALL NOT edit,
 - **WHEN** `apply` reaches its request budget after committing a chunk's Sources and some of its notes
 - **THEN** it returns a continuation, and the next call creates only the remaining notes
 
+### Requirement: Media apply acknowledges durable custody without joining derived work
+
+When `EXOMEM_FAST_DURABLE_ACK` is absent, `adoption_studio(action="apply")` SHALL use the existing durable derived batches. It SHALL commit the imported bytes and sidecar, and persist an admitted extraction job before acknowledging custody. It SHALL publish governed pending visibility before returning and SHALL report unfinished derived work as pending. It SHALL NOT wait for graph and index fan-out to finish. The existing drain SHALL retain ownership of that work until convergence.
+
+An explicit flag value other than `1` SHALL restore synchronous fan-out. The flag's global `1` behavior and other mutations' defaults SHALL remain unchanged. Bulk apply SHALL retain its request budget and continuation protocol for canonical writes.
+
+#### Scenario: A media import returns while graph work is slow
+
+- **WHEN** default apply imports admitted media and graph or index fan-out cannot finish before the reply
+- **THEN** the original and copied bytes, the sidecar and extraction job are durable, and governed recall can read the pending Source
+- **AND** the terminal reports derived work as pending, exact retry replays without another page or job, and the drain can complete the work
+
+#### Scenario: An operator restores synchronous fan-out
+
+- **WHEN** `EXOMEM_FAST_DURABLE_ACK=0` is set and a media import applies
+- **THEN** the call uses the previous synchronous fan-out path
+
 ### Requirement: A folder outside the vault imports through local staging
 
 `adoption_studio start` SHALL refuse a `path` that is absolute, or that climbs out of the vault by `..`, with `IMPORT_PATH_OUTSIDE_VAULT`, and the message SHALL name `exomem import <folder>`. The check SHALL read the path as text and SHALL NOT resolve it on the filesystem. A path that escapes through a symbolic link inside the vault SHALL get the overview resolver's `INVALID_PATH`.
