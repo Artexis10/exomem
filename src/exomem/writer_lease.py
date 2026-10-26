@@ -1334,17 +1334,19 @@ class _PostCommitOutcomeUncertain(OpError):
         )
 
 
-def post_commit_refusal(error: BaseException) -> BaseException:
-    """Report a refusal raised after a mutation's leaf returned as committed.
+def post_commit_refusal(error: BaseException, result: Any) -> BaseException:
+    """Report a refusal raised after a mutation's leaf returned ``result`` as committed.
 
     A filter over the result, such as a store read that misses its deadline, runs after the
     commit; its own refusal must not read as "nothing committed". The inner code stays in the
-    details. A fault without a public code is returned unchanged.
+    details. A fault without a public code, and a leaf that returned an explicit uncommitted
+    outcome (a rejected batch, say), keep the refusal unchanged.
     """
     from .cli_ops import public_refusal
 
     refusal = public_refusal(error) if isinstance(error, Exception) else None
-    if refusal is None:
+    payload = getattr(result, "structured_content", result)
+    if refusal is None or isinstance(payload, Mapping) and payload.get("committed") is False:
         return error
     committed = _PostCommitOutcomeUncertain()
     committed.details["post_commit_refusal"] = str(refusal.get("code") or "OP_ERROR")
@@ -7715,7 +7717,7 @@ def invoke_command(
                 try:
                     return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
                 except Exception as error:
-                    converted = post_commit_refusal(error)
+                    converted = post_commit_refusal(error, result)
                     if converted is error:
                         raise
                     raise converted from error
