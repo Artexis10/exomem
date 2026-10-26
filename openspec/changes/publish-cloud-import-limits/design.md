@@ -18,7 +18,7 @@ Current state, read from source on 2026-10-26:
 **Goals:**
 
 - Publish the limits that cellctl and the Job enforce, from one source each.
-- Grow a volume for an import without stopping the cell and without an operator.
+- Grow a volume for an import without an operator, allowing the brief restart that the render digest causes.
 - Record what the Job staged, and let Home and the CLI read it.
 
 **Non-Goals:**
@@ -78,6 +78,8 @@ The wait ends at `import_growth_deadline`, counted from the import's `created_at
 
 On a local cell, cellctl asks `pool_takes` again before it mints the key. When the node no longer holds the required size beside the snapshot reserve, cellctl fails the import with `IMPORT_STORAGE_NO_ROOM`. This is a refusal on purpose: an exhausted thin pool damages every cell on the node, so the wrong firing costs one retried import.
 
+The check also runs before every larger local claim request, including cleanup and later ordinary reconciliation. Admission has already raised desired `storage_gib`, so checking only before the key is too late. Cellctl reads the last accepted claim request from the claim itself and retains it while the node cannot hold growth. It never lowers a claim, and desired `storage_gib` stays raised. Unknown node room leaves growth waiting; known insufficient room fails the import. The same rule covers a later render after import failure. The local cutover check proves this behavior before local import growth ships; Hetzner delivery can proceed independently.
+
 No new observed state exists. Substrate derives `storage_ready` from the same receipt.
 
 ### D4. The Job enforces the published values
@@ -102,7 +104,7 @@ The CLI maps `IMPORT_TOO_MANY_FILES`, `IMPORT_STORAGE_LIMIT` and `IMPORT_PARTS_L
 
 ### D7. Status rows carry `source_root`
 
-`_compact_row` in `adoption_run.py` adds `source_root`, which the run already records. Home sums `counts.applied` over the rows under an import's staged folder. A cell that runs an older version returns rows without it, and Home then shows the adopted count as unknown.
+`_compact_row` in `adoption_run.py` adds `source_root`, which the run already records. Scoped `status` accepts the existing `path` argument and returns `adopted_files` for that subtree. It counts distinct original paths with successful filing outcomes across all matching runs. Repeated and overlapping runs count each original once; per-run totals cannot supply that result. An incomplete scan returns an unknown aggregate, not a partial count. Home reads this complete aggregate, or shows the adopted count as unknown on older cells. This work stays in P7.
 
 ### D8. The contract pin
 

@@ -8,6 +8,7 @@ Packets P2, P3, P6 and P7 of the paired Substrate change `admit-cloud-imports-ag
 - [ ] 1.4 Write `staged_files` and `staged_bytes` from the Job's report in the update that records `done`. Verify: a test that the update carries both, and that a failed import writes neither.
 - [ ] 1.5 Correct the stale comment that says a `storage_gib` raise bumps no generation. Verify: the comment matches the 0071 trigger and the render digest code.
 - [ ] 1.6 Move `substrate-contract.json` to the Substrate ref that holds migration 0079, once P1 is merged. Verify: the deployed-cellctl tests pass against that ref.
+- [ ] 1.7 Before each larger local claim request, check node room and retain the last accepted claim request when growth is unsafe. Keep desired `storage_gib` raised. Verify: stale published room, cleanup, later reconciliation and unknown room never request unsafe growth or a smaller claim. Complete this before local import growth ships at local cutover.
 
 ## 2. The import Job reads its limits (P3)
 
@@ -20,7 +21,7 @@ Packets P2, P3, P6 and P7 of the paired Substrate change `admit-cloud-imports-ag
 
 ## 4. Adopted count support (P7)
 
-- [ ] 4.1 Add `source_root` to `_compact_row` in `adoption_run.py`. Verify: a status test that the listing rows carry it, and that the full run document is unchanged.
+- [ ] 4.1 Add `source_root` to compact rows and a scoped `adopted_files` aggregate using distinct original paths across successful outcomes. Verify: repeated runs, overlapping subtrees and incomplete run state produce the specified count or unknown result.
 - [ ] 4.2 The Home side is task 5.1 of the Substrate change. Verify: Home shows the adopted count against a cell that runs this version.
 
 ## 5. Delivery

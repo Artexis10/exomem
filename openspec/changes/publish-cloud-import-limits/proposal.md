@@ -11,7 +11,7 @@ The limits that decide whether a cell accepts an import live in the cell image a
 - cellctl passes the member limit and the free-space reserve to the import Job, so the Job enforces the values that cellctl publishes.
 - cellctl waits for the volume to grow before it mints the import key. The wait leaves the cell mounted, tolerates one pod restart and ends at a configurable deadline.
 - cellctl records the staged file and byte counts from the Job's report on the import row.
-- The Adoption Studio status rows carry each run's `source_root`, so Home can count the files filed from an import.
+- Adoption Studio status groups runs by `source_root` and supplies a scoped count of distinct filed originals for Home.
 - The CLI reads the published limits before it creates an import, falls back to its built-in defaults against an older server, and maps the three new refusals.
 - The contract pin moves to the Substrate migration that adds the new C5 columns.
 
@@ -30,7 +30,7 @@ cellctl publishes each cell's effective limits. Admission, in the paired Substra
 ### Modified Capabilities
 
 - `cloud-vault-import`: Add the published limits, the one size cap, the wait for growth, the Job's limits, the staged counts and the CLI's use of the limits.
-- `adoption-studio`: Add `source_root` to the compact status rows.
+- `adoption-studio`: Add `source_root` to compact rows and a scoped count of distinct filed originals.
 
 ## Impact
 

@@ -54,6 +54,8 @@ The wait SHALL end at `import_growth_deadline`, counted from the import's creati
 
 On a local cell, cellctl SHALL check the node's room again before it mints the key. When the node no longer holds the required size beside the snapshot reserve, cellctl SHALL fail the import with `IMPORT_STORAGE_NO_ROOM`.
 
+Before every larger local claim request, cellctl SHALL check that the node can hold the increase beside the snapshot reserve. When it cannot grow, cellctl SHALL retain the last accepted request from the claim itself. This SHALL cover cleanup and later reconciliation after an import failure. Desired `storage_gib` SHALL stay raised, and cellctl SHALL NOT lower the claim. Unknown node room SHALL leave growth waiting until its deadline; known insufficient room SHALL fail the import with `IMPORT_STORAGE_NO_ROOM`. Local import growth SHALL ship only after the local cutover check proves this behavior.
+
 #### Scenario: The claim has not grown
 
 - **WHEN** an import has a requirement above the observed capacity
@@ -80,6 +82,8 @@ On a local cell, cellctl SHALL check the node's room again before it mints the k
 
 - **WHEN** a local cell's node can no longer hold the required size at the check before the key
 - **THEN** the import ends `failed` with `IMPORT_STORAGE_NO_ROOM` and no key exists
+- **AND** the claim keeps its last accepted request while desired `storage_gib` stays raised
+- **AND** cleanup and later reconciliation request no larger claim until the node can hold it
 
 ### Requirement: The import Job enforces the limits that cellctl publishes
 
