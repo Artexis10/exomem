@@ -131,7 +131,7 @@ The first candidate failed its fixed decision rule. Preserve that cohort and dec
 
 ### Current smoke amendment R2-C2-S2
 
-Run exactly ten pairs after the actor account's actual weekly reset, on the designated evaluation host, with one evaluation at a time. Each pair uses the grouped and compact surfaces, the same source fixture and one Sonnet session per arm. Keep the existing client, model, call budget, subscription account and isolation boundaries. Cap execution at twenty actor attempts, with no automatic retries, replacements or expansion.
+Run exactly ten pairs in the operator-authorized model window on the designated evaluation host, with one evaluation at a time. The immediate-run amendment replaces the earlier reset reservation. Each pair uses the grouped and compact surfaces, the same source fixture and one Sonnet session per arm. Keep the existing client, model, call budget, subscription account and isolation boundaries. Cap execution at twenty actor attempts, with no automatic retries, replacements or expansion.
 
 Select the first unused source case for each of the ten existing new-workflow intents, in the original source order. This gives purposeful coverage rather than a random population sample. Preserve the source-derived prompts and keys. Record any mechanical date changes separately and review them before fresh same-day admission; retain the old admissions unchanged.
 

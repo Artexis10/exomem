@@ -20,7 +20,7 @@
 
 - [ ] 4.1 Extend the existing harness with harder cross-family workflows and independently authored source-derived keys. Verify the source-to-seed-to-captured-request chain and offline scoring before any actor run.
 - [ ] 4.2 Preserve the completed development proof and retire the unrun 375-pair protocol. Freeze the ten-pair smoke amendment and sources, obtain a fresh independent review and record date and subscription limits.
-- [ ] 4.3 After the actual weekly reset, run at most twenty Sonnet attempts for ten pairs with no automatic retries. Record per-case outcomes and weekly-meter readings before and after. State that this smoke check cannot certify the 10-point bound; decide the catalogue through engineering judgement and the evidence.
+- [ ] 4.3 In the operator-authorized model window, run at most twenty Sonnet attempts for ten pairs with no automatic retries. Record per-case outcomes and weekly-meter readings before and after. State that this smoke check cannot certify the 10-point bound; decide the catalogue through engineering judgement and the evidence.
 - [ ] 4.4 Remove the temporary grouped baseline option after the smoke check and recorded catalogue decision. Verify ordinary compatibility calls remain available and rerun the affected contract checks.
 
 ## 5. Delivery and closure
