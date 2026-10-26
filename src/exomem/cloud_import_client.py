@@ -517,24 +517,29 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
                 raise _abandoned(record, ciphertext, state["import_id"], "PARTS_INVALID",
                                  "the issued upload parts do not cover the encrypted copy", phase=UPLOAD)
             sent = 0
-            with ciphertext.open("rb") as stream:
-                for ordinal, part in enumerate(parts, 1):
-                    if part["part_number"] != ordinal:
-                        raise _abandoned(record, ciphertext, state["import_id"], "PARTS_INVALID",
-                                         "the issued upload parts are out of order", phase=UPLOAD)
-                    payload = stream.read(part["part_size_bytes"])
-                    if len(payload) != part["part_size_bytes"]:
-                        raise _abandoned(record, ciphertext, state["import_id"], "CIPHERTEXT_SHORT",
-                                         "the encrypted copy ended early", phase=UPLOAD)
-                    if str(ordinal) not in state["parts"]:
-                        response = await uploads.put(part["url"], content=payload,
-                                                     headers={"Content-Length": str(len(payload))})
-                        response.raise_for_status()
-                        state["parts"][str(ordinal)] = response.headers["etag"]
-                        _private_json(record, state)
-                    sent += len(payload)
-                    progress.tick(f"Uploading: part {ordinal} of {len(parts)}, "
-                                  f"{human_bytes(sent)} of {human_bytes(size)}")
+            try:
+                with ciphertext.open("rb") as stream:
+                    for ordinal, part in enumerate(parts, 1):
+                        if part["part_number"] != ordinal:
+                            raise CloudImportError(UPLOAD, "PARTS_INVALID", "the issued upload parts are out of order",
+                                                   state["import_id"], resume=False)
+                        payload = stream.read(part["part_size_bytes"])
+                        if len(payload) != part["part_size_bytes"]:
+                            raise CloudImportError(UPLOAD, "CIPHERTEXT_SHORT", "the encrypted copy ended early",
+                                                   state["import_id"], resume=False)
+                        if str(ordinal) not in state["parts"]:
+                            response = await uploads.put(part["url"], content=payload,
+                                                         headers={"Content-Length": str(len(payload))})
+                            response.raise_for_status()
+                            state["parts"][str(ordinal)] = response.headers["etag"]
+                            _private_json(record, state)
+                        sent += len(payload)
+                        progress.tick(f"Uploading: part {ordinal} of {len(parts)}, "
+                                      f"{human_bytes(sent)} of {human_bytes(size)}")
+            except CloudImportError as error:
+                # Windows cannot remove the encrypted copy until its read handle closes.
+                raise _abandoned(record, ciphertext, state["import_id"], error.code,
+                                 error.message, phase=UPLOAD) from None
             progress.say(f"Uploaded {len(parts)} parts, {human_bytes(size)}.")
             await call("POST", endpoint + "/complete", json={**cipher, "part_etags": [
                 {"part_number": part["part_number"], "etag": state["parts"][str(part["part_number"]) ]}

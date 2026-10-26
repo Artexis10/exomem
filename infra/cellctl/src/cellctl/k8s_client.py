@@ -452,8 +452,6 @@ class ClusterClient:
             condition.type in {"Resizing", "FileSystemResizePending"} and condition.status == "True"
             for condition in (getattr(pvc.status, "conditions", None) or [])
         ) if pvc and pvc.status else False
-        request = (getattr(pvc.spec.resources, "requests", None) or {}).get("storage") if pvc and pvc.spec and getattr(pvc.spec, "resources", None) else None
-        pvc_request = int(quantity(str(request))) if request is not None else None
         pvc_volume_id = None  # the underlying Hetzner volume id (PV spec.csi.volumeHandle), not the PV's own K8s name
         pv_claim_ref_uid = None
         pv_storage_class = None
@@ -569,7 +567,6 @@ class ClusterClient:
             pvc_uid=pvc_uid,
             pvc_resource_version=pvc_version,
             pvc_capacity_bytes=pvc_capacity,
-            pvc_request_bytes=pvc_request,
             pvc_resize_pending=resize_pending,
             pv_claim_ref_uid=pv_claim_ref_uid,
             pv_storage_class=pv_storage_class,

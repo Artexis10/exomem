@@ -2,7 +2,7 @@
 
 See proposal.md. This change is the cellctl, image, CLI and pin side of the paired Substrate change `admit-cloud-imports-against-published-limits`. That change defines the C5 columns, the admission order and the Home flow.
 
-Current state, read from source on 2026-10-26:
+Baseline before this change, read from source on 2026-10-26:
 
 - The cell image fixes the member count (500,000), the free-space reserve (256 MiB), names (255 bytes) and paths (4096 bytes). The Job takes no limit flags, and its argument parser refuses an unknown one.
 - cellctl fixes the part size (64 MiB), the 10,000-part capacity, the 24-hour upload window and the 2-hour import hold (`import_deadline`).
@@ -38,7 +38,7 @@ An `ImportLimits` value in `imports.py`, beside `PART_BYTES`, builds the object.
 | -------------------------------- | --------------------------------------------------------------- |
 | `max_members`, `reserve_bytes`   | The values that cellctl passes to the Job (D4)                   |
 | `space_factor`                   | A cellctl constant, 2                                           |
-| `max_storage_gib`                | The cell's size cap and its node's room (below)                  |
+| `max_storage_gib`                | The attachable cell's configured cap and current size           |
 | `part_bytes`, `max_parts`        | `PART_BYTES` and the 10,000-part capacity                        |
 | `upload_window_seconds`          | `UPLOAD_DEADLINE`                                               |
 | `import_deadline_seconds`        | `ReconcileConfig.import_deadline`                               |
@@ -46,16 +46,13 @@ An `ImportLimits` value in `imports.py`, beside `PART_BYTES`, builds the object.
 
 The module constants stay only as defaults for the standalone verify and the CLI fallback.
 
-`max_storage_gib` is per cell, and its current size is `max(storage_gib, grown_storage_gib)`:
+For attachable storage, `max_storage_gib` is the larger of the cap and the cell's current size, `max(storage_gib, grown_storage_gib)`. A paid cell above the cap therefore never loses an import to the cap alone.
 
-- On a Hetzner cell, it is the larger of the cap and the current size.
-- On a local cell, it is the larger of the current size and the largest size, up to the cap, that `pool_takes` allows on the cell's node. That puts the node's room inside the published number. A node that publishes no reading allows nothing, so the value is the current size.
+Local import growth remains open. This delivery actively writes `import_limits` to NULL for local cells, including cells with an earlier object. Classification uses the actual PVC class, then the PV class, then the configured domain. A local PVC without a bound PV therefore stays unpublished. Unpublished limits preserve legacy admission, which does not raise either storage size.
 
-A paid cell that already exceeds the cap therefore never loses an import to the cap alone.
+cellctl compares the object or NULL with the stored value and writes only on change. The cells touch trigger does not change, so publication bumps no generation and sends no notification.
 
-cellctl compares the object with the stored `import_limits` in the pass that reads the cell, and writes only when they differ. The cells touch trigger does not change, so the write bumps no generation and sends no notification. A local cell's value follows its node's free bytes, so cellctl recomputes it only in a pass that reads the node's room.
-
-*Rejected: constants in Substrate.* A cap that the operator changes would need a Substrate release, and a local cell's room depends on its node.
+*Rejected: constants in Substrate.* A cap that the operator changes would need a Substrate release.
 
 ### D2. One cap for every storage class
 
@@ -76,9 +73,11 @@ The raise restarts the pod once, because of the render digest. The wait reads ob
 
 The wait ends at `import_growth_deadline`, counted from the import's `created_at`. The default is 60 minutes, above `backup_deadline`, so a backup that overlaps the wait does not use it up. `CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES` sets it, in the same way as the other deadlines. On expiry cellctl fails the import with `IMPORT_STORAGE_UNAVAILABLE` through the existing cleanup.
 
-On a local cell, cellctl asks `pool_takes` again before it mints the key. When the node no longer holds the required size beside the snapshot reserve, cellctl fails the import with `IMPORT_STORAGE_NO_ROOM`. This is a refusal on purpose: an exhausted thin pool damages every cell on the node, so the wrong firing costs one retried import.
+Local growth is unfinished and does not ship in this delivery. Existing local backup growth keeps its earlier room sampling, manifest sizing, quota and pod behavior. The shared cap moves to `StorageConfig` without changing that algorithm.
 
-The check also runs before every larger local claim request, including cleanup and later ordinary reconciliation. Admission has already raised desired `storage_gib`, so checking only before the key is too late. Cellctl reads the last accepted claim request from the claim itself and retains it while the node cannot hold growth. It never lowers a claim, and desired `storage_gib` stays raised. Unknown node room leaves growth waiting; known insufficient room fails the import. The same rule covers a later render after import failure. The local cutover check proves this behavior before local import growth ships; Hetzner delivery can proceed independently.
+Before local import growth ships, one node budget must include physical allocations, accepted pending requests and same-pass increases. Cached free bytes can lag accepted expansion, so neither a same-pass counter nor pending resize deltas prove this budget. A raw pool size minus Kubernetes inventory also misses unclaimed physical volumes after control-plane recovery. The existing [node recovery procedure](../../../docs/runbooks/cloud-node-loss.md) preserves those volumes.
+
+The local followup must supply authoritative capacity and use one budget for publication, admission and every local allocation increase. It must retain accepted claim requests when growth cannot fit, leave desired size raised, and never shrink a claim. Unknown room must wait; known insufficient room must refuse with `IMPORT_STORAGE_NO_ROOM`. Tests must cover concurrent cells, restarts, lagging capacity readings and recovery with unclaimed volumes. The local cutover rehearsal must prove this behavior before local import growth ships. Hetzner delivery proceeds independently.
 
 No new observed state exists. Substrate derives `storage_ready` from the same receipt.
 
@@ -118,7 +117,7 @@ The CLI maps `IMPORT_TOO_MANY_FILES`, `IMPORT_STORAGE_LIMIT` and `IMPORT_PARTS_L
 - **Hetzner online expansion has no production record.** Every cell class allows it, but nobody has raised a live volume. The rehearsal raises one real volume and records the capacity, the claim's conditions and any pod restart.
 - **`space_factor` is an assumption.** The rehearsal measures the peak volume use of an import against `space_factor × declared bytes`.
 - **An abandoned import keeps its grown volume.** A claim cannot shrink, and the cap bounds the cost.
-- **A local cell's published maximum moves with its node's free bytes.** cellctl rewrites it only on change, and a write sends no notification.
+- **Local growth remains open.** Local cells publish NULL until an authoritative shared budget includes physical allocations and accepted requests. Cached-capacity admission remains existing debt.
 
 ## Migration Plan
 

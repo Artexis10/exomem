@@ -169,7 +169,7 @@ def test_claim_observation_reads_status_capacity_and_filesystem_resize_condition
     client._storage_config = DEFAULT_STORAGE
     claim = NS(
         metadata=NS(name="cell-data", namespace=NAMESPACE, uid="claim-a", resource_version="42"),
-        spec=NS(storage_class_name=LEGACY_CLASS, volume_name="pv-a", resources=NS(requests={"storage": "24Gi"})),
+        spec=NS(storage_class_name=LEGACY_CLASS, volume_name="pv-a"),
         status=NS(phase="Bound", capacity={"storage": "20Gi"}, conditions=[NS(type="FileSystemResizePending", status="True")]),
     )
     volume = NS(
@@ -181,7 +181,6 @@ def test_claim_observation_reads_status_capacity_and_filesystem_resize_condition
     assert observed.pvc_uid == "claim-a"
     assert observed.pvc_resource_version == "42"
     assert observed.pvc_capacity_bytes == 20 * 1024**3
-    assert observed.pvc_request_bytes == 24 * 1024**3
     assert observed.pvc_resize_pending
 
 

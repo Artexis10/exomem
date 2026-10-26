@@ -518,13 +518,28 @@ def test_typed_refusals_name_the_phase_and_cannot_resume(tmp_path, code, phase):
 
 @needs_age
 @pytest.mark.parametrize("broken", ["size", "order", "short"])
-def test_invalid_upload_copy_or_parts_abandons_checkpoint(tmp_path, broken):
+def test_invalid_upload_copy_or_parts_abandons_checkpoint(tmp_path, monkeypatch, broken):
     folder = tmp_path / "notes"
     folder.mkdir()
     (folder / "one.md").write_text("one")
     _, recipient = _age_keys(tmp_path)
     cloud = FakeCloud(recipient)
     checkpoint = tmp_path / "checkpoint"
+    ciphertext = checkpoint / "archive.age"
+    opened = []
+    original_open, original_unlink = Path.open, Path.unlink
+    def open_file(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if path == ciphertext:
+            opened.append(stream)
+        return stream
+    def unlink_file(path, *args, **kwargs):
+        # Model Windows sharing rules on every platform: an open copy cannot be removed.
+        if path == ciphertext and any(not stream.closed for stream in opened):
+            raise PermissionError("file is open")
+        return original_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(Path, "unlink", unlink_file)
     def break_upload():
         if broken == "size":
             cloud.row["part_urls"][0]["part_size_bytes"] += 1

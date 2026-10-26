@@ -2,13 +2,13 @@
 
 ### Requirement: cellctl publishes the import limits it enforces
 
-cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. The object SHALL hold the keys that the C5 contract names, and each key SHALL come from one source: the value cellctl passes to the import Job, a cellctl setting, or the cell's size cap. cellctl SHALL write the column only when the object differs from the stored value, and a write SHALL NOT change the cell's generation.
+cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. It SHALL publish an object for attachable storage and NULL for local storage. The object SHALL hold the keys that the C5 contract names, and each key SHALL come from one source: the value cellctl passes to the import Job, a cellctl setting, or the cell's size cap. cellctl SHALL write the column only when the object or NULL differs from the stored value, and a write SHALL NOT change the cell's generation.
 
-`max_storage_gib` SHALL be at least the cell's current size, `max(storage_gib, grown_storage_gib)`. On a cell on attachable storage, it SHALL be the larger of the configured cap and the current size. On a local cell, it SHALL be the larger of the current size and the largest size, up to the cap, that the node's pool takes.
+`max_storage_gib` SHALL be at least the cell's current size, `max(storage_gib, grown_storage_gib)`. On a cell on attachable storage, it SHALL be the larger of the configured cap and the current size. Local import growth remains unfinished. Cellctl SHALL classify storage from the actual PVC class, then the PV class, then the configured domain. It SHALL actively clear an earlier limits object on a local cell. Local cells SHALL keep legacy admission, which does not raise `storage_gib` or `grown_storage_gib`.
 
 #### Scenario: The operator changes the cap
 
-- **WHEN** the operator raises the configured cap and cellctl next reads a live cell
+- **WHEN** the operator raises the configured cap and cellctl next reads a live cell on attachable storage
 - **THEN** cellctl writes an object with the new `max_storage_gib`
 - **AND** the cell's generation does not change
 
@@ -22,10 +22,21 @@ cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. The o
 - **WHEN** a cell's current size is 30 GiB and the cap is 20 GiB
 - **THEN** its published `max_storage_gib` is 30
 
-#### Scenario: A local node has no room
+#### Scenario: A local cell has an earlier limits object
 
-- **WHEN** a local cell's node publishes too few free bytes to take any growth beside the snapshot reserve
-- **THEN** the cell's published `max_storage_gib` equals its current size
+- **WHEN** cellctl reads a local claim with an earlier published limits object
+- **THEN** it writes NULL and changes no generation
+- **AND** import admission keeps both storage sizes unchanged
+
+#### Scenario: A local claim has not bound a PV
+
+- **WHEN** the actual PVC class is local and no PV is bound
+- **THEN** cellctl publishes NULL even when the configured domain is attachable storage
+
+#### Scenario: A new local claim
+
+- **WHEN** no PVC or PV supplies a class and the configured domain is local
+- **THEN** cellctl publishes NULL
 
 ### Requirement: One configured cap bounds cell growth for every storage class
 
@@ -52,9 +63,9 @@ While an import has a `required_storage_gib` and no recipient, cellctl SHALL tak
 
 The wait SHALL end at `import_growth_deadline`, counted from the import's creation. Its default SHALL be 60 minutes, above `backup_deadline`, and the operator SHALL be able to set it. On expiry, cellctl SHALL fail the import with `IMPORT_STORAGE_UNAVAILABLE` through the existing cleanup.
 
-On a local cell, cellctl SHALL check the node's room again before it mints the key. When the node no longer holds the required size beside the snapshot reserve, cellctl SHALL fail the import with `IMPORT_STORAGE_NO_ROOM`.
+Local import growth SHALL remain unshipped until an authoritative node budget covers physical allocations, accepted pending requests and same-pass increases. That budget SHALL include unclaimed physical volumes supported by recovery. Publication, admission and every local allocation increase SHALL use that budget when local growth ships. Cached free bytes, a same-pass counter or Kubernetes inventory alone SHALL NOT establish this guarantee. Existing local backup growth SHALL keep its earlier behavior in this delivery.
 
-Before every larger local claim request, cellctl SHALL check that the node can hold the increase beside the snapshot reserve. When it cannot grow, cellctl SHALL retain the last accepted request from the claim itself. This SHALL cover cleanup and later reconciliation after an import failure. Desired `storage_gib` SHALL stay raised, and cellctl SHALL NOT lower the claim. Unknown node room SHALL leave growth waiting until its deadline; known insufficient room SHALL fail the import with `IMPORT_STORAGE_NO_ROOM`. Local import growth SHALL ship only after the local cutover check proves this behavior.
+Before local import growth ships, cellctl SHALL retain each accepted claim request when its increase cannot fit beside the snapshot reserve. This SHALL cover cleanup and later reconciliation after failure. Desired size SHALL stay raised, and cellctl SHALL NOT shrink a claim. Unknown room SHALL leave growth waiting; known insufficient room SHALL fail with `IMPORT_STORAGE_NO_ROOM`. The local cutover rehearsal SHALL prove this behavior before local import growth ships.
 
 #### Scenario: The claim has not grown
 
@@ -78,16 +89,16 @@ Before every larger local claim request, cellctl SHALL check that the node can h
 - **THEN** cellctl takes the hold and renders the prepare Job
 - **AND** the import reaches `key_ready`
 
-#### Scenario: A local node lost its room
+#### Scenario: A future local growth cannot fit
 
-- **WHEN** a local cell's node can no longer hold the required size at the check before the key
+- **WHEN** local import growth is enabled and its authoritative node budget can no longer hold the required size at the check before the key
 - **THEN** the import ends `failed` with `IMPORT_STORAGE_NO_ROOM` and no key exists
 - **AND** the claim keeps its last accepted request while desired `storage_gib` stays raised
 - **AND** cleanup and later reconciliation request no larger claim until the node can hold it
 
 ### Requirement: The import Job enforces the limits that cellctl publishes
 
-cellctl SHALL pass the member limit and the free-space reserve to the import Job as `EXOMEM_IMPORT_MAX_MEMBERS` and `EXOMEM_IMPORT_RESERVE_BYTES`. The Job SHALL read them, and SHALL use its defaults when they are absent. cellctl SHALL publish the same two values.
+cellctl SHALL pass the member limit and the free-space reserve to the import Job as `EXOMEM_IMPORT_MAX_MEMBERS` and `EXOMEM_IMPORT_RESERVE_BYTES`. The Job SHALL read them, and SHALL use its defaults when they are absent. Published limits objects SHALL use those same two values.
 
 #### Scenario: The Job limit is one member lower
 
@@ -101,7 +112,7 @@ cellctl SHALL pass the member limit and the free-space reserve to the import Job
 
 ### Requirement: An import records the files and bytes it staged
 
-When an import Job succeeds with a valid report, cellctl SHALL write `staged_files` and `staged_bytes` together before cleanup can remove the Pod report. Both values SHALL be non-negative integers, excluding booleans. A missing or invalid report SHALL leave the counts unknown and SHALL NOT block cleanup. A later failure, cancellation or expiry MAY retain the raw immutable pair. Public replies SHALL expose the pair only for `done` with no pending cancel or discard intent.
+When an import Job succeeds with a valid report, cellctl SHALL write `staged_files` and `staged_bytes` together before cleanup can remove the Pod report. Both values SHALL fit the non-negative PostgreSQL `bigint` range, excluding booleans. A missing or invalid report SHALL leave the counts unknown and SHALL NOT block cleanup. A later failure, cancellation or expiry MAY retain the raw immutable pair. Public replies SHALL expose the pair only for `done` with no pending cancel or discard intent.
 
 #### Scenario: An import succeeds
 

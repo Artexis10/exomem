@@ -6,7 +6,7 @@ The limits that decide whether a cell accepts an import live in the cell image a
 
 ## What changes
 
-- cellctl publishes each cell's effective import limits in the C5 column `import_limits`. It rewrites the column only when a value changes.
+- cellctl publishes effective import limits for attachable storage in `import_limits` and actively clears local cells to NULL. It writes only on change.
 - One configured size cap, held in `StorageConfig`, bounds growth for every storage class. A fleet with only Hetzner volumes gets a cap too.
 - cellctl passes the member limit and the free-space reserve to the import Job, so the Job enforces the values that cellctl publishes.
 - cellctl waits for the volume to grow before it mints the import key. The wait leaves the cell mounted, tolerates one pod restart and ends at a configurable deadline.
@@ -17,7 +17,9 @@ The limits that decide whether a cell accepts an import live in the cell image a
 
 ## Decision
 
-cellctl publishes each cell's effective limits. Admission, in the paired Substrate change, grows `storage_gib` within the published cap before `key_ready`. The `key_ready` observation waits for observed growth.
+This delivery publishes limits and enables import growth for attachable storage. Admission grows `storage_gib` within the published cap before `key_ready`. The `key_ready` observation waits for observed growth.
+
+Local import growth remains open in this programme. Local cells publish NULL until one authoritative node budget covers physical allocations and outstanding accepted requests. Existing local backup growth remains unchanged. Hetzner delivery proceeds independently under D3.
 
 ## Non-goals
 

@@ -25,7 +25,6 @@ from kubernetes.client.rest import ApiException
 
 from . import alerts, db
 from .capacity import (
-    GIB,
     CapacityConfig,
     CapacityObservation,
     LocalCapacityObservation,
@@ -34,7 +33,6 @@ from .capacity import (
     compute_local_capacity,
     compute_node_capacity,
     compute_shared_capacity,
-    pool_takes,
 )
 from .decide import (
     DEFAULT_RECONCILE_CONFIG,
@@ -1176,7 +1174,7 @@ async def reconcile_once(
     await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
     await _cell_health_alerts(cluster, cluster_config, rows, observations, now, memory)
     await _host_alerts(cluster, cluster_config, now, memory)
-    storage_room = _storage_room(cluster, cluster_config.storage, committed_sizes)
+    storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
 
@@ -1343,12 +1341,20 @@ async def reconcile_once(
 def _storage_room(
     cluster: ClusterGateway,
     storage: StorageConfig,
+    observations: dict[str, ClusterObservation],
     committed_sizes: dict[str, int],
 ) -> StorageRoom | None:
-    """Read node room for published import limits and every local claim increase."""
+    """D10: the node pools, read only in a pass where an hourly backup has
+    just reported its use, which is when a growth is planned. A failed read
+    plans no growth: that backup's cell grows, if it must, after its next one."""
 
     local = storage.local
-    if local is None:
+    if local is None or not any(
+        observation.statefulset_hold_kind == SNAPSHOT_BACKUP
+        and observation.statefulset_backup_outcome is None
+        and observation.backup_job_used_bytes is not None
+        for observation in observations.values()
+    ):
         return None
     try:
         free_bytes = cluster.local_capacity_inputs(local).free_bytes
@@ -1656,7 +1662,10 @@ async def _reconcile_row(
     from .imports import ImportLimits, ImportStorage, decide_import, job_name
 
     if row.desired_state != "deleted":
-        limits = asdict(ImportLimits.for_cell(row, observation, cluster_config.storage, config, storage_room))
+        storage = cluster_config.storage
+        storage_class = observation.pvc_storage_class or observation.pv_storage_class or storage.domain
+        # Local import growth awaits authoritative shared-pool accounting; clear earlier published caps.
+        limits = None if storage.is_local(storage_class) else asdict(ImportLimits.for_cell(row, storage, config))
         if limits != row.import_limits:
             await db.write_observed(connection, row.cell_id, {"import_limits": limits})
             row = dataclass_replace(row, import_limits=limits)
@@ -1668,8 +1677,7 @@ async def _reconcile_row(
     import_decision = None
     if item is not None and not _identity_conflict(row, observation, cluster_config.storage):
         jobs = cluster.observe_import_jobs(namespace_name(row.cell_id), item.import_id)
-        import_decision = decide_import(row, item, observation, jobs, now=now, config=config,
-                                        storage=cluster_config.storage, storage_room=storage_room)
+        import_decision = decide_import(row, item, observation, jobs, now=now, config=config)
     exports = await db.read_exports(connection, row.cell_id)
     await _settle_exports(connection, row, exports, secrets_config, object_storage, cluster_config, config, now, memory)
     # One export is packed at a time (C6's open index); after it ends, the
@@ -1694,13 +1702,8 @@ async def _reconcile_row(
                                         volume_unavailable=volume_unavailable)
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
-    local_claim = cluster_config.storage.is_local(observation.pv_storage_class)
-    pending_claim_growth = local_claim and (observation.pvc_exists or observation.pvc_bound) and (
-        observation.pvc_request_bytes is None or observation.pvc_request_bytes < row.size_gib * GIB
-    )
     nothing_to_start = (
-        not pending_claim_growth
-        and import_decision is None
+        import_decision is None
         and export_decision is None
         and _active_hold(row, observation) is None
         and not backup_due
@@ -1770,8 +1773,9 @@ async def _reconcile_row(
         imported = jobs.get("import")
         report = imported.report if imported and imported.succeeded and isinstance(imported.report, dict) else {}
         counts = (report.get("files"), report.get("bytes"))
+        # C5 stores counts as PostgreSQL bigint; values outside that format stay unknown.
         if item.staged_files is None and report.get("ok") is True and all(
-            type(value) is int and value >= 0 for value in counts
+            type(value) is int and 0 <= value <= 2**63 - 1 for value in counts
         ):
             # Persist the successful report before cleanup can remove its Pod; C5 makes it immutable.
             await db.write_import(connection, item.import_id, {"staged_files": counts[0], "staged_bytes": counts[1]})
@@ -1806,8 +1810,7 @@ async def _reconcile_row(
                 raise
             original_error = decision.import_updates.get("error_code", item.error_code)
             pending = dataclass_replace(item, observed_state="cleanup_pending", error_code=original_error, updated_at=now)
-            decision = decide_import(row, pending, observation, jobs, now=now, config=config,
-                                        storage=cluster_config.storage, storage_room=storage_room)
+            decision = decide_import(row, pending, observation, jobs, now=now, config=config)
             decision = decision or Decision()
             decision.import_updates.update(observed_state="cleanup_pending", error_code=original_error,
                                            part_urls=None, urls_expire_at=None)
@@ -1938,23 +1941,13 @@ async def _reconcile_row(
             retry_minutes = observation.statefulset_backup_retry_minutes
         resources, placement = cluster_config.workload_for_cell(row.cell_id)
         local_volume = cluster_config.storage.is_local(storage_class)
-        claim_size = row.size_gib if local_volume else row.storage_gib
-        accepted = observation.pvc_request_bytes
-        keep_claim = local_volume and (observation.pvc_exists or observation.pvc_bound)
-        if keep_claim and accepted is not None:
-            free = storage_room.free_bytes.get(observation.pv_node) if storage_room else None
-            claim_size = max(claim_size, -(-accepted // GIB))
-            keep_claim = claim_size * GIB != accepted and (row.size_gib * GIB <= accepted or not pool_takes(
-                cluster_config.storage.local, free_bytes=free, added_bytes=claim_size * GIB - accepted,
-                largest_cell_gib=max(storage_room.largest_cell_gib, claim_size) if storage_room else claim_size,
-            ))
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
             replicas=decision.replicas,
             read_only=decision.read_only,
             # Local claims keep backup growth; attachable claims follow desired storage.
-            storage_gib=claim_size,
+            storage_gib=row.size_gib if local_volume else row.storage_gib,
             resources=resources,
             model_env=cluster_config.model_env or {},
             placement=placement,
@@ -1996,14 +1989,6 @@ async def _reconcile_row(
         )
         hold_active = observation.statefulset_exists and observation.statefulset_hold_kind is not None
         manifests = render_cell_manifests(spec)
-        if keep_claim:
-            if accepted is None:
-                # Unknown accepted size leaves only the claim untouched; holds can still drain.
-                manifests = [manifest for manifest in manifests if manifest["kind"] != "PersistentVolumeClaim"]
-            else:
-                for manifest in manifests:
-                    if manifest["kind"] == "PersistentVolumeClaim":
-                        manifest["spec"]["resources"]["requests"]["storage"] = str(accepted)
         if decision.delete_claim:
             # D4: a claim deleted this pass is not applied again. This pass
             # renders the deleted claim's class, and an unused claim is gone

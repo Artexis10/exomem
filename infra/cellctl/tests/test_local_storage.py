@@ -49,7 +49,6 @@ def _row(**overrides) -> CellRow:
 def _bound(storage_class: str, **overrides) -> ClusterObservation:
     defaults = dict(
         namespace_exists=True, namespace_cell_label="aaaaaaaaaaaaaaaa", pvc_bound=True, pvc_uid="pvc-1",
-        pvc_request_bytes=10 * 1024**3,
         pv_claim_ref_uid="pvc-1", pv_storage_class=storage_class, pvc_storage_class=storage_class,
         statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True,
         ready_pod_image=IMAGE_A,

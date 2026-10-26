@@ -107,7 +107,8 @@ DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
 
 @dataclass(frozen=True)
 class StorageRoom:
-    """Node room for import limits and every local claim increase."""
+    """D10: what a growth needs to know of the cells' nodes. reconcile.py
+    reads it only in a pass where an hourly backup reported its use."""
 
     # Each node's published free bytes; None where its driver publishes none.
     free_bytes: dict[str, int | None]

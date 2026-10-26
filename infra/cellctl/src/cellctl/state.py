@@ -173,7 +173,6 @@ class ClusterObservation:
     pvc_uid: str | None = None
     pvc_resource_version: str | None = None
     pvc_capacity_bytes: int | None = None
-    pvc_request_bytes: int | None = None
     pvc_resize_pending: bool = False
     pv_claim_ref_uid: str | None = None
     pv_storage_class: str | None = None

@@ -8,9 +8,8 @@ from datetime import datetime, timedelta
 
 from botocore.exceptions import ClientError
 
-from .capacity import GIB, pool_takes
+from .capacity import GIB
 from .state import CellRow, ClusterObservation, Decision
-from .storage_config import DEFAULT_STORAGE
 
 # C5 fixes these state tokens; they are not tenant vocabulary.
 TERMINAL = frozenset({"done", "failed", "expired", "discarded"})
@@ -36,17 +35,8 @@ class ImportLimits:
     upload_window_seconds: int = int(UPLOAD_DEADLINE.total_seconds())
 
     @classmethod
-    def for_cell(cls, row, observation, storage, config, room):
-        maximum = max(storage.max_cell_gib, row.size_gib)
-        if storage.is_local(storage.claim_class(observation.pvc_storage_class or observation.pv_storage_class)):
-            maximum = row.size_gib
-            if room is not None:
-                for size in range(row.size_gib + 1, storage.max_cell_gib + 1):
-                    free = room.free_bytes.get(observation.pv_node)
-                    if pool_takes(storage.local, free_bytes=free, added_bytes=(size - row.size_gib) * GIB,
-                                  largest_cell_gib=max(room.largest_cell_gib, size)):
-                        maximum = size
-        return cls(maximum, int(config.import_deadline.total_seconds()),
+    def for_cell(cls, row, storage, config):
+        return cls(max(storage.max_cell_gib, row.size_gib), int(config.import_deadline.total_seconds()),
                    int(config.import_growth_deadline.total_seconds()))
 
 
@@ -103,8 +93,7 @@ def job_name(import_id: str, phase: str) -> str:
 
 
 def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation,
-                  jobs: dict[str, ImportJob], *, now: datetime, config=None,
-                  storage=DEFAULT_STORAGE, storage_room=None) -> Decision | None:
+                  jobs: dict[str, ImportJob], *, now: datetime, config=None) -> Decision | None:
     """Separate work completion, volume release and eventual cleanup."""
     from .decide import DEFAULT_RECONCILE_CONFIG
 
@@ -184,15 +173,6 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             (row.observed_storage_capacity_bytes or 0) < required * GIB
             or row.observed_storage_generation != row.generation or observation.pvc_resize_pending
         )
-        if storage.is_local(observation.pv_storage_class):
-            free = storage_room.free_bytes.get(observation.pv_node) if storage_room else None
-            accepted = observation.pvc_request_bytes
-            if free is None or accepted is None:
-                waiting_for_storage = True
-            elif not pool_takes(storage.local, free_bytes=free,
-                                added_bytes=max(0, required * GIB - accepted),
-                                largest_cell_gib=max(storage_room.largest_cell_gib, required)):
-                failure = failure or "IMPORT_STORAGE_NO_ROOM"
         if waiting_for_storage and now - item.created_at >= config.import_growth_deadline:
             failure = failure or "IMPORT_STORAGE_UNAVAILABLE"
     if not running and not cleanup_started:

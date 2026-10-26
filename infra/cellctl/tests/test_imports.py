@@ -206,6 +206,8 @@ def test_cleanup_keeps_success_after_upload_expiry_and_honors_suspension_and_del
     ({"ok": True, "files": 2, "bytes": 12}, (2, 12)),
     ({"ok": True, "files": True, "bytes": 12}, (None, None)),
     ({"ok": True, "files": 2, "bytes": -1}, (None, None)),
+    ({"ok": True, "files": 2**63, "bytes": 12}, (None, None)),
+    ({"ok": True, "files": 2, "bytes": 2**63}, (None, None)),
     ({}, (None, None)),
 ])
 async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cell_db, monkeypatch, report, expected, caplog):
