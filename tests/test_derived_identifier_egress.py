@@ -1422,6 +1422,35 @@ def test_an_entity_destination_a_withheld_entity_holds_is_refused_as_any_occupie
     assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
 
 
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_slug_destination_a_withheld_entity_holds_is_refused_as_any_occupied_one(
+    tmp_path: Path, audience: str
+) -> None:
+    # The slug door skips the title lookup, so its refusal must also carry
+    # nothing (candidates, fingerprint) that tells a withheld occupant from a visible one.
+    occupied = f"{KB}/Entities/People/wanda.md"
+    entity = _page(
+        "Someone Else", "A person.", type="entity", entity_type="person", title="Someone Else"
+    )
+    answers = {}
+    for which, scope in (("withheld", "Entities/People/**"), ("visible", "Notes/Withheld/**")):
+        vault = _materialize(tmp_path / which / "vault", {occupied: entity}, audience, scope=scope)
+        answers[which] = _call(
+            vault,
+            _principal(audience),
+            "connect_memory",
+            operation="create-entity",
+            name="Wanda Grey",
+            slug="wanda",
+            entity_type="person",
+            summary="A person.",
+        )
+        assert (vault / occupied).read_text(encoding="utf-8") == entity
+
+    assert answers["withheld"] == answers["visible"]
+    assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
+
+
 _FOLDERS = {
     "visible": f"{NOTES}/Open",
     "mixed": f"{NOTES}/Mixed",

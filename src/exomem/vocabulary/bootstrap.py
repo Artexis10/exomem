@@ -49,8 +49,19 @@ def recently_added(
     return sorted(found)
 
 
-def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None) -> dict[str, Any]:
-    """The bootstrap's view of every vocabulary registry."""
+def block(
+    vault_root: Path,
+    *,
+    inspect_route: str,
+    today: dt.date | None = None,
+    registry_scope: str | None = None,
+) -> dict[str, Any]:
+    """The bootstrap's view of every vocabulary registry.
+
+    One instance is described, never a pool: the public one, or `registry_scope`
+    when the request carries it. An instance this caller cannot admit reports the
+    same `unavailable` whether it is withheld or does not exist.
+    """
     since = (today or dt.datetime.now(dt.UTC).date()) - dt.timedelta(days=NEW_WINDOW_DAYS)
     from ..registry_history import HistoryAdmissionRefused
     from . import instances
@@ -59,7 +70,7 @@ def block(vault_root: Path, *, inspect_route: str, today: dt.date | None = None)
     registries: dict[str, Any] = {}
     for name, spec in registry_specs().items():
         try:
-            spec = instances.select(vault_root, spec)
+            spec = instances.select(vault_root, spec, registry_scope)
         except registry.RegistryError as error:
             registries[name] = {"unavailable": selection_refusal(name, error)["reason"]}
             continue

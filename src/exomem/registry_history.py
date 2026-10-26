@@ -178,6 +178,7 @@ def commit(
     added: Mapping[str, Iterable[str]] | None = None,
     private: bool = False,
     validate_bindings: Callable[[], None] | None = None,
+    required_guards: Iterable[vault_module.PathGuard | vault_module.DirectoryCensusGuard] = (),
 ) -> dict[str, Any]:
     """Write `rendered` to `path` with its snapshot and log entry in one batch.
 
@@ -193,6 +194,13 @@ def commit(
     warning when `log.md` is missing (the snapshot still records the reason).
     """
     root = Path(vault_root)
+    required_guards = tuple(required_guards)
+    target = path.relative_to(root).as_posix()
+    for dependency in required_guards:
+        if isinstance(dependency, vault_module.PathGuard) and dependency.target == target:
+            # A proof's primary guard follows the write; read dependencies remain unchanged.
+            guard = dependency
+    required_guards = tuple(dependency for dependency in required_guards if dependency.target != target)
     if guard is None:
         # Owner-trusted bootstrap can create the root; the first guard binds it.
         vault_module._create_parent_dirs_held(root, root, [])
@@ -207,6 +215,7 @@ def commit(
     guard.recheck(root)
     if previous is None:
         previous = _NO_ROLES_OVERRIDE if path.name == "context-roles.yaml" else NO_OVERRIDE
+    before_source_hash = vault_module.content_hash(previous)
     moment = dt.datetime.now(dt.UTC)
     version = version_id(moment, before_hash)
     reason = (why if private else _one_line(why)) if why else ""
@@ -216,6 +225,8 @@ def commit(
             "why": reason,
             "before": before_hash if private else before_hash[:8],
             "after": after_hash if private else after_hash[:8],
+            "before_source_hash": before_source_hash,
+            "after_source_hash": vault_module.content_hash(rendered),
             "at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
             **_principal_fields(),
             **_added_field(added),
@@ -265,6 +276,7 @@ def commit(
     vault_module.batch_atomic_write(
         writes, vault_root=root, _vocabulary_auxiliaries=manifest,
         _validate_prepared_bindings=validate_bindings,
+        required_guards=required_guards,
     )
     _prune(root, stem)
     out: dict[str, Any] = {
@@ -304,6 +316,7 @@ def plan_snapshot(
     before_hash: str,
     after_hash: str,
     added: Mapping[str, Iterable[str]] | None = None,
+    rendered: str | None = None,
 ) -> tuple[str, vault_module.PlannedWrite]:
     """The kept version a write folded into another batch leaves behind.
 
@@ -314,6 +327,8 @@ def plan_snapshot(
     version id and the write.
     """
     root = Path(vault_root)
+    if previous is None:
+        previous = _NO_ROLES_OVERRIDE if path.name == "context-roles.yaml" else NO_OVERRIDE
     moment = dt.datetime.now(dt.UTC)
     version = version_id(moment, before_hash)
     header = json.dumps(
@@ -322,6 +337,10 @@ def plan_snapshot(
             "why": "",
             "before": before_hash[:8],
             "after": after_hash[:8],
+            **({
+                "before_source_hash": vault_module.content_hash(previous),
+                "after_source_hash": vault_module.content_hash(rendered),
+            } if rendered is not None else {}),
             "at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
             **_principal_fields(),
             **_added_field(added),
@@ -331,10 +350,9 @@ def plan_snapshot(
         separators=(",", ":"),
     )
     snapshot = history_dir(root, stem) / f"{version}.yaml"
-    empty = _NO_ROLES_OVERRIDE if path.name == "context-roles.yaml" else NO_OVERRIDE
     write = vault_module.PlannedWrite(
         path=snapshot,
-        content=f"{_HEADER_PREFIX}{header}\n{previous if previous is not None else empty}",
+        content=f"{_HEADER_PREFIX}{header}\n{previous}",
         create_only=True,
         guard=vault_module.PathGuard.capture(
             root, snapshot.relative_to(root).as_posix(), leaf_policy="absent"

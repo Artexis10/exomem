@@ -1,0 +1,7 @@
+# Homes are the owner's own folders under Notes, each serving topic and project keys,
+# so notes of several types about one subject sit together. Exomem ships none: a vault
+# declares them in `_Schema/homes.yaml`, one entry per folder, with
+# `attributes: {folder: Notes/<Name>, topics: [<domain key>], projects: [<project key>]}`.
+schema_version: 1
+registry: homes
+entries: {}
