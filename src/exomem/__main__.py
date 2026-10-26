@@ -4477,6 +4477,12 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op == "triage_memory" and isinstance(result, dict):
         _print_triage_human(result)
         return
+    if isinstance(result, dict) and isinstance(result.get("hits"), list) and "due_state" in result:
+        # The advisory block that `commands._with_due_state` puts on a recall has no
+        # human view; the human view shows the recall as before and `--json` keeps it.
+        result = {key: value for key, value in result.items() if key != "due_state"}
+        if set(result) == {"hits"}:
+            result = result["hits"]
     if (
         isinstance(result, dict)
         and isinstance(result.get("hits"), list)
