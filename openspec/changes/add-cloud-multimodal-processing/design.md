@@ -113,7 +113,14 @@ Reuse wins where it fits.
   - Acceptance records the image size the models add.
 - **Image search model.** It is chosen by published benchmarks, not by our own accuracy runs. The candidates are:
   - `clip-ViT-B-32`, today's model, English queries only, with the multilingual text encoder `clip-ViT-B-32-multilingual-v1` aligned to its image space;
+  - `M-CLIP/XLM-Roberta-Large-Vit-B-32`, another multilingual text encoder aligned to the existing OpenAI ViT-B/32 image space;
   - a current multilingual image-text model of the SigLIP 2 class, which handles images and text in many languages in one model.
+
+  Task 3.4 compares the aligned text encoders and preserves stored image vectors.
+  It changes the query encoder only; image tags retain their existing text encoder and calibrated threshold.
+  An image encoder or vector-space change remains separate work under the image tasks and D8.
+  The selected query artifact must include its trained projection, not only the transformer backbone.
+  Its numerical agreement check includes the tokenizer, pooling, projection, normalisation and recorded sequence limit.
 
   The rule:
   - use published multilingual image–text retrieval results, such as Crossmodal-3600 recall@k for English and Japanese;
@@ -141,25 +148,43 @@ Reuse wins where it fits.
 
 ### D6. Speech
 
-The engine and model are chosen by the bake-off recorded below:
-- faster-whisper `small` and `large-v3-turbo`, int8;
-- Parakeet-TDT-0.6B-v3 in ONNX;
-- SenseVoice-Small in ONNX;
-- optionally, Whisper `large-v3-turbo` in ONNX.
+Selection targets automatic transcription across the broadest viable language set.
+Japanese, English and Estonian verify quality; they do not limit supported languages.
+The comparison records declared coverage separately from measured quality in at least 100 languages.
+A completed fixture alone does not establish usable recognition in its language.
+
+The candidate inventory includes:
+- Whisper `large-v3` and `large-v3-turbo` through CTranslate2, at int8;
+- Whisper through ONNX Runtime;
+- SenseVoice-Small through ONNX Runtime;
+- Meta MMS, for coverage beyond 100 languages;
+- Omnilingual ASR CTC 300M v2 and 1B v2 through ONNX Runtime;
+- the earlier `small` Whisper and Parakeet-TDT-0.6B-v3 candidates, where their coverage fits.
+
+The comparison screens redistribution terms, automatic language handling and offline runtime compatibility before expensive measurements.
+It records an excluded candidate's concrete reason; exclusion is not a measured quality failure.
+The shipping image keeps the shared runtime's no-PyTorch contract.
+File-backed immutable weights remain the default; a private-copy runtime needs the shared contract's measured exception.
 
 Selection follows the general rule of the `shared-model-runtime` capability. The speech terms add only what speech needs, and the spec states them:
 
-- **Metric per language.** WER for English and Estonian, which are written with spaces between words, and CER for Japanese, which is not.
+- **Metric per verification language.** WER for English and Estonian, which are written with spaces between words, and CER for Japanese, which is not.
 - **One benchmark.** Candidates are compared on the same published benchmark wherever one covers them all: the Open ASR Leaderboard, then FLEURS or Common Voice results from model cards and papers.
-- **Missing results.** When any candidate lacks a published result in a required language, every candidate is measured for that language on the full FLEURS test split. That language is then judged on those measurements only. A measurement is never compared with a published number, because the two differ in normalisation and decoding.
+- **Missing results.** When any candidate lacks a published result in a verification language, every candidate is measured for that language on the full FLEURS test split. That language is then judged on those measurements only. A measurement is never compared with a published number, because the two differ in normalisation and decoding.
   - The full split costs only local CPU, and it is expected to give intervals narrower than the 2.0-point margin (to be confirmed by the first run).
   - Each difference from the best candidate is reported with its 95% bootstrap confidence interval, resampling the utterances. On a measured language, a candidate passes the 2.0-point bound only when the upper end of its interval is within 2.0 points.
   - The owner's amendment to the bake-off allows this measurement. That amendment is not recorded in this repository.
 - **Cost.** The int8 real-time factor at pinned CPU threads on the cell's CPU, peak memory, and whether the weights can be shared under D3.
-- **Sanity check.** Ten utterances per language catch a broken int8 or ONNX conversion.
-- **Pick.** The lowest-memory candidate whose error rate is within 2.0 points of the best in every required language. Shareable weights count once per node. Routing by language is allowed only if no single candidate passes, and only if the routed pair stays under 1.5 GB.
+- **Sanity check.** Ten utterances per verification language catch a broken int8 or ONNX conversion.
+- **Pick.** Candidates first meet the 2.0-point bound in every verification language and the cell resource bounds. Among those candidates, prefer broader supported language coverage, then lower private memory. Report measured quality by language rather than treating the declared language count as equal quality. Shareable weights count once per node. Routing by language is allowed only if no single candidate passes, and only if the routed pair stays under 1.5 GB.
 
-Bake-off result: *pending; recorded here when the run completes.*
+Bake-off result: *pending; no speech engine is selected.*
+
+The validation round is an adapter diagnostic, not a selection or a conversion agreement pass.
+FLEURS test data informed earlier work, so new comparisons must call it an established benchmark rather than a fresh held-out set.
+Any fresh confirmation uses untouched source units reserved before generation.
+The final record includes artifact and recipe identities, raw run references, per-case differences and confidence intervals.
+Automatic ingest, silent-media markers and completed-sidecar preservation are part of runtime verification.
 
 ### D7. Off until proven, and the disabled state
 

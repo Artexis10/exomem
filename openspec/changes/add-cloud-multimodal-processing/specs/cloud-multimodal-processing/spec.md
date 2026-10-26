@@ -164,24 +164,27 @@ A Cloud cell MAY add one caption per image, written by a pinned-weight, frozen c
 
 ### Requirement: The Cloud speech model is selected by the shared rule with speech terms
 
-The Cloud speech engine and model SHALL be selected under the selection rule of the `shared-model-runtime` capability, with these terms fixed before any measurement:
+The Cloud speech engine and model SHALL target the broadest language coverage that meets the quality and resource bounds. Japanese, English and Estonian SHALL be verification languages, not the coverage limit. Language sets SHALL remain deployment data. The selection record SHALL distinguish declared coverage, attempted languages, completed cases, failures and measured quality across at least 100 languages. It SHALL screen redistribution terms and automatic offline operation before costly measurements. An eligibility exclusion SHALL NOT be reported as a measured quality failure.
 
-1. Each language in the deployment's required speech language set SHALL be scored with its own metric: word error rate for a language written with spaces between words, and character error rate for a language written without them.
+Selection SHALL follow the `shared-model-runtime` capability, with these terms fixed before any measurement:
+
+1. Each language in the deployment's speech verification set SHALL be scored with its own metric: word error rate for a language written with spaces between words, and character error rate for a language written without them.
 2. Candidates SHALL be compared on the same published benchmark wherever one covers them all.
-3. When a published result is missing for any candidate in a required language, every candidate SHALL be measured for that language on the full FLEURS test split. That language SHALL be judged on those measurements only, and a measurement SHALL never be compared with a published result. Each difference from the best candidate SHALL be reported with its 95% bootstrap confidence interval.
-4. The CPU speed measure SHALL be the int8 real-time factor at pinned CPU threads on the cell's hardware. The sanity check SHALL be ten utterances per required language.
-5. The rule SHALL pick the lowest-memory candidate whose error rate is within 2.0 points of the best candidate in every required language. On a measured language, a candidate SHALL pass only when the upper end of its interval is within 2.0 points. Shareable weights SHALL count once per node.
+3. When a published result is missing for any eligible candidate in a verification language, every eligible candidate SHALL be measured for that language on the full FLEURS test split. That language SHALL be judged on those measurements only, and a measurement SHALL never be compared with a published result. Each difference from the best candidate SHALL be reported with its 95% bootstrap confidence interval.
+4. The CPU speed measure SHALL be the int8 real-time factor at pinned CPU threads on the cell's hardware. The sanity check SHALL be ten utterances per verification language.
+5. A candidate SHALL meet the cell resource bounds and stay within 2.0 points of the best candidate in every verification language. On a measured language, it SHALL pass only when the upper end of its interval is within 2.0 points. Among passing candidates, the rule SHALL prefer broader supported language coverage, then lower private memory. Shareable weights SHALL count once per node.
 6. Routing by language SHALL be allowed only when no single candidate passes, and only when the routed candidates together stay under 1.5 GB.
 
-#### Scenario: The lightest candidate within the bound wins
+#### Scenario: Broader coverage wins within the quality and resource bounds
 
-- **WHEN** two candidates are within 2.0 points of the best error rate in every required language
-- **THEN** the candidate with the lower measured memory is chosen
+- **WHEN** two candidates meet the resource bounds and the 2.0-point quality bound in every verification language
+- **THEN** the candidate with broader supported language coverage is chosen
+- **AND** lower private memory decides between candidates with equal coverage
 
-#### Scenario: A missing published result means every candidate is measured
+#### Scenario: A missing published result means every eligible candidate is measured
 
-- **WHEN** one candidate has no published result for a required language
-- **THEN** every candidate is measured for that language on the full FLEURS test split
+- **WHEN** one eligible candidate has no published result for a verification language
+- **THEN** every eligible candidate is measured for that language on the full FLEURS test split
 - **AND** no candidate's published result for that language enters the comparison
 
 #### Scenario: Routing is a fallback, not a preference
@@ -191,7 +194,7 @@ The Cloud speech engine and model SHALL be selected under the selection rule of 
 
 #### Scenario: A broken conversion is caught
 
-- **WHEN** a candidate's int8 or ONNX conversion fails the ten-utterance sanity check in any required language
+- **WHEN** a candidate's int8 or ONNX conversion fails the ten-utterance sanity check in any verification language
 - **THEN** that candidate is not selected
 
 ### Requirement: Each Cloud engine is off by default and turns on after acceptance in a canary cell
