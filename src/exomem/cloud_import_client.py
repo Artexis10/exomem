@@ -24,11 +24,12 @@ from platformdirs import user_state_dir
 from . import cloud_import_envelope, import_selection
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
+from .cloud_import import DEFAULT_RESERVE_BYTES
 from .cloud_import_job import _private_json
 
 # The production Cloud endpoints, defined here once for `exomem cloud import` and `exomem cloud export`.
-# The MCP URL is the resource of the Cloud plugin definition, which a test compares. The API base is
-# Substrate's public origin, where the Cloud routes under /api/exomem are served.
+# The Cloud owner confirmed both. The MCP URL is the resource of the Cloud plugin definition, which a
+# test compares. The API base is Substrate's public origin, where the Cloud routes under /api/exomem are served.
 PRODUCTION_MCP_URL = "https://exomem.substratesystems.io/mcp"
 PRODUCTION_API_BASE_URL = "https://substratesystems.io"
 
@@ -56,12 +57,18 @@ class CloudImportClientConfig:
 class CloudImportError(Exception):
     """A failure reported by phase and code. Neither can carry a file name or a signed URL."""
 
-    def __init__(self, phase: str, code: str, message: str, import_id: str | None = None):
+    def __init__(self, phase: str, code: str, message: str, import_id: str | None = None, *, resume: bool = True):
         super().__init__(f"{phase}: {code}")
         self.phase = phase
         self.code = code
         self.message = message
         self.import_id = import_id
+        # False when a rerun cannot continue this import; the message then says what a rerun does instead.
+        self.resume = resume
+
+
+class _SourceChanged(Exception):
+    """A file or folder changed while it was archived, so the archive would mix two versions."""
 
 
 def safe_code(value: object) -> str | None:
@@ -119,10 +126,21 @@ def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
-def _expected_ciphertext(sizes: Iterable[int]) -> int:
-    """About how large the encrypted tar is: tar blocks, the tar's end padding and age's tag per 64 KiB chunk."""
+def _member_bytes(name: str, size: int) -> int:
+    """About how many tar bytes a member takes: every member gets a pax header for its fractional mtime.
+
+    The header's data holds the mtime and, for a long or non-ASCII name, the name. The estimate always
+    counts the name, which can only overstate, and a disk check should not understate.
+    """
     block = tarfile.BLOCKSIZE
-    tar = sum(block + -(-size // block) * block for size in sizes) + tarfile.RECORDSIZE
+    pax_data = len(name.encode("utf-8", "surrogateescape")) + 64
+    return 2 * block + -(-pax_data // block) * block + -(-size // block) * block
+
+
+def _expected_ciphertext(members: Iterable[tuple[str, int]], folders: Iterable[str]) -> int:
+    """About how large the encrypted tar is: tar members, the tar's end padding and age's tag per 64 KiB chunk."""
+    tar = sum(_member_bytes(name, size) for name, size in members)
+    tar += sum(_member_bytes(name, 0) for name in folders) + tarfile.RECORDSIZE
     return tar + tar // 4096 + 1024
 
 
@@ -130,16 +148,22 @@ def _inventory(source: Path, envelope, *, include_hidden: bool, use_gitignore: b
     """What the import will carry, reported before anything is built."""
     if envelope is not None:
         encoded = envelope.encoded()
-        sizes = [source.stat().st_size, len(encoded)]
-        return _Plan("archive_members", 2, sum(sizes), _expected_ciphertext(sizes), None)
+        members = [(cloud_import_envelope.METADATA_NAME, len(encoded)),
+                   (cloud_import_envelope.ARCHIVE_NAME, source.stat().st_size)]
+        return _Plan("archive_members", 2, sum(size for _, size in members), _expected_ciphertext(members, ()), None)
     selection = import_selection.select(source, include_hidden=include_hidden, use_gitignore=use_gitignore)
     for line in selection.report_lines():
         progress.say(line)
     if not selection.kept:
         raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT",
                                "no file is left to import; pass --include-hidden or --no-gitignore to take more")
-    sizes = [item.size for item in selection.kept]
-    return _Plan("adopt", len(sizes), sum(sizes), _expected_ciphertext(sizes), selection)
+    members = [(item.rel, item.size) for item in selection.kept]
+    # The archive also holds one entry per folder that leads to a selected file.
+    folders: set[str] = set()
+    for rel, _ in members:
+        parts = rel.split("/")[:-1]
+        folders.update("/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+    return _Plan("adopt", len(members), sum(size for _, size in members), _expected_ciphertext(members, folders), selection)
 
 
 def _check_resources(plan: _Plan, checkpoint: Path, progress: Progress, free_bytes: Callable[[Path], int]) -> None:
@@ -147,13 +171,13 @@ def _check_resources(plan: _Plan, checkpoint: Path, progress: Progress, free_byt
     if shutil.which("age") is None:
         raise CloudImportError(PREFLIGHT, "AGE_MISSING", "the age tool is not on PATH; install age and run the command again")
     free = free_bytes(checkpoint)
-    progress.say(f"The encrypted copy needs about {human_bytes(plan.expected_ciphertext)} in {checkpoint}; "
-                 f"{human_bytes(free)} is free there.")
-    if plan.expected_ciphertext > free:
+    progress.say(f"The encrypted copy needs about {human_bytes(plan.expected_ciphertext)} in {checkpoint}, "
+                 f"and the disk keeps a reserve of {human_bytes(DEFAULT_RESERVE_BYTES)}; {human_bytes(free)} is free there.")
+    if plan.expected_ciphertext + DEFAULT_RESERVE_BYTES > free:
         raise CloudImportError(
             PREFLIGHT, "INSUFFICIENT_DISK",
-            f"the encrypted copy needs about {plan.expected_ciphertext} bytes and {free} bytes are free; "
-            "free space or pass --checkpoint on a larger disk")
+            f"the encrypted copy needs about {plan.expected_ciphertext} bytes plus a reserve of {DEFAULT_RESERVE_BYTES} "
+            f"bytes and {free} bytes are free; free space or pass --checkpoint on a larger disk")
 
 
 class _CountingWriter:
@@ -175,7 +199,7 @@ class _CountingWriter:
 
 
 def _add_selected(archive: tarfile.TarFile, root: Path, selection: import_selection.Selection) -> None:
-    """Add the selected files, each opened without following a link and checked against the walk."""
+    """Add the selected files, each opened without following a link and checked against the walk and while it is read."""
     made: set[str] = set()
     for item in selection.kept:
         parts = item.rel.split("/")[:-1]
@@ -185,18 +209,32 @@ def _add_selected(archive: tarfile.TarFile, root: Path, selection: import_select
                 made.add(name)
                 info = archive.gettarinfo(str(root / name), arcname=name)
                 if not info.isdir():
-                    raise CloudImportError(ARCHIVE, "SOURCE_CHANGED", "a folder changed while it was archived")
+                    raise _SourceChanged
                 archive.addfile(info)
         try:
             descriptor = import_selection.open_for_read(root / item.rel)
         except OSError:
-            raise CloudImportError(ARCHIVE, "SOURCE_CHANGED", "a file changed while it was archived") from None
+            raise _SourceChanged from None
         with os.fdopen(descriptor, "rb") as handle:
-            now = os.fstat(descriptor)
-            if (not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != item.identity
-                    or now.st_size != item.size):
-                raise CloudImportError(ARCHIVE, "SOURCE_CHANGED", "a file changed while it was archived")
-            archive.addfile(archive.gettarinfo(arcname=item.rel, fileobj=handle), handle)
+            before = os.fstat(descriptor)
+            if (not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != item.identity
+                    or (before.st_size, before.st_mtime_ns) != (item.size, item.mtime_ns)):
+                raise _SourceChanged
+            try:
+                archive.addfile(archive.gettarinfo(arcname=item.rel, fileobj=handle), handle)
+            except OSError:
+                # A file that shrinks while it is read ends early; a file that cannot be read is another failure.
+                if _changed_since(descriptor, before):
+                    raise _SourceChanged from None
+                raise
+            if _changed_since(descriptor, before):
+                raise _SourceChanged
+
+
+def _changed_since(descriptor: int, before: os.stat_result) -> bool:
+    """Whether the open file's size or modification time differs from `before`."""
+    now = os.fstat(descriptor)
+    return (now.st_size, now.st_mtime_ns) != (before.st_size, before.st_mtime_ns)
 
 
 def _ciphertext(source: Path, target: Path, recipient: str, envelope, plan: _Plan, progress: Progress) -> None:
@@ -234,6 +272,17 @@ def _ciphertext(source: Path, target: Path, recipient: str, envelope, plan: _Pla
         os.replace(pending, target)
     finally:
         pending.unlink(missing_ok=True)
+
+
+def _abandoned(record: Path, ciphertext: Path, import_id: str, code: str, why: str) -> CloudImportError:
+    """Remove a checkpoint that cannot resume, and say what happens next and how to stop the open import."""
+    record.unlink(missing_ok=True)
+    ciphertext.unlink(missing_ok=True)
+    return CloudImportError(
+        ARCHIVE, code,
+        f"{why}. The checkpoint is removed, and a new run starts a new import. Cloud import {import_id} may still "
+        "be open; to stop it, ask your assistant to call transfer_memory with action import_cancel and that import id",
+        import_id, resume=False)
 
 
 def _coded(where: _Where, error: Exception) -> CloudImportError:
@@ -343,7 +392,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
                 raise CloudImportError(where.phase, safe_code(item.get("error_code")) or "IMPORT_ENDED",
-                                       "the Cloud import ended without finishing", state["import_id"])
+                                       "the Cloud import ended without finishing, and the checkpoint is removed; "
+                                       "a new run starts a new import", state["import_id"], resume=False)
             if predicate(item):
                 return item
             if time.monotonic() >= deadline:
@@ -368,21 +418,28 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
         where.phase = ARCHIVE
         if not ciphertext.exists():
             if "ciphertext_sha256" in state:
-                raise CloudImportError(ARCHIVE, "CIPHERTEXT_MISSING", "the checkpoint's encrypted copy is missing; cancel this import before restarting")
+                raise _abandoned(record, ciphertext, state["import_id"], "CIPHERTEXT_MISSING",
+                                 "the checkpoint's encrypted copy is missing and cannot be made again")
             envelope = cloud_import_envelope.Envelope.model_validate(state["envelope"]) if state["envelope"] else None
             if plan is None:
                 # A restart after the import was declared but before the archive was built: walk the source again.
                 plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore, progress=progress)
                 if (plan.files, plan.bytes) != (state["declared_files"], state["declared_bytes"]):
-                    raise CloudImportError(ARCHIVE, "SOURCE_CHANGED", "the source changed since this import was declared; cancel it and start again")
+                    raise _abandoned(record, ciphertext, state["import_id"], "SOURCE_CHANGED",
+                                     "the source changed since this import was declared")
                 _check_resources(plan, checkpoint, progress, free_bytes)
             progress.say("Archiving and encrypting.")
-            await asyncio.to_thread(_ciphertext, source, ciphertext, item["recipient"], envelope, plan, progress)
+            try:
+                await asyncio.to_thread(_ciphertext, source, ciphertext, item["recipient"], envelope, plan, progress)
+            except _SourceChanged:
+                raise _abandoned(record, ciphertext, state["import_id"], "SOURCE_CHANGED",
+                                 "the source changed while it was archived") from None
         with ciphertext.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         size = ciphertext.stat().st_size
         if state.get("ciphertext_sha256", digest) != digest or state.get("ciphertext_bytes", size) != size:
-            raise CloudImportError(ARCHIVE, "CIPHERTEXT_CHANGED", "the checkpoint's encrypted copy changed")
+            raise _abandoned(record, ciphertext, state["import_id"], "CIPHERTEXT_CHANGED",
+                             "the checkpoint's encrypted copy changed")
         state.update(ciphertext_sha256=digest, ciphertext_bytes=size)
         _private_json(record, state)
         progress.say(f"Encrypted copy: {human_bytes(size)} in {checkpoint}. It duplicates your data on this "
@@ -430,7 +487,7 @@ def _report_failure(error: CloudImportError, checkpoint: Path, progress: Progres
     """Say where the run stopped and what it still holds; return the encrypted copy's bytes when it holds one."""
     progress.say(f"The import stopped in the {error.phase} phase: {error.code}. {error.message}.")
     if error.import_id:
-        progress.say(f"Import id: {error.import_id}. Run the same command again to resume.")
+        progress.say(f"Import id: {error.import_id}." + (" Run the same command again to resume." if error.resume else ""))
     held = checkpoint / "archive.age"
     if not held.exists():
         return None

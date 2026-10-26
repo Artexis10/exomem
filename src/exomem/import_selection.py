@@ -26,6 +26,8 @@ _READ_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
 )
+# Windows marks a hidden file with an attribute, not a leading dot; the mask is 0 elsewhere.
+_HIDDEN_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0)
 
 
 class Reason(enum.StrEnum):
@@ -120,6 +122,38 @@ def open_for_read(path: str | Path) -> int:
     return os.open(path, _READ_FLAGS)
 
 
+@dataclass(frozen=True, slots=True)
+class _Rules:
+    """One .gitignore file, read twice because git decides a folder and a file differently.
+
+    `GitIgnoreSpec` decides files as git does, but it drops every folder when a catch-all
+    pattern is followed by a folder re-include (`*` then `!*/`), where git still descends.
+    The plain `PathSpec` with last-match-wins decides folders as git does, and would let
+    `!*/` match a file below a folder, so it decides folders only.
+    """
+
+    base: str
+    files: pathspec.GitIgnoreSpec
+    folders: pathspec.PathSpec
+
+
+def _is_junction(path: str) -> bool:
+    """A Windows junction: a folder link that `is_symlink` does not report and `O_NOFOLLOW` cannot refuse."""
+    # `os.path.isjunction` exists from Python 3.12; the project supports 3.11, where it is never one.
+    return bool(getattr(os.path, "isjunction", lambda _path: False)(path))
+
+
+def _is_hidden(entry: os.DirEntry) -> bool:
+    if entry.name.startswith("."):
+        return True
+    if not _HIDDEN_ATTRIBUTE:
+        return False
+    try:
+        return bool(getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & _HIDDEN_ATTRIBUTE)
+    except OSError:
+        return False
+
+
 def _tally_tree(directory: str, notes: list[str], rel: str) -> tuple[int, int]:
     """Count the entries and regular-file bytes under a folder that stays behind, by `lstat` alone."""
     files = size = 0
@@ -129,7 +163,7 @@ def _tally_tree(directory: str, notes: list[str], rel: str) -> tuple[int, int]:
         try:
             with os.scandir(pending.pop()) as entries:
                 for entry in entries:
-                    if entry.is_dir(follow_symlinks=False):
+                    if entry.is_dir(follow_symlinks=False) and not _is_junction(entry.path):
                         pending.append(entry.path)
                         continue
                     files += 1
@@ -147,7 +181,7 @@ def _tally_tree(directory: str, notes: list[str], rel: str) -> tuple[int, int]:
     return files, size
 
 
-def _read_gitignore(path: str, rel: str, notes: list[str]) -> pathspec.GitIgnoreSpec | None:
+def _read_gitignore(path: str, rel: str, base: str, notes: list[str]) -> _Rules | None:
     try:
         descriptor = open_for_read(path)
     except OSError:
@@ -167,18 +201,19 @@ def _read_gitignore(path: str, rel: str, notes: list[str]) -> pathspec.GitIgnore
     if len(raw) > _GITIGNORE_LIMIT:
         notes.append(f"{rel} is too large to be a rules file, so its rules are not applied.")
         return None
+    lines = raw.decode("utf-8", errors="replace").splitlines()
     try:
-        return pathspec.GitIgnoreSpec.from_lines(raw.decode("utf-8", errors="replace").splitlines())
+        return _Rules(base, pathspec.GitIgnoreSpec.from_lines(lines), pathspec.PathSpec.from_lines("gitignore", lines))
     except ValueError:
         notes.append(f"{rel} holds a pattern that cannot be read, so its rules are not applied.")
         return None
 
 
-def _is_ignored(rules: tuple[tuple[str, pathspec.GitIgnoreSpec], ...], rel: str, is_dir: bool) -> bool:
+def _is_ignored(rules: tuple[_Rules, ...], rel: str, is_dir: bool) -> bool:
     """Git's precedence: the deepest .gitignore with an opinion on the path decides."""
-    for base, spec in reversed(rules):
-        inner = rel[len(base):] if base else rel
-        verdict = spec.check_file(inner + "/" if is_dir else inner).include
+    for item in reversed(rules):
+        inner = rel[len(item.base):] if item.base else rel
+        verdict = item.folders.check_file(inner + "/").include if is_dir else item.files.check_file(inner).include
         if verdict is not None:
             return verdict
     return False
@@ -187,11 +222,9 @@ def _is_ignored(rules: tuple[tuple[str, pathspec.GitIgnoreSpec], ...], rel: str,
 def select(folder: Path, *, include_hidden: bool = False, use_gitignore: bool = True) -> Selection:
     """Walk `folder` once and sort every entry into the files to take or the reason to leave it."""
     result = Selection()
-    # Each pending folder carries the .gitignore files above it as (prefix, spec); the prefix is
-    # the folder's path from the root, with a closing slash, so a rule reads relative to its file.
-    pending: list[tuple[str, str, tuple[tuple[str, pathspec.GitIgnoreSpec], ...]]] = [
-        (str(folder), "", ())
-    ]
+    # Each pending folder carries the .gitignore files above it; a file's `base` is its folder's path
+    # from the root, with a closing slash, so a rule reads relative to its file.
+    pending: list[tuple[str, str, tuple[_Rules, ...]]] = [(str(folder), "", ())]
     while pending:
         directory, prefix, rules = pending.pop()
         try:
@@ -205,22 +238,23 @@ def select(folder: Path, *, include_hidden: bool = False, use_gitignore: bool = 
         if use_gitignore:
             ruleset = next((item for item in entries if item.name == ".gitignore"), None)
             if ruleset is not None and ruleset.is_file(follow_symlinks=False):
-                spec = _read_gitignore(ruleset.path, prefix + ruleset.name, result.notes)
-                if spec is not None:
-                    rules = (*rules, (prefix, spec))
+                found = _read_gitignore(ruleset.path, prefix + ruleset.name, prefix, result.notes)
+                if found is not None:
+                    rules = (*rules, found)
         descend = []
         for entry in entries:
             rel = prefix + entry.name
             is_dir = entry.is_dir(follow_symlinks=False)
+            junction = is_dir and _is_junction(entry.path)
             reason: Reason | None = None
-            if entry.name.startswith(".") and not include_hidden:
+            if not include_hidden and _is_hidden(entry):
                 reason = Reason.HIDDEN
             elif rules and _is_ignored(rules, rel, is_dir):
                 reason = Reason.GITIGNORE
-            elif entry.is_symlink():
+            elif entry.is_symlink() or junction:
                 reason = Reason.SYMLINK
             if reason is not None:
-                if is_dir:
+                if is_dir and not junction:
                     files, size = _tally_tree(entry.path, result.notes, rel)
                 else:
                     files, size = 1, 0

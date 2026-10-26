@@ -24,6 +24,11 @@ def files_phrase(count: int) -> str:
     return f"{count:,} file" if count == 1 else f"{count:,} files"
 
 
+def files_are(count: int) -> str:
+    """`1` as `1 file is`, `2` as `2 files are`: the verb agrees with the count."""
+    return f"{files_phrase(count)} {'is' if count == 1 else 'are'}"
+
+
 def _to_stderr(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 

@@ -40,6 +40,19 @@ def test_a_deeper_gitignore_overrides_a_shallower_one_the_way_git_does(tmp_path)
     assert ignored == {"top-only.txt", "app.log", "build", "sub/other.log", "sub/scratch.tmp"}
 
 
+def test_a_catch_all_with_folder_and_markdown_re_includes_keeps_markdown_in_subfolders(tmp_path):
+    # Git descends into `sub` here because `!*/` re-includes folders, then keeps `sub/b.md` through `!*.md`.
+    _write(tmp_path, {
+        ".gitignore": "*\n!*/\n!*.md\n!.gitignore\n",
+        "a.md": "kept", "x.bin": "ignored", "sub/b.md": "kept", "sub/c.txt": "ignored", "sub/deep/d.md": "kept",
+    })
+
+    selection = select(tmp_path, include_hidden=True)
+
+    assert [item.rel for item in selection.kept] == [".gitignore", "a.md", "sub/b.md", "sub/deep/d.md"]
+    assert {item.rel for item in selection.skipped} == {"x.bin", "sub/c.txt"}
+
+
 def test_hidden_entries_at_any_depth_stay_behind_unless_asked_for_and_are_counted(tmp_path):
     _write(tmp_path, {"a.txt": "kept", ".env": "12345", ".cache/one": "123", ".cache/deep/two": "1234", "d/.note": "12"})
 
@@ -92,3 +105,18 @@ def test_an_unreadable_file_is_named_before_any_copy_is_tried(tmp_path):
 
     assert [item.rel for item in selection.kept] == ["a.txt"]
     assert selection.tally()[Reason.UNREADABLE] == (1, 8)
+
+
+def test_a_folder_junction_is_skipped_and_never_entered(tmp_path, monkeypatch):
+    # A junction is a folder link that `is_symlink` does not report, and Linux cannot make one;
+    # the platform's own predicate is replaced so the walk sees the folder "linked" as a junction.
+    outside = tmp_path / "outside"
+    _write(outside, {"secret.txt": "not part of the folder"})
+    folder = tmp_path / "folder"
+    _write(folder, {"a.txt": "kept", "linked/secret.txt": "stands in for the junction target"})
+    monkeypatch.setattr(os.path, "isjunction", lambda path: os.path.basename(path) == "linked", raising=False)
+
+    selection = select(folder)
+
+    assert [item.rel for item in selection.kept] == ["a.txt"]
+    assert [(item.rel, item.reason, item.files) for item in selection.skipped] == [("linked", Reason.SYMLINK, 1)]

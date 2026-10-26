@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -16,6 +17,7 @@ import pytest
 
 from exomem import cloud_export_client, cloud_import_client
 from exomem.cli_progress import Progress
+from exomem.cloud_import import DEFAULT_RESERVE_BYTES
 from exomem.cloud_import_client import (
     PRODUCTION_API_BASE_URL,
     PRODUCTION_MCP_URL,
@@ -201,7 +203,7 @@ def test_too_little_disk_for_the_ciphertext_is_refused_before_anything_is_sent(t
 
 
 @needs_age
-def test_restart_before_the_archive_exists_refuses_a_source_that_changed(tmp_path):
+def test_restart_with_a_changed_source_drops_the_checkpoint_and_the_rerun_starts_a_new_import(tmp_path):
     folder = tmp_path / "notes"
     folder.mkdir()
     (folder / "a.txt").write_text("declared")
@@ -217,9 +219,69 @@ def test_restart_before_the_archive_exists_refuses_a_source_that_changed(tmp_pat
     with pytest.raises(CloudImportError) as second:
         asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
 
-    assert (second.value.phase, second.value.code) == ("archive", "SOURCE_CHANGED")
+    # The failure cannot resume, so it must not say "resume": it says what a rerun does, and how to stop the old import.
+    assert (second.value.phase, second.value.code, second.value.resume) == ("archive", "SOURCE_CHANGED", False)
     assert second.value.import_id == first.value.import_id
+    assert "import_cancel" in second.value.message and "starts a new import" in second.value.message
+    assert not (tmp_path / "checkpoint/checkpoint.json").exists()
     assert not (tmp_path / "checkpoint/archive.age").exists()
+
+    third = asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
+
+    assert third["observed_state"] == "done"
+    assert third["import_id"] != first.value.import_id
+    assert cloud.declared["declared_files"] == 2
+
+
+@needs_age
+def test_a_file_that_changes_while_it_is_archived_fails_without_a_torn_archive_and_the_rerun_succeeds(tmp_path):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "a.bin").write_bytes(b"x" * 200_000)
+    _, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    touched = False
+
+    def touch_the_file_while_it_is_read(line: str) -> None:
+        # The first line from the archive phase is written after the first part of the file was read.
+        nonlocal touched
+        if line.startswith("Archiving and encrypting:") and not touched:
+            touched = True
+            later = (folder / "a.bin").stat().st_mtime_ns + 5_000_000_000
+            os.utime(folder / "a.bin", ns=(later, later))
+
+    with pytest.raises(CloudImportError) as failed:
+        asyncio.run(cloud.run(folder, tmp_path / "checkpoint", progress=Progress(touch_the_file_while_it_is_read, interval=0)))
+
+    assert (failed.value.phase, failed.value.code, failed.value.resume) == ("archive", "SOURCE_CHANGED", False)
+    assert not (tmp_path / "checkpoint/archive.age").exists() and not (tmp_path / "checkpoint/checkpoint.json").exists()
+    assert cloud.uploaded == {}
+
+    assert asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))["observed_state"] == "done"
+
+
+@needs_age
+def test_the_disk_check_never_understates_a_folder_of_long_and_non_ascii_names(tmp_path):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    for number in range(30):
+        (folder / f"{'é' * 60}-{number}" / ("n" * 140 + ".md")).parent.mkdir()
+        (folder / f"{'é' * 60}-{number}" / ("n" * 140 + ".md")).write_text("x")
+    _, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    asyncio.run(cloud.run(folder, tmp_path / "first", free_bytes=lambda path: 10**12))
+    real = len(cloud.ciphertext)
+
+    # A disk with one byte less than the real encrypted size plus the reserve must be refused.
+    with pytest.raises(CloudImportError) as refused:
+        asyncio.run(FakeCloud(recipient).run(
+            folder, tmp_path / "second", free_bytes=lambda path: real + DEFAULT_RESERVE_BYTES - 1))
+    assert refused.value.code == "INSUFFICIENT_DISK"
+
+    # And the estimate is not wildly above it: twice the real size plus the reserve is enough.
+    done = asyncio.run(FakeCloud(recipient).run(
+        folder, tmp_path / "third", free_bytes=lambda path: 2 * real + DEFAULT_RESERVE_BYTES))
+    assert done["observed_state"] == "done"
 
 
 def test_completed_c5_import_reports_success_without_crashing(tmp_path, monkeypatch, capsys):
