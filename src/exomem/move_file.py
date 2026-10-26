@@ -26,6 +26,7 @@ from typing import Any
 
 from . import (
     call_spans,
+    originals,
     reserved_paths,
     semantic_index,
     semantic_writes,
@@ -219,7 +220,7 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
             return None
-        return (rel, binary_rel) if (vault_root / binary_rel).is_file() else None
+        return (rel, binary_rel) if originals.original_state(vault_root, binary_rel).present else None
     page_rel = f"{rel}.md"
     return (page_rel, rel) if (vault_root / page_rel).is_file() else None
 
@@ -243,6 +244,14 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         for field in ("evidence_file", "data_file"):
             if frontmatter.get(field) == old_binary:
                 changes[field] = new_binary
+        descriptor = frontmatter.get("governance_companion")
+        if isinstance(descriptor, dict) and descriptor.get("artifact_path") == old_binary:
+            moved_descriptor = {**descriptor, "artifact_path": new_binary}
+            if "original_filename" in descriptor:
+                moved_descriptor["original_filename"] = Path(new_binary).name
+            changes["governance_companion"] = moved_descriptor
+        if frontmatter.get("original_filename") == Path(old_binary).name:
+            changes["original_filename"] = Path(new_binary).name
         protection = frontmatter.get("raw_protection")
         if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
             changes["raw_protection"] = {**protection, "artifact_path": new_binary}
@@ -305,6 +314,26 @@ def plan_inbound_rewrites(
 
 
 def move_file(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    update_wikilinks: bool = True,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    promotion_reason: str | None = None,
+    content_transform: Callable[[str], str] | None = None,
+    extra_writes: tuple[PlannedWrite, ...] = (),
+    validate_only: bool = False,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
+) -> MoveFileResult | MoveFileValidation:
+    from .media_store import local_originals
+
+    with local_originals(vault_root, (old_path,)):
+        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings)
+
+
+def _move_file_local(
     vault_root: Path,
     *,
     old_path: str,
@@ -463,7 +492,7 @@ def move_file(
         collection_authority.refuse_view_paths(
             vault_root, (old_rel, new_rel, *paired_binary), MoveFileError
         )
-        if (vault_root / paired_binary[1]).exists():
+        if originals.original_state(vault_root, paired_binary[1]).present:
             raise MoveFileError(
                 code="DEST_EXISTS",
                 reason=(

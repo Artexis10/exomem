@@ -907,6 +907,9 @@ def preserve(
     finally:
         artifact_stage.close()
 
+    from .media_store import enqueue_offload
+
+    enqueue_offload(vault_root, artifact_path)
     return PreserveResult(
         path=artifact_path.relative_to(vault_root).as_posix(),
         sidecar_path=sidecar_rel,

@@ -2011,6 +2011,10 @@ def delete_after_remove(
         for item in removed_rel_paths
         if (normalized := _safe_relative_path(str(item))) is not None
     ]
+    from .originals import original_state
+
+    safe_paths = [rel for rel in safe_paths
+                  if rel.lower().endswith(".md") or original_state(vault_root, rel).state != "evicted"]
     requested_report, paths_truncated = _bounded_paths(safe_paths)
     if not safe_paths:
         return IndexSyncReport("delete", requested_report, requested_report, ())

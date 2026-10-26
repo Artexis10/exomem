@@ -467,13 +467,43 @@ class MediaWorker:
                 self._q.task_done()
 
     def _process(self, job: _Job) -> _ProcessOutcome:
-        if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+        from . import held_fs, media_store, originals, reserved_paths
+
+        offload_error = None
+        # Offload runs before extraction can hand a blocked result to the parent.
+        # A store outage leaves its generation pending while extraction continues.
+        if job.do_offload:
+            try:
+                media_store.offload(self._vault_root, job.binary_path)
+            except (media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OSError) as error:
+                offload_error = error
+            else:
+                if self._store is not None:
+                    self._store.complete_offload(job)
+        admitted = self._is_recall_admitted_media_sidecar(job.sidecar_path)
+        if not admitted and not job.do_offload:
             if self._store is not None:
                 self._store.complete(job)
             return _ProcessOutcome(_COMPLETE)
         outcome = _ProcessOutcome(_COMPLETE)
-        # A stage whose engine is switched off is dropped unrun: its media keeps a
-        # pending sidecar and is queued again once the engine is enabled.
+        if admitted:
+            # The read pin spans all processing, including child result capture.
+            # Re-embedding reads only the sidecar and needs no original bytes.
+            if job.do_ocr or job.do_clip:
+                original = (media_store.open_original(self._vault_root, job.binary_path)
+                            if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
+                with original:
+                    outcome = self._process_original(job)
+            elif job.do_reembed:
+                self._run_reembed(job)
+        if outcome.state == _HANDOFF:
+            return outcome
+        if offload_error is not None:
+            raise offload_error
+        return outcome
+
+    def _process_original(self, job: _Job) -> _ProcessOutcome:
+        outcome = _ProcessOutcome(_COMPLETE)
         if job.do_ocr and media_engines.stage_enabled(job.media_type):
             outcome = self._run_extraction(job)
         if outcome.state == _HANDOFF:
@@ -1888,11 +1918,15 @@ class MediaWorker:
 
     def scan_pending(self) -> int:
         """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""
-        return self._scan_pending_ocr() + self._scan_unindexed_images()
+        from . import media_store
+
+        queued = media_store.enqueue_offloads(self._vault_root) + self._scan_pending_ocr() + self._scan_unindexed_images()
+        media_store.evict_to_target(self._vault_root)
+        return queued
 
     def _scan_pending_ocr(self) -> int:
         """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
-        from . import media_processing
+        from . import media_processing, originals
 
         kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
@@ -1932,7 +1966,7 @@ class MediaWorker:
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if not media_engines.stage_enabled(media_type):
                 continue  # the engine is off: the sidecar waits without a job
-            if media_type and binary.exists():
+            if media_type and originals.original_state(self._vault_root, binary).present:
                 existing = (
                     self._store.get_by_binary(binary)
                     if self._store is not None
@@ -1951,7 +1985,7 @@ class MediaWorker:
             for parent_rel in pending_parents:
                 parent_sidecar = self._vault_root / (parent_rel + ".md")
                 parent_binary = self._vault_root / parent_rel
-                if parent_sidecar.exists() and parent_binary.exists():
+                if parent_sidecar.exists() and originals.original_state(self._vault_root, parent_binary).present:
                     self.enqueue(
                         binary_path=parent_binary,
                         sidecar_path=parent_sidecar,
@@ -1984,7 +2018,13 @@ class MediaWorker:
             return 0
         clip_enabled = embeddings.clip_enabled()
         n = 0
-        for f in iter_kb_files(kb):
+        from itertools import chain
+
+        from . import media_store, originals
+
+        evicted = (item.path for item in media_store.bound_originals(self._vault_root)
+                   if item.state == "evicted") if originals.binding_for(self._vault_root) else ()
+        for f in chain(iter_kb_files(kb), evicted):
             mt = extract.media_type_for(f)
             if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue

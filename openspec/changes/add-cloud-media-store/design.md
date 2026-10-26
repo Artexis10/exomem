@@ -27,7 +27,7 @@ The planned node-local storage reserves twice the largest cell per concurrent ba
 - State truthfully who can read stored originals.
 
 **Non-Goals**
-- Re-rooting key custody. `make-cloud-cells-operator-resistant` owns that work (D5).
+- Defining another key hierarchy or unlock channel. `cloud-cell-key-custody` owns those rules (D5).
 - A second copy at another provider (D7).
 - Connector sync from third-party drives.
 - Moving notes, sidecars, indexes or datasets off the volume.
@@ -93,21 +93,30 @@ On the media-storage path, the media edge and the provider see only ciphertext. 
 
 ### D5. Key custody follows the cell's key hierarchy
 
-cellctl mints a per-cell media key bundle: the `age` identity and the name key. It stores the bundle wrapped with AES-GCM under the same master key that wraps the backup key, with the cell ID, purpose and version bound as additional data. It renders the bundle into the cell's Secret.
+cellctl mints a per-cell media key bundle: the `age` identity and the name key.
+It wraps the bundle with AES-GCM under that cell's root key, binding the cell ID, purpose and version as additional data.
+The platform master key does not wrap the media bundle directly.
 
-Only the runtime and the export packing step (D8) mount the bundle. Neither has public egress. A restore needs no media key, because evicted originals stay in the store. The edge never receives it.
+In standard mode, cellctl stores the wrapped bundle on the cell row and renders the bundle into the cell's Secret.
+Tenant-locked storage and delivery follow `cloud-cell-key-custody`; the bundle never enters a Kubernetes Secret in that mode.
+Only the runtime and the export packing step (D8) receive an unwrapped bundle, and neither has public egress.
+A restore needs no media key, because evicted originals stay in the store.
+The edge never receives the bundle.
 
-The media key is one more per-cell data key in that hierarchy, and it has no custody path of its own. `make-cloud-cells-operator-resistant` re-roots the backup, volume and media keys under one per-cell root key. That change also owns the tenant-locked state, in which the media key is unavailable and media work reports `locked`.
+The media bundle shares the backup and volume keys' cell root and has no separate custody or recovery path.
+The platform can unwrap that root in standard mode.
+In tenant-locked mode, the tenant holds the root; media work reports `locked` until the tenant unlocks it.
+This contract does not imply that tenant lock or its delivery channel is implemented.
 
 ### Who can read an original
 
 | Where the original is | Who can read the plaintext |
 |---|---|
 | In the store, any version | Nobody without the media key. The provider and the edge hold only ciphertext and keyed names. |
-| The media key | The operator, who holds the master key that wraps it. After the re-root, whoever can unwrap the cell root key can read it. That is still the operator in standard mode, but not in tenant-locked mode while the cell is locked. |
-| In the cell during processing, hydration or playback | The cell runtime. The operator could reach it only through audited break-glass access. |
+| The media key | Whoever can unwrap the cell root: the platform in standard mode, or the tenant in tenant-locked mode. The tenant-held claim applies only after `lock_complete_at`. |
+| In the cell during processing, hydration or playback | The cell runtime. An operator with live node access can deliberately read unlocked content; the access record does not prevent that attack. |
 | On its way to the owner | The public TLS edge and the gateway, which see requests and responses in transit, as the privacy copy already discloses. |
-| In an export | The packing step decrypts without public egress (D8). The archive itself then follows the export contract: today a plain ZIP over presigned parts, under `add-cloud-owner-export`. Ciphertext-only delivery belongs to the operator-resistant change. |
+| In an export | The packing step decrypts without public egress (D8). The archive follows `hosted-vault-portability`: a plain ZIP over the owner's authorized export path. Key custody does not change that delivery contract. |
 
 The privacy copy states this custody truthfully (`cloud-operator-access`).
 
@@ -126,7 +135,58 @@ Alternatives:
 - **A forwarding proxy to the provider.** Its endpoint is shared by all of the provider's customers, so it would be an exfiltration channel.
 - **Folding this into the artifact broker.** The broker fetches arbitrary public URLs; storage credentials do not belong behind that surface.
 
-Whether the edge is custom code or a maintained S3 gateway with per-caller prefixes (versitygw, `rclone serve s3`) is settled by the spike in task 2.1.
+The source comparison below selects a narrow custom edge for code and sandbox work.
+Task 2.1 retains the cluster hydration measurement; this decision does not claim live transfer performance.
+
+#### Source comparison, 2026-10-26
+
+This comparison covers versitygw 1.10.0 and rclone 1.75.2. Neither dependency is added to the build.
+
+| Option | Reusable capability | Remaining work |
+|---|---|---|
+| versitygw 1.10.0 | Its S3 proxy forwards an exact version ID and byte range to the provider. | Add cellctl credential verification, prefix derivation, operation filtering, declared-size accounting and the active-generation drain barrier. |
+| rclone 1.75.2 | Its authentication proxy can select a caller-specific backend root. | Add the same controls and a version bridge: its S3 server does not support versioning and returns no version ID after multipart completion. |
+| A narrow custom edge | Reuse maintained HTTP, JWT and provider clients. | Maintain the media protocol, provider adapter, bounded upload sessions and generation accounting. Avoid a general S3 server or custom cryptography. |
+
+The source evidence is the tagged [versitygw version/range forwarding](https://github.com/versity/versitygw/blob/v1.10.0/backend/s3proxy/s3.go#L1085-L1206),
+[rclone authentication proxy](https://github.com/rclone/rclone/blob/v1.75.2/cmd/serve/proxy/proxy.go#L88-L154),
+[rclone versioning limitation](https://github.com/rclone/rclone/blob/v1.75.2/cmd/serve/s3/serve_s3.md#L449)
+and [multipart completion](https://github.com/rclone/rclone/blob/v1.75.2/cmd/serve/s3/multipart.go#L866-L907).
+
+The provider's `writeFiles` capability also permits hiding an object. A key without `deleteFiles` prevents permanent version deletion, but the edge must still filter operations.
+See [B2 application-key capabilities](https://www.backblaze.com/docs/cloud-storage-application-key-capabilities).
+
+The custom edge reuses the existing HTTP and JWT dependencies and the controller's native B2 integration pattern.
+Both gateways still need the same credential, prefix, size and recovery controls; their wider S3 surface adds no required capability.
+The added maintenance is a small media protocol, provider adapter and durable upload records.
+Task 2.1 remains incomplete until the 1 GB cluster hydration measurement is recorded.
+
+#### Revocation across an edge restart
+
+The edge records provider write intent with a full sync before dispatch and retains unresolved records on persistent storage across replacement.
+These records track admitted uploads, not another offload queue.
+The edge distinguishes the loaded active-set generation from the generation whose earlier requests and writes have settled.
+A timeout, disconnect, process exit or absent HEAD cannot turn an uncertain write into a completed drain.
+Unrelated requests continue under the loaded active set; pending records are visible by cell and do not fail fleet readiness.
+The existing global drain acknowledgement still waits for every earlier unresolved write.
+
+For native multipart upload, the edge records the provider file ID and ordered part hashes before finishing the file.
+It recovers a lost completion reply by inspecting that exact file ID.
+The provider documents [successful completion after a timeout](https://www.backblaze.com/apidocs/b2-finish-large-file).
+
+Small ciphertext uses one upload attempt with a unique opaque nonce in provider metadata.
+The edge records its intent first, sends it once, and serializes writes to that object name until the result settles.
+A HEAD that matches the nonce, size and digest supplies the completed version ID.
+Missing or different metadata leaves the attempt unknown; it does not authorize automatic retransmission.
+See the provider's [upload metadata](https://www.backblaze.com/apidocs/b2-upload-file) and [HEAD response](https://www.backblaze.com/apidocs/b2-download-file-by-name).
+
+Native multipart requires [at least two parts, with a 5 MB minimum except for the final part](https://www.backblaze.com/docs/cloud-storage-large-files).
+It therefore does not cover small ciphertext without changing its format.
+No documented small-write fence proves that an unseen attempt will never complete.
+A crash before dispatch can consequently leave an unknown record indefinitely and delay global drain acknowledgement.
+This prevents a false deletion proof, at the cost of a pending cleanup for the affected operator.
+The smallest provider check drops one successful upload reply, restarts the edge, and proves recovery by nonce and exact version.
+It proves positive recovery, not a finite negative fence; neither new padding nor a storage-format change is selected.
 
 ### D7. A separate, versioned bucket on the backup provider
 
@@ -178,11 +238,13 @@ Collection is new lifecycle logic. No existing sweep supplies it: the archive me
   cellctl then deletes the manifests of pruned snapshots.
 - **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. Only versions in a listing that cellctl completed before the newest capture are candidates, so no clocks are compared. A restic restore brings back sidecars whose versions some retained manifest names.
 - **Owner deletion.** An original the owner deletes leaves the store when the last retained backup that references it is pruned, as deleted vault files leave restic today.
-- **Cell deletion.** cellctl works in this order:
+- **Cell deletion.** Media content-key retirement follows `cloud-cell-key-custody` and does not wait for edge or provider cleanup.
+  Live-copy absence and retention evidence still govern completion; removing the database bundle alone proves neither.
+  Cleanup keeps only the non-content credentials it needs. Its provider steps retain this order:
   1. Remove the cell from the edge's active set.
   2. Observe that the edge has loaded that set.
   3. Abort every unfinished multipart upload under the cell's prefix.
-  4. Delete every version under the prefix and destroy the wrapped media key bundle.
+  4. Delete every version under the prefix.
 
   It reports `deleted` only after it observes that the versions and the bundle are absent. A revoked credential cannot repopulate the prefix after the absence check.
 
@@ -243,7 +305,7 @@ Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change
   - An end-to-end test evicts, runs reconciliation, governance and the deletion fan-out, and asserts that nothing is purged.
 - **Edge outage.** Offload queues and eviction stalls; the volume grows toward its cap. Mitigation: an alert on offload backlog age.
 - **Cold playback.** A large evicted original hydrates in full before ranged playback starts, which takes seconds to tens of seconds; the spike measures it.
-- **Key loss.** Losing both the wrapped bundle and the master key loses evicted originals. The bundle shares the backup key's escrow, but more depends on it.
+- **Key loss.** Media recovery follows the cell root's custody and recovery rules in `cloud-cell-key-custody`. This change adds no separate escrow or bypass.
 - **Sidecar edits.** An edit could drop or alter the reference. Mitigations: the descriptor key is governed, and a version stays in the store while any retained snapshot references it.
 - **Compromised edge.** It holds a bucket-wide credential, so it can bypass its own active-set check. It sees every cell's ciphertext and object names, can write new versions under any prefix (a revoked cell's included), and can deny service or run up storage. It cannot decrypt, destroy versions or change a version that a reference pins. A captured *cell* credential is narrower: the edge refuses it once revoked. Mitigations: the edge holds no media key, version destruction stays with cellctl, and cellctl's metering alerts on unexpected bytes.
 - **Hydration storms.** An export or a CLIP model change can hydrate many originals. Concurrency and temporary space are bounded (D3).
@@ -253,7 +315,7 @@ Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change
 Each question below names what settles it.
 
 - **Eviction target, margin and minimum idle age.** Settled by two to four weeks of hydration records on the canary cell.
-- **Edge implementation:** custom service or maintained S3 gateway with per-caller prefixes and version-pinned reads. Settled by the task 2.1 spike, which also measures hydration of a 1 GB object.
+- **Edge integration:** the custom service is selected above. Task 2.1 still measures 1 GB hydration; sandbox provider checks verify exact-version recovery after lost replies.
 - **Export of more media than the export staging volume can hold.** This covers staging, part limits and deadlines; Cloud export today sizes its total from the cell. It is settled with the owners of `add-cloud-owner-export` and gates the fleet switch (D11).
 - **Direct presigned upload to the store for files above the 2 GiB upload-session limit.** Settled by the first such file.
 - **Unbound binaries.** A file that was neither preserved nor matched by the extraction registry has no sidecar and stays on the volume. Whether discovery should give large unbound files a sidecar is settled by their byte share in canary vaults.

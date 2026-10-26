@@ -32,7 +32,8 @@
 ## 4. Platform (D4–D7, D9, D10)
 
 - [ ] 4.1 Add the media bucket in the durability Terraform. It needs versioning, a lifecycle that only cancels unfinished multipart uploads, no object lock, and an edge key without version deletion. Verify: the plan adds only the bucket and the key, and the provider's key listing shows the capabilities.
-- [ ] 4.2 In cellctl, mint and wrap the media key bundle, sign the per-cell edge credential, and render both into selected cells' Secrets. Verify: cellctl tests show the wrap's additional data, re-rendering from the row, and an edge render that holds neither.
+  - The bucket and bucket-restricted read/write key are implemented, disabled by default. All five mocked durability plans pass, including two media cases. The provider plan and live key listing remain unverified; no provider resources were created.
+- [ ] 4.2 In cellctl, mint the media bundle, wrap it under the cell root, and sign the per-cell edge credential. Render the standard-mode bundle and edge credential into selected cells' Secrets. Tenant-lock enablement stays with `cloud-cell-key-custody`; this task adds no unlock channel. Verify: tests show the cell-root wrap and additional data, standard-mode re-rendering, and an edge render that holds neither key.
 - [ ] 4.3 In the chart, add the edge Deployment and Service (literal ClusterIP, Recreate rollout), the canary list, the fleet switch, and the network and admission rules for selected runtimes and the export packing step. Verify: chart tests show an unchanged default render, only the edge peer added for a selected cell, and nothing added for an unselected cell.
 - [ ] 4.4 Build the edge as decided in 2.1, with the active set that cellctl publishes and the generation the edge reports. Verify these with tests:
   - the prefix is taken from the credential;
@@ -40,6 +41,8 @@
   - a rotated or deleted cell's validly signed credential is refused;
   - an upload above the per-object bound is refused;
   - no hide, list or delete operation exists.
+  - a restart retains uncertain write intent, and missing HEAD does not produce a drained-generation acknowledgement;
+  - a lost successful upload reply recovers its exact version, while unrelated cells continue to work.
 - [ ] 4.5 Meter media storage in the cell from referenced versions, meter physical bytes in cellctl, and refuse uploads above the allowance with `MEDIA_ALLOWANCE_EXCEEDED`. Verify: tests show refusal before any byte, status for an original left local, and no charge for versions kept only for backups.
 - [ ] 4.6 Write a reference manifest from each backup's clone. Add cellctl's version destruction in the backup hold after prune, under the three conditions. Verify these with tests using the fake provider:
   - a version stays while a months-old retained snapshot names it;
@@ -48,11 +51,12 @@
   - a reuse whose source sidecar is deleted before capture survives;
   - a same-cell restore of the oldest backup reads every pinned version;
   - a missing manifest blocks all destruction for the cell.
-- [ ] 4.7 Extend cell deletion. It revokes the edge credential and observes the edge's generation first, aborts unfinished uploads, then deletes the media prefix and the wrapped bundle. Verify these with cellctl deletion tests using the fake provider and a fake edge:
-  - `deleted` is reported only after both are absent;
+- [ ] 4.7 Extend cell deletion. Retire media content keys under `cloud-cell-key-custody` independently of provider cleanup. Keep edge revocation and generation observation before upload aborts and prefix deletion. Verify these with cellctl deletion tests using the fake provider and a fake edge:
+  - `deleted` is reported only after the versions and bundle are absent and the existing cell deletion proof holds;
   - the cell stays `deleting` after a failed listing or an unobserved generation;
   - no upload lands after revocation.
-- [ ] 4.8 Update the Cloud privacy copy to name the media store. Verify: the copy review in `cloud-operator-access` passes.
+  - a provider outage does not postpone content-key retirement or produce an unsupported destruction claim.
+- [ ] 4.8 Update the Cloud privacy copy to name the media store and its enforced custody mode. Verify: the copy review in `cloud-operator-access` passes, with no tenant-held claim before `lock_complete_at`.
 - [ ] 4.9 Report vault storage (without cached originals) and media storage (against the allowance) in status and in the usage cellctl publishes for Home. Verify: tests show no double counting with cached originals, an unknown media figure when the cell cannot read its references, and an unchanged owner figure when only cellctl's physical listing fails.
 
 ## 5. Gateway, uploads, imports and export (D8, D10)

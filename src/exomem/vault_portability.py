@@ -913,8 +913,10 @@ def export_quiesced_vault(
             _fail("UNSAFE_ARTIFACT_ROOT", "artifact root must be a regular directory")
 
     _flush_collection_replica(source_root)
+    from .media_store import local_originals
+
     guard = mutation_guard if mutation_guard is not None else nullcontext()
-    with guard:
+    with guard, local_originals(source_root, (kb_dirname(),)):
         armed_requirement = connector_boundary.read_requirement(source_root)
         if connector_boundary.snapshot(source_root) is not None:
             state_migration.require_vault_state_ready(source_root)
@@ -985,17 +987,20 @@ def stream_quiesced_vault(
     if not connector_boundary.unrestricted(source_root, effective_principal()):
         _fail("EXPORT_UNAVAILABLE", "whole-vault export is unavailable")
     _flush_collection_replica(source_root)
-    armed_requirement = connector_boundary.read_requirement(source_root)
-    if connector_boundary.snapshot(source_root) is not None:
-        state_migration.require_vault_state_ready(source_root)
-    snapshots = _enumerate_source(source_root, effective_limits)
-    manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
-    _write_export_archive(sink, snapshots, manifest)
-    repeated = _enumerate_source(source_root, effective_limits)
-    if [(item.path, item.size, item.sha256) for item in snapshots] != [
-            (item.path, item.size, item.sha256) for item in repeated]:
-        _fail("SOURCE_CHANGED_DURING_EXPORT", "vault contents changed during export")
-    return manifest
+    from .media_store import local_originals
+
+    with local_originals(source_root, (kb_dirname(),)):
+        armed_requirement = connector_boundary.read_requirement(source_root)
+        if connector_boundary.snapshot(source_root) is not None:
+            state_migration.require_vault_state_ready(source_root)
+        snapshots = _enumerate_source(source_root, effective_limits)
+        manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
+        _write_export_archive(sink, snapshots, manifest)
+        repeated = _enumerate_source(source_root, effective_limits)
+        if [(item.path, item.size, item.sha256) for item in snapshots] != [
+                (item.path, item.size, item.sha256) for item in repeated]:
+            _fail("SOURCE_CHANGED_DURING_EXPORT", "vault contents changed during export")
+        return manifest
 
 
 def _json_no_duplicates(raw: bytes) -> Any:

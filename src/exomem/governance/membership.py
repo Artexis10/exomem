@@ -33,7 +33,7 @@ FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_r
 _MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str]], frozenset[str]] = OrderedDict()
 _SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str, str, frozenset[str]], frozenset[str]] = OrderedDict()
 _PATH_MEMO: OrderedDict[
-    tuple[str, str, tuple[companions.BoundSnapshot, ...], frozenset[str] | None], MembershipOutcome
+    tuple[str, str, tuple[companions.BoundSnapshot, ...], tuple[companions.StoredOriginalProof, ...], frozenset[str] | None], MembershipOutcome
 ] = OrderedDict()
 
 
@@ -351,9 +351,14 @@ def evaluate_path_only(
                 identity = reserved_paths.inspect_generic_path(vault_root, rel_path)
             except reserved_paths.ReservedPathLeafError as error:
                 if error.code == "MISSING":
-                    return MembershipOutcome("classified", frozenset(matched))
-                return MembershipOutcome("unresolved", frozenset(matched), "artifact_unsafe")
-            if identity.kind == "directory":
+                    from ..originals import original_state
+
+                    if not original_state(vault_root, rel_path).present:
+                        return MembershipOutcome("classified", frozenset(matched))
+                else:
+                    return MembershipOutcome("unresolved", frozenset(matched), "artifact_unsafe")
+                identity = None
+            if identity is not None and identity.kind == "directory":
                 return MembershipOutcome("classified", frozenset(matched))
         try:
             companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path, artifact_copy=artifact_copy)
@@ -363,7 +368,7 @@ def evaluate_path_only(
             if assigned is not None and error.reason == "descriptor_missing":
                 return MembershipOutcome("classified", frozenset(matched))
             return MembershipOutcome("unresolved", frozenset(matched), error.reason)
-        memo_key = (policy.fingerprint, rel_path, companion.identities, assigned)
+        memo_key = (policy.fingerprint, rel_path, companion.identities, companion.stored_originals, assigned)
         cached = _PATH_MEMO.get(memo_key) if proposed_companion is None else None
         if cached is not None:
             _PATH_MEMO.move_to_end(memo_key)

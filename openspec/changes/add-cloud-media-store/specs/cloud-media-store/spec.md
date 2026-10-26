@@ -92,7 +92,31 @@ The cell SHALL hydrate an evicted original by fetching the version its reference
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
-The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload, and SHALL name each stored object with HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. cellctl SHALL mint the media key bundle (identity and name key) per cell. It SHALL store the bundle once on the cell row, wrapped with AES-GCM under the same master key that wraps the backup key, with cell ID, purpose and version as additional data. It SHALL render the bundle into the cell's Secret. Only the cell runtime and the export packing step SHALL mount the bundle, and no pod that has public egress SHALL mount it. A restore needs no media key, because evicted originals stay in the store. The media edge, the gateway and the provider SHALL NOT receive it.
+The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload.
+Object names SHALL be HMAC-SHA-256 of the original's SHA-256 under a per-cell name key.
+cellctl SHALL mint the media key bundle (identity and name key) per cell.
+The bundle SHALL be wrapped with AES-GCM under that cell's root key.
+The wrap SHALL bind cell ID, purpose and version as additional data.
+The platform master key SHALL NOT wrap the media bundle directly.
+
+In standard mode, cellctl SHALL store the wrapped bundle once on the cell row and render the bundle into the cell's Secret.
+Tenant-locked storage and delivery SHALL follow `cloud-cell-key-custody`; the bundle SHALL NOT enter a Kubernetes Secret in that mode.
+Only the cell runtime and the export packing step SHALL receive an unwrapped bundle.
+No pod with public egress SHALL receive it.
+A restore needs no media key, because evicted originals stay in the store.
+The media edge, the gateway and the provider SHALL NOT receive the bundle.
+
+#### Scenario: The stored bundle is inspected
+
+- **WHEN** a cell's stored media key bundle is inspected
+- **THEN** that cell's root key wraps it with the cell ID, purpose and version bound as additional data
+- **AND** the platform master key does not wrap it directly
+
+#### Scenario: A tenant-locked cell has media work
+
+- **WHEN** a tenant-locked cell is locked and media work is requested
+- **THEN** the work reports `locked` and waits for the tenant's unlock
+- **AND** no Kubernetes Secret contains the media key bundle
 
 #### Scenario: The bucket is listed
 
@@ -115,6 +139,11 @@ A media edge service SHALL move ciphertext between cells and the media bucket. I
 
 The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
+The edge SHALL persist provider write intent before dispatch and retain unresolved intents across restart.
+It SHALL distinguish the loaded generation from the drained generation and SHALL NOT acknowledge a drain while an earlier write remains uncertain.
+Timeout, cancellation or a missing object response SHALL NOT prove that a provider write cannot finish.
+Uncertain uploads SHALL remain visible by cell without preventing unrelated requests under the loaded active set.
+
 A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no other egress.
 
 #### Scenario: A cell asks for another cell's object
@@ -126,6 +155,14 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 - **WHEN** a captured credential of a deleted or rotated cell is presented with a valid signature
 - **THEN** the edge refuses it, because that cell and version are no longer in the loaded active set
+
+#### Scenario: The edge restarts after an upload reply is lost
+
+- **WHEN** the edge restarts with an earlier provider write whose result is unknown
+- **THEN** it retains that write's drain obligation and reports its pending cell
+- **AND** it acknowledges the generation only after the write settles
+- **AND** a missing HEAD does not release the obligation
+- **AND** unrelated requests continue under the loaded active set
 
 #### Scenario: A compromised cell tries to destroy history
 
@@ -217,13 +254,23 @@ Each cell SHALL have a media allowance, separate from its volume size, set as a 
 
 An original that the owner deletes SHALL leave the media store once the vault no longer references its version and every retained snapshot whose manifest names that version has been pruned, as the retention requirement allows.
 
-When a cell row becomes `deleted`, cellctl SHALL:
+When a cell row becomes `deleted`, cellctl SHALL retire its media content keys under `cloud-cell-key-custody`, independently of provider cleanup.
+Live-copy absence and retention evidence SHALL continue to govern the key-destruction claim.
+Cleanup MAY retain only the non-content credentials it needs.
+Its provider steps SHALL:
 1. remove the cell from the edge's active set;
 2. observe that the edge has loaded that set;
 3. abort every unfinished multipart upload under the cell's prefix;
-4. delete every object version under the prefix and destroy the wrapped media key bundle.
+4. delete every object version under the prefix.
 
-It SHALL report `deleted` only after it observes that the versions and the bundle are absent. A failed listing or an unobserved edge generation MUST NOT count as done.
+cellctl SHALL report `deleted` only after the versions and bundle are absent and the existing cell deletion proof holds.
+A failed listing or an unobserved edge generation MUST NOT count as done.
+
+#### Scenario: The provider is unreachable during deletion
+
+- **WHEN** a deleted cell's media provider is unreachable
+- **THEN** content-key retirement proceeds independently and unknown live-copy removal remains pending
+- **AND** provider cleanup retries without reporting the cell deleted or claiming an unsupported destruction date
 
 #### Scenario: An owner deletes a recording
 

@@ -6849,8 +6849,14 @@ def _plan_inbound_edit(
     behaves exactly like a delete. A file that exists but cannot be read is
     dropped without an applied signature: it never proves completeness.
     """
-    changed = set(changed_rels)
-    deleted = set(deleted_rels)
+    from .originals import original_state
+
+    def retained(rel: str) -> bool:
+        return (rel.lower().endswith(".md") or reserved_paths.classify_logical(rel).blocked
+                or original_state(vault_root, rel).state != "evicted")
+
+    changed = {rel for rel in changed_rels if retained(rel)}
+    deleted = {rel for rel in deleted_rels if retained(rel)}
     for rel in changed & deleted:
         if (vault_root / rel).is_file():
             deleted.discard(rel)

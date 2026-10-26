@@ -85,6 +85,23 @@ def delete_directory(
     today: dt.date | None = None,
     now: dt.datetime | None = None,
 ) -> DeleteDirectoryResult:
+    from .media_store import local_originals
+
+    with local_originals(vault_root, (path,)):
+        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now)
+
+
+def _delete_directory_local(
+    vault_root: Path,
+    *,
+    path: str,
+    confirm: bool,
+    recursive: bool = False,
+    force_orphan: bool = False,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+) -> DeleteDirectoryResult:
     if not confirm:
         raise DeleteDirectoryError(
             code="UNCONFIRMED",

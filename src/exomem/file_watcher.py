@@ -1013,6 +1013,7 @@ class FileWatcher:
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
+        self._managed_media_events: dict[Path, bool] = {}
         self._pending_publication_intents: dict[Path, _PublicationIntent] = {}
         # Pending paths admitted on an event Exomem cannot attribute to itself.
         # A drain with none came only from a writer's failed publication.
@@ -1171,6 +1172,18 @@ class FileWatcher:
         """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
 
+        if path.suffix.lower() != ".md" and self._is_kb(path):
+            from . import media_store
+
+            disposition = media_store.managed_event(self._vault_root, path)
+            if disposition == "defer":
+                with self._lock:
+                    self._managed_media_events[path] = deleted
+                    self._last_change = time.monotonic()
+                self._wake.set()
+                return
+            if disposition == "suppress":
+                return
         if notify_views:
             # A same-stat external save can match index suppression; edit-back still needs its hint.
             self._notify_view_change(path)
@@ -1276,6 +1289,11 @@ class FileWatcher:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         self._resolve_held_publication_intents()
+        with self._lock:
+            managed = self._managed_media_events
+            self._managed_media_events = {}
+        for path, deleted in managed.items():
+            self._record(path, deleted=deleted)
         media, ups, del_rels, pending_epoch, access_policy, self_authored = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)
@@ -1804,7 +1822,10 @@ class FileWatcher:
         changed_set = set(changed)
         deleted_set = set(deleted)
         for sp in changed_set & deleted_set:
-            if Path(sp).exists():
+            from .originals import original_state
+
+            if (Path(sp).exists() if Path(sp).suffix.lower() == ".md"
+                    else original_state(self._vault_root, Path(sp)).present):
                 deleted_set.discard(sp)
             else:
                 changed_set.discard(sp)

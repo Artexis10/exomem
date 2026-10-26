@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from .. import media_types, reserved_paths, vault
+from .. import media_types, originals, reserved_paths, vault
 from ..kbdir import kb_dirname
 
 SEMANTIC_KEYS = ("projects", "tags", "types", "classes")
@@ -51,6 +51,7 @@ class BoundCompanion:
     types: tuple[str, ...]
     classes: tuple[str, ...]
     identities: tuple[BoundSnapshot, ...] = ()
+    stored_originals: tuple[StoredOriginalProof, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,18 @@ class BoundSnapshot:
     inode: int
     kind: str
     link_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoredOriginalProof:
+    """An exact stored binding, without pretending that an absent inode exists."""
+
+    role: str
+    path: str
+    sha256: str
+    size: int
+    reference: originals.StoredObject
+    sidecar_hash: str
 
 
 @dataclass(slots=True)
@@ -87,10 +100,14 @@ def _canonical_relative_path(value: str) -> str:
     return normalized
 
 
-def _read_artifact(vault_root, rel_path: str) -> reserved_paths.GenericFileSnapshot:
+def _read_artifact(vault_root, rel_path: str) -> reserved_paths.GenericFileSnapshot | originals.OriginalSnapshot:
     try:
         return reserved_paths.read_generic_bytes(vault_root, rel_path)
     except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            stored = originals.original_state(vault_root, rel_path)
+            if stored.state == "evicted":
+                return stored
         raise CompanionClassificationError("artifact_unsafe") from error
 
 
@@ -124,6 +141,10 @@ def _descriptor(raw: bytes) -> dict[str, object]:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except (UnicodeDecodeError, vault.FrontmatterError) as error:
         raise CompanionClassificationError("descriptor_invalid") from error
+    if "stored_object" in frontmatter:
+        reference = originals.stored_reference(frontmatter["stored_object"])
+        if reference is None or originals.binary_binding(frontmatter) is None:
+            raise CompanionClassificationError("descriptor_invalid")
     descriptor = frontmatter.get("governance_companion")
     if descriptor is None:
         raise CompanionClassificationError("descriptor_missing")
@@ -177,17 +198,23 @@ def _validate_common(
 
 
 
-def _digest(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy) -> str:
+def _digest(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy | originals.OriginalSnapshot) -> str:
+    if isinstance(snapshot, originals.OriginalSnapshot):
+        assert snapshot.binary_sha256 is not None
+        return snapshot.binary_sha256
     return snapshot.sha256 if isinstance(snapshot, reserved_paths.GenericFileCopy) else hashlib.sha256(snapshot.data).hexdigest()
 
 
-def _size(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy) -> int:
+def _size(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy | originals.OriginalSnapshot) -> int:
+    if isinstance(snapshot, originals.OriginalSnapshot):
+        assert snapshot.binary_size is not None
+        return snapshot.binary_size
     return snapshot.size if isinstance(snapshot, reserved_paths.GenericFileCopy) else len(snapshot.data)
 
 
 def _bind_snapshots(
     companion: BoundCompanion,
-    *snapshots: tuple[str, str, reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy],
+    *snapshots: tuple[str, str, reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy | originals.OriginalSnapshot],
 ) -> BoundCompanion:
     identities = tuple(
         BoundSnapshot(
@@ -201,22 +228,23 @@ def _bind_snapshots(
             link_count=snapshot.identity.link_count,
         )
         for role, path, snapshot in snapshots
+        if not isinstance(snapshot, originals.OriginalSnapshot)
     )
-    return replace(companion, identities=identities)
+    stored = tuple(
+        StoredOriginalProof(role, path, snapshot.binary_sha256, snapshot.binary_size,
+                            snapshot.reference, snapshot.sidecar_hash)
+        for role, path, snapshot in snapshots
+        if isinstance(snapshot, originals.OriginalSnapshot)
+    )
+    return replace(companion, identities=identities, stored_originals=stored)
 
 
 def _classify_sibling(
     vault_root,
     artifact_path: str,
-    artifact: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy,
+    artifact: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy | originals.OriginalSnapshot,
 ) -> BoundCompanion:
-    from ..preserve import _sidecar_path
-    from .raw_protection import marked
-
-    companion_path = (
-        _sidecar_path(Path(artifact_path), protected=marked(artifact_path)).as_posix()
-        if isinstance(artifact, reserved_paths.GenericFileCopy) else f"{artifact_path}.md"
-    )
+    companion_path = originals.sidecar_path(Path(artifact_path)).as_posix()
     companion = _read_companion(vault_root, companion_path)
     result = classify_proposed_sibling(
         artifact_path, artifact_sha256=_digest(artifact),

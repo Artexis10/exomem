@@ -27,6 +27,7 @@ from . import (
     media_jobs,
     media_types,
     memory_refs,
+    originals,
     recall_policy,
     reserved_paths,
 )
@@ -279,6 +280,36 @@ def reconcile_media(
             "MEDIA_NOT_FOUND", "media artifact does not exist"
         )
     rel_binary = lexical_relative
+    try:
+        stored = originals.original_state(vault, binary)
+    except reserved_paths.ReservedPathLeafError:
+        stored = None  # The existing confinement path supplies the public refusal.
+    if stored is not None and stored.state in {"evicted", "cached"}:
+        from . import media_store
+
+        _confine_sidecar(vault, stored.sidecar_path)
+        tier = access.access_tier(vault, rel_binary)
+        if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+            if not explicit:
+                return None
+            raise MediaProcessingError("MEDIA_PATH_ACCESS_DENIED", "media path is not writable")
+        if explicit and stored.state == "evicted":
+            with media_store.open_original(vault, binary):
+                return reconcile_media(vault, binary, explicit=explicit,
+                                       commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal)
+        if (stored.state == "evicted"
+                or media_store.cache_matches(vault, binary, snapshot=stored)
+                or media_store.recover_cache(vault, binary, stored)):
+            text = _read_sidecar_text(vault, stored.sidecar_path)
+            if text is not None and has_completed_transcript(text, media_type=media_type):
+                _retire_completed_ocr(vault, binary, stored.sidecar_path, media_type)
+                return ReconcileResult(media_type, "completed", stored.sidecar_path, None)
+            store = media_jobs.MediaJobStore(vault)
+            job = store.get_by_binary(binary)
+            if job is None and media_engines.stage_enabled(media_type):
+                job_id = store.enqueue(media_jobs.MediaJob(binary, stored.sidecar_path, media_type))
+                job = store.get(job_id)
+            return ReconcileResult(media_type, job.state if job else "pending", stored.sidecar_path, job.id if job else None)
     try:
         retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
     except reserved_paths.ReservedPathLeafError as error:
@@ -536,6 +567,10 @@ def reconcile_media(
             result = ReconcileResult(media_type, state, sidecar, job_id)
 
     assert result is not None
+    if originals.binding_for(vault) is not None:
+        from . import media_store
+
+        media_store.enqueue_offload(vault, binary)
     return result
 
 
@@ -554,6 +589,10 @@ def reconcile_all_media(
     if isinstance(limit, bool) or limit <= 0:
         raise ValueError("media reconciliation limit must be a positive integer")
     vault = Path(vault_root).resolve()
+    if originals.binding_for(vault) is not None:
+        from . import media_store
+
+        media_store.enqueue_offloads(vault)
     reconcile_one = reconcile_one or (
         lambda binary: reconcile_media(vault, binary, explicit=False)
     )
@@ -633,6 +672,12 @@ def _iter_rotating_governed_media(
 
 def _iter_governed_media(vault: Path, kb_root: Path):
     """Yield supported binaries from a deterministic, hidden/pruned KB walk."""
+    if originals.binding_for(vault) is not None:
+        from . import media_store
+
+        for stored in media_store.bound_originals(vault):
+            if stored.state == "evicted" and classify_media(stored.path):
+                yield stored.path
     stack = [kb_root]
     while stack:
         directory = stack.pop()
@@ -793,10 +838,14 @@ def _is_completed_sidecar_shape(
     present = tuple(field in frontmatter for field in _PROVENANCE_FIELDS)
     if not all(present):
         return False
-    try:
-        current = binary.stat()
-    except OSError:
-        return False
+    stored = originals.original_state(vault, binary)
+    if stored.state == "evicted":
+        current_size = stored.binary_size
+    else:
+        try:
+            current_size = binary.stat().st_size
+        except OSError:
+            return False
     # Deliberately NOT comparing binary_mtime_ns/binary_ctime_ns. They are cache
     # hints, not identity: `binary.stat()` here and the `os.fstat()` that recorded
     # them in _read_provenance can disagree for an unchanged file (see the note in
@@ -805,7 +854,7 @@ def _is_completed_sidecar_shape(
     expected = {
         "evidence_file": binary.relative_to(vault).as_posix(),
         "original_filename": binary.name,
-        "binary_size": current.st_size,
+        "binary_size": current_size,
     }
     digest = str(frontmatter.get("binary_sha256", ""))
     return (
@@ -999,6 +1048,34 @@ def _retry_ambiguous_batch_failure(
 
 
 def retry_media(
+    vault_root: Path, binary_path: str | Path, *,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    from .media_store import open_original
+
+    if originals.binding_for(vault_root) is None:
+        return _retry_media_local(vault_root, binary_path, commit_guard=commit_guard)
+    vault = Path(vault_root).resolve()
+    binary = Path(binary_path)
+    binary = Path(os.path.abspath(binary if binary.is_absolute() else vault / binary))
+    try:
+        snapshot = originals.original_state(vault, binary)
+    except (reserved_paths.ReservedPathLeafError, ValueError):
+        return _retry_media_local(vault, binary, commit_guard=commit_guard)
+    if snapshot.state != "evicted":
+        return _retry_media_local(vault, binary, commit_guard=commit_guard)
+    _confine_sidecar(vault, snapshot.sidecar_path)
+    _require_media_access(vault, binary)
+    try:
+        with open_original(vault, binary):
+            return _retry_media_local(vault, binary, commit_guard=commit_guard)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            raise
+        raise MediaProcessingError("MEDIA_NOT_FOUND", "media artifact does not exist") from error
+
+
+def _retry_media_local(
     vault_root: Path,
     binary_path: str | Path,
     *,

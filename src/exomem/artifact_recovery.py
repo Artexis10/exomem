@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-from . import request_budget, reserved_paths, upload_tokens, vault
+from . import held_fs, media_store, originals, request_budget, reserved_paths, upload_tokens, vault
 from .governance import companions, connector_boundary, egress, policy
 from .governance.principal import effective_principal, request_scope
 
@@ -111,7 +111,7 @@ def _companion(root: Path, path: str) -> tuple[str, dict]:
 
 
 def _resolve(root: Path, selected: str) -> tuple[str, dict]:
-    path = reserved_paths.resolve_physical_relative(root, selected)
+    path = originals.resolve_original_relative(root, selected)
     try:
         _, metadata = _companion(root, path)
     except reserved_paths.ReservedPathLeafError as error:
@@ -124,7 +124,7 @@ def _resolve(root: Path, selected: str) -> tuple[str, dict]:
         artifact = artifact or metadata.get("data_file")
         if marker is None or not isinstance(artifact, str):
             raise RecoveryUnavailable from None
-        artifact = reserved_paths.resolve_physical_relative(root, artifact)
+        artifact = originals.resolve_original_relative(root, artifact)
         companion, metadata = _companion(root, artifact)
         if companion != path:
             raise RecoveryUnavailable from None
@@ -254,7 +254,10 @@ def stage(
     if not who.resolved or not _SLOTS.acquire(blocking=False):
         raise RecoveryUnavailable
     try:
-        with reserved_paths.private_copy_directory() as temporary:
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            temporary = stack.enter_context(reserved_paths.private_copy_directory())
             try:
                 seconds = request_budget.budget_seconds()
                 budget = request_budget.current()
@@ -264,6 +267,7 @@ def stage(
                     else time.monotonic() + seconds
                 )
                 path, metadata = _resolve(root, selected)
+                stack.enter_context(media_store.local_originals(root, (path,)))
                 available = shutil.disk_usage(temporary).free
                 copied = reserved_paths.copy_generic_file(
                     root,
@@ -284,6 +288,8 @@ def stage(
                 yield copied, descriptor
             except (
                 reserved_paths.ReservedPathLeafError,
+                media_store.MediaStoreError,
+                held_fs.HeldFsError,
                 OSError,
                 UnicodeError,
                 vault.FrontmatterError,

@@ -102,6 +102,26 @@ def delete_file(
     validate_only: bool = False,
     expected_hash: str | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
+    from .media_store import local_originals
+
+    with local_originals(vault_root, (path,)):
+        return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash)
+
+
+def _delete_file_local(
+    vault_root: Path,
+    *,
+    path: str,
+    confirm: bool,
+    force_orphan: bool = False,
+    force_superseded: bool = False,
+    allow_curated: bool = False,
+    expected_dead_inbound: list[str] | None = None,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+    validate_only: bool = False,
+    expected_hash: str | None = None,
+) -> DeleteFileResult | DeleteFileValidation:
     if not confirm:
         raise DeleteFileError(
             code="UNCONFIRMED",
@@ -524,6 +544,11 @@ def delete_file(
     from .writer_lease import mark_active_mutation_committed
 
     mark_active_mutation_committed()
+
+    from .media_store import forget_original
+
+    # Explicit deletion retires the binding; cache eviction never calls here.
+    forget_original(vault_root, rel_path)
 
     if prior_markdown is not None:
         from . import due_state
