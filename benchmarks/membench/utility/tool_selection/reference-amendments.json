@@ -57,6 +57,23 @@
       ],
       "expected_fact_changes": "No original content, selected path, title, unclassified Source meaning or requested effect changes. Planning persists one existing run and creates no import.",
       "original_reference": "The evaluator source draft remains immutable."
+    },
+    {
+      "number": 4,
+      "stage": "offline integrated-source review after the closed smoke run",
+      "reason": "The merged registry save records a promotion and the merged import planner persists note counters.",
+      "source_anchors": [
+        "src/exomem/promotions.py::record_registry; record",
+        "src/exomem/adoption_run.py::plan",
+        "benchmarks/membench/utility/tool_selection/development.py::source_key",
+        "benchmarks/membench/utility/tool_selection/score.py::_review_without_registry_promotion"
+      ],
+      "changes": [
+        "Compute note counters from the independent expected plan items.",
+        "Permit only a registry promotion for the requested added keys, the exact saved bytes and the new retained history version. Preserve all prior review state."
+      ],
+      "expected_fact_changes": "No requested category, selected file, original content or expected import effect changes.",
+      "original_reference": "Archived keys, captures, scores and reports remain immutable. This amendment changes only the current offline instrument; it does not rescore the completed smoke or provide new actor evidence."
     }
   ]
 }

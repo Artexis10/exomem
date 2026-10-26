@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
 # No token or quality gain is claimed. Each changed ceiling rounds up to 50 bytes.
 # The separate bootstrap core budget stays unchanged.
-TOTAL_BUDGET = 159_600
+TOTAL_BUDGET = 160_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -41,7 +41,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_files": 7100,
     "change_governance": 4650,
     "change_media": 1200,
-    "change_observations": 6000,
+    "change_observations": 6200,
     "change_plans": 3350,
     "change_records": 5550,
     "change_schema": 9250,
@@ -61,7 +61,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "manage_memory_file": 5150,
     "observe_memory": 5050,
     "plan_memory": 2700,
-    "prepare_note": 5000,
+    "prepare_note": 5200,
     "preserve_artifacts": 2300,
     "preserve_evidence": 1350,
     "process_media": 1050,

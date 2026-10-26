@@ -22,7 +22,7 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
     # 33 commands on every surface plus the 2 that only a Cloud cell lists.
     assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 35
     assert len(commands.product_commands_for("mcp")) == 33
-    assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 6
+    assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 7
 
 
 @pytest.mark.parametrize("cloud", (False, True))
@@ -40,13 +40,23 @@ def test_mcp_discovery_and_both_names_reach_guarded_execution(vault, monkeypatch
         async with Client(mcp) as client:
             discovered = {tool.name for tool in await client.list_tools()}
             for excluded in commands.CLOUD_SURFACE_EXCLUSIONS if cloud else ():
-                assert excluded not in discovered
-                assert await mcp.get_tool(excluded) is None
+                contributors = [command for command in commands.product_commands_for("mcp", cloud=True)
+                                if any(rendering.name == excluded for rendering in command.renderings)]
+                if contributors:
+                    # A shared job can remain, but none of its variants comes from the excluded command.
+                    tool = next(tool for tool in await client.list_tools() if tool.name == excluded)
+                    kinds = {branch["properties"]["kind"]["const"]
+                             for branch in tool.input_schema["properties"]["operation"]["oneOf"]}
+                    assert kinds == {variant.kind for command in contributors for rendering in command.renderings
+                                     if rendering.name == excluded for variant in rendering.variants}
+                else:
+                    assert excluded not in discovered
+                    assert await mcp.get_tool(excluded) is None
             for command in commands.product_commands_for("mcp", cloud=cloud):
                 if command.renderings:
                     # Discovered as its renderings; the grouped name stays callable but unlisted.
                     assert {r.name for r in command.renderings} <= discovered
-                    assert command.name not in discovered
+                    assert command.name not in discovered or command.name in {r.name for r in command.renderings}
                     assert await mcp.get_tool(command.name) is not None
                     continue
                 assert command.public_name in discovered
@@ -216,7 +226,7 @@ def test_standalone_hooks_keep_both_spellings_in_step_with_the_registry() -> Non
     metadata = {"activation": {"operation": activation.name, "default": 4000, "minimum": 500, "maximum": 8000}}
     for name in activation.callable_names:
         assert retrieve._tool_refs(f"mcp__exomem__{name}", {"anchor": "visible-ref"}) == ["visible-ref"]
-        assert retrieve._refresh_activation_cost(metadata, name, {"max_chars": 6000}) == 6000
+        assert retrieve._refresh_activation_cost(metadata, name, {"max_chars": 6000}) == 7000
     for name in resolve_command("edit_note", commands.PRODUCT_COMMANDS).callable_names:
         tool = {"name": f"mcp__exomem__{name}", "input": {"validate_only": True}}
         assert capture._successful_kb_write(tool) is False

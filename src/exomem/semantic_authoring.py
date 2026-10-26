@@ -27,6 +27,11 @@ STATUS_CLASSIFICATION_RULE = (
     "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
 )
 
+OBSERVATION_UPDATE_GUIDANCE = (
+    "Updates rebuild the unit: omitted verdict/check_by/id persist; "
+    "tags/context/relations clear unless resent."
+)
+
 # This explains the existing preview boundary; it grants no authority to save a review or content.
 EXISTING_VALIDATION_GUIDANCE = (
     "Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. "
@@ -484,6 +489,16 @@ def get_semantic_authoring_contract() -> SemanticAuthoringContract:
     return AUTHORING_CONTRACT
 
 
+def _placement_rule(rule: str, tool_shape: str) -> str:
+    from .operation_entries import call_text
+
+    # This exact code-owned compatibility call uses the serving adapter's spelling.
+    return rule.replace(
+        'schema_memory(subject="homes", operation="inspect")',
+        call_text("schema_memory", {"subject": "homes", "operation": "inspect"}, tool_shape),
+    )
+
+
 def bootstrap_projection(
     contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
     *,
@@ -503,6 +518,9 @@ def bootstrap_projection(
     projection["validation_review"] = EXISTING_VALIDATION_GUIDANCE
     from . import capabilities
 
+    projection["minimum_semantic_unit"]["placement_rule"] = _placement_rule(
+        projection["minimum_semantic_unit"]["placement_rule"], capabilities.current_tool_shape()
+    )
     projection["minimum_semantic_unit"]["status_registry"] = capabilities.active_call_route(
         "schema_memory", {"subject": "statuses", "operation": "inspect"}
     )
@@ -565,6 +583,8 @@ def render_tool_guidance(
             minimum["rule"],
             minimum["final_unit_rule"],
             rich["correction_rule"],
+            # The source command and its public rendering share this operation-specific rule.
+            OBSERVATION_UPDATE_GUIDANCE if tool == "observe_memory" else "",
             EXISTING_VALIDATION_GUIDANCE if not whole_page else "",
             f"Compact: `{compact['canonical_section']}` then `{compact['syntax']}`; "
             f"one {compact['category']['vocabulary']} category. "
@@ -653,11 +673,7 @@ def render_concise(
     minimum = contract.minimum_semantic_unit
     from .operation_entries import DEFAULT_TOOL_SHAPE, call_text, tools_text
 
-    # Render the contract's exact compatibility call in the active public spelling.
-    placement_rule = minimum["placement_rule"].replace(
-        'schema_memory(subject="homes", operation="inspect")',
-        call_text("schema_memory", {"subject": "homes", "operation": "inspect"}, DEFAULT_TOOL_SHAPE),
-    )
+    placement_rule = _placement_rule(minimum["placement_rule"], DEFAULT_TOOL_SHAPE)
     routes = {**contract.routes, "single_semantic_unit": tools_text("observe_memory", DEFAULT_TOOL_SHAPE, "write"),
               "tier_2": "change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits."}
     findings = contract.findings

@@ -284,6 +284,45 @@ def _source(state: Mapping, path: str) -> str:
     return base64.b64decode(state["evidence"]["files"][path]["base64"]).decode("utf-8")
 
 
+def _review_without_registry_promotion(key: Key, before: Mapping, after: Mapping) -> Mapping:
+    """Admit only the source-owned promotion for the independently requested registry keys."""
+    from exomem import promotions, review_state
+    from exomem.vocabulary import registry_specs
+
+    actual = after.get("review", {})
+    if key.registry is None:
+        return actual
+    prior = before.get("review", {}).get("promotions", {})
+    ledger = actual.get("promotions", {})
+    added = {ident: row for ident, row in ledger.items() if ident not in prior}
+    subject = key.registry["subject"]
+    spec = registry_specs()[subject]
+    old_versions = before.get("registry_history", {}).get(subject, [])
+    versions = [row for row in after.get("registry_history", {}).get(subject, []) if row not in old_versions]
+    if len(added) != 1 or len(versions) != 1:
+        return actual
+    ident, row = next(iter(added.items()))
+    version = versions[0]
+    requested = key.registry["delta"]["upsert"]
+    overlay = before["registry_paths"][subject]["overlay"]
+    existing = before.get("files", {}).get(overlay, {}).get("value", {}).get(spec.name, {})
+    keys = sorted(set(requested) - set(existing))
+    if not keys or sorted(version.get("added", {}).get(spec.name, [])) != keys:
+        return actual
+    subjects = [{"registry": spec.name, "key": name, "introduced_version": version["version"],
+                 "after_hash": after["evidence"]["files"][overlay]["sha256"]} for name in keys]
+    # These ledger fields and the registry kind are fixed by promotions.record_registry/record.
+    if (set(row) != {"kind", "subjects", "omitted", "new_family", "write", "creator", "created", "created_at"}
+            or row.get("kind") != "registry" or row.get("subjects") != subjects or row.get("omitted") != 0
+            or row.get("new_family") != ("parent" in spec.fields and any(requested[name].get("parent") is None for name in keys))
+            or not isinstance(row.get("write"), str)
+            or ident != review_state.item_id(f"{promotions.FAMILY}:registry:{row['write']}")):
+        return actual
+    trimmed = json.loads(json.dumps(actual))
+    trimmed["promotions"].pop(ident)
+    return trimmed
+
+
 def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool) -> list[str]:
     """Check declared changes and every undeclared canonical domain, including intermediate effects."""
     if "files" not in before and "files" not in after:
@@ -444,7 +483,7 @@ def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool)
             trimmed.get("vocabulary", {})["items"] = {ref: value for ref, value in new.items() if ref in old}
             if trimmed != prior:
                 reasons.append("review decisions or unrelated review state changed")
-    elif before.get("review") != after.get("review"):
+    elif before.get("review") != _review_without_registry_promotion(key, before, after):
         reasons.append("review state changed outside the request")
     if key.registry is not None:
         # RegistrySpec owns the selected overlay and history paths; no vocabulary keys live in the scorer.

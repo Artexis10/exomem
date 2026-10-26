@@ -249,6 +249,11 @@ def _tool_input_schema(tool: Any) -> Mapping[str, Any]:
 def process_media_requests(tool: Any, paths: Sequence[str]) -> list[dict[str, Any]]:
     """Select the registered batch surface when it is actually advertised."""
     properties = _tool_input_schema(tool).get("properties")
+    if isinstance(properties, Mapping) and isinstance(properties.get("operation"), Mapping):
+        # Discovery can group media requests under the closed operation discriminator.
+        variants = properties["operation"].get("oneOf", [])
+        properties = next((item.get("properties", {}) for item in variants
+                           if item.get("properties", {}).get("kind", {}).get("const") == "process"), {})
     if isinstance(properties, Mapping) and "paths" in properties:
         return [{"operation": "process", "paths": list(paths)}]
     return [{"operation": "process", "path": path} for path in paths]
@@ -391,10 +396,13 @@ def required_tools_missing(discovered: Iterable[str]) -> list[str]:
     from exomem.command_surface import resolve_command
     from exomem.commands import PRODUCT_COMMANDS
 
+    discovered = set(discovered)
     available = {
         command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
         for name in discovered
     }
+    available.update(command.name for command in PRODUCT_COMMANDS
+                     if command.renderings and all(rendering.name in discovered for rendering in command.renderings))
     return sorted(name for name in REQUIRED_PUBLIC_TOOLS if name not in available)
 
 
@@ -1411,7 +1419,10 @@ async def run_public_workflow(
                 artifacts, [item for item in files if isinstance(item, Mapping)]
             ) or []
             hashes_match = len(evidence_paths) == len(artifacts)
-            process_requests = process_media_requests(registered_tools["process_media"], evidence_paths)
+            # The stable grouped execution route remains callable; its schema is advertised by the write job.
+            process_requests = process_media_requests(
+                registered_tools.get("process_media") or registered_tools["change_media"], evidence_paths
+            )
             extraction_enqueue_started = time.perf_counter()
             process_payloads = [
                 await workflow_call("process_media", request, phase="media-enqueue") for request in process_requests

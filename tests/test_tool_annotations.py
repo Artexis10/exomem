@@ -76,7 +76,7 @@ def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_pa
             continue  # note: hand-registered for MCP, checked below
         if cmd.renderings:
             # Listed as its renderings; tests/test_single_purpose_tools_mcp.py pins their hints.
-            assert cmd.public_name not in ann
+            assert cmd.public_name not in ann or cmd.public_name in {r.name for r in cmd.renderings}
             continue
         assert ann[cmd.public_name]["readOnlyHint"] is cmd.read_only, (
             f"{cmd.name}: readOnlyHint={ann[cmd.public_name]['readOnlyHint']} "
@@ -88,14 +88,14 @@ def test_destructive_hint_only_for_overwrite_ops(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
-    # Composite workflows can execute replacement/supersession, not only append.
-    assert ann["episode_memory"]["destructiveHint"] is True
-    assert ann["adoption_studio"]["destructiveHint"] is True
+    # Related jobs classify only the operations they expose.
+    assert ann["record_episode"]["destructiveHint"] is False
+    assert ann["change_records"]["destructiveHint"] is True
     for cmd in commands_module.product_commands_for("mcp"):
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
         if cmd.renderings:
-            assert cmd.public_name not in ann
+            assert cmd.public_name not in ann or cmd.public_name in {r.name for r in cmd.renderings}
             continue
         expected = cmd.name in commands_module.DESTRUCTIVE_OPS
         assert ann[cmd.public_name]["destructiveHint"] is expected, (
@@ -145,7 +145,7 @@ def test_product_titles_reach_both_mcp_title_fields(
             continue
         assert command.public_title
         if command.renderings:
-            assert command.public_name not in wire
+            assert command.public_name not in wire or command.public_name in {r.name for r in command.renderings}
             for rendering in command.renderings:
                 tool = wire[rendering.name]
                 assert tool.title == tool.annotations.title == rendering.title

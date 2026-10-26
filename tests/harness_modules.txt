@@ -116,6 +116,8 @@ tests/test_membench_subday.py
 tests/test_membench_switch_eval.py
 tests/test_membench_template_suite.py
 tests/test_membench_tool_selection.py
+tests/test_membench_tool_selection_canonical.py
+tests/test_membench_tool_selection_readout_completion.py
 tests/test_membench_trackc.py
 tests/test_membench_trackc_join.py
 tests/test_membench_trackd.py

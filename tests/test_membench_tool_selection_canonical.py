@@ -288,6 +288,15 @@ def test_registry_key_checks_the_exact_delta_and_retained_history(tmp_path, iden
     result = score_session(case, session(before, after, answer=None if commit else '{"answer":"valid"}'), calls, product_resolver())
 
     assert result.success, result.reasons
+    if commit:
+        collateral = json.loads(json.dumps(after))
+        additions = set(after["review"]["promotions"]) - set(before["review"]["promotions"])
+        promotion = collateral["review"]["promotions"][next(iter(additions))]
+        promotion["subjects"][0]["key"] = "unrequested_category"
+        assert not score_session(case, session(before, collateral), calls, product_resolver()).success
+        collateral = json.loads(json.dumps(after))
+        collateral["review"]["promotions"].pop(next(iter(before["review"]["promotions"])))
+        assert not score_session(case, session(before, collateral), calls, product_resolver()).success
 
 
 def test_media_status_uses_source_empty_ledger_facts_and_creates_no_ledger(tmp_path):

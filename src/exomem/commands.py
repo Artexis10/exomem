@@ -928,9 +928,10 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     tool_shape = active_descriptor.tool_shape
 
-    def listed(command: str) -> bool:
-        """Whether the surface lists a command under any of its spellings."""
-        return any(name in active_product_names for name in operation_entries.spellings(command))
+    def listed(command: str, effect: operation_entries.Effect | None = None) -> bool:
+        """Whether the surface lists the command's required side in its active shape."""
+        return any(name in active_product_names
+                   for name in operation_entries.listed_tools(command, tool_shape, effect))
 
     def tools_text(command: str, effect: operation_entries.Effect | None = None) -> str:
         return operation_entries.tools_text(command, tool_shape, effect)
@@ -955,7 +956,7 @@ def op_bootstrap(
     # connector-only user has no machine to type on.
     engagement_policy["change_with"] = (
         prominence_module.configuration_route()
-        if listed("configure_memory")
+        if listed("configure_memory", "write")
         else prominence_module.custom_instructions_route()
     )
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
@@ -7945,9 +7946,6 @@ def op_observe_memory(
 
     Default: compact observation; other governed kinds use rich form and typed
     relations. Validate first when semantic review is required.
-
-    Updates rebuild the unit: omitted verdict/check_by/id persist;
-    tags/context/relations clear unless resent. Help: references/writing.md.
 
     Args:
         path: Parent page path or memory reference.

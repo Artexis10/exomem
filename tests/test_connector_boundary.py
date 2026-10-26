@@ -530,7 +530,9 @@ def test_adoption_resources_do_not_disclose_run_presence_or_inventory(configured
 
     _, authenticate = configured_boundary
     mcp = FastMCP("connector-adoption-proof")
-    server.register_adoption_mcp(mcp, vault_root=vault)
+    server.register_adoption_mcp(mcp, vault_root=vault, surface_descriptor=server.capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=False, product_commands=(),
+    ))
 
     async def observe(run_id):
         prompt = await mcp.render_prompt("continue_adoption")

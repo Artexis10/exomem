@@ -75,10 +75,13 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "curation-test-key")
     mcp = server.build_server(require_auth=False)
 
-    tool = next(tool for tool in asyncio.run(mcp.list_tools()) if tool.name == "maintain_memory")
-    mcp_property = tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]["properties"][
-        "curation_action"
-    ]
+    tools = asyncio.run(mcp.list_tools())
+    curation_kinds = {
+        branch["properties"]["kind"]["const"]
+        for tool in tools if tool.name in {"check_memory", "repair_memory"}
+        for branch in tool.to_mcp_tool().input_schema["properties"]["operation"]["oneOf"]
+        if branch["properties"]["kind"]["const"].startswith("curation-")
+    }
     openapi_property = (
         TestClient(mcp.http_app())
         .get("/api/openapi.json", headers={"Authorization": "Bearer curation-test-key"})
@@ -119,7 +122,10 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
             if isinstance(item, dict) and isinstance(item.get("enum"), list)
         )
 
-    assert enum_values(mcp_property) == expected
+    # Remote admission advertises only reads until the governed curation write lane ships.
+    from exomem.curation import READ_ONLY_ACTIONS
+
+    assert curation_kinds == {f"curation-{action}" for action in READ_ONLY_ACTIONS}
     assert enum_values(openapi_property) == expected
     assert parsed.curation_action == "status"
 

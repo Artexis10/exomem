@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import commands
 from exomem import append_to_file as append_module
 from exomem import create_directory as mkdir_module
 from exomem import create_file as create_file_module
@@ -27,6 +28,8 @@ from exomem import move_file as move_module
 from exomem import recover_from_trash as recover_module
 from exomem import relation_review
 from exomem import set_frontmatter_field as set_fm_module
+from exomem.command_surface import listed_names
+from exomem.operation_entries import DEFAULT_TOOL_SHAPE
 
 TODAY = dt.date(2026, 5, 24)
 
@@ -1067,7 +1070,10 @@ def test_list_inbound_links_returns_empty_for_unreferenced(vault: Path) -> None:
 # Product surface: governance administration and file/data/media tier-2 behavior
 # are exposed through product commands while canonical leaves remain implementation
 # details.
-TIER2_TOOLS = {"govern_memory", "manage_memory_file", "query_dataset", "read_media"}
+TIER2_TOOLS = {
+    name for command in commands.product_commands_for("mcp") if command.tier == 2
+    for name in listed_names(command, DEFAULT_TOOL_SHAPE)
+}
 
 
 def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
@@ -1098,7 +1104,7 @@ def test_tier2_registered_by_default(
         "create_note",
         "capture_source",
         "edit_note",
-        "review_memory",
+        "read_review",
     } <= names
     # ...and so are the Tier 2 escape hatches when the flag is unset.
     assert TIER2_TOOLS <= names
@@ -1116,10 +1122,14 @@ def test_tier2_dropped_when_disabled(
         "create_note",
         "capture_source",
         "edit_note",
-        "review_memory",
-        "connect_memory",
+        "read_review",
+        "read_connections",
     } <= names
-    assert names.isdisjoint(TIER2_TOOLS)
+    tier1_shared = {
+        name for command in commands.product_commands_for("mcp", expose_tier2=False)
+        for name in listed_names(command, DEFAULT_TOOL_SHAPE)
+    }
+    assert names.isdisjoint(TIER2_TOOLS - tier1_shared)
 
 
 def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:

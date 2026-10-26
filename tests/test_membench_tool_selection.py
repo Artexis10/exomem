@@ -25,7 +25,7 @@ from membench.utility.switch_eval.session import (
     classify,
     run_session,
 )
-from membench.utility.switch_eval.state import Layout, StateError
+from membench.utility.switch_eval.state import Layout, Slot, StateError
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 from membench.utility.tool_selection import cases as case_module
 from membench.utility.tool_selection import executor as ex
@@ -679,9 +679,9 @@ def test_a_tool_selection_session_executes_from_its_seed_and_records_end_states(
     case = _dev_case("records-range-total")
     layout = Layout(tmp_path / "run")
     seeded = layout.run / "seeded" / case.case_id / "vault"
-    seed_vault(seeded, case.seed_steps())
-    before = read_end_state(seeded)
     spec = ex.arm_spec("grouped", ())
+    ex.seed_case(layout.run, case, parent_env={"PATH": os.defpath}, spec=spec)
+    before = json.loads((seeded.parent / "admitted-state.json").read_text())
     init = {"type": "system", "subtype": "init", "apiKeySource": "none",
             "model": "m", "claude_code_version": "v", "tools": [],
             "mcp_servers": [{"name": "exomem", "status": "connected"}]}
@@ -694,7 +694,8 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "received"})
     inputs = SessionInputs(
         planned=PlannedSession("session-1", case.case_id, "grouped", 1, 0),
         tree=ex.SURFACE_TREE, argv=(sys.executable, "-c", client, json.dumps(init)),
-        env={"PATH": os.defpath}, cwd=layout.slot / "cwd", turns=(case.prompt,), scored_turn=0,
+        env=ex.seeding_env({"PATH": os.defpath}, Slot(layout.slot), spec),
+        cwd=layout.slot / "cwd", turns=(case.prompt,), scored_turn=0,
         files={"instructions.md": ex.client_instructions()}, state_digests={},
     )
     monkeypatch.setattr(session, "_USER_STATE_ROOT", tmp_path / "user-state")
@@ -704,7 +705,13 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "received"})
     result = executor(inputs, tmp_path / "attempt")
 
     assert result.outcome == "ok" and result.answer == "received"
-    assert result.facts["end_state_before"] == result.facts["end_state_after"] == before
+    actual_before = result.facts["end_state_before"]
+    assert actual_before == result.facts["end_state_after"]
+    # Opening the copied graph cache can recover a SQLite journal; canonical state and seed files stay exact.
+    assert {key: value for key, value in actual_before.items() if key != "evidence"} == {
+        key: value for key, value in before.items() if key != "evidence"
+    }
+    assert actual_before["evidence"]["files"] == before["evidence"]["files"]
     assert not layout.slot.exists()
 
 

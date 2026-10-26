@@ -208,7 +208,7 @@ REMINDER_SHORT = (
 
 #: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] Decision or stopping point reached? record_episode once: "
+    "[Exomem episode check] Decision or stopping point? record_episode once: "
     'operation.kind="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
     "Otherwise do nothing."
 )

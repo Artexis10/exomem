@@ -441,20 +441,36 @@ def test_mcp_audit_routes_reject_boolean_sample_limits_before_leaf_execution(
         ),
     )
 
+    from exomem.operation_entries import spell_call
+
     for name, arguments in routes:
-        sample_schema = schemas[name]["properties"]["legacy_sample_limit"]
+        public_name, _ = spell_call(name, arguments, "nested")
+        if public_name == name:
+            properties = schemas[name]["properties"]
+        else:
+            operation = schemas[public_name]["properties"]["operation"]
+            audit = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "audit")
+            properties = {**audit["properties"], **operation.get("properties", {})}
+        sample_schema = properties["legacy_sample_limit"]
         assert sample_schema["type"] == "integer"
         assert sample_schema["minimum"] == 0
         assert sample_schema["maximum"] == audit_module.MAX_LEGACY_SAMPLE_LIMIT
         for invalid in (False, True):
-            with pytest.raises(Exception, match="legacy_sample_limit"):
-                asyncio.run(
+            request = spell_call(name, {**arguments, "legacy_sample_limit": invalid}, "nested")[1]
+            if public_name == name:
+                with pytest.raises(Exception, match="legacy_sample_limit"):
+                    asyncio.run(mcp.call_tool(public_name, request, run_middleware=True))
+            else:
+                result = asyncio.run(
                     mcp.call_tool(
-                        name,
-                        {**arguments, "legacy_sample_limit": invalid},
-                        run_middleware=False,
+                        public_name,
+                        request,
+                        run_middleware=True,
                     )
                 )
+                assert result.structured_content["success"] is False
+                assert result.structured_content["error"]["code"] == "INVALID_OPERATION_ARGUMENTS"
+                assert "legacy_sample_limit" in result.structured_content["error"]["message"]
 
     assert calls == []
 

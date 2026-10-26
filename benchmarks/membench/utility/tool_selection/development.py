@@ -137,6 +137,12 @@ def source_key(params: dict) -> Key:
             items.append({**item, "target_path": target, "target_ref": source_ref(target)})
         adoption = {**adoption, "originals": params["fixture"]["originals"], "plan": {
             **adoption["plan"], "date": params["fixture"]["case_date"], "items": items,
+            # The planner's note counters derive from independent expected items, never actor output.
+            "notes": {
+                "to_create": sum(1 for item in items if item.get("note")),
+                "existing": sum(1 for item in items if item.get("existing_note")),
+                "previous": sum(1 for item in items if item.get("previous_note")),
+            },
         }}
     return Key(
         kind=params["kind"], target_ops=operations, answer=answer.get("value"),
