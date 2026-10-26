@@ -787,9 +787,15 @@ def _acknowledge_derived_batches(
     if not session.batches:
         return result
     with call_spans.span("derived.acknowledgement"):
-        return _acknowledge_derived_batches_timed(
-            result, session, budget_deadline=budget_deadline
-        )
+        try:
+            return _acknowledge_derived_batches_timed(
+                result, session, budget_deadline=budget_deadline
+            )
+        finally:
+            call_spans.record_span(
+                "derived.post_canonical",
+                (_fast_ack_monotonic() - min(batch.canonical_commit_monotonic for batch in session.batches)) * 1000.0,
+            )
 
 
 _CLOSED_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
@@ -950,6 +956,26 @@ def _acknowledge_derived_batches_timed(
             return None
         return tuple(sorted(set().union(*owed.values())))
 
+    def pending_snapshot() -> Any:
+        """An expired observation budget leaves custody pending without a failed acknowledgement."""
+        advisory_ref = _claimed_advisory_ref(session)
+        if session.advisory_claimed and advisory_ref is None:
+            raise RuntimeError("applicable advisory custody has no stable result ref")
+        # Applicability is fixed in each receipt; completed state still needs a fresh read.
+        components = tuple(sorted({
+            status.component.value
+            for batch in session.batches if batch.handoff_outcome != "superseded"
+            for status in batch.receipt.components
+            if status.state != "not_required" and status.component.value in _DERIVED_COMPONENT_NAMES
+        }))
+        return with_fast_acknowledgement(
+            result,
+            derived_sync="pending",
+            derived_sync_components=components,
+            advisory_sync="pending" if session.advisory_claimed else "not_required",
+            advisory_result_ref=advisory_ref,
+        )
+
     try:
         from . import derived_receipts, index_sync
 
@@ -977,6 +1003,8 @@ def _acknowledge_derived_batches_timed(
             owed[receipt.batch_id] = batch_owed
             statuses = []
             for component in derived_receipts.DerivedComponent:
+                if _fast_ack_monotonic() >= deadline:
+                    return pending_snapshot()
                 where.update(stage="component_status", component=component.value)
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
@@ -1037,14 +1065,6 @@ def _acknowledge_derived_batches_timed(
             for snapshot in snapshots
             for component, state, code in snapshot.diagnostics
         ]
-        call_spans.record_span(
-            "derived.post_canonical",
-            (
-                _fast_ack_monotonic()
-                - min(batch.canonical_commit_monotonic for batch in session.batches)
-            )
-            * 1000.0,
-        )
         return with_fast_acknowledgement(
             result,
             derived_sync=derived_sync,

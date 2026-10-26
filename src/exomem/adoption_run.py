@@ -75,7 +75,8 @@ INITIAL_SECONDS_PER_MIB = 0.05
 # MiB; lighter chunks teach the per-item rate, which a huge file would otherwise inflate.
 BYTE_RATE_MIN_ITEM_MIB = 1.0
 # Work a call owes after its loop, inside the same MCP call, which the loop cannot
-# time. Media sidecars are indexed by a fan-out deferred until the mutation's
+# time. Durable custody still needs proof and pending publication after the leaf.
+# Media sidecars are indexed by a fan-out deferred until the mutation's
 # terminal is persisted (a fast-acknowledgement session moves it behind the reply
 # instead); its first graph step waits on the graph the background media worker
 # also holds, and the reply names every written path for the egress checks to
@@ -83,7 +84,7 @@ BYTE_RATE_MIN_ITEM_MIB = 1.0
 # terminal drains took 3.4-15.2 s, with one outlier of 30.4 s on a short final
 # call; once the first had run, each further sidecar cost about 0.1 s; reply
 # handling took about 2.4 s for 456 written paths (0.005 s each).
-TERMINAL_FANOUT_RESERVE_SECONDS = 20.0
+TERMINAL_WORK_RESERVE_SECONDS = 20.0
 TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
 REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
@@ -1338,9 +1339,11 @@ class _ApplyPacer:
         return seen if rate is None else max(rate, seen)
 
     def _owed_after_loop(self, artifacts: int) -> float:
-        if not self._owes_fanout or not artifacts:
+        if not self._owes_fanout:
+            return TERMINAL_WORK_RESERVE_SECONDS
+        if not artifacts:
             return 0.0
-        return TERMINAL_FANOUT_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
+        return TERMINAL_WORK_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
 
     @staticmethod
     def _media(chunk: list[dict]) -> int:
@@ -1383,6 +1386,10 @@ class _ApplyPacer:
             chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
             cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         return chunk if first or cost <= self._room(chunk) else []
+
+    def note_fits(self, chunk: list[dict], seconds: float) -> bool:
+        """Keep the same terminal headroom between the chunk's individual notes."""
+        return seconds <= self._room(chunk)
 
     def record(self, chunk: list[dict], elapsed: float, extractions: list[float]) -> None:
         """Learn from a finished chunk: `extractions` are its media requests' seconds."""
@@ -1506,7 +1513,7 @@ def _commit_chunk(
 def _apply_chunk(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], *,
     run_date: dt.date, ceiling: int, budget: request_budget.RequestBudget, stats: Counter,
-    written: list[str], reads: _CallReads,
+    written: list[str], reads: _CallReads, pacer: _ApplyPacer,
 ) -> list[float]:
     """Apply one chunk; returns the seconds each media extraction request took."""
     plan = run["plan"]
@@ -1594,14 +1601,14 @@ def _apply_chunk(
         reads.notes = adoption_plan.NoteIndex(root)
     _create_notes(
         root, store, run, chunk, texts,
-        label=label, notes=reads.notes, budget=budget, stats=stats, written=written,
+        label=label, notes=reads.notes, pacer=pacer, stats=stats, written=written,
     )
     return extractions
 
 
 def _create_notes(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], texts: dict[str, str], *,
-    label: str | None, notes: adoption_plan.NoteIndex, budget: request_budget.RequestBudget,
+    label: str | None, notes: adoption_plan.NoteIndex, pacer: _ApplyPacer,
     stats: Counter, written: list[str],
 ) -> None:
     """Create the draft note of every own-note item in `chunk` whose Source is on disk.
@@ -1617,9 +1624,7 @@ def _create_notes(
         path = planned["original_path"]
         if path not in outcomes or outcomes[path]["status"] != _SOURCE_ONLY:
             continue
-        if stats["notes_started"] and not budget.can_afford(
-            request_budget.DELIVERY_RESERVE_SECONDS + stats["note_ms_max"] / 1000
-        ):
+        if stats["notes_started"] and not pacer.note_fits(chunk, stats["note_ms_max"] / 1000):
             stats["notes_deferred"] += 1
             break
         started = time.monotonic()
@@ -1837,7 +1842,7 @@ def apply(
             started = time.monotonic()
             extractions = _apply_chunk(
                 root, store, run, chunk, run_date=run_date, ceiling=ceiling,
-                budget=budget, stats=stats, written=written, reads=reads,
+                budget=budget, stats=stats, written=written, reads=reads, pacer=pacer,
             )
             pacer.record(chunk, time.monotonic() - started, extractions)
             pending = pending[len(chunk):]

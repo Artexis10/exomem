@@ -302,8 +302,9 @@ def test_components_share_one_absolute_post_commit_deadline(
 
     terminal, _target = _invoke_batch(tmp_path)
 
-    assert deadlines == [102.0, 102.0, 102.0]
-    assert clock["now"] == pytest.approx(106.3)
+    assert deadlines and set(deadlines) == {102.0}
+    # The first wait exhausts the common deadline; later observations cannot extend it.
+    assert clock["now"] <= 102.1
     assert terminal["derived_sync"] == "pending"
 
 

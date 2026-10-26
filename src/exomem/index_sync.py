@@ -1792,10 +1792,13 @@ def upsert_after_write(
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
     if not eligible and not watcher_mode:
         from . import epistemic_graph
+        from .writer_lease import active_derived_batch_custody
 
         graph_component = (
             _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
-            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            # Operational writes must leave existing graph debt with its durable owner.
+            if not active_derived_batch_custody(vault_root)
+            and deferred_index.graph_full_rebuild_pending(vault_root) is not None
             else None
         )
         return IndexSyncReport(
