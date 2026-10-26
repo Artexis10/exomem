@@ -9,7 +9,8 @@ Checks (all read-only; no writes ever):
   sources with a title match are not flagged).
 - `orphan_entity`: file under `Entities/` with no inbound wikilinks from
   anywhere in `Knowledge Base/`
-- `unprocessed_source`: `type: source` page whose `ingested_into:` is empty
+- `unprocessed_source`: `type: source` page that no live note compiles: no page
+  its `ingested_into:` names is live and cites it in its own `sources:`
 - `unresolved_source_citation`: compiled page whose explicit `sources:` claim
   does not resolve to authorized governed Source or Evidence material
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts

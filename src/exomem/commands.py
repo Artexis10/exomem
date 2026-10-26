@@ -3853,8 +3853,8 @@ def op_audit(
       Bare names resolve against filename stems AND frontmatter `title:`
       (so date-prefixed sources with a title match are not flagged).
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
-    - `unprocessed_source`: source with empty `ingested_into:` (no notes
-      have compiled from it yet)
+    - `unprocessed_source`: source that no live note compiles yet (no page
+      in its `ingested_into:` is live and cites it in its own `sources:`)
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
       original or remove the unsupported citation; audit never reconstructs it.
