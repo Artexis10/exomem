@@ -21,6 +21,9 @@ import datetime as dt
 from pathlib import Path
 
 import pytest
+from test_connector_boundary import SCOPE
+from test_connector_boundary import configured_boundary as configured_boundary
+from test_private_vocabulary_instances import private_instances as private_instances
 
 from exomem import note as note_module
 from exomem import preserve as preserve_module
@@ -1145,7 +1148,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     }
     assert semantic["full_source_reads"] == [{
         "tool": "read_memory",
-        "args": {"path": page_path, "include_raw": True, "purpose": "source compilation"},
+        "args": {"path": page_path, "include_raw": True},
     }]
     assert payload["state"] == "committed"
     assert "outline_markdown" not in str(semantic)
@@ -1180,6 +1183,37 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
         assert original.decode() in (vault / page_path).read_text(encoding="utf-8")
     else:
         assert (vault / stored_path).read_bytes() == original
+
+
+def test_selected_private_relation_alias_keeps_registered_rich_feedback(private_instances, vault) -> None:
+    from exomem import relation_registry
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import instances
+
+    with request_scope(private_instances("full")):
+        overlay = instances.select(vault, relation_registry.SPEC, SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\nextensions:\n  vault.accounts_for:\n"
+            "    parent: supports\n    description: Accounts for a synthetic claim.\n"
+            "    aliases: [accounts]\n",
+            encoding="utf-8",
+        )
+        result = note_module.note(
+            vault, title="A supported private claim", note_type="insight",
+            projects=["private-project"],
+            content=(
+                "## Claim\n- relations: accounts: "
+                "[[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]\n\n"
+                "The claim follows the retry pattern.\n"
+            ),
+        )
+
+    assert result.creation["contract_result"]["relation_disposition"]["qualifying_signal"] == "typed"
+    feedback = result.write_feedback["relations"]
+    assert feedback["typed_block"] == 1
+    assert feedback["relation_debt"] is False
+    assert "unregistered" not in feedback
 
 
 # --------------------------------------------------------------------------

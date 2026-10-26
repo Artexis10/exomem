@@ -44,6 +44,7 @@ Pending media extraction does not prevent the agent from using an available orig
 Compile proposals remain optional scaffolds for one note, not source-wide semantic plans.
 Adjacent pages are unreviewed candidates, and the generator authors no generic default bullet or instruction to copy candidates as accepted edges.
 The active conversation agent inventories available full-source themes and central durable referents, then retrieves prior knowledge, entities and filing context.
+Shared writing and composing guidance follows the live engagement authority; permitted writes gain no blanket draft-preview or confirmation requirement.
 It splits independently useful outputs by meaning, preserves attribution and uncertainty, and authors specific grounded relations when appropriate.
 It checks that inventory once after the writes and reports unread, unavailable or uncompiled material honestly.
 The workflow adds no semantic word list, fixed topic set, minimum output count or repeated per-source backlog warning.

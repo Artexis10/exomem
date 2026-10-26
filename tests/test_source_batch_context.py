@@ -153,3 +153,98 @@ def test_a_compilation_scaffold_leaves_out_the_excerpt_of_a_source_the_caller_ma
     assert scaffold["semantic_compilation"]["preparation_route"]["args"]["sources"] == [
         "Knowledge Base/Sources/Open/page.md",
     ]
+
+
+def test_full_source_read_route_preserves_the_active_session_grant(vault, tmp_path, monkeypatch) -> None:
+    import hashlib
+    import time
+
+    from test_authorization_session_wire_reconnect import _configure_v4_authority
+    from test_governance_egress import SCOPE_ID, _reset_governance_caches, write_rule, write_scope
+
+    from exomem.governance import (
+        authorization_custody,
+        authorization_session_authority as authority,
+        authorization_session_lifecycle,
+        policy,
+        principal,
+        store,
+    )
+
+    audience = "principal:reader"
+    path = "Knowledge Base/Sources/Articles/session-source.md"
+    target = vault / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = "The whole source stays available under the granted purpose."
+    target.write_text(f"---\ntype: source\nsource_type: article\n---\n# Source\n\n{text}\n", encoding="utf-8")
+    write_scope(vault, paths="Sources/**")
+    write_rule(vault, ceiling=0, audience=audience)
+    _reset_governance_caches()
+    _configure_v4_authority(vault, tmp_path / "route-custody", monkeypatch)
+    now = int(time.time())
+    custody = authorization_custody.load_authorization_custody(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        session = authorization_session_lifecycle.open_session(
+            connection, custody=custody, principal_id=audience, issuer_family="mcp-oauth",
+            now=now, ttl_seconds=600,
+        )
+        fingerprint = hashlib.sha256(target.read_bytes()).hexdigest()
+        token = authority.mint_escalation_token(
+            connection, context=session.context, signing_key=custody.keyring.active_key.key,
+            audience=audience, purpose="research", max_level=6, org_ceiling=6, paths=(path,),
+            fingerprints=(fingerprint,), scope_ids=(SCOPE_ID,), now=now, expires_at=now + 300,
+        )
+        authority.redeem_escalation_token(
+            connection, token=token, context=session.context, signing_key=custody.keyring.active_key.key,
+            audience=audience, purpose="research", policy_fingerprint=policy.load(vault).fingerprint,
+            membership=(authority.SessionMembership(path, fingerprint, (SCOPE_ID,)),), now=now,
+        )
+        authority.declare_purpose(
+            connection, context=session.context, audience=audience, purpose="research",
+            now=now, expires_at=now + 300,
+        )
+    finally:
+        connection.close()
+    caller = principal.RequestPrincipal(audience_id=audience, surface="mcp").with_verified_authorization_session(
+        session.context, issuer_family="mcp-oauth",
+    )
+    with principal.request_scope(caller):
+        assert text in commands.op_read_memory(vault, path=path, include_raw=True)["body"]
+        [route] = source_coverage.compilation_guidance(vault, [path])["full_source_reads"]
+        assert text in commands.op_read_memory(vault, **route["args"])["body"]
+
+
+def test_withheld_same_name_source_does_not_change_compilation_candidates(tmp_path, monkeypatch) -> None:
+    from test_governance_egress import _reset_governance_caches, write_rule, write_scope
+
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    vault = tmp_path / "alias-vault"
+    for relative, title in (
+        ("Open/seed", "Known seed"),
+        ("Open/shared-name", "Visible source"),
+        ("Withheld/shared-name", "Withheld source"),
+    ):
+        target = vault / "Knowledge Base" / "Sources" / f"{relative}.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            f"---\ntype: source\nsource_type: note\n---\n# {title}\n\nSource text.\n",
+            encoding="utf-8",
+        )
+    write_scope(vault, paths="Sources/Withheld/**")
+    write_rule(vault, ceiling=0, audience="external")
+    _reset_governance_caches()
+    monkeypatch.setattr(corpus_aware, "suggest_related", lambda *args, **kwargs: [])
+    caller = RequestPrincipal(audience_id="external", surface="mcp")
+    requested = ["Sources/Open/seed", "shared-name"]
+    with request_scope(caller):
+        withheld = commands.op_propose_compilation(vault, sources=requested)
+    (vault / "Knowledge Base/Sources/Withheld/shared-name.md").unlink()
+    find.clear_cache()
+    with request_scope(caller):
+        absent = commands.op_propose_compilation(vault, sources=requested)
+    assert withheld == absent
+    assert withheld["suggested_sources"] == [
+        "Knowledge Base/Sources/Open/seed", "Knowledge Base/Sources/Open/shared-name",
+    ]

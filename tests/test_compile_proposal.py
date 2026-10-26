@@ -76,7 +76,7 @@ def test_proposal_filters_source_connections(vault: Path, monkeypatch) -> None:
     assert source["excerpt_scope"] == "opening_only"
     assert source["semantic_compilation"]["full_source_reads"] == [{
         "tool": "read_memory",
-        "args": {"path": f"{_ARTICLE}.md", "include_raw": True, "purpose": "source compilation"},
+        "args": {"path": f"{_ARTICLE}.md", "include_raw": True},
     }]
 
 

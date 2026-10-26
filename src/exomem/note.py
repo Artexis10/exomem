@@ -52,6 +52,7 @@ from . import (
     note_types,
     relation_registry,
     relation_review,
+    semantic_contract,
     semantic_units,
     semantic_writes,
     source_coverage,
@@ -311,6 +312,7 @@ class _PreparedNote:
 def _build_write_feedback(
     *,
     vault_root: Path,
+    registry: relation_registry.RelationRegistry,
     note_type: str,
     rel_path: str,
     status: str | None,
@@ -323,7 +325,6 @@ def _build_write_feedback(
     suggestions_count: int,
     suggestions_requested: bool,
 ) -> dict:
-    registry = relation_registry.load_registry(vault_root)
     document = semantic_units.parse_semantic_units(
         body_clean,
         relation_registry=registry,
@@ -761,6 +762,9 @@ def _legacy_note(
     kb = kb_root(vault_root)
     write_feedback = _build_write_feedback(
         vault_root=vault_root,
+        registry=relation_registry.load_for_page(
+            vault_root, note_path.relative_to(vault_root).as_posix(), parse_frontmatter(note_md)[0],
+        ),
         note_type=note_type,
         rel_path=note_path.relative_to(vault_root).as_posix(),
         status=status,
@@ -2191,6 +2195,13 @@ def note(
             destination,
             encoded_token,
         )
+    # Feedback shares the candidate's selected definitions, without a post-commit page reread.
+    feedback_registry = semantic_contract._authored_relations(
+        preflight.semantic_state,
+        preflight.corpus.registry if preflight.corpus is not None else relation_registry.load_for_page(
+            root, destination, preflight.semantic_state.frontmatter,
+        ),
+    )
     commit_started = time.perf_counter()
     from . import writer_lease
 
@@ -2278,6 +2289,7 @@ def note(
     )
     feedback = _build_write_feedback(
         vault_root=root,
+        registry=feedback_registry,
         note_type=note_type,
         rel_path=destination,
         status=status,

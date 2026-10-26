@@ -55,7 +55,10 @@ def propose_compilation(
     keep = egress.restricted_release_filter(vault_root)
 
     for s in sources:
-        canonical, _w = normalize_wikilink(s, vault_root, resolver=resolver, strict=False)
+        # Withheld matches must not change a visible source's ambiguity or result.
+        canonical, _w = normalize_wikilink(
+            s, vault_root, resolver=resolver, strict=False, visible=keep,
+        )
         abs_path = vault_root / f"{canonical}.md"
         page = find_module._CACHE.get(abs_path, vault_root)
         if page is None or (keep is not None and not keep(page.rel_path)):

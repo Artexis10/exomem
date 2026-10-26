@@ -186,19 +186,11 @@ These rules are non-negotiable.
    the same append-only tree (into a themed sub-folder) is allowed via
    `move_file`; crossing the boundary is forbidden.
 
-3. **Propose before writing compiled material.** For `create_note`,
-   `connect_memory` entity writes, and `supersede_note` (and any hand-edit of
-   `_Schema/` files), show the proposed content (or diff) and wait for
-   confirmation. The exception is `capture_source` (raw capture),
-   `preserve_evidence` (raw evidence), and read-only recall/review operations.
-
-    **Batch waiver:** you may approve a *scope* of multiple files upfront ("draft
-    all Tier 1," "write all four hubs + concepts") rather than each individually.
-    Write the batch, then summarise paths + count. The waiver is per-batch.
-
-    **Standing waiver:** phrasing like "just write it," recorded preferences, or a
-    stepping-stone reached in an autonomous session — draft, write, and report
-    rather than pre-approve.
+3. **Use the active write authority.** Follow [engagement](engagement.md) and
+   the current envelope for every write, including raw capture and vocabulary
+   effects. Draft internally; present content and wait only when the active
+   authority or a named procedure requires it. An explicit request or approved
+   batch keeps its existing scope; neither lifts an action-class ceiling or grant.
 
 4. **Frontmatter is mandatory.** Every file written under `Knowledge Base/` must
    carry frontmatter conforming to `frontmatter.md`. Exceptions:
@@ -326,7 +318,7 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    not establish completeness; unread, unavailable and uncompiled portions remain explicit.
 
 When you approve a scope of multiple files upfront, the workflow collapses to a
-single batch write (see Write discipline § 3, batch waiver).
+single batch write under the active authority (see Write discipline § 3).
 
 ## Source compilation pass
 
@@ -412,30 +404,26 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
 
 ## When to ask vs. when to proceed
 
-**Ask before:**
-- Writing any compiled note, entity, experiment, production-log, supersession, or
-  schema update.
-- Choosing a page type when intent is ambiguous (research vs. insight vs.
-  experiment vs. production-log).
-- Choosing a scope under `Notes/Research/` when you haven't named one.
-- Choosing a domain under `Notes/Experiments/` or medium under
-  `Notes/Productions/` when not stated.
-- Choosing whether a research-note is *standard*, *hub*, or *snapshot* — when the
-  framing materially affects scope.
-- Marking an existing page `superseded`.
+Use the live [engagement](engagement.md), envelope class and disposition for the
+actual action and caller. Off or advisory permits no agent-initiated write.
+An explicit user request or approved batch follows its existing scope and required guards.
+A capture preference never lifts a ceiling, v2 grant, scope limit or named procedural hold.
 
-**Proceed without asking:**
-- Proactive `search_memory` for context (read-only).
-- Capturing a clear stepping-stone conclusion whose type and scope are
-  unambiguous — write under the standing waiver and report the path.
-- `capture_source` and `preserve_evidence` operations — raw capture.
-- `search_memory`, `read_memory`, `browse_memory`, and `review_memory` — read-only.
-- `triage_memory` — writes only portable review state (Inbox, activation, and
-  relation-queue identities are namespaced apart); it never edits a note.
-- Updating `index.md`, `log.md`, and `ingested_into:` frontmatter after a
-  confirmed write.
-- Resolving obvious wikilink targets when the entity exists exactly.
-- Continuing a previously-approved batch.
+Ask for confirmation when the active authority or named procedure requires it.
+Keep confirmation for restructure, including supersession, entity merge and
+substantial curation, and for accepting a queued relation. Permitted additive
+writes do not acquire another confirmation step because they create a note,
+entity or registry entry. Raw capture also follows the live authority: first-use
+labels can require registry writes.
+
+Ask about type, scope, domain, medium or page framing only when a material choice
+remains ambiguous after checking the source, current context and registries.
+An unspecified field alone does not require a question.
+
+Draft and commit through the normal governed writer when authorized; present
+content only when required. Reuse resolved identities and existing meaningful
+connections, inspect the mutation result, and report the committed paths.
+Read-only recall and review follow the live retrieval policy.
 
 ## Source citations and write-tool details
 

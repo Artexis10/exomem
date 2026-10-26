@@ -247,9 +247,10 @@ def compilation_routes(paths: Sequence[str]) -> dict[str, Any]:
     # `unassessed` is a declared protocol state, never inferred from citations or extraction.
     out: dict[str, Any] = {"state": "unassessed"}
     if paths:
+        # Inherit the caller's purpose; replacing it can invalidate an admitted session grant.
         out["full_source_reads"] = [
             {"tool": "read_memory", "args": {
-                "path": path, "include_raw": True, "purpose": "source compilation",
+                "path": path, "include_raw": True,
             }}
             for path in paths
         ]
