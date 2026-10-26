@@ -56,8 +56,16 @@ CREATE TABLE findings (
 """
 
 
+#: Code of a refusal whose cause is only that a vault file changed under the capture; a new scan clears it.
+SOURCE_CHANGED = "COLLECTION_LEGACY_IMPORT_SOURCE_CHANGED"
+
+
 def _invalid() -> CollectionStoreError:
     return CollectionStoreError("COLLECTION_LEGACY_AUDIT_INVALID", "audit input is unusable")
+
+
+def _changed_error() -> CollectionStoreError:
+    return CollectionStoreError(SOURCE_CHANGED, "audit input changed")
 
 
 def _identity(identity: held_fs.StableIdentity) -> str:
@@ -180,13 +188,24 @@ class LegacyAuditSpool:
         self._filesystem = self._parent = self._owned_file = None
         self._owns_companions = False
         self._failed = False
+        # Whether the first failure was a vault file changing under the capture (see `refresh`).
+        self._source_changed = False
         self._scanned = False
         self._entered = False
         self._interruption = None
 
+    def _changed(self) -> CollectionStoreError:
+        """The refusal for an input that changed under the capture, unlike unusable input.
+
+        Every write to the vault rewrites the audit log, so a change is expected, not corruption:
+        the spool is spent until `refresh`, and every later call repeats this refusal.
+        """
+        self._failed = self._source_changed = True
+        return _changed_error()
+
     def _check(self) -> None:
         if self._failed:
-            raise _invalid()
+            raise _changed_error() if self._source_changed else _invalid()
         if self._cancelled is not None and self._cancelled():
             self._failed = True
             raise CollectionStoreError("COLLECTION_LEGACY_AUDIT_CANCELLED", "audit scan cancelled")
@@ -304,7 +323,7 @@ class LegacyAuditSpool:
                 (path,),
             ).fetchone()
             if prior != values:
-                raise _invalid()
+                raise self._changed()
             self._sql("UPDATE segments SET seen=1 WHERE path=?", (path,))
         else:
             self._sql("INSERT INTO segments VALUES (?,?,?,?,?,?,?,1)", (path, role, *values))
@@ -359,10 +378,10 @@ class LegacyAuditSpool:
                         pass
                 after = os.fstat(file.descriptor)
                 if metadata != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                    raise _invalid()
+                    raise self._changed()
                 with filesystem.file(parent, leaf).require() as named:
                     if named.identity != file.identity:
-                        raise _invalid()
+                        raise self._changed()
                 self._observe(
                     path, role, file.identity, metadata, digest.hexdigest(), recheck=recheck
                 )
@@ -422,9 +441,12 @@ class LegacyAuditSpool:
                     for (path,) in self._rows("SELECT path FROM segments WHERE role='manifest'"):
                         self._file(filesystem, path, "manifest", recheck=True)
                     if self._sql("SELECT 1 FROM segments WHERE seen=0 LIMIT 1").fetchone():
-                        raise _invalid()
-        except _INPUT_FAILURES:
+                        raise self._changed()
+        except _INPUT_FAILURES as error:
             self._failed = True
+            # A segment the scan saw is gone: the same change, seen as a missing file instead of a mismatch.
+            if recheck and isinstance(error, held_fs.HeldFsError) and error.code == "MISSING":
+                raise self._changed() from error
             raise
 
     def _recheck(self):
@@ -463,6 +485,23 @@ class LegacyAuditSpool:
         self._sql("COMMIT")
         self._scanned = True
 
+    def refresh(self, vault_root: Path) -> None:
+        """Capture the vault again after an input changed under this census.
+
+        Earlier proofs and captures die with the old census; the caller recaptures what it still
+        needs. A spool that failed for any other reason stays failed.
+        """
+        if self._failed and not self._source_changed:
+            raise _invalid()
+        self._failed = self._source_changed = self._scanned = False
+        self._interruption = None
+        if self._connection.in_transaction:
+            self._connection.execute("ROLLBACK")
+        for table in ("walk", "findings", "occurrences", "segments"):
+            self._sql("DELETE FROM " + table)
+        self._token = secrets.token_hex(16)
+        self.scan(vault_root)
+
     def _finding(self, proof, kind, key, detail=None):
         self._sql("INSERT OR IGNORE INTO findings VALUES (?,?,?,?)", (proof, kind, key, detail))
 
@@ -488,8 +527,8 @@ class LegacyAuditSpool:
             "SELECT digest,size FROM segments WHERE path=?", (manifest.path,)
         ).fetchone()
         if digest != manifest.manifest_version.hash:
-            self._failed = True
-            raise _invalid()
+            # The manifest on disk is no longer the version the caller read.
+            raise self._changed()
         return size
 
     def _bounded_history(self, profile):
