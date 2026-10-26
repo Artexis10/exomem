@@ -22,6 +22,39 @@ from exomem import vault as vault_module
 from exomem.governance.principal import owner_principal, request_scope
 
 
+def test_draft_retry_after_log_publication_keeps_one_activity(vault, monkeypatch) -> None:
+    """A draft has no review record to retain a clock value across a pending retry."""
+    arguments = {
+        "content": "## Claim\n\nA retained conclusion.\n",
+        "note_type": "insight", "title": "Structural retry", "status": "draft",
+        "today": dt.date(2026, 10, 26),
+    }
+    draft = note.note(vault, validate_only=True, **arguments)
+    retry = {"draft_id": draft.draft_id, "draft_token": draft.draft_token,
+             "draft_hash": draft.draft_hash}
+    before = len(vault_module.read_operation_log(vault)["entries"])
+    publish = vault_module._after_batch_destination_published
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    def die_after_log(path):
+        publish(path)
+        if path == vault / "Knowledge Base/log.md":
+            raise SimulatedProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_module, "_after_batch_destination_published", die_after_log)
+        with pytest.raises(SimulatedProcessDeath):
+            note.note(vault, **arguments, **retry)
+    assert not (vault / draft.destination).exists()
+
+    saved = note.note(vault, **arguments, **retry)
+
+    assert (vault / saved.path).is_file()
+    assert len(vault_module.read_operation_log(vault)["entries"]) == before + 1
+
+
 def test_edit_recovery_keeps_the_first_committing_attempts_server_time(vault, monkeypatch) -> None:
     """A crash before the primary write cannot change the log bytes bound to recovery."""
     from exomem import edit, relation_review
@@ -91,12 +124,13 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
         "content": f"## Claim\n\nA retained conclusion.\n\n## Relations\n\n- relates_to [[{target.removesuffix('.md')}]]\n",
         "note_type": "insight",
         "title": "Authored additions",
-        "status": "draft",
+        "status": "active",
         "today": dt.date(2020, 1, 1),
     }
     draft = note.note(vault, validate_only=True, **draft_arguments)
     created = note.note(
-        vault, draft_token=draft.draft_token, draft_id=draft.draft_id, **draft_arguments
+        vault, draft_token=draft.draft_token, draft_id=draft.draft_id,
+        draft_hash=draft.draft_hash, **draft_arguments
     )
     path = created.path
     _, body, _ = vault_module.parse_frontmatter((vault / path).read_text())
@@ -120,14 +154,14 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
         written = bound(**arguments)
         replay = bound(**arguments)
     assert replay == written
-    # The spelling-only rewrite resolves to the same stable endpoint.
+    # Respelling an edge during a real edit resolves to the same stable endpoint.
     commands.op_edit_memory(
         vault,
         path,
         "Use the target's short address.",
         operation={
             "kind": "replace_body",
-            "new_body": (body + f"\n- supports [[{extra}]]\n").replace(
+            "new_body": (changed_body + "\nClarify the conclusion without another relation.\n").replace(
                 target.removesuffix(".md"), Path(target).stem
             ),
         },
@@ -341,7 +375,8 @@ def test_a_mutation_reason_cannot_author_server_provenance(vault: Path) -> None:
     graph_sync.await_active_rebuild(vault, timeout=30)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     cohort = relation_census.census(vault)["new_edges"]
-    assert cohort["authored_edges"]["numerator"] == 0
+    assert cohort["authored_edges"]["numerator"] is None
+    assert cohort["coverage"]["unknown_server_time_entries"] >= 2
     assert "Keep this ordinary prose." in (vault / "Knowledge Base/log.md").read_text()
 
 
@@ -356,7 +391,7 @@ def test_unit_identity_coverage_requires_a_stable_authored_anchor(
         vault,
         note_type="insight",
         title="A unit identity boundary",
-        status="draft",
+        status="active",
         content=f"## Claim\n{identity}- relations: relates_to: [[{target}]]\n\nA retained conclusion.\n",
     )
     graph_sync.await_active_rebuild(vault, timeout=30)

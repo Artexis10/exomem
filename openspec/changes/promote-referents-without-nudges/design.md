@@ -309,7 +309,7 @@ Keep the historical graph cohort unchanged and add a new authored-edge cohort sp
 Use exact governed write deltas and server UTC timestamps from the existing atomic operation log, including its rotation archives.
 The timestamp records the first server preparation of the committing attempt and survives a pending retry through its existing recovery record.
 The recovery record holds only that bounded timestamp; semantic deltas are recomputed and the original auxiliary digest still guards replay.
-Approval operations without a durable timestamp binding omit optional provenance and remain a visible coverage gap.
+Approval operations and structural writes without a durable timestamp binding omit optional provenance and remain a visible coverage gap.
 An authored date never establishes that an uninstrumented write falls outside the server-time window.
 Page dates, graph rebuild times and promotion settlement do not establish edge creation time.
 Stable resolved endpoint identity prevents a spelling change or inherited predecessor edge from becoming a new authored edge.

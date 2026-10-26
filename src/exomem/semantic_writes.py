@@ -2114,7 +2114,7 @@ def _preflight_existing(
             "transition token does not match the exact before and after state",
         )
     transition_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    provenance_server_at = _new_provenance_time(root)
+    provenance_server_at = _new_provenance_time(root) if applicability == "full" else None
     if transition_token is not None and applicability == "full" and after.identity_kind == "exomem_id":
         prepared = relation_review.load_lifecycle_prepared(root, after.identity, admission=admission)
         if (
@@ -4546,7 +4546,6 @@ def _preflight_creation(
             vocabulary_binding.parent_guard,
         ) if vocabulary_binding is not None else (),
         origin_inputs,
-        provenance_server_at=_new_provenance_time(root),
     )
 
 

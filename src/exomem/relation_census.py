@@ -380,7 +380,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "unknown_server_time_entries": unknown_time,
         "unlogged_operations": None,
         "window_complete": False,
-        "limitation": "Unlogged, legacy and unbound approval writes have incomplete server-time coverage.",
+        "limitation": "Unlogged writes and writes without a durable server-time binding have incomplete coverage.",
     }
     recorded_edges = [edge for event in events.values() for edge in event["added_edges"]]
     unknown_identity = sum(
