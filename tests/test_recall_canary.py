@@ -102,6 +102,76 @@ def test_mcp_canary_accepts_a_positive_read_memory_case(tmp_path):
     assert "private-page" not in json.dumps(report)
 
 
+@pytest.mark.parametrize("tool", ["search_memory", "recall_context"])
+def test_mcp_canary_calls_canonical_recall_tools(tmp_path, tool):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool(name=tool)
+    def recall(query: str) -> dict:
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
+
+    case = _canary_case()
+    case["tool"] = tool
+    report = _run_canary(tmp_path, server, [case], samples=1, check="availability")
+    assert report["check_verdict"] == "passed"
+    assert report["cases"][0]["tool"] == tool
+
+
+@pytest.mark.parametrize("tool", ["read_records", "read_plans"])
+@pytest.mark.parametrize("kind", ["inspect", "query"])
+def test_mcp_canary_reads_nested_collection_operations(tmp_path, tool, kind):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+    calls = []
+
+    @server.tool(name=tool)
+    def collection_read(operation: dict) -> dict:
+        calls.append(operation)
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": "material"}]}
+
+    operation = {"kind": kind, "collection": "example"}
+    case = _canary_case()
+    case.update(tool=tool, arguments={"operation": operation})
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False, check="availability")
+    assert report["check_verdict"] == "passed"
+    assert calls == [operation]
+    assert report["cases"][0]["observed_terminals"] == 1
+
+
+@pytest.mark.parametrize("tool", ["read_records", "read_plans"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"operation": {"kind": "import", "import_request": {"mode": "preview"}}},
+        {"operation": {"kind": "append", "collection": "example", "item": {}}},
+        {"kind": "inspect"},
+        {"operation": {"kind": ["inspect"]}},
+        {"operation": {"kind": "query"}},
+        {"operation": {"kind": "inspect", "collection": 42}},
+        {"operation": {"kind": "inspect", "item": {}}},
+    ],
+)
+def test_mcp_collection_mutations_and_malformed_operations_fail_before_connection(
+    tmp_path, tool, arguments
+):
+    class NoConnection:
+        async def __aenter__(self):
+            pytest.fail("invalid collection operations must not connect")
+
+    case = _canary_case()
+    case.update(tool=tool, arguments=arguments)
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps([case]))
+    report = asyncio.run(
+        gate.run_mcp_canary(client=NoConnection(), cases_file=path, package_mode="source")
+    )
+    assert report["failure"] == "invalid-cases"
+    assert report["initialization_ms"] is None
+
+
 def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
     from fastmcp import FastMCP
 
@@ -652,8 +722,16 @@ def test_mcp_measured_failure_retains_all_outcomes_and_unattempted_cases(tmp_pat
     assert first["latency"][0]["observed"] == 2
     assert first["latency"][0]["samples"] == 2
     assert first["latency"][0]["refusals"] == 1
+    measured = sorted(
+        attempt["elapsed_ms"] for attempt in first["attempts"] if attempt["phase"] == "measured"
+    )
+    assert first["observed_terminals"] == 2
+    assert first["p50_ms"] == round(measured[0], 3)
+    assert first["p95_ms"] == round(measured[1], 3)
     assert second["availability"] == "unattempted"
     assert second["attempts"] == []
+    assert second["observed_terminals"] == 0
+    assert second["p50_ms"] is second["p95_ms"] is None
 
 
 @pytest.mark.parametrize("terminal", ["malformed", "tool-error", "timeout"])
@@ -672,12 +750,15 @@ def test_mcp_terminal_failures_have_elapsed_time_without_response_content(tmp_pa
             content=[TextContent(type="text", text="private-response")],
         )
 
-    report = _run_canary(tmp_path, server, [_canary_case()], timeout_seconds=0.01)
+    report = _run_canary(tmp_path, server, [_canary_case()], timeout_seconds=0.01, warm_up=False)
     assert report["verdict"] == "failed"
     attempt = report["cases"][0]["attempts"][0]
     assert attempt["outcome"] == "error"
     assert attempt["elapsed_ms"] >= 0
     assert len(report["cases"][0]["attempts"]) == 1
+    assert report["cases"][0]["observed_terminals"] == (0 if terminal == "timeout" else 1)
+    assert report["cases"][0]["p50_ms"] is not None
+    assert report["cases"][0]["p95_ms"] is not None
     assert "private-response" not in json.dumps(report)
 
 
@@ -721,6 +802,115 @@ def test_mcp_controller_contract_uses_its_own_revision_and_sample_count(tmp_path
     latency = report["cases"][0]["latency"][0]
     assert latency["contract_revision"] == "controller-test"
     assert latency["min_samples"] == 31
+
+
+@pytest.mark.parametrize("samples", [None, 1])
+def test_mcp_case_bars_keep_their_thresholds_and_minimums(tmp_path, samples):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def ask_memory(query: str) -> dict:
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
+
+    contract = load_contract().model_dump(mode="json")
+    base = next(bar for bar in contract["bars"] if bar["id"] == "programme-public-warm")
+    contract["bars"].extend(
+        [
+            {
+                **base,
+                "id": "broad-budget",
+                "threshold_ms": 60000,
+                "min_samples": 1,
+                "operations": ["ask_memory"],
+            },
+            {**base, "id": "narrow-budget", "threshold_ms": 0, "min_samples": 3},
+        ]
+    )
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(contract))
+    first = {**_canary_case(), "bar_id": "broad-budget"}
+    second = {**_canary_case(), "id": "case-02", "bar_id": "narrow-budget"}
+    report = _run_canary(tmp_path, server, [first, second], contract_file=path, samples=samples)
+    broad, narrow = report["cases"]
+    assert broad["bar_id"] == "broad-budget"
+    assert narrow["bar_id"] == "narrow-budget"
+    assert broad["requested_samples"] == narrow["requested_samples"] == (samples or 3)
+    assert broad["latency"][0]["min_samples"] == 1
+    assert broad["latency"][0]["verdict"] == "observed-within-bar"
+    assert narrow["latency"][0]["min_samples"] == 3
+    assert narrow["latency"][0]["verdict"] == ("failed" if samples is None else "insufficient")
+    assert report["coverage"] == ("complete" if samples is None else "incomplete")
+
+
+@pytest.mark.parametrize("damage", ["unknown", "wrong-surface", "wrong-operation"])
+def test_mcp_invalid_case_bar_cannot_fall_back_or_connect(tmp_path, damage):
+    class NoConnection:
+        async def __aenter__(self):
+            pytest.fail("every selected bar must validate before connection")
+
+    contract = load_contract().model_dump(mode="json")
+    base = next(bar for bar in contract["bars"] if bar["id"] == "programme-public-warm")
+    selected = {**base, "id": "selected-budget"}
+    if damage == "wrong-surface":
+        selected["surface"] = "cli"
+    elif damage == "wrong-operation":
+        selected["operations"] = ["read_memory"]
+    if damage != "unknown":
+        contract["bars"].append(selected)
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps(contract))
+    case = {**_canary_case(), "id": "case-02", "bar_id": selected["id"]}
+    cases_path = tmp_path / "cases.json"
+    cases_path.write_text(json.dumps([_canary_case(), case]))
+    report = asyncio.run(
+        gate.run_mcp_canary(
+            client=NoConnection(),
+            cases_file=cases_path,
+            package_mode="source",
+            contract_file=contract_path,
+        )
+    )
+    assert report["failure"] == "invalid-observer-or-contract"
+    assert report["initialization_ms"] is None
+    assert report["cases"] == []
+
+
+def test_mcp_terminal_timing_excludes_costly_observer_assertions(tmp_path, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def ask_memory(query: str) -> dict:
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
+
+    assertion_seconds = 3600
+    observer_offset = 0
+    check_result = gate._canary_result
+
+    def costly_assertion(*args, **kwargs):
+        nonlocal observer_offset
+        observer_offset += assertion_seconds
+        return check_result(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gate,
+        "time",
+        SimpleNamespace(time=time.time, perf_counter=lambda: time.perf_counter() + observer_offset),
+    )
+    monkeypatch.setattr(gate, "_canary_result", costly_assertion)
+    report = _run_canary(
+        tmp_path, server, [_canary_case()], samples=1, warm_up=False, check="availability"
+    )
+    [attempt] = report["cases"][0]["attempts"]
+    assert report["check_verdict"] == "passed"
+    assert observer_offset == assertion_seconds
+    assert 0 <= attempt["elapsed_ms"] < assertion_seconds * 1000
 
 
 def test_mcp_cli_emits_only_content_free_json_and_structured_warning(tmp_path, monkeypatch, capsys):
