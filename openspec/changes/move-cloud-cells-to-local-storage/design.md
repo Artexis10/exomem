@@ -47,8 +47,8 @@ Each cell gets one logical volume with its own ext4 filesystem, provisioned by T
 
 - **Isolation:** a cell that fills its volume fails its own writes and cannot touch a neighbour or the node's root disk.
 - **Thin pool:** this gives CSI snapshots and clones, which D3 needs.
-- **No overcommit:** with ratio 1.0, the virtual size of every volume, snapshot and clone can never exceed the pool, so one tenant's backup can't take the whole pool down. A snapshot and its clone are each full-size thin volumes for this accounting.
-- **Ratio pinned:** D6 computes the pool as published free bytes plus the node's volume sizes. That holds only at ratio 1.0, where TopoLVM publishes the pool less every virtual size. At any other ratio the published bytes are scaled, and slots would be miscounted. The chart's values schema therefore accepts no other ratio.
+- **No overcommit:** the provider transaction in D12 charges every volume, snapshot and clone at its full reserved size. Ratio 1.0 alone does not enforce that transaction. A snapshot and its clone each consume a full-size charge.
+- **Ratio pinned:** the chart keeps ratio 1.0. D12 obtains the pool size and reservation budget from physical provider inventory. Kubernetes volume objects and cached free-space annotations cannot reconstruct that inventory after control-plane recovery.
 - **ext4, pinned:** a clone of a dirty filesystem must mount read-only on the same node. XFS needs `nouuid` for that and refuses some dirty logs read-only. ext4's default `auto_da_alloc` also makes write-to-temp-then-rename survive a power cut in practice (D9).
 - **Metadata:** the pool uses 64 KiB chunks, set when it is created, because a chunk size never changes afterwards and LVM's own policy would choose larger chunks for a large pool. Its metadata volume holds 64 bytes per chunk, which is LVM's own default size for that chunk size. It is computed from the pool's size and capped at LVM's 15.81 GiB limit. The volume group keeps twice the metadata size free, so the metadata and its spare can grow. An alert at 80% data or metadata use is task 5.6.
 - **Capacity and resize:** TopoLVM publishes free capacity per node and supports online resize, so the import runbook's `storage_gib` increase still works.
@@ -58,7 +58,7 @@ Each cell gets one logical volume with its own ext4 filesystem, provisioned by T
 Rejected alternatives:
 
 - **k3s local-path:** a host directory with no size limit, so one tenant could fill the node.
-- **OpenEBS LVM LocalPV:** no restore of a snapshot into a new claim, which is the step D3 needs.
+- **OpenEBS LVM LocalPV:** changing providers requires new snapshot, recovery and allocation qualification. Snapshot restore support alone does not establish the D12 reservation transaction.
 - **Static local PVs:** manual capacity bookkeeping.
 - **ZFS:** an out-of-tree kernel module to keep in step with every kernel update.
 
@@ -197,12 +197,12 @@ A partly restored vault is a different hazard: an interrupted restore can leave 
 
 For a local-storage node, the storage term is:
 
-`floor((pool size − snapshot reserve) / default cell size)`
+`floor((physical pool size − effective backup reserve − unmatched ordinary charge) / default cell size)`
 
-and a cell larger than the default consumes `ceil(size / default)` slots of it.
+The unmatched ordinary charge covers physical reservations not already represented by counted cell commitments. Match by physical incarnation and charge each byte once. A cell larger than the default consumes `ceil(size / default)` slots of the remaining total.
 
 - **Pool size, not free bytes:** free bytes fall while a backup's snapshot and clone exist, so a term built on them would dip on every backup.
-- **Observing the pool size:** TopoLVM publishes free capacity, not pool size: its CSIStorageCapacity and node annotation both report the pool less every volume's virtual size (spike 1.1). At ratio 1.0, pool size is therefore that free capacity plus the sizes of the node's LogicalVolume objects. cellctl gains read-only `list` on LogicalVolumes for this.
+- **Observing the pool size:** the D12 provider reports physical pool size, ordinary reserved bytes and the effective backup reserve. Its inventory includes unclaimed volumes and partial operations. Kubernetes-only inventory and cached free-space readings are scheduling observations, not allocation authority. Existing admission counts remain the owner of cell commitments; no second admission ledger is introduced.
 - **Default cell size:** 4 GiB on the local class. Hetzner volumes stay 10 GiB, the provider's minimum volume size.
   - At ratio 1.0 a local cell charges its full size, so the default sets density. On 2026-10-06 the live cells used 4.28 GiB (the owner's), about 0.01 GiB and about 0 GiB of their 10 GiB volumes.
   - A RAID1 pool of about 476 GiB holds about 43 cells at 10 GiB, while CPU and memory allow about 98.
@@ -210,8 +210,8 @@ and a cell larger than the default consumes `ceil(size / default)` slots of it.
   - A cell's size is its row's `storage_gib`, which Substrate owns (column default 10). New cells take 4 GiB when the cutover (task 7.2) changes Substrate's default for new cells.
   - A migrating cell keeps its row's size unless the operator lowers it before the restore, never below what the cell uses.
   - A larger `storage_gib` expands a cell's claim through TopoLVM's online expansion, and also restarts the cell once. `storage_gib` is part of the render digest, which the pod template carries, so cellctl re-applies the cell as a digest change (D4). D10's automatic growth leaves the digest as it is and does not restart the cell.
-- **Snapshot reserve:** 2 × the largest cell's size × the node's backup concurrency. In spike 1.1, a snapshot and its clone of a 4 GiB volume each took the full 4 GiB from published free capacity.
-- **Scheduler backstop:** the scheduler refuses a claim larger than a node's published free capacity ("did not have enough free storage"), and the capacity object followed the node within half a second in the spike. A miscount in this term therefore stops a cell from scheduling; it does not overfill a pool.
+- **Snapshot reserve:** the effective D12 reserve is the larger of twice the largest source times configured concurrency and all outstanding family reservations. A backup does not change published slots while that effective reserve and ordinary charges remain unchanged.
+- **Allocation backstop:** the scheduler can use cached capacity, but every provider mutation enforces D12 against fresh physical inventory. A delayed request can wait for room; it cannot spend an earlier capacity sample.
 - **Published slots:** the minimum of the qualified occupancy, CPU, memory and storage terms.
 - **No pool, no slots:** a node whose storage driver has not published a pool publishes zero slots. Once the configured domain is local, that is what keeps cells off the control-plane node: it has no cell pool. No separate rule names the server.
 - **Configuration only:** the driver name, the topology key and PV nodeAffinity matching become configuration.
@@ -290,7 +290,7 @@ A 4 GiB default only holds if a cell that fills grows without an operator. cellc
 
 - **Observed use:** the hourly backup Job already mounts the cell's filesystem, as the clone. It reports the filesystem's used and total bytes in its termination message, value-free, and cellctl reads them from the finished Job. This needs no new privilege; kubelet volume statistics would need `nodes/proxy`, which reaches every pod on the node.
 - **Step and cap:** each growth adds one default cell size (4 GiB), up to a configured cap per cell. One growth runs per cell per hourly backup, so a cell never grows faster than its use is observed. A cell past 80% use at its cap cannot grow and will fill, so it raises the same alert as a node without room.
-- **Room first:** cellctl grows a cell only while its node's published free bytes cover the step and the larger snapshot reserve that the new size implies (D6). Otherwise it raises an alert through the alert receiver, the same path as the backup-age alert, and leaves the size as it is.
+- **Room first:** cellctl uses the provider budget for the prospective target and reserve. The provider repeats that check inside D12's transaction. A refused growth keeps the existing claim and retained desired target, raises the existing alert, and can reconcile later. A cached sample never authorizes unsafe growth.
 - **Recorded on the row:** cellctl records the grown size on the cell's row, in a column it owns, and renders the claim at the larger of that and `storage_gib`. A later pass therefore never renders a smaller claim, which Kubernetes refuses. The column needs a Substrate migration.
 - **Capacity:** a grown cell consumes `ceil(size / default)` slots, as any larger cell does (D6), so admission sees the growth on the next capacity pass.
 - **Not shrunk:** a cell never shrinks automatically. Kubernetes cannot shrink a claim, and a smaller size needs a backup and a restore.
@@ -304,6 +304,56 @@ Cells are created automatically on any node with a free slot. Nodes are added by
 - **Bursts:** before the cutover, a Hetzner Cloud node can serve as temporary overflow on the Hetzner class. Its cells move to a local node by the per-cell migration (D7), and the overflow node is then removed. After the cutover only local-storage nodes publish slots (D7).
 - **A tenant that needs more:** a cell grows its storage online (D10). A cell that needs a node to itself uses the existing per-cell reservation: an agent labelled and tainted `exomem.io/dedicated-cell` with the cell's id publishes no general slots.
 
+### D12. The provider owns allocation and backup reservations
+
+The closest maintained implementation is the pinned TopoLVM driver. It already supplies thin snapshots, clones, online resize and physical LV inventory. Its capacity publication does not atomically enforce the backup reserve. Extend that boundary instead of adding a controller-side reservation journal or migrating filesystems.
+
+The added maintenance surface is a provider protocol, LVM metadata and command-lifetime fencing. Code and disposable sandbox work are authorized. Production activation remains outside this delivery's authority.
+
+#### Physical budget
+
+For one pool, let `A` charge every ordinary physical LV at the larger of its virtual size and any recorded target. Include supported unclaimed volumes. Unknown pre-existing volumes count as ordinary. Let `L` be the largest ordinary target or outstanding backup-family source, and let `C` be configured backup concurrency.
+
+The effective backup reserve is `max(2 * L * C, sum(outstanding family reservations))`. Each active or retiring family reserves twice its frozen source size. An ordinary create or growth requires prospective `A + reserve <= physical pool size`. New families also respect configured concurrency; lowering concurrency never releases an outstanding family's charge.
+
+A family owns at most one snapshot and one clone, each no larger than its frozen source size. Their ownership tags enter the same LVM command that creates them. A partial multi-command operation retains a recognizable charge and recorded target. Recovery completes or cleans that operation before reporting a ready volume.
+
+This check prevents one allocation from consuming another cell's online-backup room. A conservative charge can delay admission or growth; the requesting cell pays that delay. An unreadable inventory retries without treating missing observations as free bytes. Physical orphans remain charged until an authorized cleanup observes their absence.
+
+#### Bounded family state and cancellation
+
+Store one versioned family record on the physical source LV, using an atomic LVM metadata update. It contains the source LVM UUID, epoch, request identity, state and reserved size. These states form a closed provider protocol, not a configurable vocabulary. No append-only provisioning journal is introduced.
+
+A Begin request binds the source UUID, expected closed epoch and immutable request identity. It advances that epoch and admits one family. Retrying the same active request returns its token. A closed request never becomes active again.
+
+An End request binds that same pre-Begin identity. If Begin has not committed, End still consumes the expected epoch and records closure. A Begin delayed behind that End therefore cannot allocate. End for an older request never closes a newer family. Physical deletion and recreation changes the source UUID, so an old request cannot match the new source.
+
+For an active family, End revokes its token before cleanup and retains a retiring charge. Closure releases capacity only after fresh physical inventory proves every family child absent. A source cannot be deleted before its family closes. If external recovery removes a source, surviving tagged children remain charged; absence of its source never authorizes another child.
+
+Cellctl persists the source UUID, expected epoch and request identity with its existing hold before requesting Begin. It completes a hold only after provider closure. Reconciliation can repeat Begin and End without creating another family or releasing another request's charge.
+
+#### Immutable CSI binding
+
+Use an immutable Secret unique to the backup request for CreateSnapshot. The snapshot name selects that Secret through the existing snapshotter template. Never reuse its name for another family.
+
+The CSI controller copies the submitted family token and expected immediate source UUID into the child LogicalVolume spec. Retry compatibility checks include both fields. The provider reports the child's physical UUID in status. These bindings are immutable for that child.
+
+For a clone, the controller copies the token bound to that particular snapshot LogicalVolume. It never reads the serving source's current family. The existing snapshot handle remains an opaque LogicalVolume identity; no larger composite handle is needed. LVMD checks the unchanged token and physical source incarnation inside its transaction before allocation.
+
+Deleting the Secret after closure cannot revive a request. A queued operation that already copied its old token still meets provider revocation. Legacy snapshots without a family token use ordinary full-size accounting, preserving existing CSI semantics.
+
+#### Process fence and proof
+
+Each pool transaction separately opens one stable host-mounted lock inode and acquires its flock. Reusing a cached open file description across goroutines does not serialize transactions. The transaction holds its description across inventory, checks, metadata updates, commands, waits and resulting inventory.
+
+Pass that locked description as each non-interactive command's standard input. Close descriptors without an explicit unlock. A surviving child must retain the lock after LVMD dies. Native LVM VG locks remain enabled. The permitted process chain includes TopoLVM's nsenter invocation; LVM runs from the node's mount namespace, so its binary identity is a host fact.
+
+The descriptor approach remains unproved until the sandbox exercises that exact process chain and qualified host LVM binary. Record both identities. Background LVM operations are excluded from this transaction. A daemon death between commands leaves tagged, fully charged partial work for recovery.
+
+The decisive drill delays a command across daemon death, closes a family before a delayed Begin, retries old tokens after a new Begin, recreates a physical source, and reduces concurrency across restart. It also competes ordinary growth with two full backup cycles and retained orphan volumes. Observe physical sizes, charges, lock ownership and serving readiness at each boundary. No gain or production-readiness claim follows from source reasoning alone.
+
+Provider policy derives from the existing storage cap and backup concurrency. Published local import limits stay NULL until this boundary and its paired cellctl integration pass their sandbox proof. Enabling guarded allocation requires old unguarded temporary operations to drain and physical inventory to fit the invariant. Rollback stops new guarded allocation, retains family metadata, and closes outstanding families before an older provider resumes mutations.
+
 ### Archive order
 
 The `cloud-cell` and `cloud-service-resource-policy` requirements modified here still live only in the deltas of `adopt-exomem-cloud-plain-cells` and `add-cloud-service-resource-policy`. This change archives after both. If an archive tool refuses that order, these deltas fold into the earlier change before it archives.
@@ -311,7 +361,7 @@ The `cloud-cell` and `cloud-service-resource-policy` requirements modified here 
 ## Risks / Trade-offs
 
 - **Node loss now costs up to an hour of writes,** where it cost none before. This is accepted for the cost and density gain. RAID1 covers the more common disk failure with no loss.
-- **The snapshot path adds moving parts:** a snapshot controller, clones, quota headroom and thin-pool metadata. Spike 1.1 exercised them on a one-node rehearsal cluster (run 37382385459), and the drill repeats them across two agents before any production use. If thin-snapshot accounting misbehaves at ratio 1.0, the fallback is the stopped backup at reduced frequency, never an overcommitted pool.
+- **The snapshot path adds moving parts:** a snapshot controller, clones, quota headroom and thin-pool metadata. Spike 1.1 exercised them on a one-node rehearsal cluster (run 37382385459), and the drill repeats them across two agents before any production use. Failed reservation qualification leaves local activation disabled. A different provider requires a separate design decision; stopped backups do not replace the online-backup contract.
 - **Unlock depends on Tang on the server node.** If the server is down, a rebooting agent waits. Cells could not serve without the server anyway, and the escrowed passphrase and Tang keys allow a manual unlock or a rebind.
 - **Single-node blast radius:** one dedicated node holds many tenants. Recovery time therefore grows with cells per node, which the drill measures. Scaling adds nodes rather than bigger nodes.
 - **Under-admission during migration:** cells still on Hetzner volumes count against local slots until they move. It lasts days and costs a few slots.

@@ -198,7 +198,7 @@ Encrypted cluster-state snapshots MAY retain the cell's Secret until their reten
 
 ### Requirement: Capacity is published from observed limits
 
-For each node in the configured cell storage domain, cellctl SHALL publish `cell_slots` from the node's observed storage. On local storage that is the size of the node's cell storage pool, minus a reserve of twice the largest cell volume for each concurrent backup the node allows, divided by the default cell volume size. The result is further bounded by any qualified occupancy, CPU and memory limits. A cell larger than the default size SHALL consume additional slots in proportion to its size. A node whose storage capacity is not positively observed, including a node with no cell storage pool, SHALL publish zero slots. Admission SHALL count non-deleted cell rows against the sum of `cell_slots`. No reservation ledger SHALL exist that can hold capacity after a cell is gone.
+For each node in the configured cell storage domain, cellctl SHALL publish `cell_slots` from the node's observed storage. On local storage, the storage term SHALL subtract the effective backup reserve and unmatched ordinary physical charges from physical pool size, then divide by default cell volume size. The effective reserve SHALL cover configured concurrency and all outstanding families. A physical reservation already represented by a counted cell commitment SHALL NOT be charged twice. The result is further bounded by any qualified occupancy, CPU and memory limits. A cell larger than the default size SHALL consume additional slots in proportion to its size. A node whose storage capacity is not positively observed, including a node with no cell storage pool, SHALL publish zero slots. Admission SHALL count non-deleted cell rows against the sum of `cell_slots`. No second admission ledger SHALL exist. Provider charges SHALL follow physical volumes and bounded backup families until their cleanup is acknowledged. Cached Kubernetes capacity SHALL NOT authorize a provider mutation.
 
 #### Scenario: Node is full
 
@@ -212,7 +212,7 @@ For each node in the configured cell storage domain, cellctl SHALL publish `cell
 
 #### Scenario: Capacity pass during a backup
 
-- **WHEN** a capacity pass runs while a cell's backup snapshot and clone exist
+- **WHEN** a capacity pass runs during a backup and its effective reserve and ordinary physical charges remain unchanged
 - **THEN** the node publishes the same slots as without the backup
 
 ## ADDED Requirements
@@ -273,7 +273,7 @@ The operator SHALL be able to move a cell on a healthy node to a new claim on th
 
 ### Requirement: A local cell grows online before it fills
 
-cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A cell past 80% use at its cap SHALL raise the same alert. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
+cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL use the provider budget for a prospective growth. The provider SHALL serialize its fresh physical check with allocation and preserve the larger backup reserve. A refused growth SHALL raise an alert, retain its desired target and leave the actual volume unchanged. A cell past 80% use at its cap SHALL raise the same alert. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.
 
 #### Scenario: Cell passes 80% use
 
@@ -282,8 +282,8 @@ cellctl SHALL grow a running cell's local volume online when its filesystem pass
 
 #### Scenario: Node has no room to grow
 
-- **WHEN** a local cell passes 80% use, but its node's free bytes do not cover the step and the larger reserve
-- **THEN** cellctl raises an alert and leaves the cell's size unchanged
+- **WHEN** a local cell passes 80% use, but the provider cannot preserve the reserve for its prospective growth
+- **THEN** cellctl raises an alert, retains the desired target and leaves the actual volume unchanged
 
 #### Scenario: Cell at its cap passes 80% use
 
@@ -318,3 +318,46 @@ While a cell's row records a volume, cellctl SHALL NOT create a fresh claim for 
 
 - **WHEN** a cell's first backup completes
 - **THEN** the cell keeps running without a restart, and its render digest is unchanged
+
+### Requirement: Physical allocation preserves the online-backup reserve
+
+The provider SHALL serialize physical inventory, capacity checks and mutations across daemon death. It SHALL charge ordinary volumes at their full reserved sizes, including unclaimed volumes and partial operations. The reserve SHALL cover both configured backup concurrency and outstanding family reservations. Lowering concurrency SHALL NOT release an outstanding charge.
+
+#### Scenario: Two requests use one earlier capacity sample
+
+- **WHEN** two ordinary allocations would consume the same remaining room
+- **THEN** the provider admits only allocations whose prospective physical state preserves the reserve
+
+#### Scenario: A command survives its daemon
+
+- **WHEN** the provider daemon dies during a storage command
+- **THEN** a replacement transaction waits for that command before observing inventory or authorizing another mutation
+
+#### Scenario: Concurrency decreases during backups
+
+- **WHEN** configuration reduces concurrency while backup families remain active or retiring
+- **THEN** ordinary allocation retains their full reservations until physical cleanup closes them
+
+### Requirement: A backup reservation cannot revive after cancellation
+
+Each backup family SHALL bind a physical source incarnation, expected epoch and immutable request identity. Cancellation SHALL consume that epoch even before Begin commits. Closed requests SHALL never reopen. Closure SHALL release capacity only after physical cleanup. Delayed requests SHALL carry their original token through snapshot and clone creation.
+
+#### Scenario: Cancellation precedes a delayed Begin
+
+- **WHEN** cancellation reaches the provider before the matching Begin acquires its transaction
+- **THEN** the delayed Begin creates no family and allocates no volume
+
+#### Scenario: An old clone request arrives during a new backup
+
+- **WHEN** an old queued clone request runs after its family closes and another family begins
+- **THEN** it retains the old token and cannot spend the new reservation
+
+#### Scenario: A physical source is recreated
+
+- **WHEN** a physical source is deleted and recreated under the same Kubernetes identity
+- **THEN** its new physical incarnation rejects the old family's requests
+
+#### Scenario: Cleanup cannot remove one child
+
+- **WHEN** a snapshot or clone remains after cleanup fails
+- **THEN** its family remains charged and reconciliation retries without completing the hold
