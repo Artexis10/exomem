@@ -706,7 +706,9 @@ def check_reservation_permissions(drill: Drill, cell: Cell) -> dict[str, Any]:
         if allowed.returncode == 0 and forbidden.returncode != 0 and policy_name in forbidden.stderr:
             return {"source_physical_uuid": physical_uuid, "target_request": "allowed",
                     "node_rewrite": "denied", "source": "Kubernetes server dry-runs as the cellctl service account"}
-        return None
+        # The timeout reports the last attempt, so a failure names which case the server decided wrongly.
+        raise RuntimeError(f"target request exit {allowed.returncode}: {allowed.stderr.strip()[-400:]}; "
+                           f"node rewrite exit {forbidden.returncode}: {forbidden.stderr.strip()[-400:]}")
 
     return wait_for(ready, timeout=60, interval=2, description="the request-only admission policy to enforce both cases")
 
