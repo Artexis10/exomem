@@ -205,18 +205,21 @@ def _authored_targets(
     for relation in document.canonical_note_relations:
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, resolver=resolver, strict=False
+                epistemic_graph_module._page_target(relation.target),
+                vault_root,
+                resolver=resolver,
+                strict=False,
             )
         except Exception:  # noqa: BLE001 - malformed authored links are ignored
             continue
         if warning:
             continue
-        authored.add((relation.kind, epistemic_graph_module._with_md(canonical)))
+        authored.add((relation.kind, epistemic_graph_module._page_rel(canonical)))
     return authored
 
 
 def _is_placeholder_target(vault_root: Path, target: str) -> bool:
-    return not (Path(vault_root) / epistemic_graph_module._with_md(target)).is_file()
+    return not (Path(vault_root) / epistemic_graph_module._page_rel(target)).is_file()
 
 
 def _current_candidate_is_authored(
@@ -226,7 +229,7 @@ def _current_candidate_is_authored(
 ) -> bool | None:
     """Check current Markdown using exact cached resolver authority."""
     relation_type = str(candidate.get("relation_type") or "")
-    target = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    target = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
     if not relation_type or not target:
         return False
     matching_relations = tuple(
@@ -443,11 +446,11 @@ def _shared_source_candidates(
     return [
         {
             "from": rel_path,
-            "to": epistemic_graph_module._with_md(str(target_path)),
+            "to": epistemic_graph_module._page_rel(str(target_path)),
             "relation_type": "relates_to",
             "method": "shared_sources",
             "evidence": {
-                "shared_source": epistemic_graph_module._with_md(
+                "shared_source": epistemic_graph_module._page_rel(
                     str(shared_key or "").removeprefix("file:")
                 )
             },
@@ -533,8 +536,8 @@ def _hinted_candidate_refs(
     `snapshot` is a validated graph read snapshot the caller already holds; it
     is used as is and left open.
     """
-    from_path = epistemic_graph_module._with_md(str(candidate.get("from") or ""))
-    to_path = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    from_path = epistemic_graph_module._page_rel(str(candidate.get("from") or ""))
+    to_path = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
     paths = tuple(dict.fromkeys((from_path, to_path)))
     if not all(paths):
         return None
@@ -649,7 +652,7 @@ def _classify_candidate(
         authored = _authored_targets(page, vault_root)
     relation_type = str(candidate.get("relation_type") or "")
     to_path = str(candidate.get("to") or "")
-    if (relation_type, epistemic_graph_module._with_md(to_path)) in authored:
+    if (relation_type, epistemic_graph_module._page_rel(to_path)) in authored:
         return "authored_edge", None
     if _is_placeholder_target(vault_root, to_path):
         return "placeholder_target", None
@@ -808,7 +811,7 @@ def resolve_candidate(
                 )
         raise _refresh_required(ref)
 
-    rel_path = epistemic_graph_module._with_md(str(source_path or ""))
+    rel_path = epistemic_graph_module._page_rel(str(source_path or ""))
     if not epistemic_graph_module.EpistemicGraphIndex(vault_root).available():
         raise _refresh_required(ref)
     page = _page_for(vault_root, rel_path)
@@ -939,7 +942,7 @@ def accept(
             {
                 (
                     str(candidate.get("relation_type") or ""),
-                    epistemic_graph_module._with_md(
+                    epistemic_graph_module._page_rel(
                         str(candidate.get("to") or "")
                     ),
                 )

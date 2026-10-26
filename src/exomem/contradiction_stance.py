@@ -55,8 +55,8 @@ _PAIR_NAMESPACE = "competing"
 
 def pair_key(a: str, b: str) -> tuple[str, str]:
     """Order-independent, `.md`-normalized identity for an unordered page pair."""
-    left = epistemic_graph_module._with_md(str(a or ""))
-    right = epistemic_graph_module._with_md(str(b or ""))
+    left = epistemic_graph_module._page_rel(str(a or ""))
+    right = epistemic_graph_module._page_rel(str(b or ""))
     return (left, right) if left <= right else (right, left)
 
 

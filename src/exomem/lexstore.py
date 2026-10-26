@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import enum
 import functools
 import hashlib
 import itertools
@@ -831,6 +832,21 @@ _FULL_REBUILD_REQUESTED: set[Path] = set()
 #: That proof reads checkpoint metadata, which cannot attest rows, so any other
 #: cause clears its key here and keeps the rebuild.
 _LAG_ONLY_REBUILDS: set[Path] = set()
+
+
+class RepairCause(enum.StrEnum):
+    """Why a caller asked for a repair, as the token the worker logs.
+
+    A closed set, so a log line names a reason and never carries a path or an
+    error message.
+    """
+
+    WATCHER_BATCH_STALE = "watcher_batch_stale"
+    WATCHER_HANDOFF_FAILED = "watcher_handoff_failed"
+
+
+#: Why each pending request was made, until the worker names them in its pass line.
+_REPAIR_CAUSES: dict[Path, set[RepairCause]] = {}
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
 _REPAIRS_LOCK = threading.Lock()
 #: Reconcile source-proof outcomes — stable, content-free counters ONLY (no
@@ -1897,10 +1913,26 @@ def _schedule_runtime_catalog_repair(
         _schedule_repair(vault_root)
 
 
-def request_repair(vault_root: Path) -> None:
-    """Non-walking retry seam for a request refused by runtime admission."""
-    if maintained_content_index_enabled():
-        _schedule_repair(vault_root)
+def request_repair(
+    vault_root: Path,
+    *,
+    deferred_paths: list[Path] | None = None,
+    cause: RepairCause | None = None,
+) -> None:
+    """Non-walking retry seam for a request refused by runtime admission.
+
+    `deferred_paths` narrows the repair to a targeted retry of those paths (see
+    `_schedule_repair`); `cause` is the token the worker logs. A narrow
+    request that names nothing the catalogue indexes is dropped, never widened
+    into the whole-catalogue pass that an empty path list would request.
+    """
+    if not maintained_content_index_enabled():
+        return
+    if deferred_paths is not None:
+        deferred_paths = _lexical_markdown(deferred_paths)
+        if not deferred_paths:
+            return
+    _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
 
 
 def request_lag_repair(vault_root: Path) -> None:
@@ -2115,6 +2147,7 @@ def _schedule_repair(
     deferred_paths: list[Path] | None = None,
     pending_only: bool = False,
     lag_only: bool = False,
+    cause: RepairCause | None = None,
 ) -> bool:
     """Start at most one best-effort lexical repair per vault.
 
@@ -2137,6 +2170,9 @@ def _schedule_repair(
     lag-only, the worker first replays the exact registry delta and skips the
     whole-corpus pass only when the catalogue then proves exactly current.
 
+    `cause` names why the caller asked; the worker logs it with the pass it
+    starts, so a whole-corpus pass is attributable.
+
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
     fails escalates, and a rebuild request queued while a targeted retry is
@@ -2154,6 +2190,8 @@ def _schedule_repair(
         except Exception:  # noqa: BLE001 - scheduling must remain best-effort
             pass
     with _REPAIRS_LOCK:
+        if cause is not None:
+            _REPAIR_CAUSES.setdefault(key, set()).add(cause)
         if pending_only:
             if key in _REPAIRS_IN_FLIGHT:
                 return True
@@ -2211,6 +2249,7 @@ def _schedule_repair(
                             _LAG_ONLY_REBUILDS.discard(key)
                             published_handoff = key in _PUBLISHED_HANDOFF_PENDING
                             _PUBLISHED_HANDOFF_PENDING.discard(key)
+                    causes = _REPAIR_CAUSES.pop(key, set())
                     if not rebuild and not paths:
                         # Nothing left, and nothing can arrive between here and
                         # releasing the flight: a caller that takes this lock
@@ -2257,6 +2296,12 @@ def _schedule_repair(
                         outcome = "targeted"
                         if not paths:
                             continue
+                log.info(
+                    "lexical repair pass starting scope=%s paths=%d causes=%s",
+                    "full" if rebuild else "targeted",
+                    len(paths),
+                    ",".join(sorted(causes)) or "unattributed",
+                )
                 targeted_started = time.monotonic()
                 try:
                     full_pass = rebuild or not store.retry_deferred_upsert(paths)
@@ -3783,6 +3828,11 @@ def catalog_cache_token(vault_root: Path) -> str:
 # ------------------------------------------------------------------ write seams
 
 
+def _lexical_markdown(paths: list[Path]) -> list[Path]:
+    """The paths the lexical catalogue indexes: Markdown, minus sync-conflict copies."""
+    return [p for p in paths if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name]
+
+
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     """Keep the lexical index in lockstep with a writer's markdown change.
 
@@ -3794,7 +3844,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     """
     if not _catalog_usable():
         return True
-    md = [p for p in written_paths if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name]
+    md = _lexical_markdown(written_paths)
     if not md or not lexical_path(vault_root).exists():
         return True
     try:
@@ -3813,11 +3863,7 @@ def apply_watcher_batch(
     """Apply one already-published watcher generation to the lexical sidecar."""
     if not _catalog_usable():
         return True
-    md = [
-        path
-        for path in written_paths
-        if path.suffix.lower() == ".md" and ".sync-conflict-" not in path.name
-    ]
+    md = _lexical_markdown(written_paths)
     if not (md or removed_rel_paths) or not lexical_path(vault_root).exists():
         return True
     try:

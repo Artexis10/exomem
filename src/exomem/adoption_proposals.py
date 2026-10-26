@@ -35,6 +35,7 @@ from . import vault as vault_module
 from .adoption_run import AdoptionRunStore
 from .entity_types import load_entity_types
 from .kbdir import kb_dirname
+from .source_coverage import CAPTURE_HEADING
 
 ADOPTION_REVIEW_PREFIX = "exomem://review/adoption/"
 
@@ -458,9 +459,8 @@ def _validate(root: Path, kind: str, payload: dict, run: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 def _extract_capture(text: str, max_chars: int) -> tuple[str, bool]:
     """Pull the ``## Capture`` fenced body out of an imported Source copy."""
-    marker = "## Capture"
-    idx = text.find(marker)
-    body = text[idx + len(marker) :] if idx != -1 else text
+    idx = text.find(CAPTURE_HEADING)
+    body = text[idx + len(CAPTURE_HEADING) :] if idx != -1 else text
     lines = [ln for ln in body.splitlines() if not ln.strip().startswith("```")]
     excerpt = "\n".join(lines).strip()
     truncated = len(excerpt) > max_chars

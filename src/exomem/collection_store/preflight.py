@@ -191,6 +191,48 @@ def _prove_all(root, manifests) -> list[dict]:
         return prove_into(root, manifests, staging, Path(scratch), import_context())
 
 
+def _scan(audit, root) -> None:
+    """Scan the vault's audit history; once more when a write to the vault outran the first scan."""
+    try:
+        audit.scan(root)
+    except connection.CollectionStoreError as error:
+        if error.code != legacy.SOURCE_CHANGED:
+            raise
+        audit.refresh(root)
+
+
+def capture_collection(root, manifest_path, *, audit, presentation_operation):
+    """``capture_legacy_collection``, once more after a fresh audit scan when a write outran it.
+
+    Every governed write rewrites the audit log, so a capture beside a live writer is outrun
+    by it. Being outrun twice raises the same SOURCE_CHANGED refusal.
+    """
+    try:
+        return legacy_import.capture_legacy_collection(
+            root, manifest_path, audit=audit, presentation_operation=presentation_operation)
+    except connection.CollectionStoreError as error:
+        if error.code != legacy.SOURCE_CHANGED:
+            raise
+    audit.refresh(root)
+    return legacy_import.capture_legacy_collection(
+        root, manifest_path, audit=audit, presentation_operation=presentation_operation)
+
+
+def retried(root, audit, row, again) -> dict:
+    """``row``, or ``again()`` when a write to the vault outran its capture or proof, as `capture_collection`.
+
+    Being outrun a second time keeps the SOURCE_CHANGED block; a fresh scan that fails blocks the
+    row with its own cause, so unusable input never reads as a concurrent edit.
+    """
+    if row.get("blocker", {}).get("code") != legacy.SOURCE_CHANGED:
+        return row
+    try:
+        audit.refresh(root)
+    except _REFUSALS as error:
+        return {**row, "blocker": _blocker(error)}
+    return again()
+
+
 @contextmanager
 def scanned(root, scratch, manifests, *, deadline=None):
     """One audit spool that scanned the vault, or ``None`` and a blocked row for every collection.
@@ -202,7 +244,7 @@ def scanned(root, scratch, manifests, *, deadline=None):
     with legacy.LegacyAuditSpool(Path(scratch), deadline=deadline) as audit:
         blocker = None
         try:
-            audit.scan(root)
+            _scan(audit, root)
         except TimeoutError:
             blocker = _DEADLINE
         except _REFUSALS as error:
@@ -239,6 +281,13 @@ def prove_into(root, manifests, staging, scratch, context, *, record=None, deadl
 
 
 def _prove_one(root, manifest, staging, audit, context, record=None, *, presentation_operation=None) -> dict:
+    def once():
+        return _prove_once(root, manifest, staging, audit, context, record,
+                           presentation_operation=presentation_operation)
+    return retried(root, audit, once(), once)
+
+
+def _prove_once(root, manifest, staging, audit, context, record=None, *, presentation_operation=None) -> dict:
     try:
         captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit,
                                                           presentation_operation=presentation_operation)

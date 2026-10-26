@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.146.1](https://github.com/Artexis10/exomem/compare/v0.146.0...v0.146.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* centralize pending-write retry guidance ([#2118](https://github.com/Artexis10/exomem/issues/2118)) ([4b019c3](https://github.com/Artexis10/exomem/commit/4b019c366a9bc9fe36fd9363928e0bccaed97433))
+
+## [0.146.0](https://github.com/Artexis10/exomem/compare/v0.145.1...v0.146.0) (2026-10-26)
+
+
+### Features
+
+* **import:** adopt own notes as drafts and serve the Source backlog to agents ([#2114](https://github.com/Artexis10/exomem/issues/2114)) ([d63b496](https://github.com/Artexis10/exomem/commit/d63b496c11df80edfd0433e39aae0537331886db))
+
+
+### Bug Fixes
+
+* **collection-store:** bound reads, wait out handoffs, name lock holders, release at stop, refresh legacy audit ([#2115](https://github.com/Artexis10/exomem/issues/2115)) ([d703e30](https://github.com/Artexis10/exomem/commit/d703e30e34dfbba379deab1f20e9b2d29a9ab204))
+
+## [0.145.1](https://github.com/Artexis10/exomem/compare/v0.145.0...v0.145.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **graph:** key file rows by exact path and replay stale watcher batches ([#2112](https://github.com/Artexis10/exomem/issues/2112)) ([0de47b1](https://github.com/Artexis10/exomem/commit/0de47b1f6fe7033aa6953bb6b6ef56fd9f84a5ba))
+
+## [0.145.0](https://github.com/Artexis10/exomem/compare/v0.144.4...v0.145.0) (2026-10-26)
+
+
+### Features
+
+* **import:** stage outside folders and report Cloud import phases ([#2110](https://github.com/Artexis10/exomem/issues/2110)) ([69e8812](https://github.com/Artexis10/exomem/commit/69e88121a94ec700ea426287ba75404f3b22f1a9))
+
 ## [0.144.4](https://github.com/Artexis10/exomem/compare/v0.144.3...v0.144.4) (2026-10-25)
 
 

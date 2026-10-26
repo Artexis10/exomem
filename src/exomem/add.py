@@ -41,6 +41,7 @@ from . import (
     vocabulary_resolution,
 )
 from .kbdir import kb_prefix
+from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -781,6 +782,13 @@ def add(
                 if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
                     run_fanout()
 
+    from . import due_state
+
+    # A new Source is outstanding from the moment it lands, so the backlog counts it now.
+    due_state.refresh_after_writes(
+        vault_root, [due_state.PageWrite(source_path.relative_to(vault_root).as_posix())]
+    )
+
     try:
         self_path = source_path.relative_to(vault_root).as_posix()
         warnings.extend(
@@ -1258,7 +1266,7 @@ def _render_source(
         for paragraph in why_captured.strip().splitlines():
             lines.append(f"> {paragraph}")
         lines.append("")
-    lines.append("## Capture")
+    lines.append(CAPTURE_HEADING)
     lines.append("")
     lines.append(content.strip())
     lines.append("")

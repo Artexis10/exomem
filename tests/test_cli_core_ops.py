@@ -53,8 +53,11 @@ def test_ask_memory_json_envelope(vault: Path, capsys) -> None:
     assert code == 0
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
-    assert isinstance(payload["data"], list)
-    assert payload["data"], "keyword ask_memory for 'metabolism' should surface fixture notes"
+    # The fixture vault holds uncompiled Sources, so the session's first recall carries the
+    # due-state block and the hits arrive in the envelope.
+    hits = payload["data"]["hits"]
+    assert isinstance(hits, list)
+    assert hits, "keyword ask_memory for 'metabolism' should surface fixture notes"
 
 
 def test_ask_memory_human_output(vault: Path, capsys) -> None:
@@ -924,9 +927,10 @@ def test_simple_ask_alias_uses_compact_product_defaults(vault: Path, capsys) -> 
     assert code == 0, err
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
-    assert isinstance(payload["data"], list)
-    assert payload["data"], "ask should surface fixture notes"
-    assert "excerpt" not in payload["data"][0]
+    hits = payload["data"]["hits"]
+    assert isinstance(hits, list)
+    assert hits, "ask should surface fixture notes"
+    assert "excerpt" not in hits[0]
 
 
 def test_legacy_find_alias_matches_simple_ask(vault: Path, capsys) -> None:
@@ -934,8 +938,9 @@ def test_legacy_find_alias_matches_simple_ask(vault: Path, capsys) -> None:
     assert code == 0, err
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
-    assert payload["data"], "find should remain a compatibility alias for ask"
-    assert "excerpt" not in payload["data"][0]
+    hits = payload["data"]["hits"]
+    assert hits, "find should remain a compatibility alias for ask"
+    assert "excerpt" not in hits[0]
 
 
 def test_legacy_find_lean_cli_skips_missing_model_lanes_without_warnings(
@@ -957,7 +962,7 @@ def test_legacy_find_lean_cli_skips_missing_model_lanes_without_warnings(
     code, out, err = _run(["find", "metabolism", "--json"], capsys)
 
     assert code == 0, err
-    assert json.loads(out.strip().splitlines()[-1])["data"]
+    assert json.loads(out.strip().splitlines()[-1])["data"]["hits"]
     assert "EXOMEM_DISABLE_EMBEDDINGS" not in os.environ
     assert "EXOMEM_DISABLE_RANKING" not in os.environ
     assert "EXOMEM_DISABLE_CLIP" not in os.environ

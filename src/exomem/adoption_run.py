@@ -22,6 +22,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import posixpath
 import secrets
 import stat
 import threading
@@ -29,15 +30,17 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
 from . import (
     adoption_plan,
     context_refs,
+    due_state,
     held_fs,
     knowledge_packs,
+    note_types,
     request_budget,
     reserved_paths,
     source_taxonomy,
@@ -95,6 +98,11 @@ PHASES = (
 )
 
 _APPLIED_STATUSES = ("applied", "already-applied")
+# An own-note item whose Source is on disk and whose draft note is still owed. The item is
+# not complete: `apply` resumes it at the note, and the phase stays `applying` until it is.
+_SOURCE_ONLY = "source-applied"
+# The values of a rule's `adopt_as` are fixed by the rule schema, not by the vault.
+_ADOPT_AS = ("source", "note")  # nosemgrep: ep-word-set -- the closed values of the rule schema's `adopt_as`.
 # Per-item failures that mean "the original is not what the plan read".
 _DRIFT_CODES = frozenset({"SOURCE_CHANGED", "NOT_FOUND"})
 _RECALL_SAMPLE = 10
@@ -428,26 +436,104 @@ def _reject(path: str, code: str) -> dict:
     return {"path": path, "code": code, "reason": _REASONS.get(code, code)}
 
 
-def _rule_key(entry: object) -> tuple[str, str | None, str | None]:
-    """``(path, source_kind, domain)`` of one `include` entry: a path or a rule object."""
+_RULE_FIELDS = ("source_kind", "domain", "adopt_as", "note_type", "project")  # nosemgrep: ep-word-set -- the keys of the `include` rule object schema.
+
+
+def _rule_key(entry: object) -> tuple[str, dict[str, str]]:
+    """``(path, fields)`` of one `include` entry: a path or a rule object.
+
+    ``fields`` holds the rule object's non-empty string fields, stripped.
+    """
     if isinstance(entry, str):
-        return _clean(entry), None, None
+        return _clean(entry), {}
     if isinstance(entry, Mapping):
-        unknown = sorted(set(entry) - {"path", "source_kind", "domain"})
+        unknown = sorted(set(entry) - {"path", *_RULE_FIELDS})
         if unknown or not isinstance(entry.get("path"), str) or not _clean(entry["path"]):
             raise AdoptionRunError(
                 "INVALID_RULE",
-                "an include rule is a path or an object {path, source_kind?, domain?}"
+                "an include rule is a path or an object "
+                "{path, source_kind?, domain?, adopt_as?, note_type?, project?}"
                 + (f"; unknown keys: {', '.join(unknown)}" if unknown else ""),
             )
-        parts = []
-        for field in ("source_kind", "domain"):
+        fields: dict[str, str] = {}
+        for field in _RULE_FIELDS:
             value = entry.get(field)
             if value is not None and not isinstance(value, str):
-                raise AdoptionRunError("INVALID_RULE", f"{field} must be a registry key string")
-            parts.append(value.strip() if isinstance(value, str) and value.strip() else None)
-        return _clean(entry["path"]), parts[0], parts[1]
+                raise AdoptionRunError("INVALID_RULE", f"{field} must be a string")
+            if isinstance(value, str) and value.strip():
+                fields[field] = value.strip()
+        return _clean(entry["path"]), fields
     raise AdoptionRunError("INVALID_RULE", "an include rule is a path or an object")
+
+
+def _classify_rule(
+    root: Path, taxonomy: source_taxonomy.SourceTaxonomy | None, fields: Mapping[str, str]
+) -> dict | None:
+    """What one rule object asks for, validated against the registries, or a refusal.
+
+    A `source` rule (the default) classifies its Sources by `source_kind` and `domain`.
+    A `note` rule names the `note_type` its Markdown files become; its `project` and
+    `domain` are inputs of that note's destination, and its `source_kind` alone
+    classifies the Source copy.
+    """
+    adopt_as = fields.get("adopt_as", "source")
+    if adopt_as not in _ADOPT_AS:
+        raise AdoptionRunError("INVALID_RULE", "adopt_as is 'source' (the default) or 'note'")
+    if adopt_as == "source":
+        stray = [field for field in ("note_type", "project") if field in fields]
+        if stray:
+            raise AdoptionRunError(
+                "INVALID_RULE", f"{', '.join(stray)} belong to a rule with adopt_as: note"
+            )
+        return _resolve_classification(taxonomy, fields.get("source_kind"), fields.get("domain"))
+    classification = (
+        _resolve_classification(taxonomy, fields["source_kind"], None)
+        if "source_kind" in fields else {}
+    ) or {}
+    return {**classification, "note": _resolve_note_rule(root, fields)}
+
+
+def _resolve_note_rule(root: Path, fields: Mapping[str, str]) -> dict:
+    """The registered compiled note type a rule names, if the note leaf can place it from this rule.
+
+    The registry holds the types and their roles; the leaf holds placement and the
+    inputs a type needs. Asking the leaf to validate a draft says whether it can place
+    the type, so this module holds neither a type list nor a folder.
+    """
+    from . import note as note_module
+
+    raw = fields.get("note_type")
+    if raw is None:
+        raise AdoptionRunError("NOTE_TYPE_REQUIRED", "a note rule names the note_type its files become")
+    try:
+        registered = note_types.Basis(root).resolve(raw).require()
+    except note_types.NoteTypeUnavailable as error:
+        raise AdoptionRunError("NOTE_TYPE_UNAVAILABLE", str(error)) from error
+    if registered is None:
+        raise AdoptionRunError(
+            "NOTE_TYPE_UNREGISTERED", f"note_type {raw!r} is not in the note-type registry"
+        )
+    if not note_types.compiled(registered):
+        raise AdoptionRunError(
+            "NOTE_TYPE_NOT_COMPILED",
+            f"note_type {registered.key!r} is not a compiled type; own notes become compiled notes",
+        )
+    rule = {"note_type": registered.key}
+    for field in ("project", "domain"):
+        if field in fields:
+            rule[field] = fields[field]
+    try:
+        note_module.note(
+            root, validate_only=True, content="# Probe\n\nProbe.", title="Probe",
+            status="draft", **rule,
+        )
+    except note_module.NoteError as error:
+        needs = f" (needs: {', '.join(error.missing)})" if error.missing else ""
+        raise AdoptionRunError(
+            "NOTE_TYPE_CANNOT_PLACE",
+            f"the note leaf cannot place a {registered.key!r} draft from this rule{needs}: {error.reason}",
+        ) from error
+    return rule
 
 
 def _resolve_classification(
@@ -511,6 +597,7 @@ def _resolve_classification(
 
 
 def _materialize_selection(
+    root: Path,
     run: dict,
     include: list,
     exclude: list[str],
@@ -540,10 +627,8 @@ def _materialize_selection(
     rules: list[tuple[int, int, str, bool, dict | None]] = []
     seen_includes: dict[str, dict | None] = {}
     for entry in include:
-        path, kind_raw, domain_raw = _rule_key(entry)
-        classification = _resolve_classification(taxonomy, kind_raw, domain_raw) if (
-            kind_raw is not None or domain_raw is not None
-        ) else None
+        path, fields = _rule_key(entry)
+        classification = _classify_rule(root, taxonomy, fields) if fields else None
         if path in seen_includes and seen_includes[path] != classification:
             raise AdoptionRunError(
                 "CONFLICTING_RULES", f"{path!r} appears in two include rules with different classification"
@@ -763,6 +848,49 @@ def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
+def _refuse_outside_vault(root: Path, path: str) -> None:
+    """Refuse a `start` path that names a place outside the vault, before `_clean` can reshape it.
+
+    `_clean` and the overview resolver strip leading slashes, so `/etc` would read as the
+    vault-relative `etc` and fail as NOT_FOUND, hiding that the caller meant a folder elsewhere.
+    The check is lexical and never touches the filesystem: resolving a caller's absolute or UNC
+    value would let a Windows host open a network connection to the host that the value names.
+    """
+    raw = path or ""
+    route = (
+        "start scans folders inside the vault; stage a folder elsewhere with "
+        "`exomem import <folder>`, then start on the path it prints"
+    )
+    # Both spellings, whatever the host: a drive letter or UNC share is absolute on Windows
+    # and an ordinary relative name on POSIX, and either one means "not a vault path".
+    if PurePosixPath(raw).is_absolute() or PureWindowsPath(raw).anchor:
+        inside = _vault_relative(root, raw)
+        if inside is None:
+            raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", route)
+        raise AdoptionRunError(
+            "IMPORT_PATH_OUTSIDE_VAULT",
+            f"start takes a vault-relative path, not an absolute one; use {inside!r}",
+        )
+    # Parent steps that climb above the vault root, normalised as text.
+    climbed = posixpath.normpath(raw.replace("\\", "/"))
+    if climbed == ".." or climbed.startswith("../"):
+        raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", route)
+
+
+def _vault_relative(root: Path, raw: str) -> str | None:
+    """The vault-relative form of an absolute path written in the host's own spelling, or None.
+
+    Only the host's flavour counts: a Windows drive spelling is an ordinary file name on POSIX, not a place in the vault.
+    """
+    if not PurePath(raw).is_absolute() or not PurePath(root).is_absolute():
+        return None
+    try:
+        relative = PurePath(os.path.normpath(raw)).relative_to(os.path.normpath(root))
+    except ValueError:
+        return None
+    return relative.as_posix() if relative.parts else None
+
+
 def start(
     root: Path,
     *,
@@ -773,6 +901,7 @@ def start(
     today: dt.date | None = None,
 ) -> dict:
     root = Path(root)
+    _refuse_outside_vault(root, path)
     run_date = _today(today)
     kb = root / kb_dirname()
     if not kb.is_dir():
@@ -845,7 +974,7 @@ def start(
 
 
 def _pending(run: dict) -> list[dict]:
-    """Planned items in this call's scope that have no outcome yet, in plan order."""
+    """Planned items in this call's scope that have no outcome yet, or are owed a note, in plan order."""
     plan = run.get("plan") or {}
     outcomes = run.get("outcomes") or {}
     scope = run.get("scope")
@@ -853,7 +982,7 @@ def _pending(run: dict) -> list[dict]:
     return [
         item for item in plan.get("items") or []
         if (wanted is None or item["original_path"] in wanted)
-        and item["original_path"] not in outcomes
+        and _is_open(outcomes, item["original_path"])
     ]
 
 
@@ -912,15 +1041,15 @@ def select(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"select is not allowed from phase {run['phase']!r}"
             )
-        # A rule object names a registered kind (and domain); resolve before any change
-        # so a refused rule leaves the stored selection as it was.
+        # A rule object names a registered kind, domain or note type; resolve before any
+        # change so a refused rule leaves the stored selection as it was.
         taxonomy = (
             source_taxonomy.load_taxonomy(root)
             if any(not isinstance(entry, str) for entry in include or [])
             else None
         )
         accepted, classification, rejected = _materialize_selection(
-            run, include or [], exclude or [], overrides or [], include_junk, taxonomy
+            root, run, include or [], exclude or [], overrides or [], include_junk, taxonomy
         )
         run["selection"] = {
             "paths": accepted,
@@ -1003,12 +1132,15 @@ def plan(
         inventory = {row["path"]: row for row in run.get("inventory") or []}
         ceiling = client_artifacts.fetch_budget().max_file_bytes
         index = adoption_plan.read_import_index(root)
+        notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
         for planned in draft["items"]:
+            frozen_paths = [(planned.get("note") or {}).get("target_path")]
             if planned["action"] == "copy-as-source":
-                for frozen in (planned["target_path"], planned.get("artifact_path")):
-                    if frozen:
-                        destinations.reserve(frozen)
+                frozen_paths += [planned["target_path"], planned.get("artifact_path")]
+            for frozen in frozen_paths:
+                if frozen:
+                    destinations.reserve(frozen)
 
         budget = _call_budget()
         handled = 0
@@ -1021,7 +1153,7 @@ def plan(
                 collection=collection["label"], collection_root=collection["root"],
                 classification=classification.get(rel), taxonomy=taxonomy,
                 text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
-                date_iso=draft["date"], destinations=destinations, index=index,
+                date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
                 ceiling=ceiling,
             )
             draft["next"] += 1
@@ -1051,6 +1183,10 @@ def plan(
         for planned in items:
             if planned["action"] == "copy-as-source":
                 planned["frontmatter"] = adoption_plan.item_frontmatter(planned, collection["label"])
+            if planned.get("note"):
+                planned["note"]["frontmatter"] = adoption_plan.note_frontmatter(
+                    planned, collection["label"]
+                )
             if planned.get("slug_warning"):
                 skipped.append(
                     {"path": planned["original_path"], "code": "SLUG_TRUNCATED",
@@ -1069,6 +1205,11 @@ def plan(
                 index, collection=collection["label"], collection_root=collection["root"]
             ),
             "total_bytes": adoption_plan.plan_total_bytes(items),
+            "notes": {
+                "to_create": sum(1 for i in items if i.get("note")),
+                "existing": sum(1 for i in items if i.get("existing_note")),
+                "previous": sum(1 for i in items if i.get("previous_note")),
+            },
         }
         run["plan_draft"] = None
         run["phase"] = "planned"
@@ -1106,6 +1247,27 @@ def _applied(planned: dict) -> dict:
     if planned.get("artifact_path"):
         outcome["artifact_path"] = planned["artifact_path"]
     return outcome
+
+
+def _is_open(outcomes: dict, path: str) -> bool:
+    """Whether the item still has work: no outcome yet, or its Source is down and its note owed."""
+    return path not in outcomes or outcomes[path].get("status") == _SOURCE_ONLY
+
+
+def _owes_note(planned: dict) -> bool:
+    """Whether the item's plan makes a draft note, or expects the one an earlier run made."""
+    return bool(planned.get("note") or planned.get("existing_note"))
+
+
+def _hold_for_note(outcome: dict, planned: dict) -> None:
+    """Keep an own-note item open after its Source: the note is still owed."""
+    if _owes_note(planned) and outcome["status"] in _APPLIED_STATUSES:
+        outcome["source_status"], outcome["status"] = outcome["status"], _SOURCE_ONLY
+
+
+def _source_status(outcome: dict) -> str:
+    """Whether the item's Source was made by this run (`applied`) or found (`already-applied`)."""
+    return outcome.get("source_status") or outcome["status"]
 
 
 def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
@@ -1283,12 +1445,14 @@ class _CallReads:
     """What one `apply` call reads from the vault once and keeps current across its chunks.
 
     Walking every Source for each chunk made a re-run cost grow with the whole vault.
-    Both start empty and fill on first use; a batch that raised drops them, because
-    what it left on disk is then unknown.
+    Each starts empty and fills on first use; a batch that raised drops the Source
+    reads, because what it left on disk is then unknown. A batch writes no note, so
+    the note index stays.
     """
 
     index: list[adoption_plan.EarlierImport] | None = None
     source_counts: dict[str, int] | None = None
+    notes: adoption_plan.NoteIndex | None = None
 
 
 def _commit_chunk(
@@ -1305,6 +1469,7 @@ def _commit_chunk(
     outcomes = run["outcomes"]
     for planned, _item in survivors:
         outcomes[planned["original_path"]] = _applied(planned)
+        _hold_for_note(outcomes[planned["original_path"]], planned)
     try:
         committed = adopt_module.commit_import_items(
             root, [item for _planned, item in survivors], today=run_date,
@@ -1321,6 +1486,7 @@ def _commit_chunk(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path),
                     planned["original_sha256"],
                 )
+                _hold_for_note(outcomes[planned["original_path"]], planned)
                 landed.append(planned)
             else:
                 if isinstance(error, adopt_module.AdoptError):
@@ -1351,12 +1517,17 @@ def _apply_chunk(
     index = reads.index
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
+    texts: dict[str, str] = {}
     for planned in chunk:
         path = planned["original_path"]
         text, failure = _read_original(root, planned, ceiling)
         if failure is not None:
             outcomes[path] = failure
             continue
+        if text is not None and _owes_note(planned):
+            texts[path] = text
+        if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
+            continue  # an earlier call wrote its Source; only the note is owed
         if planned["action"] == "already-imported":
             frozen = [entry for entry in index if entry.path == planned["target_path"]]
             if _earlier_with_same_bytes(root, frozen, label, planned) is None:
@@ -1367,6 +1538,7 @@ def _apply_chunk(
             outcomes[path] = _already_applied(
                 planned["target_path"], planned.get("artifact_path"), planned["original_sha256"]
             )
+            _hold_for_note(outcomes[path], planned)
             settled.append(planned)
             continue
         earlier = _earlier_with_same_bytes(root, index, label, planned)
@@ -1375,6 +1547,7 @@ def _apply_chunk(
                 earlier.path, adoption_plan.artifact_of(root, earlier.path),
                 planned["original_sha256"],
             )
+            _hold_for_note(outcomes[path], planned)
             settled.append(planned)
             continue
         occupied = [
@@ -1398,21 +1571,143 @@ def _apply_chunk(
             root, store, run, survivors, run_date=run_date, label=label, reads=reads
         )
         for planned in landed:
-            if outcomes[planned["original_path"]]["status"] == "applied":
+            if _source_status(outcomes[planned["original_path"]]) == "applied":
                 reads.index.append(
                     adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
                 )
     for planned in [*settled, *landed]:
         _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
     extractions: list[float] = []
+    copied: list[str] = []
     for planned in landed:
-        if outcomes[planned["original_path"]]["status"] == "applied":
-            written.append(planned["target_path"])
+        if _source_status(outcomes[planned["original_path"]]) == "applied":
+            copied.append(planned["target_path"])
         if planned["form"] == "artifact":
             seconds = _request_extraction(root, planned, budget, stats)
             if seconds is not None:
                 extractions.append(seconds)
+    written.extend(copied)
+    # The Sources are written without the semantic seam, so the chunk counts them in the
+    # backlog itself, before any note does. Each draft note's own commit refreshes its Source.
+    due_state.refresh_after_writes(root, [due_state.PageWrite(path) for path in copied])
+    if reads.notes is None:
+        reads.notes = adoption_plan.NoteIndex(root)
+    _create_notes(
+        root, store, run, chunk, texts,
+        label=label, notes=reads.notes, budget=budget, stats=stats, written=written,
+    )
     return extractions
+
+
+def _create_notes(
+    root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], texts: dict[str, str], *,
+    label: str | None, notes: adoption_plan.NoteIndex, budget: request_budget.RequestBudget,
+    stats: Counter, written: list[str],
+) -> None:
+    """Create the draft note of every own-note item in `chunk` whose Source is on disk.
+
+    One note at a time, each through the governed two-phase creation. The call stops
+    between two notes when the next would not fit in the time left; the items it leaves
+    keep their `source-applied` outcome and the continuation resumes at them. A call
+    always makes at least one note, so a budget below one note's cost still moves.
+    """
+    outcomes = run["outcomes"]
+    created_any = False
+    for planned in chunk:
+        path = planned["original_path"]
+        if path not in outcomes or outcomes[path]["status"] != _SOURCE_ONLY:
+            continue
+        if stats["notes_started"] and not budget.can_afford(
+            request_budget.DELIVERY_RESERVE_SECONDS + stats["note_ms_max"] / 1000
+        ):
+            stats["notes_deferred"] += 1
+            break
+        started = time.monotonic()
+        _create_note(
+            root, planned, texts[path], outcomes[path],
+            label=label, notes=notes, date_iso=run["plan"]["date"], stats=stats, written=written,
+        )
+        stats["notes_started"] += 1
+        stats["note_ms_max"] = max(stats["note_ms_max"], int((time.monotonic() - started) * 1000))
+        created_any = True
+    if created_any:
+        # The outcomes are committed with the chunk's Sources and again here, so a
+        # crash costs the identity check at most one chunk of notes.
+        store.save(run)
+
+
+def _create_note(
+    root: Path, planned: dict, text: str, outcome: dict, *,
+    label: str | None, notes: adoption_plan.NoteIndex, date_iso: str, stats: Counter,
+    written: list[str],
+) -> None:
+    """Find or create one item's draft note, then settle the item on the result."""
+    from . import note as note_module
+
+    frozen = (planned.get("note") or {}).get("target_path")
+    source_page = outcome["target_path"]
+
+    def found() -> str | None:
+        return adoption_plan.find_note(
+            root, notes, collection=label, collection_path=planned["collection_path"],
+            frozen=frozen,
+        )
+
+    existing = found()
+    if existing is not None:
+        _settle_note(outcome, {"status": "already-applied", "target_path": existing, "at": _now_iso()})
+        stats["notes_found"] += 1
+        return
+    if frozen is None:
+        _fail_note(outcome, "PLAN_STALE", "the note an earlier run made is gone; re-plan this import")
+        stats["notes_failed"] += 1
+        return
+    if os.path.lexists(root / frozen):
+        _fail_note(
+            outcome, "TARGET_OCCUPIED", f"{frozen} already exists and is not an import of this file"
+        )
+        stats["notes_failed"] += 1
+        return
+    try:
+        created = adopt_module.create_draft_note(
+            root, planned, text, source_path=source_page, collection=label, date_iso=date_iso
+        )
+    except Exception as error:  # noqa: BLE001 - a refused note is this item's outcome; its Source stays
+        # A failure after the commit still left the note: the identity check records it.
+        existing = found()
+        if existing is not None:
+            _settle_note(outcome, {"status": "already-applied", "target_path": existing, "at": _now_iso()})
+            stats["notes_found"] += 1
+            return
+        if isinstance(error, (adopt_module.AdoptError, note_module.NoteError)):
+            failure = {"code": error.code, "reason": error.reason}
+        elif isinstance(error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)):
+            failure = adoption_plan.source_failure(error)
+        else:
+            failure = {"code": "NOTE_FAILED", "reason": str(error)}
+        _fail_note(outcome, failure["code"], failure["reason"])
+        stats["notes_failed"] += 1
+        return
+    _settle_note(
+        outcome,
+        {"status": "applied", "target_path": created.path, "note_ref": created.ref, "at": _now_iso()},
+    )
+    written.append(created.path)
+    stats["notes_created"] += 1
+
+
+def _settle_note(outcome: dict, note: dict) -> None:
+    """Complete an own-note item: its Source and its note both exist."""
+    outcome["note"] = note
+    outcome["status"] = (
+        "applied" if "applied" in (outcome.get("source_status"), note["status"]) else "already-applied"
+    )
+
+
+def _fail_note(outcome: dict, code: str, reason: str) -> None:
+    """Fail an own-note item at its note; the outcome keeps the Source it made."""
+    outcome["note"] = {"status": "failed", "code": code, "reason": reason, "at": _now_iso()}
+    outcome.update(_failed(code, reason))
 
 
 def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) -> None:
@@ -1433,7 +1728,7 @@ def _progress(run: dict) -> dict:
     return {
         "applied": sum(1 for s in statuses if s in _APPLIED_STATUSES),
         "failed": sum(1 for s in statuses if s == "failed"),
-        "remaining": sum(1 for s in statuses if s is None),
+        "remaining": sum(1 for s in statuses if s is None or s == _SOURCE_ONLY),
         "total": len(in_scope),
     }
 
@@ -1547,6 +1842,9 @@ def apply(
             pacer.record(chunk, time.monotonic() - started, extractions)
             pending = pending[len(chunk):]
             chunks += 1
+            if stats["notes_deferred"]:
+                stopped = True
+                break
 
         outcomes = run["outcomes"]
         # Every requested source drifted or vanished, and nothing was ever imported: refuse
@@ -1586,6 +1884,11 @@ def apply(
                     "deferred": stats["extraction_deferred"],
                     "failed": stats["extraction_failed"],
                 },
+                "notes": {
+                    "created": stats["notes_created"],
+                    "found": stats["notes_found"],
+                    "failed": stats["notes_failed"],
+                },
             },
             "progress": _progress(run),
         }
@@ -1623,6 +1926,7 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
 def _recompute_phase(outcomes: dict, plan_items: list[dict], budget_stopped: bool) -> str:
     """`applied` only when every planned item has an outcome and none failed."""
     statuses = [outcomes.get(it["original_path"], {}).get("status") for it in plan_items]
+    statuses = [None if status == _SOURCE_ONLY else status for status in statuses]
     applied = any(s in _APPLIED_STATUSES for s in statuses)
     failed = any(s == "failed" for s in statuses)
     if any(s is None for s in statuses):
@@ -1782,6 +2086,7 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
     by_code = Counter(
         o.get("code") for o in outcomes.values() if o.get("status") == "failed" and o.get("code")
     )
+    notes = Counter((o["note"] or {}).get("status") for o in outcomes.values() if o.get("note"))
     folders = [row for row in run.get("inventory") or [] if row.get("kind") == "folder"]
     applied_text = [item for item, _outcome in _applied_items(run) if item["form"] == "text"]
     return {
@@ -1798,6 +2103,13 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
             "inventory_truncated": run.get("inventory_truncated", 0),
         },
         "extraction": _extraction_states(root, run, budget),
+        "notes": {
+            "planned": sum(1 for it in plan_items if it.get("note") or it.get("existing_note")),
+            "created": notes["applied"],
+            "already-applied": notes["already-applied"],
+            "failed": notes["failed"],
+            "left_with_previous_note": sum(1 for it in plan_items if it.get("previous_note")),
+        },
         "links": {
             "resolved": sum(len((item.get("links") or {}).get("resolved") or []) for item in applied_text),
             "unresolved": sum(len((item.get("links") or {}).get("unresolved") or []) for item in applied_text),

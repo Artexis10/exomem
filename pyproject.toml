@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.144.4" # x-release-please-version
+version = "0.146.1" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,6 +56,7 @@ dependencies = [
     "SQLAlchemy>=2.1.4,<3",
     "alembic>=1.20,<2",
     "tzdata>=2026.2",           # import time zones: the same IANA rules on every platform, versioned per job
+    "pathspec>=1.1.1,<2",       # gitignore rules of a folder selected for import (exomem import, exomem cloud import)
 ]
 
 # Rendered by PyPI as the "Project links" sidebar block. Without this table the

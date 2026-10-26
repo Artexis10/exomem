@@ -163,7 +163,7 @@ def _note_pairs(connection, path, known_types, after):
             f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) IN ('links_to', 'relates_to') "
             f"AND t.page_type IN ({placeholders}) AND t.path {comparison} ? "
             "ORDER BY t.path LIMIT ?",
-            (epistemic_graph._with_md(path), *known_types, boundary, limit),
+            (epistemic_graph._page_rel(path), *known_types, boundary, limit),
         ).fetchall()
 
     lefts = neighbours(after[0], 2, inclusive=True)
@@ -204,7 +204,7 @@ def _candidate_rows(connection, path, known_types, anchor, after):
             f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) = 'relates_to' "
             "AND (s.path, t.path) > (?, ?) "
             "GROUP BY s.node_key, t.node_key ORDER BY s.path, t.path LIMIT ?",
-            (epistemic_graph._with_md(path), *after, EDGE_PAGE + 1),
+            (epistemic_graph._page_rel(path), *after, EDGE_PAGE + 1),
         ).fetchall()
         next_after = (
             [rows[EDGE_PAGE - 1][0], rows[EDGE_PAGE - 1][4]] if len(rows) > EDGE_PAGE else None

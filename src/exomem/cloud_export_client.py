@@ -19,6 +19,7 @@ from .cloud_import_client import (
     CloudImportClientConfig,
     add_endpoint_arguments,
     authorized_api_client,
+    server_code,
 )
 
 PACKING_DEADLINE_SECONDS = 3600
@@ -36,24 +37,12 @@ class CloudExportError(Exception):
         self.message = message
 
 
-def _server_code(response: httpx2.Response) -> str:
-    """The error code of a Cloud API refusal, or the status when the body has none."""
-    try:
-        code = response.json()["error"]["code"]
-    except (ValueError, KeyError, TypeError):
-        code = None
-    # A format check on a protocol field, so a hostile body cannot put free text in the output.
-    if isinstance(code, str) and 0 < len(code) <= 64 and code.isascii() and code.replace("_", "").isalnum():
-        return code
-    return f"HTTP_{response.status_code}"
-
-
 async def _api_json(api: httpx2.AsyncClient, method: str, url: str) -> tuple[int, dict]:
     response = await api.request(method, url)
     if response.status_code == 404 and method == "GET":
         raise CloudExportError("EXPORTS_NOT_OFFERED", "this Cloud deployment does not offer exports yet")
     if response.is_error:
-        raise CloudExportError(_server_code(response), "the Cloud API refused the request")
+        raise CloudExportError(server_code(response), "the Cloud API refused the request")
     return response.status_code, response.json()
 
 
