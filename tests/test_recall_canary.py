@@ -750,7 +750,9 @@ def test_mcp_terminal_failures_have_elapsed_time_without_response_content(tmp_pa
             content=[TextContent(type="text", text="private-response")],
         )
 
-    report = _run_canary(tmp_path, server, [_canary_case()], timeout_seconds=0.01, warm_up=False)
+    # Only the timeout case may expire; a short budget makes the other terminals flaky on slow runners.
+    timeout_seconds = 0.01 if terminal == "timeout" else 10.0
+    report = _run_canary(tmp_path, server, [_canary_case()], timeout_seconds=timeout_seconds, warm_up=False)
     assert report["verdict"] == "failed"
     attempt = report["cases"][0]["attempts"][0]
     assert attempt["outcome"] == "error"
