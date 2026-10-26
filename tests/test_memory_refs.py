@@ -322,6 +322,10 @@ def test_legacy_negative_reference_refreshes_when_identity_is_added(
 
 
 def test_ask_memory_enriches_references_once(vault: Path, monkeypatch) -> None:
+    from exomem import due_state
+
+    # The first recall of a vault builds its due-state projection, which resolves refs too.
+    due_state.reconcile(vault)
     calls = 0
     original = memory_refs.ReferenceIndex.refs_for_paths
 

@@ -124,6 +124,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "governance-schema",
         "relations",
         "collections",
+        "import",
     }
 )
 
@@ -291,6 +292,9 @@ def _dispatch_main(raw: list[str]) -> int:
         return _relations_main(raw[1:])
     if raw and raw[0] == "collections":
         return _collections_main(raw[1:])
+    if raw and raw[0] == "import":
+        from .local_import import main as local_import_main
+        return local_import_main(raw[1:])
     if raw and raw[0] == "cloud":
         if raw[1:2] == ["export"]:
             from .cloud_export_client import main as cloud_export_main
@@ -4473,6 +4477,12 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op == "triage_memory" and isinstance(result, dict):
         _print_triage_human(result)
         return
+    if isinstance(result, dict) and isinstance(result.get("hits"), list) and "due_state" in result:
+        # The advisory block that `commands._with_due_state` puts on a recall has no
+        # human view; the human view shows the recall as before and `--json` keeps it.
+        result = {key: value for key, value in result.items() if key != "due_state"}
+        if set(result) == {"hits"}:
+            result = result["hits"]
     if (
         isinstance(result, dict)
         and isinstance(result.get("hits"), list)

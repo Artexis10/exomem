@@ -9,7 +9,8 @@ Checks (all read-only; no writes ever):
   sources with a title match are not flagged).
 - `orphan_entity`: file under `Entities/` with no inbound wikilinks from
   anywhere in `Knowledge Base/`
-- `unprocessed_source`: `type: source` page whose `ingested_into:` is empty
+- `unprocessed_source`: `type: source` page that no live note compiles: no page
+  its `ingested_into:` names is live and cites it in its own `sources:`
 - `unresolved_source_citation`: compiled page whose explicit `sources:` claim
   does not resolve to authorized governed Source or Evidence material
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
@@ -101,6 +102,7 @@ from . import (
     access,
     capabilities,
     contradiction_stance,
+    homes,
     indexes,
     lifecycle_statuses,
     logging_config,
@@ -110,6 +112,8 @@ from . import (
     semantic_language_registry,
     semantic_units,
     source_closure,
+    source_coverage,
+    source_taxonomy,
     temporal,
 )
 from . import entity_recurrence as entity_recurrence_module
@@ -132,6 +136,9 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 
+RELATION_GENERIC_SHARE_CATEGORY = "relation_generic_share"
+
+# These category names select implemented audit checks, not vault vocabulary.
 ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink",
     "forward_reference",
@@ -149,6 +156,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "corpus_contradictions",
     "relation_debt",
+    RELATION_GENERIC_SHARE_CATEGORY,
     "governance_receipts",
     "bridge_review",
     "duplicated_sidecar",
@@ -506,11 +514,13 @@ def audit(
     semantic_detail: Literal["actionable", "full"] = "actionable",
     retain_reflected_observations: bool = False,
     status_basis: lifecycle_statuses.Basis | None = None,
+    source_context: bool = True,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
     `categories` filters which checks to run (default: all). Read-only.
     `today` is dependency-injectable for tests (used by unprocessed-source aging).
+    `source_context=False` builds no reader context on an unprocessed-source finding.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     selected = set(categories) if categories else set(ALL_CATEGORIES)
@@ -522,7 +532,8 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    pages = [] if selected <= _SEMANTIC_AUDIT_CATEGORIES else _parse_all(kb, vault_root)
+    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
+    pages = [] if selected <= projection_checks else _parse_all(kb, vault_root)
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
@@ -549,7 +560,11 @@ def audit(
     if "orphan_entity" in selected:
         findings.extend(_check_orphan_entities(vault_root, pages))
     if "unprocessed_source" in selected:
-        findings.extend(_check_unprocessed_sources(vault_root, pages, today=today))
+        findings.extend(
+            _check_unprocessed_sources(
+                vault_root, pages, today=today, source_context=source_context
+            )
+        )
     if "unresolved_source_citation" in selected:
         findings.extend(_check_unresolved_source_citations(vault_root, pages))
     if "index_drift" in selected:
@@ -620,6 +635,12 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
+    if RELATION_GENERIC_SHARE_CATEGORY in selected:
+        from . import relation_census
+
+        review_findings, coverage = relation_census.generic_share_review(vault_root)
+        findings.extend(review_findings)
+        metadata.setdefault("coverage", {})[RELATION_GENERIC_SHARE_CATEGORY] = coverage
     if "missing_sources" in selected:
         findings.extend(_check_missing_sources(vault_root, pages, status_basis=status_basis))
     if "derivation_double_counting" in selected:
@@ -2600,8 +2621,19 @@ def _check_unprocessed_sources(
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+    lookup: Callable[[str], find_module.ParsedPage | None] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
+    source_context: bool = True,
 ) -> list[AuditFinding]:
-    """Flag sources with empty ingested_into, aged + triaged oldest-first.
+    """Flag Sources that no live page compiles, aged + triaged oldest-first.
+
+    A Source is compiled only when a page named in its `ingested_into` is live and
+    cites it (`source_coverage`); a draft, retired, missing or unclaimed derivative
+    leaves it here, listed with its reason. `lookup` finds a derivative's parsed
+    page; it defaults to `pages`, so a derivative the caller cannot see reports as
+    missing. `source_context=False` leaves out the title, excerpt and derivatives
+    a reader groups by; the due-state projection stores none of them.
 
     Adds age signal so the backlog can be drained by priority rather than
     treated as an undifferentiated pile: bucket fresh (<30d) / aging (30-90d) /
@@ -2610,23 +2642,48 @@ def _check_unprocessed_sources(
     first.
     """
     today = today or dt.date.today()
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
+    if lookup is None:
+        lookup = {page.rel_path: page for page in pages}.get
+
+    if resolver is None:
+
+        @lru_cache(maxsize=1)
+        def resolver():
+            # Built on first use: a vault whose Sources name no derivative never pays for it.
+            return find_module.writer_resolver_snapshot(vault_root)
+
     rows: list[tuple[int, AuditFinding]] = []  # (age_days for sort, finding)
     for page in pages:
-        if page.frontmatter.get("type") != "source":
+        if not type_basis.selects(page.page_type, note_types.captured_source):
             continue
         # A conversation recap is not a backlog item: every conversation writes
         # one, and the recap with its episode ledger is already the coverage
         # record, so a finding per conversation would only be noise.
-        if page.frontmatter.get("source_type") == "episode":
+        if page.frontmatter.get("source_type") == source_taxonomy.EPISODE_KIND:
             continue
-        ingested = page.frontmatter.get("ingested_into")
-        if not (ingested is None or (isinstance(ingested, list) and len(ingested) == 0)):
+        coverage = source_coverage.evaluate(
+            vault_root,
+            page,
+            lookup=lookup,
+            resolver=resolver,
+            status_basis=status_basis,
+            type_basis=type_basis,
+        )
+        if coverage.compiled:
             continue
 
         captured = _parse_fm_date(
             page.frontmatter.get("captured") or page.frontmatter.get("created")
         )
-        meta: dict = {"signal_version": _page_signal_version(page)}
+        meta: dict = {
+            "signal_version": content_hash(_page_signal_version(page) + coverage.signal())[:16],
+            # The capture date, or the floor the projection sorts last, as every
+            # other dated family publishes it.
+            "due_since": (captured or dt.date.min).isoformat(),
+            **(source_coverage.context(vault_root, page, coverage) if source_context else {}),
+        }
         age_days: int | None = None
         if captured is not None:
             age_days = max(0, (today - captured).days)
@@ -2645,6 +2702,12 @@ def _check_unprocessed_sources(
             severity = "info"
             age_phrase = " (capture date unknown)"
 
+        failing = coverage.failing
+        if failing:
+            reasons = ", ".join(sorted({item.reason for item in failing}))
+            what = f"no live note compiles it yet ({len(failing)} derivative(s): {reasons})"
+        else:
+            what = "nothing compiled from it yet"
         rows.append(
             (
             age_days if age_days is not None else -1,
@@ -2652,14 +2715,13 @@ def _check_unprocessed_sources(
                 category="unprocessed_source",
                 severity=severity,
                 path=page.rel_path,
-                detail=(
-                    f"Source has no ingested_into entries — nothing compiled "
-                    f"from it yet{age_phrase}"
-                ),
+                detail=f"Source is not compiled — {what}{age_phrase}",
                 proposed_fix=(
-                    "Call `propose_compilation(sources=[this])` for a draft note "
-                    "skeleton, then compile via `note` (the back-ref updates "
-                    "automatically). Otherwise mark archived or delete."
+                    "Promote a pending derivative to a live status through a governed "
+                    "edit once its claims are reviewed, or call "
+                    "`propose_compilation(sources=[this])` for a draft note skeleton "
+                    "and compile via `note` (the back-ref updates automatically). "
+                    "Otherwise mark archived or delete."
                 ),
                 meta=meta,
             ),
@@ -2702,7 +2764,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
 
     # Actual counts.
     sources = indexes._count_sources(kb / "Sources")
-    notes = indexes._count_notes(kb / "Notes")
+    notes = indexes._count_notes(kb / "Notes", home_set=homes.load(vault_root))
     entities = indexes._count_entities(kb / "Entities")
     actual: dict[str, int] = {
         "sources": sum(sources.values()),
@@ -6217,23 +6279,19 @@ def _contradiction_w_dormancy() -> float:
         return 0.5
 
 
-def _contradiction_family(rel_path: str) -> str | None:
-    """Return the `Notes/Research/<X>` family segment of a KB path, else None.
+def _contradiction_family(frontmatter: Mapping[str, Any]) -> str | None:
+    """Return the page's `project` key as its contradiction family, else None.
 
-    The architecture-cluster noise is same-family adjacency: many
-    `Notes/Research/<X>/*-architecture` pairs that are expected to sit close. Two
-    notes are 'same-family' when they share the `<X>` subfolder directly under
-    `Notes/Research/`. Returns `"Notes/Research/<X>"` for such a path (after the
-    leading `Knowledge Base/` is stripped) and None for anything outside that
-    tree (or directly in it with no `<X>` subfolder).
+    The architecture-cluster noise is same-family adjacency: many pages about one
+    project that are expected to sit close. Two notes are 'same-family' when they
+    carry the same `project` key, wherever they are filed. The key, not the folder,
+    decides: a home or a type folder can hold several projects, and a project's
+    notes can live in several folders. A page with no `project` has no family.
     """
-    stripped = rel_path.removeprefix(kb_prefix()).lstrip("/")
-    parts = stripped.split("/")
-    # parts = ["Notes", "Research", "<X>", ..., "file.md"] → need an <X> dir
-    # before the filename, so at least 4 components.
-    if len(parts) >= 4 and parts[0] == "Notes" and parts[1] == "Research":
-        return "/".join(parts[:3])
-    return None
+    project = frontmatter.get("project")
+    if not isinstance(project, str) or not project.strip():
+        return None
+    return project.strip().casefold()
 
 
 def _pair_dormancy(
@@ -7144,9 +7202,10 @@ def _proximity_contradictions(
 
     scored: list[tuple[bool, float, str, str, float, float]] = []
     for (a, b), cos in pair_cos.items():
-        same_family = _contradiction_family(a) is not None and _contradiction_family(
-            a
-        ) == _contradiction_family(b)
+        family = _contradiction_family(eligible[a].frontmatter)
+        same_family = family is not None and family == _contradiction_family(
+            eligible[b].frontmatter
+        )
         dormancy = _pair_dormancy(a, b, events_map, d)
         priority = cos + w_dormancy * dormancy
         scored.append((same_family, priority, a, b, cos, dormancy))

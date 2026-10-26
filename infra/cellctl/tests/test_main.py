@@ -203,3 +203,11 @@ def test_cellctl_refuses_to_start_without_a_valid_upgrade_readiness_deadline(mon
 
     with pytest.raises(ValueError, match=name):
         main.build_reconcile_config()
+
+
+@pytest.mark.parametrize("raw", ["broken-json", "null", '{"source":"partial"}'])
+def test_unusable_retention_configuration_stays_evidence_without_blocking_startup(monkeypatch, raw):
+    """A policy typo must not take the controller's unrelated cell workflows down."""
+    _settings_env(monkeypatch, {})
+    monkeypatch.setenv("CELLCTL_KEY_RETENTION_SOURCES", raw)
+    assert main.build_cluster_config().key_retention_sources

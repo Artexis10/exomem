@@ -84,7 +84,7 @@ def _candidate_identity(candidate: dict[str, Any]) -> str:
 
 
 def _bullet(candidate: dict[str, Any]) -> str:
-    relation = candidate.get("relation_type") or "relates_to"
+    relation = candidate.get("authored_label") or candidate.get("relation_type") or "relates_to"
     destination = str(candidate.get("to") or "").removesuffix(".md")
     return f"- {relation} [[{destination}]]"
 
@@ -111,8 +111,9 @@ def selected_relation(
         source_project = None
     if not isinstance(target_project, str):
         target_project = None
+    registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
     resolved = semantic_contract_module._registry_resolution(
-        relation_registry.load_registry(vault_root),
+        registry,
         requested_relation,
         projects=(source_project,) if source_project is not None else (),
         page_type=page.page_type,
@@ -120,14 +121,19 @@ def selected_relation(
         target_kind=target.page_type,
         origin="markdown_relation",
     )
-    definition = resolved.definition
+    definition, canonical = resolved.definition, resolved.canonical
     if (
         definition is None
+        or canonical is None
         or resolved.status not in {"core", "extension", "alias"}
         or (definition.projects and target_project not in definition.projects)
     ):
         raise ValueError("INVALID_SELECTED_RELATION: relation is not active for reviewed endpoints")
-    return {**candidate, "relation_type": resolved.canonical}
+    return {
+        **candidate,
+        "relation_type": canonical,
+        "authored_label": relation_registry.authored_label(registry, requested_relation, canonical),
+    }
 
 
 def _evidence_signal_version(page: Any, candidate: dict[str, Any]) -> str:
@@ -184,7 +190,9 @@ def _relation_document(page: Any, vault_root: Path) -> Any:
         page.body,
         validate=False,
         language_registry=semantic_language_registry.load_registry(vault_root),
-        relation_registry=relation_registry.load_registry(vault_root),
+        relation_registry=relation_registry.load_for_page(
+            vault_root, page.rel_path, page.frontmatter
+        ),
         page_type=page.page_type,
     )
 
@@ -205,18 +213,21 @@ def _authored_targets(
     for relation in document.canonical_note_relations:
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, resolver=resolver, strict=False
+                epistemic_graph_module._page_target(relation.target),
+                vault_root,
+                resolver=resolver,
+                strict=False,
             )
         except Exception:  # noqa: BLE001 - malformed authored links are ignored
             continue
         if warning:
             continue
-        authored.add((relation.kind, epistemic_graph_module._with_md(canonical)))
+        authored.add((relation.kind, epistemic_graph_module._page_rel(canonical)))
     return authored
 
 
 def _is_placeholder_target(vault_root: Path, target: str) -> bool:
-    return not (Path(vault_root) / epistemic_graph_module._with_md(target)).is_file()
+    return not (Path(vault_root) / epistemic_graph_module._page_rel(target)).is_file()
 
 
 def _current_candidate_is_authored(
@@ -226,7 +237,7 @@ def _current_candidate_is_authored(
 ) -> bool | None:
     """Check current Markdown using exact cached resolver authority."""
     relation_type = str(candidate.get("relation_type") or "")
-    target = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    target = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
     if not relation_type or not target:
         return False
     matching_relations = tuple(
@@ -431,9 +442,9 @@ def _shared_source_candidates(
             "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
             "WHERE p.src_key = ('file:' || e1.source_path) "
             "AND p.dst_page_key = ('file:' || e2.source_path) "
-            "AND p.relation_type = 'relates_to') "
+            "AND p.relation_type = ?) "
             "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
-            (rel_path, max(0, int(limit))),
+            (rel_path, relation_registry.generic_relation_key(), max(0, int(limit))),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -443,11 +454,11 @@ def _shared_source_candidates(
     return [
         {
             "from": rel_path,
-            "to": epistemic_graph_module._with_md(str(target_path)),
+            "to": epistemic_graph_module._page_rel(str(target_path)),
             "relation_type": "relates_to",
             "method": "shared_sources",
             "evidence": {
-                "shared_source": epistemic_graph_module._with_md(
+                "shared_source": epistemic_graph_module._page_rel(
                     str(shared_key or "").removeprefix("file:")
                 )
             },
@@ -533,8 +544,8 @@ def _hinted_candidate_refs(
     `snapshot` is a validated graph read snapshot the caller already holds; it
     is used as is and left open.
     """
-    from_path = epistemic_graph_module._with_md(str(candidate.get("from") or ""))
-    to_path = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    from_path = epistemic_graph_module._page_rel(str(candidate.get("from") or ""))
+    to_path = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
     paths = tuple(dict.fromkeys((from_path, to_path)))
     if not all(paths):
         return None
@@ -649,7 +660,7 @@ def _classify_candidate(
         authored = _authored_targets(page, vault_root)
     relation_type = str(candidate.get("relation_type") or "")
     to_path = str(candidate.get("to") or "")
-    if (relation_type, epistemic_graph_module._with_md(to_path)) in authored:
+    if (relation_type, epistemic_graph_module._page_rel(to_path)) in authored:
         return "authored_edge", None
     if _is_placeholder_target(vault_root, to_path):
         return "placeholder_target", None
@@ -808,7 +819,7 @@ def resolve_candidate(
                 )
         raise _refresh_required(ref)
 
-    rel_path = epistemic_graph_module._with_md(str(source_path or ""))
+    rel_path = epistemic_graph_module._page_rel(str(source_path or ""))
     if not epistemic_graph_module.EpistemicGraphIndex(vault_root).available():
         raise _refresh_required(ref)
     page = _page_for(vault_root, rel_path)
@@ -939,7 +950,7 @@ def accept(
             {
                 (
                     str(candidate.get("relation_type") or ""),
-                    epistemic_graph_module._with_md(
+                    epistemic_graph_module._page_rel(
                         str(candidate.get("to") or "")
                     ),
                 )
@@ -976,6 +987,11 @@ def accept(
         "from": selected.get("from"),
         "to": selected.get("to"),
         "relation_type": selected.get("relation_type"),
+        "relation_label": relation_registry.display_label(
+            relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter),
+            str(selected.get("relation_type") or ""),
+        ),
+        "authored_label": selected.get("authored_label") or selected.get("relation_type"),
         "method": candidate.get("method"),
         "fingerprint": resolved.fingerprint,
         "bullet": bullet,

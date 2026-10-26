@@ -345,7 +345,7 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
         "change_records",
         "read_review",
         "read_connections",
-        "read_adoption",
+        "read_import",
         "check_memory",
         "read_schema",
         "read_governance",

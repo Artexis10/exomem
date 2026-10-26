@@ -80,6 +80,19 @@ A public tool MAY combine related operations from existing execution commands. E
 - **THEN** its public schema and invocation resolver exclude the dataset variant
 - **AND** enabling tier 2 retains the dataset reader's permissions, provenance and query result contract
 
+#### Scenario: A registry preview checks the live overlay
+
+- **WHEN** a caller selects `read_schema` with kind `preview` and a keyed registry delta
+- **THEN** the server invokes the grouped proposal operation against the current overlay
+- **AND** the preview preserves existing custom entries and checks collisions and the registry cap without saving
+- **AND** discovery distinguishes this operation from complete-document validation
+
+#### Scenario: An existing import client retains its run
+
+- **WHEN** a caller starts an import through `import_memory` and later uses the deprecated `adoption_studio` spelling
+- **THEN** both calls retain the same execution identity and address the same run
+- **AND** the public read family remains `read_import`
+
 ### Requirement: Converted capabilities remain available on their admitted surfaces
 
 Every existing operation SHALL remain reachable through a listed public variant or a recorded surface exclusion. A surface SHALL omit tools with no admitted variants. MCP guidance SHALL name listed tools; REST and CLI SHALL retain grouped command contracts.

@@ -16,7 +16,7 @@ def test_core_is_single_source_for_parser_and_graph() -> None:
     from exomem import epistemic_graph
 
     core = relation_registry.core_registry()
-    assert len(core.core) == 33
+    assert len(core.core) == 35
     assert markdown_relations.RELATION_TYPES == core.keys
     assert semantic_blocks.RELATION_TYPES == core.keys
     assert epistemic_graph.RELATION_TYPES == core.keys
@@ -32,12 +32,26 @@ def test_legacy_relation_contract_matches_static_golden() -> None:
         key: {
             "direction": definition.direction,
             **({"inverse": definition.inverse} if definition.inverse else {}),
+            **({"generic": True} if definition.generic else {}),
             "origins": sorted(definition.origins),
         }
         for key, definition in relation_registry.core_registry().core.items()
     }
     assert actual == golden["relations"]
     assert golden["graph_context_default_profile"] == "all"
+
+
+def test_kinship_and_affiliation_are_core_relations_in_families_of_their_own() -> None:
+    core = relation_registry.core_registry().core
+    others = {
+        definition.family
+        for key, definition in core.items()
+        if key not in {"kin_of", "affiliated_with"}
+    }
+    assert (core["kin_of"].family, core["kin_of"].direction) == ("kinship", "symmetric")
+    assert core["affiliated_with"].family == "affiliation"
+    assert not {"kinship", "affiliation"} & others
+    assert all(core[key].description for key in ("kin_of", "affiliated_with"))
 
 
 def test_extension_alias_parent_and_scope_resolution() -> None:

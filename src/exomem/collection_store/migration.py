@@ -22,6 +22,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import ExitStack, closing, contextmanager
+from functools import partial
 from pathlib import Path
 
 from .. import held_fs, reserved_paths, state_paths
@@ -335,15 +336,14 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
                 if audit is None:
                     rows.extend(blocked)
                 else:
-                    for manifest in pending:
+                    def stage_one(manifest):
                         check()
                         try:
                             captured = legacy_import.capture_legacy_collection(
                                 root, manifest.path, audit=audit, presentation_operation=presentation
                             )
                         except preflight._REFUSALS as error:
-                            rows.append(preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error)))
-                            continue
+                            return preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error))
                         try:
                             with _migration_scope(root, deadline):
                                 check()
@@ -367,15 +367,18 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
                                 _recorder(staging)(captured, result)
                                 staging.execute("COMMIT")
                         except preflight._REFUSALS as error:
-                            rows.append(preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error)))
-                            continue
+                            return preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error))
                         finally:
                             if staging.in_transaction:
                                 with _migration_scope(root):
                                     staging.execute("ROLLBACK")
-                        rows.append(preflight._row(manifest.path, manifest, status="ready", proof="passed",
+                        return preflight._row(manifest.path, manifest, status="ready", proof="passed",
                             rows=result.item_count, legacy_events=result.legacy_event_count,
-                            legacy_audit_status=captured.legacy_inspection["status"]))
+                            legacy_audit_status=captured.legacy_inspection["status"])
+
+                    for manifest in pending:
+                        # Beside a live writer, a write outruns a capture: scan again and try this collection once more.
+                        rows.append(preflight.retried(root, audit, stage_one(manifest), partial(stage_one, manifest)))
             with _migration_scope(root, deadline):
                 check()
                 chain.verify_store_chain(staging, check=check)
@@ -477,7 +480,7 @@ def _carried(root, directory, *, supersede=False, deadline=None, verified=None, 
             for manifest in pending:
                 check()
                 try:
-                    captured = legacy_import.capture_legacy_collection(
+                    captured = preflight.capture_collection(
                         root, manifest.path, audit=audit, presentation_operation=presentation
                     )
                 except (TimeoutError, *preflight._REFUSALS):
@@ -707,7 +710,7 @@ def _changed_since_publication(session, fence_client, intent, deadline=None):
         changed = []
         for entry in intent["collections"]:
             try:
-                captured = legacy_import.capture_legacy_collection(
+                captured = preflight.capture_collection(
                     root, entry["manifest_path"], audit=audit, presentation_operation=presentation
                 )
             except (TimeoutError, *preflight._REFUSALS):

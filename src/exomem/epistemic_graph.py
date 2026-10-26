@@ -378,6 +378,8 @@ class GraphEdge:
     #: edge still counts as an edge to its page. None means the destination is
     #: already a page.
     dst_page_key: str | None = None
+    #: How `relation_type` reads to a person, from the registry that resolved it.
+    relation_label: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -385,6 +387,7 @@ class GraphEdge:
             "src_key": self.src_key,
             "dst_key": self.dst_key,
             "relation_type": self.relation_type,
+            "relation_label": self.relation_label,
             "raw_relation": self.raw_relation,
             "parent_relation": self.parent_relation,
             "registry_status": self.registry_status,
@@ -411,6 +414,7 @@ class GraphNeighbor:
     relation_type: str | None
     direction: str
     family: str
+    relation_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3158,6 +3162,7 @@ class EpistemicGraphIndex:
                 ).fetchall()
             }
             residue: set[str] = set()
+            unchanged_without_row: set[str] = set()
             if stored_hashes != current_hashes:
                 if residue_out is None:
                     return declined("indexed_sources_differ")
@@ -3181,18 +3186,34 @@ class EpistemicGraphIndex:
                     if rel in stored_hashes and stored_hashes[rel] != source_hash
                 )
                 residue_out.update(residue)
+                # A sidecar written when file rows were keyed by a name cut at
+                # `#` holds no file row for the page that lost its key, yet
+                # keeps that page's dependency coverage. Its bytes are what the
+                # stored topology saw, so its title is unchanged: leave it out of
+                # the revert below, which would otherwise treat it as absent.
+                # It stays residue, so the drain repairs it with one rebuild.
+                unchanged_without_row |= {
+                    rel
+                    for rel in created
+                    if conn.execute(
+                        "SELECT 1 FROM graph_dependency_coverage "
+                        "WHERE source_path = ? AND source_hash = ?",
+                        (rel, current_hashes[rel]),
+                    ).fetchone()
+                }
             resolver = vault_module.WikilinkResolver.from_entries(
                 self.vault_root,
                 resolver_entries,
             )
             carry = self._read_topology_carry(conn)
+            explained = residue - unchanged_without_row
             topology_matches = resolver_fingerprint is not None and (
                 _resolver_topology_fingerprint(resolver) == resolver_fingerprint
                 or bool(
                     carry is not None
-                    and (residue or carry)
+                    and (explained or carry)
                     and self._residue_explains_topology(
-                        conn, resolver, residue, resolver_fingerprint, carry=carry
+                        conn, resolver, explained, resolver_fingerprint, carry=carry
                     )
                 )
             )
@@ -3271,9 +3292,11 @@ class EpistemicGraphIndex:
     @staticmethod
     def _stored_resolver_entry(conn: sqlite3.Connection, rel: str) -> tuple[bool, str | None]:
         """A page's resolver entry as its stored file row records it."""
+        # By path, not key: a sidecar written before file rows took exact keys
+        # stores a page whose name holds `#` under a collapsed key.
         row = conn.execute(
-            "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
-            (_file_key(rel),),
+            "SELECT title FROM graph_nodes WHERE path = ? AND kind = 'file'",
+            (rel,),
         ).fetchone()
         if row is None:
             return False, None
@@ -6960,14 +6983,14 @@ class EpistemicGraphIndex:
             for match in vault_module.find_body_wikilinks(raw):
                 try:
                     canonical, warning = vault_module.normalize_wikilink(
-                        match.group(1).strip(),
+                        _page_target(match.group(1).strip()),
                         self.vault_root,
                         resolver=resolver,
                         strict=False,
                     )
                 except Exception:  # noqa: BLE001 - a malformed link resolves to nothing
                     continue
-                if warning is None and _with_md(canonical) in targets:
+                if warning is None and _page_rel(canonical) in targets:
                     found.add(rel)
                     break
         return found
@@ -7345,7 +7368,7 @@ class EpistemicGraphIndex:
         try:
             with conn:
                 for rel in rel_paths:
-                    deleted += self._delete_path(conn, _with_md(rel))
+                    deleted += self._delete_path(conn, _page_rel(rel))
             return deleted
         finally:
             conn.close()
@@ -7376,7 +7399,7 @@ class EpistemicGraphIndex:
             rows = conn.execute(select + " ORDER BY node_key").fetchall()
         else:
             rows = conn.execute(
-                select + " WHERE path = ? ORDER BY node_key", (_with_md(path),)
+                select + " WHERE path = ? ORDER BY node_key", (_page_rel(path),)
             ).fetchall()
         return [
             node
@@ -7412,7 +7435,7 @@ class EpistemicGraphIndex:
         else:
             rows = conn.execute(
                 select + " WHERE source_path = ? ORDER BY edge_key",
-                (_with_md(source_path),),
+                (_page_rel(source_path),),
             ).fetchall()
         return [
             edge
@@ -7621,7 +7644,7 @@ class EpistemicGraphIndex:
 
         seed_order: dict[str, int] = {}
         for i, seed in enumerate(seeds):
-            rel = _with_md(seed)
+            rel = _page_rel(seed)
             if not _path_allowed(rel):
                 continue
             if rel not in seed_order:
@@ -7686,9 +7709,8 @@ class EpistemicGraphIndex:
                     if edge is None:
                         continue
                     relation_type = edge.get("relation_type")
-                    definition = view.registry_for(str(edge.get("source_path") or "")).definition(
-                        str(relation_type or "")
-                    )
+                    authored = view.registry_for(str(edge.get("source_path") or ""))
+                    definition = authored.definition(str(relation_type or ""))
                     rows.append(
                         (
                             seed_order[seed_rel],
@@ -7699,6 +7721,11 @@ class EpistemicGraphIndex:
                                 relation_type=relation_type,
                                 direction=direction,
                                 family=definition.family if definition else "",
+                                relation_label=(
+                                    relation_registry.display_label(authored, definition.key)
+                                    if definition
+                                    else None
+                                ),
                             ),
                         )
                     )
@@ -7715,7 +7742,7 @@ class EpistemicGraphIndex:
         seeds the sidecar never covered, instead of silently dropping them."""
         if not paths:
             return set()
-        rels = [_with_md(p) for p in paths]
+        rels = [_page_rel(p) for p in paths]
         conn = self._open_read_snapshot()
         if conn is None:
             return set()
@@ -7798,7 +7825,7 @@ class EpistemicGraphIndex:
         withheld pages.
         """
         requested_keys = [str(k) for k in keys if k]
-        anchor_rel = _with_md(anchor) if anchor else None
+        anchor_rel = _page_rel(anchor) if anchor else None
         # GraphView shares this operation's combined path and caller verdicts,
         # so repeated edge endpoints do not repeat admission work.
         allowed_paths: dict[str, bool] = {}
@@ -8251,6 +8278,7 @@ class EpistemicGraphIndex:
             # Selected meanings decide suppression and candidates before any
             # rank: SQL rows below are interpreted facts, never stored guesses.
             authored_pages, authored_raw = _authored_relations(conn, view, selected)
+            generic = relation_registry.generic_relation_key()
             unit_relations = _unit_relation_rows(conn, view, sources=selected)
             selected_registries = {source: view.registry_for(source) for source in selected}
             authored_json = json.dumps(
@@ -8294,7 +8322,7 @@ class EpistemicGraphIndex:
                 question_candidates.append((
                     source, other, question, unit_ref, anchor, other_ref, other_anchor,
                     target_id, target_count,
-                    int((source, _file_key(other), "relates_to") in authored_raw),
+                    int((source, _file_key(other), generic) in authored_raw),
                 ))
             question_rows = _ranked(
                 question_candidates,
@@ -8313,7 +8341,7 @@ class EpistemicGraphIndex:
                     continue
                 resolution_candidates.append((
                     *resolution, target_id, target_count,
-                    int((source, _file_key(other), "relates_to") in authored_raw),
+                    int((source, _file_key(other), generic) in authored_raw),
                 ))
             resolution_rows = _ranked(
                 resolution_candidates,
@@ -8377,7 +8405,7 @@ class EpistemicGraphIndex:
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e1.source_path) "
                 "AND p.dst_page_key = ('file:' || e2.source_path) "
-                "AND p.raw_relation = 'relates_to') AS authored_match, "
+                "AND p.raw_relation = ?) AS authored_match, "
                 "ROW_NUMBER() OVER (PARTITION BY e1.source_path "
                 "ORDER BY e2.source_path, e1.dst_key) AS source_rank, "
                 "COUNT(*) OVER (PARTITION BY e1.source_path) AS source_total "
@@ -8392,14 +8420,14 @@ class EpistemicGraphIndex:
                 "AND NOT EXISTS (SELECT 1 FROM authored p "
                 "WHERE p.source_path = e1.source_path "
                 "AND p.dst_page_key = ('file:' || e2.source_path) "
-                "AND p.relation_type = 'relates_to')) "
+                "AND p.relation_type = ?)) "
                 "SELECT source_path, target_path, dst_key, exomem_id, "
                 "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
                 "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
                 "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
                 "FROM ranked WHERE source_rank <= ? "
                 "ORDER BY source_path, target_path, dst_key LIMIT ?",
-                (authored_json, *selected, per_source_cap, branch_cap + 1),
+                (authored_json, generic, *selected, generic, per_source_cap, branch_cap + 1),
             ).fetchall()
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
@@ -8451,7 +8479,7 @@ class EpistemicGraphIndex:
         def remember(
             path: Any, exomem_id: Any, count: Any, target_exists: Any = 1
         ) -> str:
-            rel = _with_md(str(path or ""))
+            rel = _page_rel(str(path or ""))
             target_info.setdefault(rel, (exomem_id, int(count or 0)))
             if not bool(target_exists):
                 placeholder_targets.add(rel)
@@ -8641,7 +8669,7 @@ class EpistemicGraphIndex:
             resolution_authored[key] = bool(authored_match)
             resolution_matches.setdefault(key, []).append(
                 {
-                    "target": _with_md(resolution_targets.get(str(target_key or "")) or ""),
+                    "target": _page_rel(resolution_targets.get(str(target_key or "")) or ""),
                     "relation": relation,
                     "anchor": anchor,
                     "unit_ref": unit_ref,
@@ -8709,7 +8737,7 @@ class EpistemicGraphIndex:
                     "relation_type": "relates_to",
                     "method": "shared_sources",
                     "evidence": {
-                        "shared_source": _with_md(
+                        "shared_source": _page_rel(
                             str(shared_key or "").removeprefix("file:")
                         )
                     },
@@ -9015,7 +9043,7 @@ def _query_meaning(
 
     anchor: str | None = None
     if registry_scope is None and path:
-        anchor = _with_md(path)
+        anchor = _page_rel(path)
     elif registry_scope is None and unit_ref:
         candidates, _overflow = view.unit_parent_candidates(unit_ref)
         anchored = False
@@ -9583,6 +9611,10 @@ def graph_context(
                     continue
                 if profile.direction == "incoming" and edge["dst_key"] not in frontier:
                     continue
+                edge = {
+                    **edge,
+                    "relation_label": relation_registry.display_label(authored, definition.key),
+                }
                 diagnostics = _relation_diagnostics(edge)
                 if diagnostics:
                     edge = {**edge, **diagnostics}
@@ -9753,7 +9785,7 @@ def suggest_relations(
     candidates: list[dict[str, Any]] = []
     warnings: list[str] = []
     if path:
-        rel = _with_md(path)
+        rel = _page_rel(path)
         page = (
             find_module._CACHE.get(Path(vault_root) / rel, Path(vault_root))
             if _recall_path_allowed(Path(vault_root), rel)
@@ -11165,7 +11197,7 @@ def _relation_target(
         # this rule stay bare until their source is re-derived: a public delete
         # rebuilds, and a source edit or a page joining or leaving the name
         # re-derives it, so no schema bump is forced.
-        page_key = _file_key(_with_md(canonical))
+        page_key = _file_key(canonical)
         dst_key, dst_page_key = page_key, page_key
         candidates = _link_candidates(resolver, target)
         if any(visible is None or visible(candidate) for candidate in candidates):
@@ -11421,11 +11453,12 @@ def _body_wikilink_observations(
             continue
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                target, vault_root, resolver=resolver, strict=False, visible=visible
+                _page_target(target), vault_root, resolver=resolver, strict=False,
+                visible=visible,
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
-        target_path = _with_md(canonical)
+        target_path = _page_rel(canonical)
         if warning or not target_path.startswith(kb_prefix()) or target_path in seen:
             continue
         seen.add(target_path)
@@ -11487,12 +11520,12 @@ def _relation_destination(
     edge on that unit. Every other outcome keeps the page-level edge the target
     always produced, and records why, so a typo degrades instead of deleting.
     """
-    page_key = _file_key(_with_md(canonical))
+    page_key = _file_key(canonical)
     if not fragment:
         return page_key, page_key, {}
     resolved = _current_page_unit(
         vault_root,
-        _with_md(canonical),
+        _page_rel(canonical),
         lambda document: document.resolve_fragment(fragment),
         # Shared rows land on the neutral candidate; readers re-resolve the
         # fragment against the target page's selected interpretation.
@@ -11555,16 +11588,31 @@ def _names_a_heading(source: str, fragment: str) -> bool:
     return False
 
 
-def _with_md(path: str) -> str:
-    cleaned = str(path).strip()
-    if cleaned.startswith("[[") and cleaned.endswith("]]"):
-        cleaned = cleaned[2:-2]
-    cleaned = cleaned.split("|", 1)[0].split("#", 1)[0].strip().strip("/")
+def _page_rel(path: str) -> str:
+    """The exact vault path of a page, with the KB prefix and `.md` supplied.
+
+    Nothing is parsed out of the name: a `#` or `|` in a file name belongs to
+    the name. Link syntax exists only in a link target, which `_with_md` reads.
+    """
+    cleaned = str(path).strip().strip("/")
     if not cleaned:
         return cleaned
     if not cleaned.startswith(kb_prefix()) and "/" in cleaned:
         cleaned = kb_prefix() + cleaned.removeprefix(kb_dirname() + "/")
     return cleaned if cleaned.lower().endswith(".md") else cleaned + ".md"
+
+
+def _with_md(target: str) -> str:
+    """The page path a link target names, its brackets, alias and fragment dropped."""
+    return _page_rel(_page_target(target))
+
+
+def _page_target(raw_target: str) -> str:
+    """The page part of a link target, so a resolver's answer is an exact page path.
+
+    `|` and `#` are wikilink syntax, so they end the page name in a target.
+    """
+    return _split_target_fragment(raw_target)[0]
 
 
 def _page_project(frontmatter: dict[str, Any]) -> str | None:
@@ -11578,11 +11626,11 @@ def _page_project(frontmatter: dict[str, Any]) -> str | None:
 
 
 def _target_kind(vault_root: Path, target: str) -> str:
-    return "file" if (Path(vault_root) / _with_md(target)).exists() else "unresolved"
+    return "file" if (Path(vault_root) / _page_rel(target)).exists() else "unresolved"
 
 
 def _file_key(rel_path: str) -> str:
-    return f"file:{_with_md(rel_path)}"
+    return f"file:{_page_rel(rel_path)}"
 
 
 def _hash(value: str) -> str:
@@ -11650,6 +11698,7 @@ def _edge(
         resolver_origin,
         dict(review_evidence or {}),
         dst_page_key if dst_page_key != dst_key else None,
+        relation_registry.display_label(registry, canonical) if canonical else None,
     )
 
 
@@ -11802,7 +11851,7 @@ def _seed_nodes(
     """Seeds for a path or a text query, as the operation's view serves them."""
     if path:
         rows = conn.execute(
-            NODE_SELECT + " WHERE path = ? ORDER BY node_key", (_with_md(path),)
+            NODE_SELECT + " WHERE path = ? ORDER BY node_key", (_page_rel(path),)
         ).fetchall()
         served = [
             node for node in (view.serve(_node_row_to_dict(row)) for row in rows)
@@ -11849,7 +11898,7 @@ def _planned_unit_rows(
     params: list[Any] = [CANDIDATE_KIND]
     if path:
         clauses.append("path = ?")
-        params.append(_with_md(path))
+        params.append(_page_rel(path))
     if query:
         clauses.append("(title LIKE ? OR text LIKE ?)")
         like = f"%{query}%"
@@ -12759,7 +12808,7 @@ class GraphView:
     ) -> tuple[str, str, dict[str, str]]:
         """Use the validated target summary instead of parsing target source text."""
         self._check()
-        page_key = _file_key(_with_md(canonical))
+        page_key = _file_key(canonical)
         if not fragment:
             return page_key, page_key, {}
         row = self._land({"dst_key": page_key, "metadata": _unlanded_fragment(fragment)})
@@ -13004,7 +13053,9 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
-            canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
+            canonical, warning = vault_module.normalize_wikilink(
+                _page_target(target), vault_root, strict=False
+            )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if warning:
@@ -13012,7 +13063,7 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
         candidates.append(
             {
                 "from": rel_path,
-                "to": _with_md(canonical),
+                "to": _page_rel(canonical),
                 "relation_type": "links_to",
                 "method": "wikilink",
                 "evidence": {"source_path": rel_path, "target": target},
@@ -13164,7 +13215,7 @@ def _structural_candidates(
     if conn is None:
         return []
     try:
-        rel = _with_md(rel_path)
+        rel = _page_rel(rel_path)
         file_key = _file_key(rel)
         view = GraphView(vault_root, conn)
         produced = [
@@ -13242,7 +13293,7 @@ def _unit_relation_lift_candidates(
         authored = relation_registry.normalize_relation(str(raw_relation or ""))
         if not authored or not _is_writable_relation_label(authored):
             continue
-        target = _with_md(str(dst_key or "").removeprefix("file:"))
+        target = _page_rel(str(dst_key or "").removeprefix("file:"))
         if not target or target == rel_path:
             continue
         entry = grouped.setdefault(
@@ -13301,7 +13352,7 @@ def _shared_open_question_candidates(
     )[:_STRUCTURAL_ROW_LIMIT]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for _source, other_path, question, unit_ref, anchor, other_unit_ref, other_anchor in rows:
-        target = _with_md(str(other_path or ""))
+        target = _page_rel(str(other_path or ""))
         if not target or target == rel_path:
             continue
         grouped.setdefault(target, []).append(
@@ -13361,12 +13412,12 @@ def _shared_resolution_target_candidates(
             other_anchor,
             other_unit_ref,
         ) = row
-        target = _with_md(str(other_path or ""))
+        target = _page_rel(str(other_path or ""))
         if not target or target == rel_path:
             continue
         grouped.setdefault(target, []).append(
             {
-                "target": _with_md(_path_for_node_key(conn, str(target_key or "")) or ""),
+                "target": _page_rel(_path_for_node_key(conn, str(target_key or "")) or ""),
                 "relation": relation,
                 "anchor": anchor,
                 "unit_ref": unit_ref,
@@ -13645,11 +13696,12 @@ def _question_matches(
         return []
     theirs = _question_units(conn, view, questions=[question for _p, question, _r, _a in mine])
     authored = authored or {}
+    generic = relation_registry.generic_relation_key()
     matches = []
     for source, question, unit_ref, anchor in mine:
         for other, other_question, other_ref, other_anchor in theirs:
             if other == source or other_question != question or any(
-                target == _file_key(other) and relation == "relates_to"
+                target == _file_key(other) and relation == generic
                 for target, relation, _origin in authored.get(source, ())
             ):
                 continue
@@ -13687,13 +13739,14 @@ def _resolution_matches(
         if edge["relation_type"] in _RESOLUTION_RELATION_TYPES
     ]
     authored = authored or {}
+    generic = relation_registry.generic_relation_key()
     matches = []
     for edge in mine:
         source = str(edge["source_path"])
         for other in theirs:
             other_page = str(other["source_path"])
             if other_page == source or other["dst_key"] != edge["dst_key"] or any(
-                target == _file_key(other_page) and relation == "relates_to"
+                target == _file_key(other_page) and relation == generic
                 for target, relation, _origin in authored.get(source, ())
             ):
                 continue
@@ -13728,7 +13781,7 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
     out: list[dict[str, Any]] = []
     self_path = page.rel_path
     for target, score in sorted(scores.items(), key=lambda item: (-item[1], item[0])):
-        target_path = _with_md(target)
+        target_path = _page_rel(target)
         if target_path == self_path:
             continue
         out.append(
@@ -13751,7 +13804,9 @@ def _draft_wikilink_candidates(
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
-            canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
+            canonical, warning = vault_module.normalize_wikilink(
+                _page_target(target), vault_root, strict=False
+            )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if warning:
@@ -13759,7 +13814,7 @@ def _draft_wikilink_candidates(
         candidates.append(
             {
                 "from": pseudo,
-                "to": _with_md(canonical),
+                "to": _page_rel(canonical),
                 "relation_type": "links_to",
                 "method": "wikilink",
                 "evidence": {"target": target},

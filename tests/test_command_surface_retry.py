@@ -1789,3 +1789,105 @@ def test_identical_retry_without_replay_identity_contends_normally(
     assert calls == 1
     assert [error.code for error in errors] == ["MUTATION_BUSY"]
     assert errors[0].details["committed"] is False
+
+
+@pytest.mark.parametrize(
+    ("read_only", "code", "committed"),
+    [(False, "MUTATION_ACKNOWLEDGEMENT_PENDING", None), (True, "COLLECTION_STORE_BUSY", False)],
+)
+@pytest.mark.parametrize("refusing_pass", [1, 2])
+def test_store_filter_refusal_after_a_write_leaf_reports_an_unknown_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_only: bool,
+    code: str,
+    committed: bool | None,
+    refusing_pass: int,
+) -> None:
+    """A deadline refusal in either result filter never reports that a completed write committed nothing.
+
+    The same-identity retry then replays the stored terminal without running the leaf again.
+    """
+    from exomem.collection_store import connection
+    from exomem.governance import egress
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    written = vault / "Knowledge Base" / "committed.txt"
+    runs = 0
+
+    def leaf(root: Path, *, value: int) -> dict:  # noqa: ARG001
+        nonlocal runs
+        runs += 1
+        written.write_text("done", encoding="utf-8")
+        return {"value": value}
+
+    command = SimpleNamespace(name="probe_write", leaf=leaf, read_only=read_only, executor="cell")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:test")
+    filter_passes = egress.postfilter
+    seen = 0
+
+    def filter_misses_its_deadline(*args, **kwargs):
+        nonlocal seen
+        seen += 1
+        if seen != refusing_pass:
+            return filter_passes(*args, **kwargs)
+        raise connection.busy("the collection store did not finish this read within its completion deadline")
+
+    monkeypatch.setattr(egress, "postfilter", filter_misses_its_deadline)
+    result = command_surface.bind_vault(leaf, vault, command=command)(value=7)
+
+    assert written.read_text(encoding="utf-8") == "done"
+    assert result["success"] is False
+    assert result["error"]["code"] == code
+    assert result["error"]["committed"] is committed
+    if read_only:
+        return
+    assert result["error"]["status"] == "uncertain"
+    assert result["error"]["post_leaf_refusal"] == "COLLECTION_STORE_BUSY"
+    retried = command_surface.bind_vault(leaf, vault, command=command)(value=7)
+    assert runs == 1
+    assert retried == {"value": 7}
+
+
+def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monkeypatch):
+    """A freshness signal after a write preserves its unknown outcome and same-identity recovery."""
+    from exomem.collection_store.governance import _StaleQueryHistoryProjection
+    from exomem.governance import egress
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    written = vault / "Knowledge Base" / "committed.txt"
+    runs = 0
+
+    def leaf(root, *, value):
+        nonlocal runs
+        runs += 1
+        written.write_text("done")
+        return {"value": value}
+
+    command = SimpleNamespace(name="probe_write", leaf=leaf, read_only=False, executor="cell")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:test")
+    postfilter = egress.postfilter
+    passes = 0
+
+    def stale_second_pass(*args, **kwargs):
+        nonlocal passes
+        passes += 1
+        if passes == 2:
+            raise _StaleQueryHistoryProjection("COLLECTION_NOT_FOUND", "collection was not found")
+        return postfilter(*args, **kwargs)
+
+    monkeypatch.setattr(egress, "postfilter", stale_second_pass)
+    bound = command_surface.bind_vault(leaf, vault, command=command)
+    result = bound(value=7)
+    assert written.read_text() == "done" and runs == 1
+    assert result["error"]["code"] == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+    assert result["error"]["committed"] is None
+    assert result["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
+    assert bound(value=7) == {"value": 7}
+    assert runs == 1

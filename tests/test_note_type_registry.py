@@ -206,25 +206,25 @@ def test_a_save_refuses_a_meaning_outside_the_closed_schema(
 def test_a_registered_folder_routes_like_a_shipped_one(vault: Path) -> None:
     from exomem.governance.principal import library_scope
 
-    def misfiled_insight_codes() -> set[str]:
+    def filed_codes(frontmatter: dict[str, str]) -> set[str]:
         with library_scope():
             validation = commands.op_manage_memory_file(
                 vault,
                 operation="create",
-                path="Knowledge Base/Notes/Meetings/2026-10-misfiled.md",
-                content="# Misfiled\n\nAn insight filed with the meetings.\n",
-                frontmatter={"type": "insight", "status": "active"},
+                path="Knowledge Base/Notes/Meetings/2026-10-filed.md",
+                content="# Filed\n\nA page filed with the meetings.\n",
+                frontmatter=frontmatter,
                 validate_only=True,
             )
         return {finding["code"] for finding in validation["contract_result"]["blocking_findings"]}
 
-    # Before the save the folder belongs to no type, so the insight is off its route.
-    assert "COMPILED_DESTINATION_MISMATCH" in misfiled_insight_codes()
+    # An insight is valid in any Notes folder, so the unregistered folder does not refuse it.
+    insight = {"type": "insight", "status": "active"}
+    assert not {"COMPILED_TYPE_MISMATCH", "COMPILED_DESTINATION_MISMATCH"} & filed_codes(insight)
     _save(vault, {"upsert": {"meeting-note": MEETING_TYPE}}, "meetings are conclusions")
-    # After it the folder routes to `meeting-note`, so the insight has the wrong type.
-    after = misfiled_insight_codes()
-    assert "COMPILED_TYPE_MISMATCH" in after
-    assert "COMPILED_DESTINATION_MISMATCH" not in after
+    # After the save the folder holds the type's pages, so a page without a compiled type is refused.
+    assert not {"COMPILED_TYPE_MISMATCH", "COMPILED_DESTINATION_MISMATCH"} & filed_codes(insight)
+    assert "COMPILED_TYPE_MISMATCH" in filed_codes({"type": "memo", "status": "active"})
 
 
 def test_the_shipped_pack_reproduces_each_former_type_set() -> None:

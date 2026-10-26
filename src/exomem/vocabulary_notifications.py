@@ -90,7 +90,7 @@ def reconcile_legacy(vault_root: Path) -> dict[str, int]:
     now = dt.datetime.now(dt.UTC)
     imported = 0
     dropped = 0
-    with review_state._LOCK:
+    with owner.locked():
         payload = owner.load()
         section = payload["vocabulary"]
         notifications = section["notifications"]
@@ -148,7 +148,7 @@ def take_advisory(vault_root: Path, items: Sequence[WorkItem]) -> dict[str, Any]
         return None
     context = _hash([actor.audience_id, actor.authorization_session_id or actor.session_id])
     owner = review_state.ReviewStateStore(vault_root)
-    with review_state._LOCK:
+    with owner.locked():
         payload = owner.load()
         section = payload["vocabulary"]
         observed = tuple(item.ref for item in items)

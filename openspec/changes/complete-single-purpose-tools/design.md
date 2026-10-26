@@ -149,6 +149,14 @@ Four collection-creation prompts promised an offset-bearing datetime. The existi
 
 ## Risks / Trade-offs
 
+### Compact registry previews and import naming
+
+Publish registry delta proposals as `read_schema` with `operation.kind="preview"`. The route retains the grouped `schema_memory` proposal identity. Its proposal schema accepts a keyed delta, not a complete registry document. The existing registry implementation merges the live overlay and checks collisions and the cap. Publish standalone registry document validation as `validate-document` to distinguish its context.
+
+Verify preview parity through MCP with retained custom entries, a collision and a full registry. Preserve the original smoke outcomes. Offline checks establish execution behavior; they do not measure a model's choice of operation after the repair.
+
+Publish the import write family as `import_memory` and its reads as `read_import`. Retain `adoption_studio` as the stable execution identity and deprecated flat compatibility spelling until at least release 0.160.0. The Studio area uses the name "Import". Integrate current rule fields, home guidance and reversible promotion operations before generating the final catalogue. These later changes have offline proof and remain outside the completed model measurement.
+
 - Shared names can collide with legacy registrations. Publish schemas through discovery and retain one grouped executable.
 - Incorrect route selection can change authorization or retry identity. Compare normalized calls at the boundary and exercise cross-spelling replay.
 - Schema expansion can offset fewer tool names. Measure complete wire bytes and input tokens; claim no efficiency gain without evidence.

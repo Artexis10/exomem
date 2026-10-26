@@ -35,8 +35,6 @@ class LocalStorage:
     # Hetzner volumes need (their provider minimum): a local cell charges its
     # full size at ratio 1.0 and grows online.
     default_cell_gib: int = 4
-    # D10: a cell grows online one default size at a time, never past this.
-    max_cell_gib: int = 20
     # Tasks 5.5 and 5.6: the pods cellctl reads for the host alerts, and where.
     # The chart names them (templates/_cell-storage.tpl) from the same values it
     # renders those pods with, so the two cannot disagree. Both are Prometheus
@@ -58,8 +56,6 @@ class LocalStorage:
             raise ValueError("per-node backup concurrency must be a positive integer")
         if type(self.default_cell_gib) is not int or self.default_cell_gib < 1:
             raise ValueError("the default cell size must be a positive number of GiB")
-        if type(self.max_cell_gib) is not int or self.max_cell_gib < self.default_cell_gib:
-            raise ValueError("the largest a cell grows to must be a whole number of GiB, at least the default size")
         if not isinstance(self.metrics_namespace, str) or not _NAME.fullmatch(self.metrics_namespace):
             raise ValueError("the metrics namespace must be a DNS subdomain name")
         for selector in (self.thin_pool_selector, self.array_selector):
@@ -81,8 +77,16 @@ class StorageConfig:
     # D7: the one class new claims use and whose nodes publish capacity.
     domain: str = LEGACY_CLASS
     local: LocalStorage | None = None
+    per_cell_class: str | None = None
+    max_cell_gib: int = 20
 
     def __post_init__(self) -> None:
+        if self.per_cell_class is not None and (not _NAME.fullmatch(self.per_cell_class)
+                                               or self.per_cell_class == LEGACY_CLASS):
+            raise ValueError("per-cell Hetzner class must be a distinct DNS name")
+        minimum = self.local.default_cell_gib if self.local else LocalStorage.default_cell_gib
+        if type(self.max_cell_gib) is not int or self.max_cell_gib < minimum:
+            raise ValueError("max_cell_gib must be a whole number of GiB, at least the default size")
         if self.domain not in self.classes:
             raise ValueError("the cell storage domain must be a configured cell class")
 
@@ -90,7 +94,8 @@ class StorageConfig:
     def classes(self) -> frozenset[str]:
         """D7: every class a cell volume may be bound to while cells migrate."""
 
-        return frozenset({LEGACY_CLASS} | ({self.local.class_name} if self.local else set()))
+        return frozenset({LEGACY_CLASS} | ({self.local.class_name} if self.local else set())
+                         | ({self.per_cell_class} if self.per_cell_class else set()))
 
     @property
     def domain_is_local(self) -> bool:

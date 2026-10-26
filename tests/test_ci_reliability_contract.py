@@ -19,6 +19,8 @@ FULL_CI_JOBS = {
     "cloud-cellctl",
     "retrieval-quality",
     "retrieval-latency",
+    "recall-latency-series",
+    "recall-latency-paired",
     "governance-projection-wire",
     "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
@@ -542,6 +544,23 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     )
     semantic_command = jobs["semantic-write-latency"]["steps"][-1]["run"]
     assert "scripts/semantic_write_latency.py --check" in semantic_command
+
+
+def test_paired_recall_runs_one_bounded_job_per_case_file_series() -> None:
+    """The paired comparison cannot finish in a 30-minute pytest shard, and a timeout blocks releases."""
+    workflow = _workflow()
+    jobs = workflow["jobs"]
+    paired = jobs["recall-latency-paired"]
+    assert paired["needs"] == "recall-latency-series"
+    assert paired["strategy"]["matrix"]["series"] == (
+        "${{ fromJSON(needs.recall-latency-series.outputs.series) }}"
+    )
+    assert "benchmarks/recall-latency/cases.json" in jobs["recall-latency-series"]["steps"][-1]["run"]
+    compare = next(step for step in paired["steps"] if "--paired" in step.get("run", ""))
+    assert '--series "$SERIES"' in compare["run"]
+    assert compare["timeout-minutes"] < paired["timeout-minutes"]
+    assert "recall-latency-paired" in jobs["gate"]["needs"]
+    assert not any("--paired" in step.get("run", "") for step in jobs["retrieval-latency"]["steps"])
 
 
 def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None:

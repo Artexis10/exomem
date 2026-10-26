@@ -151,6 +151,8 @@ traefik:
 # with their own StorageClass, separate from the `storage` block above.
 
 cellctl:
+  # Observed deployed retention policies; missing windows remain unknown.
+  keyRetentionSources: []
   enabled: false
   # Operator-selected cells reserve agents carrying their own cell ID.
   dedicatedCellIds: []
@@ -325,6 +327,7 @@ cloudGateway:
 
 cloudStorage:
   className: exomem-cloud-encrypted
+  perCellClassName: exomem-cloud-cell-key
   encryptionSecretName: exomem-cloud-volume-encryption
   encryptionSecretNamespace: exomem-platform
 
@@ -337,6 +340,8 @@ cloudStorage:
 # the cutover (task 7.2), and existing cells keep the class they have.
 cellStorage:
   domain: hetzner
+  # Unset uses the controller default of 20 GiB for every storage class.
+  maxCellGib: null
   local:
     enabled: false
     # D3: hourly backups that may run at once on one node.
@@ -344,7 +349,8 @@ cellStorage:
     # D10: a local cell past 80% use grows online by the 4 GiB default size, up
     # to this many GiB. D6 reserves twice the largest cell per concurrent
     # backup, so this cap also bounds each node's snapshot reserve.
-    maxCellGib: 20
+    # Earlier chart values remain accepted; set only one cap or set both alike.
+    maxCellGib: null
   # Task 5.5: the array alert reads the md arrays of the dedicated hosts, through
   # node-exporter's mdadm collector alone, pinned by image index digest (v1.12.1,
   # quay.io/prometheus/node-exporter). It runs on the nodes TopoLVM's node plugin

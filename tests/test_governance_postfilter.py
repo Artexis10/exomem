@@ -1151,7 +1151,7 @@ def _seed_adoption_run(vault: Path, *, run_ref: str) -> None:
     )
 
 
-def _read_adoption_resource(vault: Path, uri: str) -> str:
+def _read_import_resource(vault: Path, uri: str) -> str:
     """Drive the REAL registered handler through FastMCP's resource reader."""
     import asyncio
 
@@ -1205,7 +1205,7 @@ def test_adoption_run_resource_withholds_a_governed_path(
     _as_external_connector_client(monkeypatch)
     _govern_patterns_shut(vault)
     _seed_adoption_run(vault, run_ref="exomem://adoption/run/x")
-    payload = _read_adoption_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
+    payload = _read_import_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
     assert ADOPTION_WITHHELD not in payload
 
 
@@ -1214,7 +1214,7 @@ def test_adoption_run_resource_still_serves_the_owner(vault: Path) -> None:
     resolves to the owner and still sees its own run."""
     _govern_patterns_shut(vault)
     _seed_adoption_run(vault, run_ref="exomem://adoption/run/x")
-    payload = _read_adoption_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
+    payload = _read_import_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
     assert ADOPTION_WITHHELD in payload
 
 
@@ -1224,7 +1224,7 @@ def test_adoption_runs_collection_resource_is_gated(
     """The collection resource is scrubbed too — same handler class."""
     _as_external_connector_client(monkeypatch)
     _seed_adoption_run(vault, run_ref=f"ref {AWS_KEY}")
-    payload = _read_adoption_resource(vault, "exomem://adoption/runs")
+    payload = _read_import_resource(vault, "exomem://adoption/runs")
     assert AWS_KEY not in payload
     assert scrubber.NOTICE in payload
 

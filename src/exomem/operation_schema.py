@@ -87,6 +87,11 @@ def _variant_branch(
     for name, parameter in parameters.items():
         if name in variant.fields and name not in rendering.tool_arguments:
             properties[aliases.get(name, name)] = _field_schema(parameter, required=name in variant.required)
+    if rendering.command == "schema_memory" and variant.action == "propose":
+        # This registry operation takes a delta; other schema operations take whole documents.
+        from .vocabulary.registry import delta_schema
+
+        properties["proposal"] = delta_schema()
     branch = {
         "type": "object",
         "properties": properties,

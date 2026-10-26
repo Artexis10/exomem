@@ -771,6 +771,10 @@ class ExomemLocalAdapter:
             for key in ("hits", "result", "results"):
                 if isinstance(payload.get(key), list):
                     return payload[key]
+            # A response with a due-state block arrives as an envelope,
+            # {"hits": [...], "due_state": {...}}, which the wire wraps in "result".
+            if isinstance(payload.get("result"), dict):
+                return self._normalize(payload["result"])
             return []
         if isinstance(payload, list):
             return payload

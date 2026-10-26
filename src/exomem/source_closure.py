@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -101,6 +101,11 @@ def _bounded_value(value: str) -> str:
 
 def _source_values(markdown: str, type_basis: note_types.Basis) -> tuple[str, ...]:
     frontmatter, _body, _frontmatter_text = vault.parse_frontmatter(markdown)
+    return claims_in(frontmatter, type_basis)
+
+
+def claims_in(frontmatter: Mapping[str, Any], type_basis: note_types.Basis) -> tuple[str, ...]:
+    """Normalized explicit source values from the frontmatter of a parsed compiled page."""
     if not type_basis.selects(frontmatter.get("type"), note_types.compiled):
         return ()
     raw = frontmatter.get("sources")
@@ -134,14 +139,17 @@ def _eligible_path(path: str) -> bool:
     return relative.startswith("Sources/") or relative.startswith("Evidence/")
 
 
-def _resolve_one(
+def locate(
     root: Path,
     supplied: str,
     *,
     resolver: vault.WikilinkResolver,
-    authorize_path: Callable[[str], bool],
-    type_basis: note_types.Basis,
-) -> ResolvedSource | None:
+) -> str | None:
+    """The vault-relative Markdown path a reference names, or None when it names none.
+
+    Path resolution only: it reads no page and asks no release filter, so a caller
+    that has already admitted the page pays no read.
+    """
     target = _target(supplied)
     if not target:
         return None
@@ -169,8 +177,33 @@ def _resolve_one(
         ValueError,
     ):
         return None
-    relative = relative.replace("\\", "/").lstrip("/")
-    if not _eligible_path(relative) or not authorize_path(relative):
+    return relative.replace("\\", "/").lstrip("/")
+
+
+def resolve_reference(
+    root: Path,
+    supplied: str,
+    *,
+    resolver: vault.WikilinkResolver,
+) -> str | None:
+    """The path a source claim names, or None when it names no captured location.
+
+    `_resolve_one` adds the admission and the type check to this path rule.
+    """
+    relative = locate(root, supplied, resolver=resolver)
+    return relative if relative is not None and _eligible_path(relative) else None
+
+
+def _resolve_one(
+    root: Path,
+    supplied: str,
+    *,
+    resolver: vault.WikilinkResolver,
+    authorize_path: Callable[[str], bool],
+    type_basis: note_types.Basis,
+) -> ResolvedSource | None:
+    relative = resolve_reference(root, supplied, resolver=resolver)
+    if relative is None or not authorize_path(relative):
         return None
     try:
         source, guard = vault.read_guarded_text(root, root / relative)
@@ -373,9 +406,12 @@ __all__ = [
     "UNRESOLVED_CODE",
     "UNRESOLVED_MESSAGE",
     "UNRESOLVED_REMEDIATION",
+    "claims_in",
     "enforce_source_closure",
     "inspect_source_closure",
+    "locate",
     "merge_backref_writes",
     "prepare_source_closure",
+    "resolve_reference",
     "source_claims",
 ]

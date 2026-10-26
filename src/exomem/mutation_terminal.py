@@ -1099,8 +1099,8 @@ def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
 #: would validate nothing. The category vocabulary is NOT restated here for the
 #: opposite reason — `audit` owns which categories exist, and a second copy of that
 #: list would drift the day a category ships, so a category is checked as a bounded
-#: token and its meaning is left to the module that owns it.
-_MAX_DUE_STATE_CATEGORIES = 8
+#: token and its meaning is left to the module that owns it. The count of categories
+#: is bounded by `_max_due_state_categories` below for the same reason.
 _MAX_DUE_STATE_TOP = 5
 _MAX_DUE_STATE_TOKEN_CHARS = 64
 _MAX_DUE_STATE_REF_CHARS = 256
@@ -1108,6 +1108,17 @@ _MAX_DUE_STATE_REF_CHARS = 256
 DUE_STATE_AFFECTED_PATHS = "affected_paths"
 #: Every reference this substrate puts on the wire is an `exomem://` URI.
 _ADVISORY_REF_SCHEME = "exomem://"
+
+
+def _max_due_state_categories() -> int:
+    """The most categories one block can name: one per category the projection holds.
+
+    It is the length of the owner's list, not a value the leaf supplied, so it still
+    rejects a malformed block, and it moves with the list the day a category ships.
+    """
+    from . import due_state as due_state_module  # lazy, as in `_admit_due_state`
+
+    return len(due_state_module.PROJECTION_CATEGORIES)
 
 
 def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
@@ -1143,7 +1154,7 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
         if type(total) is not int or total <= 0:
             continue
         if not isinstance(categories, Mapping) or not (
-            0 < len(categories) <= _MAX_DUE_STATE_CATEGORIES
+            0 < len(categories) <= _max_due_state_categories()
         ):
             continue
         if not all(
@@ -1430,7 +1441,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             normalized = relation_registry.normalize_relation(raw)
             if (
                 normalized
-                and normalized != "relates_to"
+                and normalized != relation_registry.generic_relation_key()
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)

@@ -463,6 +463,22 @@ def delete_directory(
 
     mark_active_mutation_committed()
 
+    from . import due_state
+
+    # The pages as they stood, so the Sources they cited are re-judged once they are gone.
+    trashed_pages: list[due_state.PageWrite] = []
+    for item in tree:
+        if not item.relative_path.lower().endswith(".md"):
+            continue
+        try:
+            text = item.snapshot.data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        trashed_pages.append(
+            due_state.PageWrite(f"{rel_path.rstrip('/')}/{item.relative_path}", prior_markdown=text)
+        )
+    due_state.refresh_after_writes(vault_root, trashed_pages)
+
     index_feedback: dict | None = None
     if fanout_rels:
         fanout_unverified = False

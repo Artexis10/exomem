@@ -16,6 +16,7 @@ code fixed before the registry existed:
 - E, pages that must cite their sources: `sources_required`.
 - G, the source rank penalty: `ranks_as_source`.
 - H, raw and append-only pages: `raw`.
+- I, captured Sources whose compilation the attention queue tracks: `captured_source`.
 
 The lookup is exact. Each call site keeps its own normalisation of the
 authored value before the lookup, and the lookup adds none.
@@ -41,6 +42,10 @@ PACK = "note-types.yaml"
 ROLES = frozenset({"compiled", "entity", "source", "evidence"})
 # The note-type registry schema fixes the two `sources` values.
 SOURCES_VALUES = frozenset({"required", "optional"})
+# nosemgrep: ep-word-set -- The typed writer implements these partition kinds; a pack entry picks one.
+PARTITIONS = frozenset({"project", "domain", "medium", "none"})
+# nosemgrep: ep-word-set -- The typed writer implements these stem kinds; a pack entry picks one.
+STEMS = frozenset({"slug", "dated", "started"})
 #: The one parent folder a compiled type's folder sits in.
 NOTES_FOLDER = "Notes"
 
@@ -68,16 +73,33 @@ class NoteType:
     folder: str | None = None
     time_bounded: bool = False
     sources: str = "optional"
+    #: What splits the type folder into sub-folders: the page's project, domain or medium.
+    partition: str = "none"
+    #: How the file stem is built from the slug: bare, month-prefixed or start-month-prefixed.
+    stem: str = "slug"
+    #: The token of the type's row in the top index Counts. Rows written before the pack named
+    #: the research type `research-note` use `research`.
+    index_row: str = ""
 
 
 def _note_type(entry: registry.Entry) -> NoteType:
     attributes = entry.attributes
+    partition, stem = attributes.get("partition", "none"), attributes.get("stem", "slug")
+    if partition not in PARTITIONS or stem not in STEMS:
+        # Only the shipped pack sets these, so a bad value is a build defect.
+        raise registry.RegistryError(
+            f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} has partition {partition!r} or stem {stem!r} "
+            "that the typed writer does not implement"
+        )
     return NoteType(
         key=entry.key,
         role=attributes.get("role"),
         folder=attributes.get("folder"),
         time_bounded=bool(attributes.get("time_bounded", False)),
         sources=str(attributes.get("sources", "optional")),
+        partition=partition,
+        stem=stem,
+        index_row=str(attributes.get("index_row") or entry.key),
     )
 
 
@@ -124,6 +146,16 @@ def ranks_as_source(note_type: NoteType) -> bool:
 def raw(note_type: NoteType) -> bool:
     """Set H: raw and append-only captures."""
     return note_type.role == "source" or note_type.role == "evidence"
+
+
+def captured_source(note_type: NoteType) -> bool:
+    """Set I: captured Sources whose compilation the attention queue tracks.
+
+    Evidence is raw too, but it records proof and owes no compiled note, so the
+    coverage rule selects `source` alone. Set G has the same members today and a
+    different purpose (ranking); the two change for different reasons.
+    """
+    return note_type.role == "source"
 
 
 Predicate = Callable[[NoteType], bool]
@@ -293,6 +325,9 @@ class _Adapter:
         row.pop("key")
         row.pop("origin")
         document["entries"][key] = row
+
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document["entries"].pop(key, None)
 
     def render(self, document: Mapping[str, Any]) -> str:
         return yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=True)

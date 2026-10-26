@@ -8,6 +8,7 @@ list_directory, etc.).
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import hashlib
@@ -17,6 +18,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -29,10 +31,21 @@ from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
+from markdown_it import MarkdownIt
 from slugify import slugify as _slugify
 
-from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths, view_lag
+from . import (
+    call_ledger,
+    call_spans,
+    freshness,
+    held_fs,
+    privacy_log,
+    reserved_paths,
+    stack_sites,
+    view_lag,
+)
 from .kbdir import kb_dirname, kb_prefix
+from .log_events import log_event
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
@@ -364,6 +377,9 @@ _LOCK_NAMESPACES = frozenset(
 )
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+#: Who holds each in-process lock above, under ``_THREAD_LOCKS_GUARD``: thread label, acquire site,
+#: monotonic acquire time and phase (``flock_wait`` while it waits for other processes, then ``held``).
+_THREAD_HOLDERS: dict[str, dict[str, Any]] = {}
 _HELD_LOCKS = threading.local()
 
 
@@ -676,6 +692,8 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 class VaultLockError(ValueError):
     code: str
     reason: str
+    #: Diagnostics for logs; never part of the message and never shown to a client.
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
@@ -755,9 +773,17 @@ def _private_lock_directory() -> Path:
 
 
 class _InterprocessFileLock:
-    def __init__(self, path: Path, *, deadline: float):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        deadline: float,
+        on_timeout: Callable[[], dict[str, Any]] | None = None,
+    ):
         self.path = path
         self.deadline = deadline
+        #: Describes the lost wait for the raised timeout's ``details``.
+        self._on_timeout = on_timeout
         self._handle: BinaryIO | None = None
 
     def __enter__(self) -> _InterprocessFileLock:
@@ -783,7 +809,9 @@ class _InterprocessFileLock:
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0:
                     raise VaultLockTimeout(
-                        "VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock"
+                        "VAULT_LOCK_TIMEOUT",
+                        "timed out acquiring vault lock",
+                        self._on_timeout() if self._on_timeout is not None else {},
                     ) from error
                 time.sleep(min(0.01, remaining))
                 continue
@@ -800,6 +828,77 @@ class _InterprocessFileLock:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
         self._handle.close()
         self._handle = None
+
+
+#: Frames of the lock machinery itself; a lock's site is the nearest caller outside them.
+_LOCK_SITE_SKIP = frozenset((__name__, contextlib.__name__))
+
+
+def _flock_holder_path(lock_path: Path) -> Path:
+    return lock_path.with_name(f"{lock_path.name}.holder")
+
+
+def _publish_flock_holder(lock_path: Path, *, thread: str, site: str) -> None:
+    """Record the holder beside its lock for another process to read; a failed write loses only that."""
+    from .mutation_lock import _atomic_write_holder_metadata
+
+    holder = {"pid": os.getpid(), "thread": thread, "site": site, "acquired_at": time.time()}
+    with contextlib.suppress(OSError):
+        _atomic_write_holder_metadata(_flock_holder_path(lock_path), holder)
+
+
+def _clear_flock_holder(lock_path: Path) -> None:
+    from .mutation_lock import _clear_holder_metadata
+
+    with contextlib.suppress(OSError):
+        _clear_holder_metadata(_flock_holder_path(lock_path))
+
+
+def _read_flock_holder(lock_path: Path) -> dict[str, Any] | None:
+    """The holder another process published, or None. Never verified: a crash leaves its record."""
+    try:
+        value = json.loads(_flock_holder_path(lock_path).read_text(encoding="utf-8"))
+        pid, acquired_at = value["pid"], value["acquired_at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not (type(pid) is int and isinstance(acquired_at, (int, float))
+            and not isinstance(acquired_at, bool)):
+        return None
+    return {"scope": "other_process", "pid": pid,
+            "thread": stack_sites.log_label(value.get("thread")),
+            "site": stack_sites.log_label(value.get("site"), limit=96), "phase": "held",
+            "held_seconds": round(max(0.0, time.time() - acquired_at), 3), "verified": False}
+
+
+def _lock_timeout_details(
+    kind: Literal["mutex", "flock"],
+    *,
+    key: str,
+    namespace: str,
+    lock_path: Path | None,
+    wait_start: float,
+    wait_site: str,
+) -> dict[str, Any]:
+    """Name what a lost wait lost to, log it once, and return it for the raised timeout.
+
+    ``kind`` is the wait that ran out: ``mutex`` for another thread of this process, which this
+    process can verify, or ``flock`` for another process, which only its own record can name.
+    The two are all this function waits on, so code fixes them. No lock, digest or vault path
+    is recorded, and the details reach logs only."""
+    if kind == "mutex":
+        with _THREAD_LOCKS_GUARD:
+            record = dict(_THREAD_HOLDERS.get(key) or {})
+        holder = {"scope": "in_process", "pid": os.getpid(), "thread": record["thread"],
+                  "site": record["site"], "phase": record["phase"],
+                  "held_seconds": round(time.monotonic() - record["acquired"], 3),
+                  "verified": True} if record else None
+    else:
+        holder = _read_flock_holder(lock_path) if lock_path is not None else None
+    details = {"lock": kind, "namespace": namespace,
+               "waited_ms": round((time.monotonic() - wait_start) * 1000),
+               "wait_site": wait_site, "holder": holder}
+    log_event(log, logging.WARNING, "vault_lock_timeout", fields=details)
+    return details
 
 
 @contextmanager
@@ -826,18 +925,38 @@ def vault_creation_lock(
     key = f"{root}\0{namespace}"
     with _THREAD_LOCKS_GUARD:
         thread_lock = _THREAD_LOCKS.setdefault(key, threading.Lock())
-    deadline = time.monotonic() + float(timeout)
+    site = stack_sites.caller_site(sys._getframe(), skip_modules=_LOCK_SITE_SKIP)
+    thread_label = stack_sites.log_label(threading.current_thread().name)
+    wait_start = time.monotonic()
+    deadline = wait_start + float(timeout)
+    lock_path: Path | None = None
+
+    def lost(kind: Literal["mutex", "flock"]) -> dict[str, Any]:
+        return _lock_timeout_details(kind, key=key, namespace=namespace, lock_path=lock_path,
+                                     wait_start=wait_start, wait_site=site)
+
     remaining = max(0.0, deadline - time.monotonic())
     if not thread_lock.acquire(timeout=remaining):
-        raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock")
+        raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock", lost("mutex"))
+    with _THREAD_LOCKS_GUARD:
+        _THREAD_HOLDERS[key] = {"thread": thread_label, "site": site,
+                                "acquired": time.monotonic(), "phase": "flock_wait"}
     _HELD_LOCKS.keys = {key}
     _HELD_LOCKS.after_release = []
     try:
         lock_path = _private_lock_directory() / f"{digest}.lock"
-        with _InterprocessFileLock(lock_path, deadline=deadline):
-            yield lock_path
+        with _InterprocessFileLock(lock_path, deadline=deadline, on_timeout=lambda: lost("flock")):
+            _publish_flock_holder(lock_path, thread=thread_label, site=site)
+            with _THREAD_LOCKS_GUARD:
+                _THREAD_HOLDERS[key]["phase"] = "held"
+            try:
+                yield lock_path
+            finally:
+                _clear_flock_holder(lock_path)
     finally:
         _HELD_LOCKS.keys = set()
+        with _THREAD_LOCKS_GUARD:
+            _THREAD_HOLDERS.pop(key, None)
         thread_lock.release()
         _run_after_release(_HELD_LOCKS.__dict__.pop("after_release", []))
 
@@ -3490,6 +3609,7 @@ def _bounded_directory_entries(
     max_entries: int,
     ignored_names: frozenset[str] = frozenset(),
     admission: Callable[[str], bool] | None = None,
+    include_internal_state: bool = False,
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
     try:
@@ -3518,7 +3638,7 @@ def _bounded_directory_entries(
                 if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
                     raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
                 continue
-            if _is_registered_internal_state_artifact(entry_relative):
+            if not include_internal_state and _is_registered_internal_state_artifact(entry_relative):
                 continue
             if len(ordinary_names) <= max_entries:
                 ordinary_names.append(name)
@@ -3594,6 +3714,8 @@ class DirectoryCensusGuard:
     entries: tuple[PathIdentity, ...]
     max_entries: int
     admission: Callable[[str], bool] | None = None
+    # Destructive undo must bind retained internal history; ordinary scans still omit it.
+    include_internal_state: bool = False
 
     @classmethod
     def capture(
@@ -3603,6 +3725,7 @@ class DirectoryCensusGuard:
         *,
         max_entries: int,
         admission: Callable[[str], bool] | None = None,
+        include_internal_state: bool = False,
     ) -> DirectoryCensusGuard:
         parts = _safe_guard_target(target)
         if type(max_entries) is not int or max_entries < 0:
@@ -3646,6 +3769,7 @@ class DirectoryCensusGuard:
                 expected=directory_identity,
                 max_entries=max_entries,
                 admission=admission,
+                include_internal_state=include_internal_state,
             )
             guard = cls(
                 target,
@@ -3655,10 +3779,11 @@ class DirectoryCensusGuard:
                 entries,
                 max_entries,
                 admission,
+                include_internal_state,
             )
             guard.recheck(root)
             return guard
-        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries, admission)
+        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries, admission, include_internal_state)
         guard.recheck(root)
         return guard
 
@@ -3741,6 +3866,7 @@ class DirectoryCensusGuard:
                     max_entries=self.max_entries,
                     ignored_names=allowed_names,
                     admission=self.admission,
+                    include_internal_state=self.include_internal_state,
                 )
                 if current:
                     raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
@@ -3754,6 +3880,7 @@ class DirectoryCensusGuard:
             max_entries=self.max_entries,
             ignored_names=allowed_names,
             admission=self.admission,
+            include_internal_state=self.include_internal_state,
         )
         expected_entries = tuple(
             entry for entry in self.entries if Path(entry.relative_path).name not in allowed_names
@@ -6478,6 +6605,42 @@ def yaml_scalar(value: Any) -> str:
 _yaml_scalar = yaml_scalar
 
 
+def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
+    """Return the scanner protocol's "dir", "md", or None for one entry."""
+    try:
+        relative = child.relative_to(vault_root).as_posix()
+    except ValueError:
+        return None
+    if reserved_paths.classify_logical(relative).blocked:
+        return None
+    try:
+        info = child.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+        return None
+    if stat.S_ISDIR(info.st_mode):
+        return None if in_excluded_scan_dir(relative) else "dir"
+    # Markdown extensions and Obsidian sync-conflict names are scanner protocol.
+    if (
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and child.suffix.lower() == ".md"
+        and ".sync-conflict-" not in child.name
+    ):
+        return "md"
+    return None
+
+
+def walk_vault_md_admits(
+    vault_root: Path, path: Path, listings: dict[Path, frozenset[str] | None]
+) -> bool:
+    """Match the full-vault scan by listing only the candidate's ancestry."""
+    from .find_corpus import walk_entry_admits
+
+    return walk_entry_admits(vault_root, path, listings, _walk_vault_md_entry)
+
+
 def walk_vault_md(vault_root: Path):
     """Yield every .md path under vault_root, skipping config/cruft dirs.
 
@@ -6495,28 +6658,10 @@ def walk_vault_md(vault_root: Path):
             return
         for child in children:
             foreground_priority.check_cancelled()
-            try:
-                relative = child.relative_to(vault_root).as_posix()
-            except ValueError:
-                continue
-            if reserved_paths.classify_logical(relative).blocked:
-                continue
-            try:
-                info = child.lstat()
-            except OSError:
-                continue
-            if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                if in_excluded_scan_dir(relative):
-                    continue
+            kind = _walk_vault_md_entry(vault_root, child)
+            if kind == "dir":
                 yield from walk(child)
-            elif (
-                stat.S_ISREG(info.st_mode)
-                and info.st_nlink == 1
-                and child.suffix.lower() == ".md"
-                and ".sync-conflict-" not in child.name
-            ):
+            elif kind == "md":
                 # Skip Obsidian sync-conflict duplicates — they aren't real
                 # notes; indexing/scanning them pollutes search and wikilink
                 # resolution.
@@ -7577,6 +7722,8 @@ def normalize_wikilink(
     vault_root: Path,
     *,
     resolver: WikilinkResolver | None = None,
+    targeted_namespace_contains: Callable[[str], bool] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None]:
@@ -7597,10 +7744,10 @@ def normalize_wikilink(
 
     `visible` (see `writer_link_visibility`) restricts every match to the
     pages it admits; `None` matches over every page.
-    """
-    if resolver is None:
-        resolver = WikilinkResolver(vault_root)
 
+    `targeted_namespace_contains` answers exact resolver keys for explicit
+    paths. Bare names use `resolver` or lazily call `resolver_factory`.
+    """
     def _seen(no_ext: str) -> bool:
         return visible is None or visible(f"{no_ext}.md")
 
@@ -7630,16 +7777,24 @@ def normalize_wikilink(
         canonical = cleaned if cleaned.startswith(kb_prefix()) else kb_prefix() + cleaned
         return canonical + anchor, None
 
+    # Explicit paths need namespace membership only; bare names need the full
+    # stem/title index and retain its ambiguity rules.
+    targeted = targeted_namespace_contains is not None and "/" in cleaned
+    if not targeted and resolver is None:
+        resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
+    contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
+
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
-    if cleaned in resolver.full_paths and _seen(cleaned):
+    if contains(cleaned) and _seen(cleaned):
         return cleaned + anchor, None
     if not cleaned.startswith(kb_prefix()):
         candidate = kb_prefix() + cleaned
-        if candidate in resolver.full_paths and _seen(candidate):
+        if contains(candidate) and _seen(candidate):
             return candidate + anchor, None
 
     # 2. KB-stripped match (target looks like KB-relative).
-    if cleaned in resolver.kb_stripped and _seen(kb_prefix() + cleaned):
+    kb_match = contains(kb_prefix() + cleaned) if targeted else cleaned in resolver.kb_stripped
+    if kb_match and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
@@ -7985,6 +8140,8 @@ def prepend_log_entry(
     op: str,
     rel_path_no_ext: str,
     body: str,
+    provenance: Mapping[str, Any] | None = None,
+    machine_generated: bool = False,
 ) -> str:
     """Insert a `## [date] <op> | <rel>` block after the log's `---` separator.
 
@@ -7997,7 +8154,15 @@ def prepend_log_entry(
     if title.startswith(kb_prefix()):
         title = title[len(kb_prefix()) :]
     newline = document_newline(log_text)
-    new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
+    rendered_body = escape_wikilinks_for_log(body)
+    # Only server-serialized audit events opt out; caller prose cannot mint log structure.
+    if not machine_generated:
+        rendered_body = "\n".join("> " + line for line in rendered_body.splitlines())
+    new_entry = f"## [{date_iso}] {op} | {title}\n\n{rendered_body}\n"
+    if provenance is not None:
+        # The fixed fence token versions the operation-log protocol, not vocabulary.
+        encoded = json.dumps(provenance, ensure_ascii=False, sort_keys=True).replace("`", "\\u0060")
+        new_entry += f"\n```exomem-operation-v1\n{encoded}\n```\n"
     new_entry = with_newline(new_entry, newline)
     if new_entry in log_text:
         return log_text
@@ -8117,18 +8282,31 @@ def plan_log_writes(
     rel_path_no_ext: str,
     body: str,
     operation_token: str,
+    provenance: Mapping[str, Any] | None = None,
+    machine_generated: bool = False,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
     log_file = kb_root(vault_root) / "log.md"
     if not log_file.is_file():
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
+    if provenance is not None:
+        provenance = {
+            **provenance,
+            "version": 1,
+            "operation_id": hashlib.sha256(json.dumps(
+                [operation_token, provenance.get("before_hash"), provenance.get("after_hash")],
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+        }
     updated = prepend_log_entry(
         current,
         date_iso=date_iso,
         op=op,
         rel_path_no_ext=rel_path_no_ext,
         body=body,
+        provenance=provenance,
+        machine_generated=machine_generated,
     )
     return _plan_log_content(
         vault_root,
@@ -8136,6 +8314,55 @@ def plan_log_writes(
         live_guard=live_guard,
         operation_token=operation_token,
     )
+
+
+def read_operation_log(vault_root: Path) -> dict[str, Any]:
+    """Read activity sections and structured provenance from live and rotated logs."""
+    root = kb_root(vault_root)
+    live = root / "log.md"
+    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
+    paths = [live, *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    entries: list[dict[str, Any]] = []
+    failed = 0
+    read = 0
+    parser = MarkdownIt("commonmark")
+    for path in paths:
+        try:
+            text, _guard = read_guarded_text(vault_root, path)
+        except (OSError, UnicodeError, ValueError):
+            failed += 1
+            continue
+        read += 1
+        tokens = parser.parse(text)
+        sections = [i for i, token in enumerate(tokens)
+                    if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
+        for index, at in enumerate(sections):
+            header = tokens[at + 1].content
+            stamp, separator, rest = header.removeprefix("[").partition("] ")
+            op, bar, title = rest.partition(" | ")
+            if not header.startswith("[") or not separator or not bar:
+                continue
+            stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
+            entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
+            for token in tokens[at:stop]:
+                if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
+                    continue
+                try:
+                    value = json.loads(token.content)
+                except (ValueError, TypeError):
+                    entry["provenance_invalid"] = True
+                    continue
+                if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+                    entry["provenance"] = value
+                else:
+                    entry["provenance_invalid"] = True
+            entries.append(entry)
+    return {
+        "entries": entries,
+        "live_log_present": live.is_file(),
+        "files_read": read,
+        "files_unreadable": failed,
+    }
 
 
 def plan_log_writes_many(
@@ -8146,6 +8373,7 @@ def plan_log_writes_many(
     rel_path_no_ext: str,
     bodies: Iterable[str],
     operation_token: str,
+    machine_generated: bool = False,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per body, oldest first.
 
@@ -8164,6 +8392,7 @@ def plan_log_writes_many(
             op=op,
             rel_path_no_ext=rel_path_no_ext,
             body=body,
+            machine_generated=machine_generated,
         )
     return _plan_log_content(
         vault_root,

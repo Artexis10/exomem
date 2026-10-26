@@ -8,7 +8,8 @@ int64 keeps Helm from printing a large JSON number as 1.073741824e+09.
 {{- $contractAlerts := (.Files.Get "files/observability-v1.json" | fromJson).alerts }}
 {{- $storage := include "exomem.cellStorage" . | fromJson }}
 {{- $local := .Values.cellStorage.local.enabled }}
-{{- $cellClasses := list (printf "'%s'" .Values.cloudStorage.className) }}
+{{- $relocation := or $local (ne .Values.cloudStorage.perCellClassName "") }}
+{{- $cellClasses := list (printf "'%s'" .Values.cloudStorage.className) (printf "'%s'" .Values.cloudStorage.perCellClassName) }}
 {{- if $local }}
 {{- $cellClasses = append $cellClasses (printf "'%s'" $storage.local.class_name) }}
 {{- end }}
@@ -101,13 +102,15 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  {{- if $local }}
-  # move-cloud-cells-to-local-storage D4: relocation sets a cell's old volume
+  {{- if $relocation }}
+  # Relocation to local or per-cell Hetzner storage sets a cell's old volume
   # to Retain before it deletes the claim; admission confines the patch to
   # that one field.
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["patch"]
+  {{- end }}
+  {{- if $local }}
   # D3: an hourly backup's snapshot. D4: the deletion proof reads what
   # remains of a deleted cell's snapshots.
   - apiGroups: ["snapshot.storage.k8s.io"]
@@ -250,12 +253,11 @@ spec:
               value: {{ int64 (required "observability contract alerts.pending_operation_warn_seconds is required" $contractAlerts.pending_operation_warn_seconds) | quote }}
             - name: CELLCTL_PVC_RESERVED_FREE_BYTES
               value: {{ int64 (required "observability contract alerts.pvc_reserved_free_bytes is required" $contractAlerts.pvc_reserved_free_bytes) | quote }}
-            {{- if $local }}
-            # move-cloud-cells-to-local-storage: the classes a cell volume may
-            # be on and the one new claims take (_cell-storage.tpl).
+            # Shared cap and optional local classes (_cell-storage.tpl).
+            - name: CELLCTL_KEY_RETENTION_SOURCES
+              value: {{ .Values.cellctl.keyRetentionSources | toJson | quote }}
             - name: CELLCTL_CELL_STORAGE
               value: {{ $storage | toJson | quote }}
-            {{- end }}
             {{- if .Values.artifactBroker.enabled }}
             - name: CELLCTL_ARTIFACT_BROKER_URL
               value: {{ .Values.artifactBroker.endpoint | quote }}
@@ -499,7 +501,7 @@ spec:
     # exo-cell-<16 lowercase base32> (D4, D5's namespace_name convention),
     # but for the cluster-scoped Retain patch rule 11 confines.
     - expression: >-
-        {{ if $local }}request.resource.resource == 'persistentvolumes' || {{ end -}}
+        {{ if $relocation }}request.resource.resource == 'persistentvolumes' || {{ end -}}
         variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$')
       message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>.
     # 2. A namespace cellctl creates or updates must carry the restricted
@@ -628,22 +630,28 @@ spec:
     # (D3), and relocation deletes the cell's claim once its volume is
     # retained (D4, the exomem-cellctl-retained-delete policy).
     - expression: >-
-        request.operation != 'DELETE' || request.resource.resource in ['namespaces', 'jobs']
+        request.operation != 'DELETE' || request.resource.resource in ['namespaces', 'jobs'] ||
+        (request.resource.resource == 'secrets' && (variables.target.metadata.name == 'cell-credentials' ||
+          variables.target.metadata.name.matches('^export-[0-9a-f]{32}-verify-get$')))
+        {{- if $relocation }} ||
+        (request.resource.resource == 'persistentvolumeclaims' && variables.target.metadata.name == 'cell-data')
+        {{- end }}
         {{- if $local }} ||
         (request.resource.resource == 'persistentvolumeclaims' &&
-          (variables.target.metadata.name == 'cell-data' ||
-            variables.target.metadata.name.matches('^cell-clone-[0-9a-f]{10}$'))) ||
+          variables.target.metadata.name.matches('^cell-clone-[0-9a-f]{10}$')) ||
         (request.resource.resource == 'volumesnapshots' &&
           variables.target.metadata.name.matches('^cell-snapshot-[0-9a-f]{10}$'))
         {{- end }}
-      message: cellctl may delete only a cell namespace{{ if $local }}, a Job, its claim, or a backup's clone and snapshot{{ else }} or a Job{{ end }}.
-    # 7. The Secret is the cell's own Opaque credentials Secret, never a
+      message: cellctl may delete only a cell namespace, its child Secret, a hold Job, or an admitted retained claim.
+    # UUID-derived export Secret names fix the verification capability protocol.
+    # 7. The Secret is an Opaque cell credential or export capability, never a
     # service-account-token Secret the token controller would fill in.
     - expression: >-
         request.resource.resource != 'secrets' || request.operation == 'DELETE' ||
-        (variables.target.metadata.name == 'cell-credentials' &&
+        ((variables.target.metadata.name == 'cell-credentials' ||
+          variables.target.metadata.name.matches('^export-[0-9a-f]{32}-verify-get$')) &&
           (!has(variables.target.type) || variables.target.type == 'Opaque'))
-      message: cellctl may write only the Opaque Secret cell-credentials.
+      message: cellctl may write only Opaque cell credentials or an export verification capability.
     # 8. The PVC is the cell's one volume, provisioned fresh on a configured
     # cell class: no data source and no pre-bound volume. With local storage,
     # an hourly backup's clone is the other (D3): on the clone class, from the
@@ -764,7 +772,7 @@ spec:
           size(variables.np.egress[1].ports) == 2 &&
           variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
       message: cellctl may write job-egress only as Job egress to TCP 443 outside the excepted ranges, plus kube-dns.
-    {{- if $local }}
+    {{- if $relocation }}
     # 11. move-cloud-cells-to-local-storage D4: cellctl's one PV write sets a
     # cell volume's reclaim policy to Retain before relocation deletes its
     # claim. Only on a PV claimed from a cell namespace, and nothing else in
@@ -787,6 +795,8 @@ spec:
           object.metadata.?finalizers == oldObject.metadata.?finalizers &&
           object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences)
       message: cellctl may only set a cell volume's reclaim policy to Retain, and change nothing else in it.
+    {{- end }}
+    {{- if $local }}
     # 12. D3: an hourly backup's snapshot is of the cell's own claim, on the
     # snapshot class, never bound to an existing snapshot's content.
     - expression: >-
@@ -862,9 +872,9 @@ spec:
   paramRef:
     name: default-deny
     parameterNotFoundAction: Deny
-{{- if $local }}
+{{- if $relocation }}
 ---
-# move-cloud-cells-to-local-storage D4: relocation deletes a cell's claim only
+# Relocation deletes a cell's claim only
 # after setting its volume to Retain, so the delete never takes the volume
 # with it. The binding takes every PV as a param, and the delete is admitted
 # only when each one claimed by this claim is retained. With no PV at all

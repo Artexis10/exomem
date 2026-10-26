@@ -17,7 +17,7 @@ from typing import Any
 
 from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 9
+AUTHORING_CONTRACT_VERSION = 10
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 STATUS_CLASSIFICATION_RULE = (
@@ -409,7 +409,15 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         ],
         "structural_rule": (
             "Reject missing, invalid, or mismatched compiled frontmatter before evaluating "
-            "the minimum-unit predicate."
+            "the minimum-unit predicate. A page in a type folder needs a compiled type; a "
+            "compiled type may sit in any Notes folder, and a compiled page outside Notes "
+            "is refused."
+        ),
+        "placement_rule": (
+            "Folders are defaults. `create_note` files research notes in their `project` home. "
+            "Other compiled notes use the first `topics` entry with a home. "
+            '`schema_memory(subject="homes", operation="inspect")` lists homes. The '
+            "draft's `placement` gives the folder, basis and call to make a topic a home."
         ),
         "lifecycle_rule": (
             "Check live creates, replacements and transitions to live; "
@@ -645,6 +653,11 @@ def render_concise(
     minimum = contract.minimum_semantic_unit
     from .operation_entries import DEFAULT_TOOL_SHAPE, call_text, tools_text
 
+    # Render the contract's exact compatibility call in the active public spelling.
+    placement_rule = minimum["placement_rule"].replace(
+        'schema_memory(subject="homes", operation="inspect")',
+        call_text("schema_memory", {"subject": "homes", "operation": "inspect"}, DEFAULT_TOOL_SHAPE),
+    )
     routes = {**contract.routes, "single_semantic_unit": tools_text("observe_memory", DEFAULT_TOOL_SHAPE, "write"),
               "tier_2": "change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits."}
     findings = contract.findings
@@ -706,9 +719,9 @@ def render_concise(
         "If the exposed bootstrap schema lacks `section`, use "
         f"`{call_text('bootstrap', {'profile': 'full'}, DEFAULT_TOOL_SHAPE)}` instead; released profiles reject section arguments. "
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
-        f"Shipped compiled types: {destinations}. More may be registered; "
+        f"Shipped compiled types and their default folders: {destinations}. More may be registered; "
         f"`{call_text('schema_memory', {'subject': 'note-types', 'operation': 'inspect'}, DEFAULT_TOOL_SHAPE)}` lists the live set. "
-        f"{minimum['structural_rule']} The minimum predicate applies when "
+        f"{minimum['structural_rule']} {placement_rule} The minimum predicate applies when "
         f"{applies}. "
         f"{minimum['lifecycle_rule']}\n"
         f"- Existing active pages: {minimum['final_unit_rule']}\n"

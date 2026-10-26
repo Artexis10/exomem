@@ -24,7 +24,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
-from .command_surface import DEFAULT_TOOL_SHAPE, TOOL_SHAPES, listed_names
+from .command_surface import DEFAULT_TOOL_SHAPE, listed_names
 from .edge_ingress import EdgeIngressMiddleware
 from .operation_schema import shared_rendering_tool
 from .server_assets import (
@@ -920,17 +920,11 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
 
 
 def _tool_shape_from_environment() -> str:
-    """The MCP tool shape for this server, read once at build. EXPERIMENTAL.
-
-    `nested` is the default surface. `grouped` is today's surface, selectable only as the
-    baseline of the tool-selection eval, and the round that ends that comparison removes it.
-    A misspelt or retired value stops the build: an eval arm that silently ran another
-    shape would invalidate the comparison, and nothing else sets this variable.
-    """
+    """Publish the selected catalogue; the temporary grouped comparison is retired."""
     shape = os.environ.get("EXOMEM_MCP_TOOL_SHAPE", DEFAULT_TOOL_SHAPE).strip() or DEFAULT_TOOL_SHAPE
-    if shape not in TOOL_SHAPES:
+    if shape != DEFAULT_TOOL_SHAPE:
         raise RuntimeError(
-            f"EXOMEM_MCP_TOOL_SHAPE must be one of {', '.join(TOOL_SHAPES)}; got {shape!r}"
+            f"EXOMEM_MCP_TOOL_SHAPE must be {DEFAULT_TOOL_SHAPE}; got retired or unknown value {shape!r}"
         )
     return shape
 

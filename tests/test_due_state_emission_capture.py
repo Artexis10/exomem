@@ -12,6 +12,9 @@ from _nag_governance_helpers import overdue_prediction, scratch_page, write
 from exomem import commands, writer_lease
 from exomem import due_state as due_state_module
 
+# These tests count dated obligations; the fixture vault's Source backlog would shift every total.
+pytestmark = pytest.mark.usefixtures("obligations_only")
+
 SCRATCH = "Knowledge Base/Notes/Research/Infrastructure/nag-scratch.md"
 
 

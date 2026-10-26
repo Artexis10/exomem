@@ -24,13 +24,12 @@ from test_mcp_schema_fidelity import _build_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Measured on the same 0.144.3 fixture with scripts/measure-tool-schema-bytes.py:
-# compact tool-object sums exclude array/RPC framing: grouped 95,235; nested 156,609.
-# Shared complete fields remove 23,453 bytes from the unshared nested representation.
-# Nested remains 61,374 bytes above the grouped surface; no token or quality gain is claimed.
-# Each ceiling rounds the larger grouped/nested tool object up to the next 50 bytes.
+# The 0.146.1 fixture measures 158,399 ordinary and 159,969 Cloud tool-object bytes
+# in the checks below, excluding array/RPC framing. The preview schema and current
+# registry operations are included. The historical 0.144.3 grouped sum was 95,235.
+# No token or quality gain is claimed. Each changed ceiling rounds up to 50 bytes.
 # The separate bootstrap core budget stays unchanged.
-TOTAL_BUDGET = 157_600
+TOTAL_BUDGET = 159_600
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -39,7 +38,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3350,
-    "change_adoption": 5500,
+    "import_memory": 5500,
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
@@ -47,7 +46,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_observations": 6000,
     "change_plans": 3350,
     "change_records": 5550,
-    "change_schema": 9150,
+    "change_schema": 9250,
     "change_session_access": 1700,
     "change_settings": 1500,
     "check_memory": 6600,
@@ -69,7 +68,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_adoption": 1850,
+    "read_import": 1900,
     "read_connections": 3300,
     "read_episode": 1500,
     "read_governance": 2250,
@@ -78,7 +77,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_plans": 2700,
     "read_records": 3300,
     "read_review": 7550,
-    "read_schema": 14450,
+    "read_schema": 16300,
     "recall_context": 2950,
     "record_episode": 4150,
     "record_memory": 4600,

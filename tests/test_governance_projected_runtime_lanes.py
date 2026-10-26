@@ -371,8 +371,9 @@ def test_graph_lane_prefers_typed_edges_and_preserves_provenance(tmp_path):
     seed = _variant("Knowledge Base/seed.md", "e" * 64, "seed match")
     plain = _variant("Knowledge Base/a-plain.md", "f" * 64, "plain neighbor")
     typed = _variant("Knowledge Base/z-typed.md", "0" * 64, "typed neighbor")
+    extension = _variant("Knowledge Base/local.md", "4" * 64, "local neighbor")
     runtime = _runtime(
-        tuple(_item(variant) for variant in (seed, plain, typed)),
+        tuple(_item(variant) for variant in (seed, plain, typed, extension)),
         graphs=(
             projected_graph.ProjectionGraphMeasurement(
                 projections.MeasurementKey(
@@ -392,10 +393,14 @@ def test_graph_lane_prefers_typed_edges_and_preserves_provenance(tmp_path):
                         typed.item_identity,
                         "supports",
                     ),
+                    projected_graph.ProjectionGraphEdge(
+                        seed.item_identity, extension.item_identity, "vault.observes",
+                    ),
                 ),
             ),
             _graph(plain),
             _graph(typed),
+            _graph(extension),
         ),
     )
 
@@ -403,7 +408,7 @@ def test_graph_lane_prefers_typed_edges_and_preserves_provenance(tmp_path):
         tmp_path,
         runtime,
         query="seed",
-        limit=3,
+        limit=4,
         mode="hybrid",
         graph=True,
         rerank=False,
@@ -411,17 +416,25 @@ def test_graph_lane_prefers_typed_edges_and_preserves_provenance(tmp_path):
         purpose=None,
     )
 
-    assert [hit.path for hit in result.hits] == [
-        seed.item_identity,
-        typed.item_identity,
-        plain.item_identity,
-    ]
-    assert result.hits[1].graph_provenance is not None
-    assert result.hits[1].graph_provenance.relation_type == "supports"
-    assert result.hits[1].graph_provenance.direction == "outbound"
-    assert result.hits[1].graph_provenance.seed == seed.item_identity
-    assert result.hits[2].graph_provenance is not None
-    assert result.hits[2].graph_provenance.relation_type == "links_to"
+    paths = [hit.path for hit in result.hits]
+    assert paths[0] == seed.item_identity
+    assert set(paths[1:-1]) == {typed.item_identity, extension.item_identity}
+    assert paths[-1] == plain.item_identity
+    by_path = {hit.path: hit.graph_provenance for hit in result.hits}
+    typed_provenance = by_path[typed.item_identity]
+    assert typed_provenance is not None
+    assert typed_provenance.relation_type == "supports"
+    assert typed_provenance.as_dict()["relation_label"] == "supports"
+    assert typed_provenance.direction == "outbound"
+    assert typed_provenance.seed == seed.item_identity
+    extension_provenance = by_path[extension.item_identity]
+    assert extension_provenance is not None
+    assert extension_provenance.relation_type == "vault.observes"
+    assert extension_provenance.as_dict()["relation_label"] is None
+    plain_provenance = by_path[plain.item_identity]
+    assert plain_provenance is not None
+    assert plain_provenance.relation_type == "links_to"
+    assert plain_provenance.as_dict()["relation_label"] == "links_to"
 
 
 def test_graph_promotes_a_target_below_the_complete_vector_candidate_prefix(

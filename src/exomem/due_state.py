@@ -96,6 +96,7 @@ from pathlib import Path
 from typing import Any
 
 from . import call_spans
+from . import promotions as promotions_module
 from . import review_state as review_state_module
 from .collection_store.preview import (
     bound_writer,
@@ -107,8 +108,16 @@ from .planning_values import PlanningValues
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+# 3 adds `SOURCE_BACKLOG`: a stored projection without it would read as "no Source is
+# outstanding" until the next reconcile, so the version change forces the rebuild.
+SCHEMA_VERSION = 3
 STATE_FILENAME = ".due-state.json"
+
+#: The one backlog family: captured Sources that no live note compiles, due from their capture
+#: date. A write settles it through the Sources the written page cites, not through the page
+#: itself, and it sorts after every dated obligation, so a large import cannot fill the
+#: five-slot `top` that a due prediction needs.
+SOURCE_BACKLOG = "unprocessed_source"
 
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote
@@ -126,6 +135,8 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "collection_candidate",
     "artifact_role_promotion",
     "transient_state_review",
+    # Last: a backlog rather than an obligation (see `SOURCE_BACKLOG`).
+    SOURCE_BACKLOG,
 )
 
 #: The categories a single write can soundly settle in full on its own.
@@ -182,6 +193,11 @@ DELTA_DEFECTS: dict[str, tuple[str, ...]] = {
 #: How many item references the wire block may carry. Small on purpose: the block
 #: is an invitation to consult the review surface, not a replacement for it.
 TOP_LIMIT = 5
+
+#: Set on a served row that review state has dismissed or snoozed. The row stays in
+#: the served result so `outstanding` can count it; `block` and `served_entries`
+#: leave it out. Server-internal, never on the wire.
+TRIAGED = "triaged"
 
 # PROVISIONAL: tune from observed behavior, never from preference.
 OBSERVATION_GRACE_HOURS = 24
@@ -1034,6 +1050,8 @@ def recompute(
         today=_FAR_FUTURE,
         now=now,
         retain_reflected_observations=True,
+        # The projection stores no excerpt, so the rebuild does not build one.
+        source_context=False,
     )
     from . import artifact_role_review, artifact_role_state
     role_marker = (
@@ -1565,18 +1583,140 @@ def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PageWrite:
+    """One committed page write, as a projection delta reads it.
+
+    `prior_markdown` is the page as it stood before an edit or delete, and
+    `related_pages` are other pages the same operation changed. Both only widen
+    which cited Sources are refreshed.
+    """
+
+    path: str
+    prior_markdown: str | None = None
+    related_pages: tuple[str, ...] = ()
+
+
+def _cited_source_paths(
+    vault_root: Path,
+    write: PageWrite,
+    page: Any,
+    *,
+    type_basis: Any,
+    resolver: Callable[[], Any],
+) -> set[str]:
+    """The Sources whose coverage `write` can change.
+
+    Every Source the page cites after the write, every Source it cited before
+    (`prior_markdown`), every Source a page it changed in the same operation cites
+    (`related_pages`, such as a superseded predecessor), and the page itself when it
+    is a captured Source. The claims resolve to paths only: this reads no Source.
+    `resolver` returns the one wikilink snapshot of this delta.
+    """
+    from . import find as find_module
+    from . import note_types, source_closure
+
+    claims: list[str] = []
+    if page is not None:
+        claims.extend(source_closure.claims_in(page.frontmatter, type_basis))
+    if write.prior_markdown:
+        claims.extend(source_closure.source_claims(write.prior_markdown, type_basis))
+    for related in write.related_pages:
+        other = find_module._CACHE.get(vault_root / str(related), vault_root)
+        if other is not None:
+            claims.extend(source_closure.claims_in(other.frontmatter, type_basis))
+    paths: set[str] = set()
+    if claims:
+        snapshot = resolver()
+        paths.update(
+            path
+            for path in (
+                source_closure.resolve_reference(vault_root, claim, resolver=snapshot)
+                for claim in dict.fromkeys(claims)
+            )
+            if path is not None
+        )
+    # A deleted page may have been a Source: its row has to go too.
+    if page is None or type_basis.selects(page.page_type, note_types.captured_source):
+        paths.add(write.path)
+    return paths
+
+
+def _source_findings(
+    vault_root: Path, source_paths: list[str], *, resolver: Callable[[], Any]
+) -> list[Any]:
+    """The `SOURCE_BACKLOG` findings of these Sources; a compiled Source has none."""
+    from . import audit as audit_module
+    from . import find as find_module
+
+    def lookup(path: str) -> Any:
+        return find_module._CACHE.get(vault_root / path, vault_root)
+
+    pages = [page for page in map(lookup, source_paths) if page is not None]
+    if not pages:
+        return []
+    # The projection stores no excerpt, so the delta does not build one.
+    return audit_module._check_unprocessed_sources(
+        vault_root, pages, today=_FAR_FUTURE, lookup=lookup, resolver=resolver,
+        source_context=False,
+    )
+
+
 @_owner_local
 def apply_write_delta(
-    vault_root: Path, rel_path: str, *, today: dt.date | None = None
+    vault_root: Path,
+    rel_path: str,
+    *,
+    today: dt.date | None = None,
+    prior_markdown: str | None = None,
+    related_pages: Iterable[str] = (),
 ) -> dict[str, Any] | None:
     """Recompute one written page's entries and re-aggregate. Bounded, no audit pass.
 
     Returns the updated projection, or None when there is nothing to delta against
     — a missing or unreadable projection is recovered by a read surface, never by
     turning this write into a vault-wide scan it would then have to pay for.
+    `prior_markdown` and `related_pages` are as `PageWrite` describes them.
+    """
+    return apply_write_deltas(
+        vault_root,
+        [PageWrite(str(rel_path), prior_markdown, tuple(related_pages))],
+        today=today,
+    )
+
+
+def refresh_after_writes(vault_root: Path, writes: Iterable[PageWrite]) -> None:
+    """Apply the projection delta of writes that have committed, best effort.
+
+    A fault here costs the projection a refresh that the next reconcile performs,
+    never the write that already committed.
+    """
+    writes = list(writes)
+    if not writes:
+        return
+    try:
+        apply_write_deltas(vault_root, writes)
+    except Exception:  # noqa: BLE001 - a projection delta never breaks a committed write
+        log.debug("due-state delta failed for %d written page(s)", len(writes), exc_info=True)
+
+
+@_owner_local
+def apply_write_deltas(
+    vault_root: Path,
+    writes: Iterable[PageWrite],
+    *,
+    today: dt.date | None = None,
+) -> dict[str, Any] | None:
+    """Recompute the entries of a batch of written pages with one load and one save.
+
+    The same bounded delta as `apply_write_delta`, per page, and None for the same
+    reason: a missing projection is recovered by a read surface. One batch shares one
+    wikilink snapshot, one review-ref lookup and one save of the projection, so a
+    bulk import pays for the projection once per batch rather than once per page.
     """
     from . import audit as audit_module
     from . import find as find_module
+    from . import note_types
 
     today = today or dt.date.today()
     payload = _load_shared(vault_root)
@@ -1584,12 +1724,39 @@ def apply_write_delta(
         return None
 
     vault_root = Path(vault_root)
-    rel = str(rel_path).replace("\\", "/").lstrip("/")
-    _track_batch_path(vault_root, rel)
-    page = find_module._CACHE.get(vault_root / rel, vault_root)
-    pages = [page] if page is not None else []
+    writes = [
+        PageWrite(
+            str(write.path).replace("\\", "/").lstrip("/"),
+            write.prior_markdown,
+            tuple(write.related_pages),
+        )
+        for write in writes
+    ]
+    page_of: dict[str, Any] = {}
+    for write in writes:
+        _track_batch_path(vault_root, write.path)
+        page_of[write.path] = find_module._CACHE.get(vault_root / write.path, vault_root)
+    pages = [page for page in page_of.values() if page is not None]
 
-    findings: list[Any] = []
+    @functools.lru_cache(maxsize=1)
+    def resolver() -> Any:
+        # One snapshot for the whole delta, built on first use. Building it walks the
+        # vault, so the two steps below share it instead of each paying for one.
+        return find_module.writer_resolver_snapshot(vault_root)
+
+    type_basis = note_types.Basis(vault_root)
+    source_paths = sorted(
+        set().union(
+            *(
+                _cited_source_paths(
+                    vault_root, write, page_of[write.path], type_basis=type_basis, resolver=resolver
+                )
+                for write in writes
+            )
+        )
+    )
+
+    findings: list[Any] = _source_findings(vault_root, source_paths, resolver=resolver)
     if pages:
         findings.extend(
             audit_module._check_prediction_window(vault_root, pages, today=_FAR_FUTURE)
@@ -1602,9 +1769,11 @@ def apply_write_delta(
         findings.extend(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
-        # Page-local half of a split category: this page's own pointers only.
+        # Page-local half of a split category: these pages' own pointers only.
         findings.extend(_page_local_supersession(vault_root, pages))
+    # One grouping, so the Source rows and the page rows share one review-ref lookup.
     grouped = _entries_from_findings(vault_root, findings)
+    source_entries = grouped.get(SOURCE_BACKLOG) or {}
 
     with _LOCK:
         current = _load_shared(vault_root) or payload
@@ -1614,46 +1783,58 @@ def apply_write_delta(
             from . import artifact_role_review, artifact_role_state
             enabled = set(PAGE_DELTA_CATEGORIES) & set(artifact_role_review.FAMILIES)
             if enabled:
-                try:
-                    artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
-                    if page is not None and page.page_type == "experiment":
-                        role_index = {**role_index, "has_origins": True}
-                except Exception:  # noqa: BLE001 - committed mutation retains its receipt
-                    log.debug("artifact role delta unavailable", exc_info=True)
+                for rel, page in page_of.items():
+                    try:
+                        artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
+                        if page is not None and page.page_type == "experiment":
+                            role_index = {**role_index, "has_origins": True}
+                    except Exception:  # noqa: BLE001 - committed mutation retains its receipt
+                        log.debug("artifact role delta unavailable", exc_info=True)
         for category in PAGE_DELTA_CATEGORIES:
             if category in {"artifact_role_promotion", "transient_state_review"}:
                 continue
             pages_map = dict(categories.get(category) or {})
-            entries = (grouped.get(category) or {}).get(rel)
-            if entries:
-                pages_map[rel] = _bucket(entries, today)
-            else:
-                pages_map.pop(rel, None)
+            for rel in page_of:
+                entries = (grouped.get(category) or {}).get(rel)
+                if entries:
+                    pages_map[rel] = _bucket(entries, today)
+                else:
+                    pages_map.pop(rel, None)
             categories[category] = pages_map
         for category, settleable in DELTA_DEFECTS.items():
             pages_map = dict(categories.get(category) or {})
-            # Keep every stored defect this write cannot decide (the chain-scoped
-            # half), replace only the page-local ones it just recomputed.
-            preserved = [
-                entry
-                for entry in _unbucket(pages_map.get(rel))
-                if str(entry.get("defect") or "") not in settleable
-            ]
-            entries = preserved + list((grouped.get(category) or {}).get(rel) or [])
-            if entries:
-                pages_map[rel] = _bucket(entries, today)
-            else:
-                pages_map.pop(rel, None)
+            for rel in page_of:
+                # Keep every stored defect this write cannot decide (the chain-scoped
+                # half), replace only the page-local ones it just recomputed.
+                preserved = [
+                    entry
+                    for entry in _unbucket(pages_map.get(rel))
+                    if str(entry.get("defect") or "") not in settleable
+                ]
+                entries = preserved + list((grouped.get(category) or {}).get(rel) or [])
+                if entries:
+                    pages_map[rel] = _bucket(entries, today)
+                else:
+                    pages_map.pop(rel, None)
             categories[category] = pages_map
+        # Rows of the Sources these pages cite, not of the pages: a live note
+        # compiles a Source, a draft or a retired note does not.
+        backlog = dict(categories.get(SOURCE_BACKLOG) or {})
+        for path in source_paths:
+            if path in source_entries:
+                backlog[path] = _bucket(source_entries[path], today)
+            else:
+                backlog.pop(path, None)
+        categories[SOURCE_BACKLOG] = backlog
         updated = {
             "version": SCHEMA_VERSION,
             "computed_on": today.isoformat(),
             "categories": categories,
-            # One governed write, one projection delta, one tick. This is the
-            # denominator the "more automatic" claim is measured against, and
-            # it has to be persisted because the emission governor above it is
-            # per-process memory no projector can read.
-            "emission": _bump_ledger(vault_root, current, writes=1),
+            # One governed page write, one tick. This is the denominator the
+            # "more automatic" claim is measured against, and it has to be
+            # persisted because the emission governor above it is per-process
+            # memory no projector can read.
+            "emission": _bump_ledger(vault_root, current, writes=len(writes)),
             # Carried, not rebuilt. A page write learns nothing about bindings
             # and must not drop the index the structured deltas depend on --
             # losing it here would silently send every later plan write back to
@@ -2796,8 +2977,37 @@ def served_entries(
     paths: frozenset[str] | None = None,
     recover: bool = True,
     payload: dict[str, Any] | None = None,
+    include_triaged: bool = False,
 ) -> list[dict[str, Any]]:
-    """Every open item this audience may see, most-overdue first -- memoised.
+    """Every open item this audience may see, most-overdue first.
+
+    What review state has not dismissed or snoozed: every counter, ranking and
+    delivery stamp reads this view. `include_triaged` keeps the triaged rows,
+    flagged with `TRIAGED`, for the one reader that counts them (`served`).
+    """
+    rows = _served_rows(
+        vault_root, today=today, now=now, principal=principal, purpose=purpose,
+        paths=paths, recover=recover, payload=payload,
+    )
+    return rows if include_triaged else [row for row in rows if not row.get(TRIAGED)]
+
+
+def _served_rows(
+    vault_root: Path,
+    *,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+    principal: Any = None,
+    purpose: str | None = None,
+    paths: frozenset[str] | None = None,
+    recover: bool = True,
+    payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Every item this audience may see, triaged ones flagged, most-overdue first -- memoised.
+
+    A row that review state has dismissed or snoozed stays in the result with
+    `TRIAGED` set: `served_entries` drops it unless asked, and `outstanding` counts it. The
+    other rows are the open items.
 
     `paths` selects stored page buckets before recomposition and bypasses this
     full-view cache. `recover=False` omits a missing or unreadable projection.
@@ -2968,10 +3178,11 @@ def _rows_still_due(
     """The rows of an older build that the current projection and review state still hold.
 
     A row stays only while every stored item behind it is still in the current
-    projection under the same fingerprint and the current review state leaves it
-    open, and its family is not quiet. A finished, changed or dismissed item
-    therefore leaves at once; an item the older build never saw waits for the
-    refresh. None when the review state cannot be read.
+    projection under the same fingerprint and its family is not quiet. A finished
+    or changed item therefore leaves at once; an item the older build never saw
+    waits for the refresh. The current review state decides whether a kept row
+    is open or triaged, so a dismissal moves a row out of the visible counts and
+    leaves it outstanding. None when the review state cannot be read.
     """
     store = review_state_module.ReviewStateStore(vault_root)
     try:
@@ -2997,14 +3208,19 @@ def _rows_still_due(
         origins = build["sources"].get((category, row["ref"], row["fingerprint"]))
         if category in excluded or origins is None:
             continue
-        if all(
+        if not all(
             held(category, page_key, stored_id, stored_fingerprint)
-            and store.effective_state(
-                served_id, row["fingerprint"], today=today, payload=state_payload
-            )[0] == "open"
             for page_key, stored_id, stored_fingerprint, served_id in origins
         ):
-            kept.append(row)
+            continue
+        open_now = all(
+            store.effective_state(
+                served_id, row["fingerprint"], today=today, payload=state_payload
+            )[0] == "open"
+            for _page_key, _stored_id, _stored_fingerprint, served_id in origins
+        )
+        flagged = {key: value for key, value in row.items() if key != TRIAGED}
+        kept.append(flagged if open_now else {**flagged, TRIAGED: True})
     return kept
 
 
@@ -3327,10 +3543,12 @@ def _served_entries_uncached(
     uses it to drop a row whose item a newer projection no longer holds.
 
     The order of operations is the contract, not an implementation detail:
-    re-bucket against today, drop what this audience may not see, drop what the
+    re-bucket against today, drop what this audience may not see, flag what the
     reader has already triaged, and only then count and order. Filtering after
     ordering, or counting before filtering, would let a withheld item shape the
-    result it is supposed to be absent from.
+    result it is supposed to be absent from. A triaged row is flagged, never
+    dropped, only after the audience filter: `outstanding` counts what the
+    audience may see, before review state.
     """
     from .governance import egress as egress_module
 
@@ -3493,14 +3711,20 @@ def _served_entries_uncached(
                         today=today,
                         payload=state_payload,
                     )
-                    if effective != "open":
-                        continue  # already triaged; a counter must not re-raise it
+                    triaged = effective != "open"
+                    if triaged and candidate_component:
+                        # A dismissed suggestion is not outstanding work, and it
+                        # must not take one of the candidate noise budget's slots.
+                        continue
                     row = {
                         "category": category,
                         "ref": str(entry.get("ref") or ""),
                         "due_since": due.isoformat(),
                         "fingerprint": str(entry.get("fingerprint") or ""),
                         "path": path,
+                        # Flagged, not dropped: the visible counts leave it out and
+                        # `outstanding` keeps it, so a counter never re-raises it.
+                        **({TRIAGED: True} if triaged else {}),
                     }
                     if sources is not None:
                         origins = sources.setdefault(
@@ -3532,8 +3756,11 @@ def _served_entries_uncached(
     # Dated first, oldest first; dateless last. A defect a human authored no date
     # for is reported with a floor date internally, and left to sort naively it
     # would outrank every genuinely overdue prediction in a five-slot `top`.
+    # The Source backlog sorts after every obligation for the same reason: an
+    # import of thousands of old captures must not push a due prediction out.
     rows.sort(
         key=lambda row: (
+            row["category"] == SOURCE_BACKLOG,
             row["due_since"] == _NO_DATE,
             row["due_since"],
             order[row["category"]],
@@ -3590,6 +3817,9 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     rows = [row for row in (block.get("top") or []) if isinstance(row, dict)]
     if not rows:
         return
+    # A promotion notice is spent once an interactive conversation other than its
+    # creator's has been shown it; `settle_delivered` decides who counts.
+    promotions_module.settle_delivered(vault_root, rows)
     try:
         entries = []
         for row in rows:
@@ -3754,24 +3984,30 @@ def _ref_id(ref: str) -> str:
     return str(ref or "").rsplit("/", 1)[-1]
 
 
-def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The bounded wire block, or None when there is nothing to report.
-
-    Absent rather than empty: an advisory that arrives saying nothing is still a
-    thing the reader has to read.
-    """
-    if not rows:
-        return None
+def _counted(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Rows per category, in projection order."""
     counts: dict[str, int] = {}
     for row in rows:
         counts[row["category"]] = counts.get(row["category"], 0) + 1
     return {
+        category: counts[category]
+        for category in (*PROJECTION_CATEGORIES, promotions_module.FAMILY)
+        if category in counts
+    }
+
+
+def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The bounded wire block of the visible rows, or None when there is nothing to report.
+
+    Absent rather than empty: an advisory that arrives saying nothing is still a
+    thing the reader has to read. A row that review state triaged is not visible.
+    """
+    rows = [row for row in rows if not row.get(TRIAGED)]
+    if not rows:
+        return None
+    return {
         "total": len(rows),
-        "categories": {
-            category: counts[category]
-            for category in PROJECTION_CATEGORIES
-            if category in counts
-        },
+        "categories": _counted(rows),
         # The fingerprint is the row's own signal identity: round-tripped as
         # `expected_fingerprint`, it addresses this due signal alone, and the
         # resolver can answer from the stored entry without a whole-vault audit.
@@ -3781,6 +4017,7 @@ def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
                 "ref": row["ref"],
                 "fingerprint": row["fingerprint"],
                 "due_since": row["due_since"],
+                **({"new_family": True} if row.get("new_family") else {}),
             }
             for row in rows[:TOP_LIMIT]
         ],
@@ -3794,16 +4031,41 @@ def served(
     principal: Any = None,
     purpose: str | None = None,
 ) -> dict[str, Any] | None:
-    """The wire block for the requesting audience, or None when nothing is due."""
-    return block(
-        served_entries(
-            vault_root, today=today, principal=principal, purpose=purpose
-        )
+    """The wire block for the requesting audience, or None when nothing is outstanding.
+
+    `total` and `categories` count what review state leaves visible.
+    `outstanding_total` and `outstanding` count the same rows before dismissal
+    and snoozing, under the same disclosure rule, so a dismissal never reads as
+    progress: only finishing the work lowers them. When every outstanding row is
+    dismissed or snoozed the block still arrives, with `total` 0 and no
+    categories, because the work is still there.
+    """
+    rows = served_entries(
+        vault_root, today=today, principal=principal, purpose=purpose, include_triaged=True
     )
+    promoted = promotions_module.served_rows(
+        vault_root, principal=principal, purpose=purpose, today=today
+    )
+    # Reserve one bounded display slot for promotion delivery; backlog cannot starve it.
+    leading = [row for row in promoted if row.get("new_family")]
+    trailing = [row for row in promoted if not row.get("new_family")]
+    authored = [row for row in rows if row["category"] != SOURCE_BACKLOG]
+    backlog = [row for row in rows if row["category"] == SOURCE_BACKLOG]
+    before_notice = max(0, TOP_LIMIT - len(leading) - bool(trailing))
+    rows = [*leading, *authored[:before_notice], *trailing, *authored[before_notice:], *backlog]
+    if not rows:
+        return None
+    result = block(rows) or {"total": 0, "categories": {}, "top": []}
+    return {**result, "outstanding_total": len(rows), "outstanding": _counted(rows)}
 
 
 def block_for_write(
-    vault_root: Path, rel_path: str, *, today: dt.date | None = None
+    vault_root: Path,
+    rel_path: str,
+    *,
+    today: dt.date | None = None,
+    prior_markdown: str | None = None,
+    related_pages: Iterable[str] = (),
 ) -> dict[str, Any] | None:
     """Apply the per-write delta and return the block this response may carry.
 
@@ -3817,7 +4079,13 @@ def block_for_write(
     Those decisions are real and are collected; they just belong to this advisory
     rather than to the mutation.
     """
-    payload = apply_write_delta(vault_root, rel_path, today=today)
+    payload = apply_write_delta(
+        vault_root,
+        rel_path,
+        today=today,
+        prior_markdown=prior_markdown,
+        related_pages=related_pages,
+    )
     if payload is None:
         return None
     from .governance import egress as egress_module
@@ -3839,9 +4107,16 @@ def _affected_block(
     if not paths:
         return None
     paths = frozenset(path.replace("\\", "/").lstrip("/") for path in paths)
-    result = block(served_entries(
-        vault_root, today=today, paths=paths, recover=False, payload=payload,
-    ))
+    # A write's own advice leaves the Source backlog out: a Source is outstanding from
+    # the moment it is created, so every import would answer with advice about itself.
+    # The backlog reaches the agent through the global block and `review_memory`.
+    result = block([
+        row
+        for row in served_entries(
+            vault_root, today=today, paths=paths, recover=False, payload=payload,
+        )
+        if row["category"] != SOURCE_BACKLOG
+    ])
     return {**result, "scope": DUE_STATE_AFFECTED_PATHS} if result else None
 
 

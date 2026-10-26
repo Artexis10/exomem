@@ -1,39 +1,27 @@
 ## ADDED Requirements
 
-### Requirement: Typed edges have additive and removal leaves
+### Requirement: Typed edges use the existing writers and one internal removal step
 
-`connect_memory` SHALL offer `add-relation` with `path`, `requested_relation`, `target`, `expected_hash` and `why`.
-It SHALL append one bullet under the subject page's `## Relations` through the edit writer, write a log entry, return `exists` for an edge that is already present, refuse a stale `expected_hash`, and refuse an unregistered or deprecated predicate with the propose route.
-`edit_memory` SHALL offer a `remove_relation` operation kind with `relation` and `target` on the subject page's `path`, keyed by that triple and taking no hash.
-It SHALL remove exactly the bullets of that triple and return `absent` when there are none.
-Removal SHALL NOT be offered on `connect_memory`, which stays additive, so that every tool's destructive hint stays truthful.
-Both leaves SHALL refuse a withheld subject or target exactly as a missing one, and both SHALL be curation step kinds that compensate each other.
-`create-entity` `connections` SHALL accept `{target, relation}` items beside strings, and a string SHALL keep the registry's generic relation.
-
-#### Scenario: Repeating an edge writes nothing
-
-- **WHEN** `add-relation` is called twice with the same subject, predicate and target
-- **THEN** the second call returns `exists` and the page bytes are unchanged
+An agent SHALL author a typed edge through the shipped `create-entity` `relations` items (`{kind, target}`) or through a `## Relations` bullet written by an ordinary note writer.
+No additive edge operation SHALL be added to `connect_memory`, and a plain string connection SHALL keep the registry's generic relation.
+Edge removal SHALL exist as an internal curation step, keyed by subject page, predicate and target and taking no hash, that removes exactly the bullets of that triple and reports `absent` when there are none.
+Only a promotion revert and other curation plans SHALL run that step, so no tool gains a removal operation and every destructive hint stays truthful.
+The step SHALL refuse a withheld subject exactly as a missing one.
 
 #### Scenario: Removal touches only its triple
 
-- **WHEN** a `remove_relation` operation removes an `owns` edge while another session has edited a different section of the same page
-- **THEN** only the `owns` bullet for that target is gone, the other edit survives, and a repeat returns `absent`
+- **WHEN** a revert's removal step removes an `owns` edge while another session has edited a different section of the same page
+- **THEN** only the `owns` bullet for that target is gone, the other edit survives, and a repeat reports `absent`
 
-#### Scenario: A withheld target cannot be detected
+#### Scenario: A typed relation renders its predicate
 
-- **WHEN** a restricted caller calls `add-relation` with a target that is withheld from it, and separately with a target that does not exist
-- **THEN** both refusals are byte-identical
-
-#### Scenario: A typed connection renders its predicate
-
-- **WHEN** `create-entity` receives `connections: [{target: <person>, relation: member_of}]`
+- **WHEN** `create-entity` receives `relations: [{kind: member_of, target: <person>}]`
 - **THEN** the new page's `## Relations` holds `- member_of [[<person>]]`
 - **AND** a plain string connection still renders the generic relation
 
 ### Requirement: Promotions carry provenance
 
-An entity creation or typed edge made by `create-entity`, `add-relation` or a declaration SHALL write a log entry on its page.
+An entity creation or typed edge made by `create-entity`, an authored `## Relations` bullet or a declaration SHALL write a log entry on its page.
 `create-entity` SHALL accept the existing `ref` argument as the originating write's ref, and the `undeclared_referents` route SHALL fill it.
 The entry SHALL name the originating write's path and operation id when known, and the episode key when an episode leaf ran the effect.
 An origin ref that the caller cannot read SHALL record the origin as unknown and SHALL NOT refuse the creation; a withheld ref and a missing ref SHALL give the same result.
@@ -92,7 +80,10 @@ A link from the promotion's originating write SHALL NOT be a dependant, because 
 A registry addition SHALL revert through one `schema_memory` save of that key with a `remove` delta, `expected_hash=<revert_fingerprint>` and `why`, where the `revert_fingerprint` is the registry's current `expected_hash`.
 The save SHALL take no `vocabulary_ref` or `vocabulary_fingerprint`.
 The server SHALL decide at save time from current usage: it SHALL remove the key when the key is vault-added and nothing uses it, and otherwise SHALL deprecate the key, to its parent for a relation, and list the dependants.
-The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check, which today means entity types, relations and semantic categories, and every other registry SHALL refuse it.
+The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check: entity types, relations, semantic categories, note types, homes, source kinds and domains.
+Every other registry SHALL refuse it, and unavailable usage SHALL refuse removal instead of reporting an unused key.
+Domain removal SHALL count page `domain` and `topics` fields, home topic selectors, and replacement references.
+Scalar-domain display counts alone SHALL NOT establish that a domain is unused.
 No revert SHALL land on `triage_memory` or `connect_memory`.
 A revert SHALL NOT restore an older registry version or drop a later save.
 A revert SHALL run only on the user's request, which is its confirmation, and history and logs SHALL keep both the promotion and its revert.
@@ -120,7 +111,7 @@ A revert SHALL run only on the user's request, which is its confirmation, and hi
 
 #### Scenario: A removal by another route settles the entry
 
-- **WHEN** the promoted edge is removed through an `edit_memory` `remove_relation` operation rather than the revert call
+- **WHEN** the promoted edge is removed by an ordinary edit of the page rather than the revert call
 - **THEN** the entry settles because the edge is absent
 
 #### Scenario: A used type is deprecated, not removed

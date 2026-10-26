@@ -31,6 +31,7 @@ from .vault import (
 )
 from .vault import content_hash as text_content_hash
 
+# nosemgrep: ep-word-set -- maintain_memory defines these closed curation action tokens.
 CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "work-item",
     "propose",
@@ -40,6 +41,8 @@ CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "resume",
     "propose-compensation",
     "apply-compensation",
+    # Reverts one recent promotion in one call (`promotion_revert.py`).
+    "revert",
 )
 READ_ONLY_ACTIONS: Final[frozenset[str]] = frozenset({"work-item", "preview", "status"})
 STEP_KINDS: Final[tuple[str, ...]] = (
@@ -63,10 +66,17 @@ STEP_KINDS: Final[tuple[str, ...]] = (
 RECORDS_STEP_KIND: Final[str] = "append-record"
 RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
 OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
+#: The revert leaf of `recent_promotions` (promote-referents-without-nudges 2.6):
+#: remove the bullets of one typed edge, keyed by subject page, predicate and
+#: target. It is internal. No public plan admits it (`STEP_KINDS` lacks it), no
+#: tool operation names it, and it takes no hash, so an unrelated concurrent edit
+#: of the page survives. Only a plan the promotion revert seals may carry it.
+REMOVE_RELATION_STEP_KIND: Final[str] = "remove-relation"
 #: The receipt outcomes that record a committed leaf; a `failed` receipt records none.
 # nosemgrep: ep-word-set -- the closed receipt outcomes this module writes and reconstructs.
 COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
-# The compatibility flag `allow_records` admits only episode-owned private leaves.
+# The compatibility flag `allow_records` admits only the private leaves: the episode leaves here,
+# and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
 _EPISODE_STEP_KINDS = RECORDS_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
 MAX_STEPS: Final[int] = 64
 MAX_PLAN_BYTES: Final[int] = 256 * 1024
@@ -160,9 +170,13 @@ _CREATE_ENTITY_FIELDS = frozenset(
         "identity_decision",
         "facets",
         "relations",
+        "aliases",
+        "registry_scope",
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})
+# nosemgrep: ep-word-set -- remove_relation defines these closed request fields.
+_REMOVE_RELATION_FIELDS = frozenset({"subject", "predicate", "target", "why"})
 _APPEND_RECORD_FIELDS = frozenset(
     {"collection", "item", "item_key", "body", "why", "expected_container_hash"}
 )
@@ -228,6 +242,8 @@ _ARG_FIELDS = {
     "accept-relation": _ACCEPT_RELATION_FIELDS,
     "edit": _EDIT_FIELDS,
     OBSERVE_UNIT_STEP_KIND: _OBSERVE_UNIT_FIELDS,
+    # The private undo protocol adds one optional binding, with no new required field.
+    REMOVE_RELATION_STEP_KIND: _REMOVE_RELATION_FIELDS | {"_promotion"},
     "supersede": _SUPERSEDE_FIELDS,
     "move": _MOVE_FIELDS,
     "delete": _DELETE_FIELDS,
@@ -241,6 +257,7 @@ _REQUIRED_FIELDS = {
     "accept-relation": _ACCEPT_RELATION_FIELDS,
     "edit": _EDIT_FIELDS,
     OBSERVE_UNIT_STEP_KIND: _OBSERVE_UNIT_FIELDS,
+    REMOVE_RELATION_STEP_KIND: _REMOVE_RELATION_FIELDS,
     "supersede": frozenset({"old_path", "content", "title"}),
     "move": frozenset({"old_path", "new_path"}),
     "delete": frozenset({"path", "confirm"}),
@@ -458,6 +475,8 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
     elif kind == "create-entity":
         for field in ("entity_type", "name", "summary"):
             _require_string(args.get(field), f"steps[{ordinal}].args.{field}")
+        if "registry_scope" in args:
+            _require_string(args["registry_scope"], f"steps[{ordinal}].args.registry_scope")
     elif kind == "accept-relation":
         for field in _ACCEPT_RELATION_FIELDS:
             _require_string(args.get(field), f"steps[{ordinal}].args.{field}")
@@ -481,6 +500,15 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         if not isinstance(expected_hash, str) or not _HEX64.fullmatch(expected_hash):
             raise _error("INVALID_CURATION_PLAN", "edit requires the reviewed expected_hash")
         args["operation"] = normalized_operation
+    elif kind == REMOVE_RELATION_STEP_KIND:
+        if "_promotion" in args:
+            from . import promotion_proof
+
+            args["_promotion"] = promotion_proof.metadata(args["_promotion"])
+        args["subject"] = normalize_target_path(args.get("subject"), field="subject")
+        args["target"] = normalize_target_path(args.get("target"), field="target")
+        _require_string(args.get("predicate"), f"steps[{ordinal}].args.predicate", max_chars=200)
+        _require_string(args.get("why"), f"steps[{ordinal}].args.why", max_chars=MAX_WHY_CHARS)
     elif kind == OBSERVE_UNIT_STEP_KIND:
         args["path"] = normalize_target_path(args.get("path"), field="path")
         _require_string(args.get("why"), f"steps[{ordinal}].args.why", max_chars=MAX_WHY_CHARS)
@@ -669,8 +697,13 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
 
 def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str, Any]:
     """A closed forward plan. The compatibility flag `allow_records` admits
-    private episode leaves; only the episode seal and sealed plans pass it."""
-    kinds = (*STEP_KINDS, *_EPISODE_STEP_KINDS) if allow_records else STEP_KINDS
+    the private leaves (the episode leaves and the promotion revert's
+    `remove-relation`); only their sealers and sealed plans pass it."""
+    kinds = (
+        (*STEP_KINDS, *_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND)
+        if allow_records
+        else STEP_KINDS
+    )
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
     value = dict(raw)
@@ -756,6 +789,49 @@ def _optional_model_call(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
+def _step_instances(vault_root: Path, plan: Mapping[str, Any]) -> list[str]:
+    """The private instances the plan's create-entity steps select, as `link` selects them."""
+    from . import link as link_module
+    from .vocabulary.registry import RegistryError
+
+    found: set[str] = set()
+    for step in plan.get("steps") or ():
+        if step.get("kind") != "create-entity":
+            continue
+        args = step["args"]
+        try:
+            scope = link_module.entity_instance(
+                vault_root,
+                project=args.get("project"),
+                tags=args.get("tags"),
+                registry_scope=args.get("registry_scope"),
+            )
+        except RegistryError:
+            # The step's own preparation refuses it; no instance is bound for it here.
+            continue
+        if scope is not None:
+            found.add(scope)
+    return sorted(found)
+
+
+def _instance_identity(vault_root: Path, scope: str) -> str:
+    from . import entity_types, relation_registry
+    from .vocabulary.registry import RegistryError
+
+    try:
+        entities = entity_types.load_entity_types(vault_root, registry_scope=scope)
+        relations = relation_registry.load_registry(vault_root, registry_scope=scope)
+    except RegistryError:
+        # A caller who cannot admit the instance gets one answer, never its definitions.
+        return _digest({"scope": scope, "available": False})
+    return _digest(
+        {
+            "entities": [entities.core_version, entities.extension_hash],
+            "relations": [relations.core_version, relations.extension_hash],
+        }
+    )
+
+
 def registry_identities(vault_root: Path) -> dict[str, str]:
     """Return deterministic identities for registries that affect executability."""
     from . import entity_types, relation_registry
@@ -788,6 +864,17 @@ def registry_identities(vault_root: Path) -> dict[str, str]:
             {"core_version": relations.core_version, "extension_hash": relations.extension_hash}
         ),
         "schemas": _digest(schema_rows),
+    }
+
+
+def plan_registry_identities(vault_root: Path, plan: Mapping[str, Any]) -> dict[str, str]:
+    """The public registry identities plus one per private instance the plan's steps select."""
+    return {
+        **registry_identities(vault_root),
+        **{
+            f"instance@{scope}": _instance_identity(vault_root, scope)
+            for scope in _step_instances(Path(vault_root), plan)
+        },
     }
 
 
@@ -1277,6 +1364,24 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             after_hash = semantic.get("after_hash")
             effect_before = [{"path": path, "content_hash": before_hash}]
             effect_after = [{"path": path, "content_hash": after_hash}]
+        elif kind == REMOVE_RELATION_STEP_KIND:
+            from . import promotions
+
+            path = args["subject"]
+            # A withheld subject answers exactly as a missing one.
+            if not promotions.page_visible(vault_root, path):
+                raise _error("CURATION_BINDING_STALE", f"target {path!r} is unavailable")
+            _source, page_hash = _read_target(vault_root, path)
+            if not promotions.edge_present(vault_root, path, args["predicate"], args["target"]):
+                raise _error("CURATION_RELATION_ABSENT", f"no {args['predicate']!r} edge on {path!r}")
+            # No hash binds this step: a concurrent edit of another part of the page survives. The
+            # page hash rides in `prepared` for the plan fingerprint only, so the revert the user
+            # saw is the revert that runs.
+            prepared = {"page_hash": page_hash}
+            before_hash = None
+            after_hash = None
+            effect_before = []
+            effect_after = [{"path": path, "exists": True}]
         elif kind == OBSERVE_UNIT_STEP_KIND:
             path = args["path"]
             preimage, before_hash = _read_target(vault_root, path)
@@ -1655,7 +1760,7 @@ def seal_proposal(
             holder_kind="command",
         )
     ):
-        blockers = _binding_blockers(root, sealed, registry_identities(root))
+        blockers = _binding_blockers(root, sealed, plan_registry_identities(root, sealed))
         if blockers:
             raise _error(blockers[0]["code"], blockers[0]["reason"])
         return CurationStore(root).create_forward(
@@ -1672,10 +1777,10 @@ def prepare_proposal(
     """Every check `propose` makes, without sealing anything. Read-only, so a
     caller preparing several plans can refuse them all before sealing one."""
     root = Path(vault_root)
-    # Captured before anything is read, so a registry change during preparation
-    # differs from the seal-time recheck instead of being absorbed into the plan.
-    registry_ids = registry_identities(root)
     validated = validate_forward_plan(plan, allow_records=allow_records)
+    # Captured before any step is prepared, so a registry change during preparation
+    # differs from the seal-time recheck instead of being absorbed into the plan.
+    registry_ids = plan_registry_identities(root, validated)
     # Candidate identity and state are re-read before any plan artifact is
     # published.  A stale review must not leave an inert but misleading plan in
     # the governed run store.
@@ -1882,7 +1987,7 @@ def preview(
     store = CurationStore(root)
     plan = store.load_plan(run_id)
     identity, fingerprint = store.identities(run_id)
-    blockers = _binding_blockers(root, plan, registry_identities(root), keep=keep)
+    blockers = _binding_blockers(root, plan, plan_registry_identities(root, plan), keep=keep)
     if (
         isinstance(plan.get("entity_candidate"), Mapping)
         and not _committed_step_ids(store.reconstruct(run_id))
@@ -1926,6 +2031,8 @@ def compensation_kind(kind: str) -> str:
         RECORDS_STEP_KIND: "unavailable",
         "update-record": "unavailable",
         OBSERVE_UNIT_STEP_KIND: "unavailable",
+        # Authoring the edge again is a new write and a new promotion, never a rollback.
+        REMOVE_RELATION_STEP_KIND: "unavailable",
     }[kind]
 
 
@@ -1995,6 +2102,7 @@ def _witness_basis(
         RECORDS_STEP_KIND: "record_memory:append",
         "update-record": "record_memory:update",
         OBSERVE_UNIT_STEP_KIND: "observe_memory:update",
+        REMOVE_RELATION_STEP_KIND: "edit_memory:remove-relation",
     }[step["kind"]]
     return {
         "version": 1,
@@ -2486,6 +2594,10 @@ def _dispatch_step(
         return commands.op_edit_memory(
             vault_root, path=args["path"], why=args["why"], operation=operation
         )
+    if kind == REMOVE_RELATION_STEP_KIND:
+        from . import promotion_revert
+
+        return promotion_revert.remove_relation(vault_root, **args)
     if kind == OBSERVE_UNIT_STEP_KIND:
         return commands.op_observe_memory(
             vault_root, path=args["path"], operation="update", reason=args["why"],
@@ -2722,7 +2834,7 @@ def _blockers_for_uncommitted(
         except CurationError as error:
             return [{"code": error.code, "reason": error.reason}]
     return _binding_blockers(
-        vault_root, _uncommitted_plan(plan, committed), registry_identities(vault_root)
+        vault_root, _uncommitted_plan(plan, committed), plan_registry_identities(vault_root, plan)
     )
 
 
@@ -4168,6 +4280,11 @@ def _compensation_args(
         raise _error(
             "CURATION_COMPENSATION_UNAVAILABLE",
             "a prior unit interpretation remains history; a later guarded update corrects it",
+        )
+    if kind == REMOVE_RELATION_STEP_KIND:
+        raise _error(
+            "CURATION_COMPENSATION_UNAVAILABLE",
+            "a removed edge is authored again as a new write, which is a new promotion",
         )
     effect = dict(receipt.get("effect") or {})
     if kind in {"create-note", "create-entity"}:

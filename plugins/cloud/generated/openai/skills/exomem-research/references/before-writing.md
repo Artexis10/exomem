@@ -50,9 +50,9 @@ reviewed snapshot through
 Its decision carries the item fingerprint, family, registry hashes, target
 versions, outcome, rationale, and canonical `choice`; it is not execution or permission.
 `generic, no-edge, or defer` are valid truthful outcomes. A proposed
-new identity still uses its family's canonical writer, and all existing
-confirmation rules remain in force: v1 has no scoped delegation or automatic
-vocabulary write.
+new identity still uses its family's canonical writer. Follow the live envelope's
+`promotion_classes` and disposition for that write; a vocabulary decision grants
+no extra authority. v1 has no standing restructure delegation.
 
 Bind that supported canonical write with `vocabulary_ref` and
 `vocabulary_fingerprint`, and keep one transport idempotency identity across

@@ -100,6 +100,7 @@ def delete_file(
     today: dt.date | None = None,
     now: dt.datetime | None = None,
     validate_only: bool = False,
+    expected_hash: str | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
     if not confirm:
         raise DeleteFileError(
@@ -178,11 +179,14 @@ def delete_file(
     fm: dict = {}
     fm_warn: str | None = None
     catalog_before_hash: str | None = None
+    # The page as it stood, so the Sources it cited are re-judged once it is gone.
+    prior_markdown: str | None = None
     if rel_path.lower().endswith(".md"):
         try:
             snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
             catalog_before_hash = hashlib.sha256(snapshot.data).hexdigest()
             text = snapshot.data.decode("utf-8")
+            prior_markdown = text
             fm, _, _ = parse_frontmatter(text)
             if fm.get("superseded_by") and not force_superseded:
                 raise DeleteFileError(
@@ -359,6 +363,8 @@ def delete_file(
             raise DeleteFileError(
                 "DELETE_FAILED", "delete source changed during canonical validation"
             ) from error
+        if expected_hash is not None and source_hash != expected_hash:
+            raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
         return DeleteFileValidation(
             DeleteFileResult(
                 path=rel_path,
@@ -445,6 +451,14 @@ def delete_file(
         ) from error
     lifecycle_operation = transition.operation
 
+    # A preview of one object cannot authorize deleting a replacement; rename rechecks this manifest.
+    if expected_hash is not None and not any(
+        item.source_path == rel_path and item.content_hash == expected_hash
+        for item in lifecycle_operation.manifest
+    ):
+        transition.abort()
+        raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
+
     # A removed CLIP-relevant media binary (image/video — the only kinds with
     # derived-index residue: CLIP rows, and for a video, scene-frame children)
     # also drops its scene-frame sidecar children (if any) via the same
@@ -510,6 +524,13 @@ def delete_file(
     from .writer_lease import mark_active_mutation_committed
 
     mark_active_mutation_committed()
+
+    if prior_markdown is not None:
+        from . import due_state
+
+        due_state.refresh_after_writes(
+            vault_root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
+        )
 
     # Drop Markdown rows from the semantic index sidecars. A removed media
     # binary (detected via media_types) also enters the fan-out — it purges

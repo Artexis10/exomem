@@ -470,7 +470,7 @@ def test_real_dispatcher_read_audit_and_checkpoint_are_separate_from_plan_and_pr
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True, exist_ok=True)
     env = seeding_env(dict(os.environ), slot, spec)
-    env["EXOMEM_MCP_TOOL_SHAPE"] = "grouped"
+    env["EXOMEM_MCP_TOOL_SHAPE"] = "nested"
     slot.turn_file.write_text("0")
     # Persist an existing synthetic credential sample, so this boundary proof survives unrelated URI repairs.
     injected = subprocess.run([sys.executable, "-c", """
@@ -675,7 +675,7 @@ def test_retained_failed_media_fixture_survives_recorded_status_without_starting
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True, exist_ok=True)
     env = seeding_env(dict(os.environ), slot, spec)
-    env["EXOMEM_MCP_TOOL_SHAPE"] = "grouped"
+    env["EXOMEM_MCP_TOOL_SHAPE"] = "nested"
     slot.turn_file.write_text("0")
     before = snapshot_slot(slot, env, tmp_path / "before.json")
     admit_fixture(case.params, before)

@@ -76,7 +76,7 @@
     }
   },
   "browse_memory": {
-    "description": "Browse folders, list files or trash, or preview file reclassification without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: browse_memory create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Browse folders, list files or trash, or preview file reclassification without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: browse_memory create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -520,368 +520,6 @@
       "type": "object"
     }
   },
-  "change_adoption": {
-    "description": "Save an adoption report, import selected originals or manage a collection adoption run. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage. Originals remain unchanged. Select one operation.kind.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "operation": {
-          "description": "One operation, selected by `kind`.",
-          "oneOf": [
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "save-manifest",
-                  "type": "string"
-                },
-                "path": {
-                  "description": "Subtree.",
-                  "type": "string",
-                  "default": ""
-                },
-                "max_depth": {},
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "samples": {},
-                "pack_limit": {},
-                "manifest_path": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "kind"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "copy-as-sources",
-                  "type": "string"
-                },
-                "path": {
-                  "description": "Subtree.",
-                  "type": "string",
-                  "default": ""
-                },
-                "max_depth": {},
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "samples": {},
-                "pack_limit": {},
-                "selected_paths": {}
-              },
-              "required": [
-                "kind",
-                "selected_paths"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "compile-selected",
-                  "type": "string"
-                },
-                "path": {
-                  "description": "Subtree.",
-                  "type": "string",
-                  "default": ""
-                },
-                "max_depth": {},
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "samples": {},
-                "pack_limit": {},
-                "selected_paths": {}
-              },
-              "required": [
-                "kind",
-                "selected_paths"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "start",
-                  "type": "string"
-                },
-                "path": {
-                  "description": "For `start`, subtree to scan (default: vault root).",
-                  "type": "string",
-                  "default": ""
-                },
-                "include_hidden": {
-                  "description": "For `start`, include hidden files.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "initialize_kb": {
-                  "description": "For `start`, bootstrap a missing Knowledge Base (otherwise KB_NOT_INITIALIZED).",
-                  "type": "boolean",
-                  "default": false
-                },
-                "collection": {
-                  "type": "string",
-                  "description": "For `start`, a name kept across re-imports."
-                }
-              },
-              "required": [
-                "kind"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "select",
-                  "type": "string"
-                },
-                "run_id": {},
-                "include": {
-                  "items": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "additionalProperties": {
-                          "type": "string"
-                        },
-                        "type": "object"
-                      }
-                    ]
-                  },
-                  "type": "array",
-                  "description": "For `select`, paths whose files are selected, or {path, source_kind, domain} to file a folder under registered keys."
-                },
-                "exclude": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "For `select`, paths to deselect."
-                },
-                "overrides": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "For `select`, files to force-select."
-                },
-                "include_junk": {
-                  "description": "For `select`, include demoted junk files.",
-                  "type": "boolean",
-                  "default": false
-                }
-              },
-              "required": [
-                "kind",
-                "run_id"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "plan",
-                  "type": "string"
-                },
-                "run_id": {},
-                "continuation": {}
-              },
-              "required": [
-                "kind",
-                "run_id"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "apply",
-                  "type": "string"
-                },
-                "run_id": {},
-                "plan_id": {
-                  "description": "For `apply`, from `plan`/`status`; a mismatch or changed selection refuses with PLAN_STALE.",
-                  "type": "string"
-                },
-                "continuation": {},
-                "retry_failed": {
-                  "description": "For `apply`, re-apply only failures.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "only_paths": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "For `apply`, restrict to these originals."
-                }
-              },
-              "required": [
-                "kind",
-                "run_id",
-                "plan_id"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "cancel",
-                  "type": "string"
-                },
-                "run_id": {},
-                "why": {}
-              },
-              "required": [
-                "kind",
-                "run_id"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "finish",
-                  "type": "string"
-                },
-                "run_id": {},
-                "write_manifest": {
-                  "type": "boolean",
-                  "default": true
-                }
-              },
-              "required": [
-                "kind",
-                "run_id"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "propose",
-                  "type": "string"
-                },
-                "run_id": {},
-                "proposals": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "run_id"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "apply-proposal",
-                  "type": "string"
-                },
-                "why": {},
-                "ref": {
-                  "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` ref.",
-                  "type": "string"
-                },
-                "expected_fingerprint": {
-                  "description": "For `apply-proposal`, the reviewed fingerprint; a mismatch refuses.",
-                  "type": "string"
-                },
-                "expected_hash": {
-                  "type": "string",
-                  "description": "For `apply-proposal`, target page hash for relation and reconciliation-relate approvals."
-                }
-              },
-              "required": [
-                "kind",
-                "why",
-                "ref",
-                "expected_fingerprint"
-              ],
-              "additionalProperties": false
-            }
-          ],
-          "discriminator": {
-            "propertyName": "kind"
-          },
-          "properties": {
-            "max_depth": {
-              "type": "integer",
-              "default": 3
-            },
-            "samples": {
-              "type": "integer",
-              "default": 5
-            },
-            "pack_limit": {
-              "type": "integer",
-              "default": 6
-            },
-            "selected_paths": {
-              "description": "Files for copy/compile.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "run_id": {
-              "description": "From `start`; required except for `start` and run-listing `status`.",
-              "type": "string"
-            },
-            "continuation": {
-              "type": "string",
-              "description": "For `plan` and `apply`, from the previous result."
-            },
-            "why": {
-              "type": "string",
-              "description": "Required for `apply-proposal`; also the `cancel` reason."
-            }
-          }
-        },
-        "response_detail": {
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string",
-          "default": "compact"
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "additionalProperties": false
-    }
-  },
   "change_connections": {
     "description": "Create a governed entity or accept a reviewed relation using current fingerprints. Select one operation.kind.",
     "inputSchema": {
@@ -1091,7 +729,7 @@
     }
   },
   "change_files": {
-    "description": "Create, append, move, delete, recover or reclassify governed files. Preview reclassification through browse_memory. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Create, append, move, delete, recover or reclassify governed files. Preview reclassification through browse_memory. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1741,7 +1379,7 @@
     }
   },
   "change_observations": {
-    "description": "Add, update or remove a semantic unit with the existing review and fingerprint guards. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Add, update or remove a semantic unit with the existing review and fingerprint guards. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2550,7 +2188,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -2561,6 +2199,7 @@
                         "statuses",
                         "planning-values",
                         "note-types",
+                        "homes",
                         "sync-providers"
                       ]
                     },
@@ -2588,7 +2227,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
@@ -2628,7 +2267,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -2639,6 +2278,7 @@
                         "statuses",
                         "planning-values",
                         "note-types",
+                        "homes",
                         "sync-providers"
                       ]
                     },
@@ -2663,7 +2303,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
@@ -2706,7 +2346,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -2748,7 +2388,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "default": "contract"
                     },
@@ -2847,7 +2487,7 @@
                 },
                 "name": {},
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "workflow-contracts"
@@ -2873,7 +2513,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "context-roles"
@@ -2900,7 +2540,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "activation-conventions"
@@ -2927,7 +2567,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "relations"
@@ -2955,7 +2595,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "default": "contract"
                 },
@@ -3774,7 +3414,7 @@
     }
   },
   "create_note": {
-    "description": "Save a durable conclusion as compiled knowledge.\n\nDistill decisions, findings, failures, patterns, experiments and production logs.\nRaw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Save a durable conclusion as compiled knowledge.\n\nDistill decisions, findings, failures, patterns, experiments and production logs.\nRaw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3977,7 +3617,7 @@
     }
   },
   "edit_note": {
-    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use supersede_note.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\nAuthor typed relations under `## Relations`, for example\n`- supports [[Knowledge Base/Notes/Research/example-target]]`.\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use supersede_note.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\nAuthor typed relations under `## Relations`, for example\n`- supports [[Knowledge Base/Notes/Research/example-target]]`.\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4477,6 +4117,368 @@
       "additionalProperties": false
     }
   },
+  "import_memory": {
+    "description": "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage. Select one operation.kind.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "save-manifest",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {},
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {},
+                "pack_limit": {},
+                "manifest_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "copy-as-sources",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {},
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {},
+                "pack_limit": {},
+                "selected_paths": {}
+              },
+              "required": [
+                "kind",
+                "selected_paths"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "compile-selected",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {},
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {},
+                "pack_limit": {},
+                "selected_paths": {}
+              },
+              "required": [
+                "kind",
+                "selected_paths"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "start",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "For `start`, subtree to scan (default: vault root).",
+                  "type": "string",
+                  "default": ""
+                },
+                "include_hidden": {
+                  "description": "For `start`, include hidden files.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "initialize_kb": {
+                  "description": "For `start`, bootstrap a missing Knowledge Base.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "collection": {
+                  "type": "string",
+                  "description": "For `start`, a name kept across re-imports."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "select",
+                  "type": "string"
+                },
+                "run_id": {},
+                "include": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "array",
+                  "description": "For `select`, paths whose files are selected, or {path, source_kind?, domain?} to file a folder under registered keys, or {path, adopt_as: note, note_type, project?, domain?} for a draft note of each Markdown file."
+                },
+                "exclude": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `select`, paths to deselect."
+                },
+                "overrides": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `select`, files to force-select."
+                },
+                "include_junk": {
+                  "description": "For `select`, include demoted junk files.",
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "plan",
+                  "type": "string"
+                },
+                "run_id": {},
+                "continuation": {}
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "apply",
+                  "type": "string"
+                },
+                "run_id": {},
+                "plan_id": {
+                  "description": "For `apply`, from `plan`/`status`.",
+                  "type": "string"
+                },
+                "continuation": {},
+                "retry_failed": {
+                  "description": "For `apply`, re-apply only failures.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "only_paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `apply`, restrict to these originals."
+                }
+              },
+              "required": [
+                "kind",
+                "run_id",
+                "plan_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "cancel",
+                  "type": "string"
+                },
+                "run_id": {},
+                "why": {}
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "finish",
+                  "type": "string"
+                },
+                "run_id": {},
+                "write_manifest": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "propose",
+                  "type": "string"
+                },
+                "run_id": {},
+                "proposals": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "apply-proposal",
+                  "type": "string"
+                },
+                "why": {},
+                "ref": {
+                  "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` ref.",
+                  "type": "string"
+                },
+                "expected_fingerprint": {
+                  "description": "For `apply-proposal`, the reviewed fingerprint.",
+                  "type": "string"
+                },
+                "expected_hash": {
+                  "type": "string",
+                  "description": "For `apply-proposal`, target page hash for relation and reconciliation-relate approvals."
+                }
+              },
+              "required": [
+                "kind",
+                "why",
+                "ref",
+                "expected_fingerprint"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "default": 3
+            },
+            "samples": {
+              "type": "integer",
+              "default": 5
+            },
+            "pack_limit": {
+              "type": "integer",
+              "default": 6
+            },
+            "selected_paths": {
+              "description": "Files for copy/compile.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "run_id": {
+              "description": "From `start`; required except for `start` and run-listing `status`.",
+              "type": "string"
+            },
+            "continuation": {
+              "type": "string",
+              "description": "For `plan` and `apply`, from the previous result."
+            },
+            "why": {
+              "type": "string",
+              "description": "Required for `apply-proposal`; also the `cancel` reason."
+            }
+          }
+        },
+        "response_detail": {
+          "description": "Success detail: compact (default), full, or legacy.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string",
+          "default": "compact"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
+    }
+  },
   "manage_authorization_session": {
     "description": "Open, inspect, rotate or close an authorization session. Open forbids a credential; other operations require one. Session status remains write-classified. Select one operation.kind.",
     "inputSchema": {
@@ -4609,7 +4611,7 @@
     }
   },
   "prepare_note": {
-    "description": "Prepare a sourced compilation draft or validate an observation without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Prepare a sourced compilation draft or validate an observation without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -4917,122 +4919,6 @@
         "content"
       ],
       "type": "object"
-    }
-  },
-  "read_adoption": {
-    "description": "Scan existing material without importing it, inspect adoption runs or read a bounded work item. Status retains recorded coverage and verification counts. Select one operation.kind.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "operation": {
-          "description": "One operation, selected by `kind`.",
-          "oneOf": [
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "scan-only",
-                  "type": "string"
-                },
-                "path": {
-                  "description": "Subtree.",
-                  "type": "string",
-                  "default": ""
-                },
-                "max_depth": {
-                  "type": "integer",
-                  "default": 3
-                },
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "samples": {
-                  "type": "integer",
-                  "default": 5
-                },
-                "pack_limit": {
-                  "type": "integer",
-                  "default": 6
-                },
-                "semantic_max_files": {
-                  "type": "integer",
-                  "default": 512
-                },
-                "semantic_max_bytes": {
-                  "type": "integer",
-                  "default": 8388608
-                },
-                "semantic_example_limit": {
-                  "type": "integer",
-                  "default": 12
-                }
-              },
-              "required": [
-                "kind"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "status",
-                  "type": "string"
-                },
-                "run_id": {}
-              },
-              "required": [
-                "kind"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "work-item",
-                  "type": "string"
-                },
-                "run_id": {},
-                "sources": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "For `work-item`, source paths instead of the first imports."
-                },
-                "max_sources": {
-                  "type": "integer",
-                  "default": 5
-                },
-                "max_chars_per_source": {
-                  "type": "integer",
-                  "default": 2000
-                }
-              },
-              "required": [
-                "kind",
-                "run_id"
-              ],
-              "additionalProperties": false
-            }
-          ],
-          "discriminator": {
-            "propertyName": "kind"
-          },
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "From `start`; required except for `start` and run-listing `status`."
-            }
-          }
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "additionalProperties": false
     }
   },
   "read_connections": {
@@ -5488,6 +5374,122 @@
             "vocabulary_request_id": {
               "type": "string",
               "description": "Pending additive request id (inspect via vocabulary-request)."
+            }
+          }
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "read_import": {
+    "description": "Scan existing material without importing it, inspect import runs or read a bounded work item. Stage external folders with the CLI import command first. Status retains recorded coverage and verification counts. Select one operation.kind.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "scan-only",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {
+                  "type": "integer",
+                  "default": 3
+                },
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "pack_limit": {
+                  "type": "integer",
+                  "default": 6
+                },
+                "semantic_max_files": {
+                  "type": "integer",
+                  "default": 512
+                },
+                "semantic_max_bytes": {
+                  "type": "integer",
+                  "default": 8388608
+                },
+                "semantic_example_limit": {
+                  "type": "integer",
+                  "default": 12
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "status",
+                  "type": "string"
+                },
+                "run_id": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "work-item",
+                  "type": "string"
+                },
+                "run_id": {},
+                "sources": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `work-item`, source paths instead of the first imports."
+                },
+                "max_sources": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "max_chars_per_source": {
+                  "type": "integer",
+                  "default": 2000
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "description": "From `start`; required except for `start` and run-listing `status`."
             }
           }
         }
@@ -6342,7 +6344,7 @@
                 },
                 "path": {
                   "type": "string",
-                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
+                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused); for vocabulary, the page the question concerns."
                 }
               },
               "required": [
@@ -6365,7 +6367,7 @@
                 },
                 "path": {
                   "type": "string",
-                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
+                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused); for vocabulary, the page the question concerns."
                 }
               },
               "required": [
@@ -6522,7 +6524,7 @@
                 "limit": {},
                 "path": {
                   "type": "string",
-                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
+                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused); for vocabulary, the page the question concerns."
                 }
               },
               "required": [
@@ -6567,7 +6569,7 @@
                   ]
                 },
                 "path": {
-                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns.",
+                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused); for vocabulary, the page the question concerns.",
                   "enum": [
                     null
                   ],
@@ -6575,7 +6577,7 @@
                 },
                 "state": {},
                 "family": {
-                  "description": "Vocabulary family for a meaning question; with `mode=\"vocabulary\"` requires `path` and `query`; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration.",
+                  "description": "Vocabulary family for a meaning question; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration.",
                   "enum": [
                     null
                   ],
@@ -6674,7 +6676,7 @@
     }
   },
   "read_schema": {
-    "description": "Inspect, validate or preview schemas and vocabulary contracts without saving changes. Select one operation.kind.",
+    "description": "Inspect schemas without saving changes. Use preview for a registry delta merged with its live overlay, including collision and cap checks. Pass proposal={\"upsert\":{\"<key>\":{...}}}. Use validate-document for a complete registry document. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -6701,7 +6703,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -6712,6 +6714,7 @@
                         "statuses",
                         "planning-values",
                         "note-types",
+                        "homes",
                         "sync-providers"
                       ]
                     },
@@ -6734,7 +6737,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
@@ -6757,7 +6760,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "query-engine"
@@ -6776,33 +6779,115 @@
               "type": "object",
               "properties": {
                 "kind": {
-                  "const": "propose",
+                  "const": "preview",
                   "type": "string"
-                },
-                "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
-                  "type": "string",
-                  "enum": [
-                    "entity-types",
-                    "relations",
-                    "source-kinds",
-                    "domains",
-                    "categories",
-                    "statuses",
-                    "planning-values",
-                    "note-types",
-                    "sync-providers"
-                  ]
-                },
-                "proposal": {},
-                "registry_scope": {}
+                }
               },
               "required": [
-                "kind",
-                "proposal",
-                "subject"
+                "kind"
               ],
-              "additionalProperties": false
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "preview",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "type": "string",
+                      "enum": [
+                        "entity-types",
+                        "relations",
+                        "source-kinds",
+                        "domains",
+                        "categories",
+                        "statuses",
+                        "planning-values",
+                        "note-types",
+                        "homes",
+                        "sync-providers"
+                      ]
+                    },
+                    "proposal": {
+                      "type": "object",
+                      "description": "A delta merged with the live registry overlay before validation. Use keyed upsert objects, not a complete registry document.",
+                      "properties": {
+                        "upsert": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "object"
+                          }
+                        },
+                        "alias": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "deprecate": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "remove": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "minProperties": 1,
+                      "additionalProperties": false
+                    },
+                    "registry_scope": {}
+                  },
+                  "required": [
+                    "kind",
+                    "proposal",
+                    "subject"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "preview",
+                      "type": "string"
+                    },
+                    "name": {},
+                    "subject": {
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "type": "string",
+                      "enum": [
+                        "workflow-contracts"
+                      ]
+                    },
+                    "proposal": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "proposal",
+                    "subject"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
             },
             {
               "type": "object",
@@ -6824,7 +6909,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -6835,6 +6920,7 @@
                         "statuses",
                         "planning-values",
                         "note-types",
+                        "homes",
                         "sync-providers"
                       ]
                     },
@@ -6854,7 +6940,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
@@ -6891,7 +6977,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -6909,7 +6995,9 @@
                     "expected_hash": {},
                     "strict": {},
                     "compare_to": {},
-                    "proposal": {},
+                    "proposal": {
+                      "type": "object"
+                    },
                     "why": {},
                     "include_model_suggestions": {},
                     "context": {},
@@ -6933,7 +7021,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "default": "contract"
                     },
@@ -6947,7 +7035,9 @@
                     "expected_hash": {},
                     "strict": {},
                     "compare_to": {},
-                    "proposal": {},
+                    "proposal": {
+                      "type": "object"
+                    },
                     "why": {},
                     "include_model_suggestions": {},
                     "context": {},
@@ -7043,7 +7133,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -7059,7 +7149,9 @@
                     "expected_hash": {},
                     "strict": {},
                     "compare_to": {},
-                    "proposal": {},
+                    "proposal": {
+                      "type": "object"
+                    },
                     "why": {},
                     "include_model_suggestions": {},
                     "context": {},
@@ -7083,11 +7175,9 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
-                        "categories",
-                        "relations",
                         "traversal-profiles"
                       ]
                     },
@@ -7101,7 +7191,9 @@
                     "expected_hash": {},
                     "strict": {},
                     "compare_to": {},
-                    "proposal": {},
+                    "proposal": {
+                      "type": "object"
+                    },
                     "why": {},
                     "include_model_suggestions": {},
                     "context": {},
@@ -7125,13 +7217,15 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
                       ]
                     },
-                    "proposal": {}
+                    "proposal": {
+                      "type": "object"
+                    }
                   },
                   "required": [
                     "kind",
@@ -7147,14 +7241,16 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
                         "activation-conventions"
                       ]
                     },
-                    "proposal": {}
+                    "proposal": {
+                      "type": "object"
+                    }
                   },
                   "required": [
                     "kind",
@@ -7185,7 +7281,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -7201,7 +7297,9 @@
                     "expected_hash": {},
                     "strict": {},
                     "compare_to": {},
-                    "proposal": {},
+                    "proposal": {
+                      "type": "object"
+                    },
                     "why": {},
                     "include_model_suggestions": {},
                     "context": {},
@@ -7225,7 +7323,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "categories",
@@ -7243,7 +7341,9 @@
                     "expected_hash": {},
                     "strict": {},
                     "compare_to": {},
-                    "proposal": {},
+                    "proposal": {
+                      "type": "object"
+                    },
                     "why": {},
                     "include_model_suggestions": {},
                     "context": {},
@@ -7266,14 +7366,16 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
                         "activation-conventions"
                       ]
                     },
-                    "proposal": {}
+                    "proposal": {
+                      "type": "object"
+                    }
                   },
                   "required": [
                     "kind",
@@ -7287,11 +7389,54 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "validate-document",
+                  "type": "string"
+                },
+                "name": {},
+                "subject": {
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "type": "string",
+                  "enum": [
+                    "categories",
+                    "relations"
+                  ]
+                },
+                "project": {},
+                "page_type": {},
+                "save": {
+                  "description": "Legacy inference flag; true is refused for workflow contracts.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "expected_hash": {},
+                "strict": {},
+                "compare_to": {},
+                "proposal": {
+                  "type": "object"
+                },
+                "why": {},
+                "include_model_suggestions": {},
+                "context": {},
+                "date_from": {},
+                "date_to": {},
+                "continuation": {},
+                "limit": {}
+              },
+              "required": [
+                "kind",
+                "subject"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "inventory",
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "workflow-contracts"
@@ -7313,13 +7458,15 @@
                 },
                 "name": {},
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "workflow-contracts"
                   ]
                 },
-                "proposal": {},
+                "proposal": {
+                  "type": "object"
+                },
                 "context": {}
               },
               "required": [
@@ -7333,35 +7480,11 @@
               "type": "object",
               "properties": {
                 "kind": {
-                  "const": "preview",
-                  "type": "string"
-                },
-                "name": {},
-                "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
-                  "type": "string",
-                  "enum": [
-                    "workflow-contracts"
-                  ]
-                },
-                "proposal": {}
-              },
-              "required": [
-                "kind",
-                "proposal",
-                "subject"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
                   "const": "resolve-entity-type",
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "entity-types"
@@ -7390,13 +7513,15 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "relations"
                   ]
                 },
-                "proposal": {},
+                "proposal": {
+                  "type": "object"
+                },
                 "date_from": {},
                 "date_to": {},
                 "continuation": {},
@@ -7417,7 +7542,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "relations"
@@ -7461,9 +7586,6 @@
             "name": {
               "description": "Saved workflow key.",
               "type": "string"
-            },
-            "proposal": {
-              "type": "object"
             },
             "project": {
               "type": "string",
@@ -8230,7 +8352,7 @@
     }
   },
   "supersede_note": {
-    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_note`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:a6978ee9249f3c3fac17339b9b92dc18be3c82e1206441725f6c2a750d984090]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_note`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -8472,7 +8594,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns.",
+                  "description": "Provenance scan path; for evolution it selects the path route (`query` unused); for vocabulary, the page the question concerns.",
                   "type": "string"
                 },
                 "ref": {
@@ -8480,7 +8602,7 @@
                   "description": "`exomem://review/<id>` for item mode (upkeep refs revalidate one item) or `exomem://write-advisory-result/<id>` for write-advisory-result; for a vocabulary relation question, a current relation-queue candidate ref alongside its source path."
                 },
                 "family": {
-                  "description": "Vocabulary family for a meaning question; with `mode=\"vocabulary\"` requires `path` and `query`; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration.",
+                  "description": "Vocabulary family for a meaning question; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration.",
                   "type": "string"
                 }
               },

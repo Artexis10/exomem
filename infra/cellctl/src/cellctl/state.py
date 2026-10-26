@@ -97,6 +97,16 @@ class CellRow:
     last_backup_snapshot: str | None = None
     backup_key_wrapped: bytes | None = None
     backup_key_version: int | None = None
+    cell_root_key_wrapped: bytes | None = None
+    cell_root_key_version: int | None = None
+    content_keys_retired_at: datetime | None = None
+    last_live_key_destroyed_at: datetime | None = None
+    key_retention_sources: str | None = None
+    keys_expire_at: datetime | None = None
+    custody_observation: str | None = None
+    relocation_target_storage_class: str | None = None
+    relocation_old_volume_id: str | None = None
+    relocation_accepted_at: datetime | None = None
     b2_key_id: str | None = None
     b2_key_wrapped: bytes | None = None
     b2_key_version: int | None = None
@@ -117,6 +127,7 @@ class CellRow:
     usage_observed_at: datetime | None = None
     # Read only: a cell never backed up ages its backup alert from here.
     created_at: datetime | None = None
+    import_limits: dict | None = None
 
     @property
     def size_gib(self) -> int:
@@ -166,6 +177,8 @@ class ClusterObservation:
     # Tasks 6.4 and 7.3: the operator's `exomem.io/move-volume` mark, naming
     # the volume a healthy cell is on, so the cell moves to a new claim.
     namespace_move_volume: str | None = None
+    namespace_move_storage_class: str | None = None
+    namespace_move_accepted_volume: str | None = None
 
     pvc_bound: bool = False
     pvc_volume_id: str | None = None

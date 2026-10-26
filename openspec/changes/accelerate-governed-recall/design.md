@@ -527,27 +527,42 @@ it with the current path on the reference corpus.
   their admitted hashes. A mismatch omits that evidence, marks coverage incomplete
   and prevents the partial selection from entering the shared result cache.
   Policy and semantic identity changes keep their existing refusal behavior.
-- **Unit lanes.** `_hydrate_indexed_unit_records` (`find.py:2188`) rebuilds each
-  candidate parent's unit state (`semantic_index.py:250`, `:189`), then resolves
-  its prose carriers through a governance policy load per parent
-  (`find_results.py:15`, `governance/egress.py:4342`, `governance/policy.py:1297`).
-  `search_semantic_units` stacks the candidate unit vectors on every query
-  (`embedding_index.py:1765`). The unit sidecar already holds the parent
-  generation and unit metadata for the current generation, the policy is one
-  snapshot per request, and the unit matrix is built once per generation.
-  The admitted branch of `search_semantic_units_result`
-  (`lexstore.py:7980-7989`) loads every admitted unit's stemmed text and
-  rebuilds the term frequencies on each call, with no cache. That is the
-  pattern #1649 removes for pages, so a restricted unit search pays for every
-  admitted unit on every query. It is old debt from the #1649 review, and
-  slice 6.6 computes those statistics once per catalogue generation and
-  admitted set.
+- **Unit lanes.** The shipped unit path already reuses the neutral matrix and
+  admitted lexical statistics by generation. It also retains parent reads for
+  selected hydration. Task 6.6 must preserve those mechanisms rather than add
+  another cache for the same work.
+
+  A hosted reference diagnostic window on 2026-10-25 recorded 3,250 exact
+  bridge snapshot reads and 3,524,084 filesystem name comparisons
+  ([run 40232728916](https://github.com/Artexis10/exomem/actions/runs/40232728916)).
+  These are application counts during that window, not proved foreground work.
+  Python 3.12.3's profiler uses interpreter-wide monitoring and can include
+  background audits. Its timings establish no latency gain or foreground cost.
+  Remaining admission work needs thread-qualified attribution before a repair.
+  Release decisions must still precede scoring and retain their policy, caller
+  and source dependencies.
 
   Mixed recall also freezes its combined page and unit slots before canonical
   hydration. Each lane retains its original collection limit and rank. Managed
   keyword groups provide their emitted page identities; non-reranked semantic
   recall uses its proved metadata prefix. The existing fusion weights and unit
   cap choose the combined pool. Only selected pages and unit parents are read.
+  Mixed demand is finite. An exhausted unit window need not degrade a complete
+  finite prefix when enough units survive the parent cap and every represented
+  parent has a complete admitted structural bound at or below that cap.
+  The represented set includes page-only results. A complete selected structure
+  proves this bound; the number of stored occurrence rows does not.
+
+  The unit lane retains its acquired ranking and actual exhaustion evidence.
+  Relation filtering still follows unit ranking, so it cannot change the admitted
+  BM25 corpus. Parent capping precedes finite selection. Exhaustive structured
+  acquisition keeps its existing path. Only candidate-window classification is
+  deferred until the mixed plan freezes, before canonical hydration.
+  An exhausted window with a larger or unproved represented parent remains
+  incomplete. Prefix counts cannot become exact positive truncation totals.
+  Complete acquisitions retain their existing exact counts. General positive
+  count proofs beyond an exhausted window remain deferred until vector coverage
+  and reference ownership can attest the actual scoring snapshot.
   Lost evidence leaves an empty slot; it cannot promote another rank or move a
   truncation annotation to another hit.
 
@@ -748,17 +763,63 @@ threshold, and compares work between two corpus sizes as ratios.
   page (decision 8). The BM25 and keyword step ratios pass, because their
   matched rows are the same at both sizes.
 
-**Paired comparison, full CI.** The `retrieval-latency` job runs on shared
-`ubuntu-latest` runners and feeds `gate` and release evidence, so it applies no
-absolute threshold.
+**Paired comparison, full CI.** The `recall-latency-paired` jobs run on shared
+`ubuntu-24.04` runners, one job per series of the case file, and feed `gate`
+and release evidence, so they apply no absolute threshold. They sample only the
+contract's `paired.principals`, today the owner: at today's latency both
+principals together need hours, and the admitted series does not gate yet.
 
 - *Arms.* Head and the pairing base, installed side by side in one job on one
   runner, against one reference corpus generated once, with the same cases. The
   pairing base is the most recent release tag. It is code only and moves
   automatically when Release Please tags a release. No vault data, live-cell
   result or box load moves it.
+- *Runtime dependencies.* Each arm uses its own source lock. Head runs in the
+  frozen benchmark environment. The tag gets an isolated runtime environment
+  from its frozen lock, without development groups. The summary records each
+  source lock digest and environment policy. A failed tag installation refuses
+  measurement; it never substitutes head's dependencies. The lock reader ignores
+  historical writer settings without changing the tagged lock.
 - *Order.* Each case runs in both arms back to back, three times per arm, and
   the arm that goes first alternates between cases.
+- *Measurement adapter.* Both arms use the same benchmark-owned wrappers
+  around the actual timing constructor and span boundaries. The wrappers
+  preserve class identity and run the original bodies. They retain private,
+  transient intervals for stage unions and CPU accounting, including the
+  existing due-state call spans. They change no authority, admission,
+  selection, egress or returned fields. Restricted public diagnostics stay
+  suppressed; the operator-owned synthetic harness reads its own collectors.
+- *Call boundary.* Each worker resolves `ask_memory` from its arm's command
+  registry and binds it through the existing `command_surface.bind_vault`.
+  It creates that callable before sampling and times the entire bound call.
+  This includes dispatcher ownership, terminal filtering, ownership completion,
+  disclosure receipts, response scrubbing and logging, plus the leaf's due-state
+  carrier. The in-process bound command excludes transport, authentication
+  middleware, FastMCP serialization and the live server's active-surface descriptor.
+  Historical leaf measurements keep their narrower boundary and cannot establish
+  this boundary's acceptance. The leaf and terminal filter retain their own
+  resolution scopes; the worker adds no outer placement or invocation lifetime.
+- *Warm preparation.* Under the existing preparation owner scope, the harness
+  calls `due_state.reconcile` synchronously before starting managed recall.
+  It verifies that `due_state.load` accepts the persisted projection, then
+  retains the existing managed catalogue admission and per-principal warm-up.
+  This completes the missing-projection audit before sampling. Normal TTL
+  refresh remains enabled. A failed preparation refuses measurement because
+  a cold fixture cannot prove warm latency; a false refusal costs one benchmark
+  rerun and never changes production admission.
+- *Unit attribution.* The unit-only path records selection as `semantic_units`
+  after computing admission. Nested eligibility spans keep their qualified names.
+  The mixed path retains its existing outer unit span. Generic `command.body`
+  work remains unbudgeted rather than being assigned to the unit row.
+- *Worker isolation.* The harness pauses only its inactive benchmark child,
+  outside sample timers, on the same CPU pair. It resumes the child for its
+  next sample and during cleanup. Each active arm retains its own native
+  thread policy, including any spin cost. Alternating order alone would not
+  remove interference from a resident inactive encoder pool.
+- *Legacy cache reset.* The adapter clears only the arm's result and
+  checkpoint maps under their existing lock. It never calls a legacy helper
+  that also clears parsed pages. This operation keeps the same reference
+  workload when the latest tag predates the result-only helper.
 - *Statistic.* Per case, the ratio of head's median elapsed time to the
   pairing base's. Per series, the geometric mean of those ratios with its 95%
   confidence interval, a t-interval on the log ratios.
@@ -784,7 +845,7 @@ Control justification:
 - *A wrong firing* comes only from runner noise, because both arms are code
   and run on one runner, one corpus and one case list. It turns the full run
   red, and the release evidence check stays red with it. The agent or operator
-  who drives the release pays: one rerun of the failed `retrieval-latency` job
+  who drives the release pays: one rerun of the failed `recall-latency-paired` job
   (`gh run rerun <run-id> --failed`) and a release delay of that job's
   duration. A green rerun clears it. No user and no pull request is gated, and
   vault data or the shared box's load cannot fire it.
@@ -1016,25 +1077,40 @@ it, and the timing table keeps one row per stage:
   `unattributed_ms` is `total_ms` less the union of the root-level intervals.
 - *Waiting on another branch.* The unit lanes' `vector.wait` interval is
   excluded from the unit-lane row, because time blocked on another branch's
-  result is not the stage's own. It is not reported as unbudgeted either: the
-  encode row already counts the time it waits on.
+  result is not the stage's own. It is not reported as unbudgeted work.
+  The waiting thread can resume after encoding ends, so the encode interval
+  does not necessarily cover the entire wait.
 - *Critical path.* Each request records its critical path: the stages that
-  ran one after another, plus the branch that ended last. Each row reports
-  the share of the series' requests in which its stage lay on the critical
-  path. A stage off the critical path still answers to its budget, because
-  its branch becomes the critical one when it overruns the other.
+  ran one after another, plus the branch that ended last. Explicit fork/join
+  contexts record each branch's complete lifetime, including gaps between
+  named stages. Structural contexts own no wall time, CPU or budget.
+  A selected branch contributes all its rows; tied branches both contribute.
+  Serial setup and response work remain on the path even when their thread
+  also ran the other branch. Thread identity and overlap windows alone do
+  not establish branch identity. Missing execution structure reports an
+  unknown path; the current serial producer declares its execution model.
+  Each row reports its path share over known samples and that sample count.
+  Unknown paths never become zero membership. A stage off the path still
+  answers to its budget, because its branch can become the longer one.
 - *CPU time.* The request's *overlap* is the time during which spans on two or
   more threads are open. A row's `cpu_ms` is the process CPU over the parts of
   its intervals outside the overlap, as decision 11 uses it. The process CPU
   over the overlap is reported once per request as `overlap_cpu_ms`, and no
-  row counts it. The process CPU over the part of `total_ms` that no
-  root-level interval covers is reported as `unattributed_cpu_ms`. No CPU is
-  split between threads: the pools that the encoder and NumPy drive run
-  native threads that no span opens, so an attribution per thread would be a
-  guess.
-- *CPU source.* The CPU fields read `/proc/self/task`, only while timing
-  diagnostics are on. On a platform without it, every CPU field reads
-  unknown, never 0, and the wall-time verdicts stand.
+  row counts it. Every remaining process CPU delta goes to its effective
+  row or `unattributed_cpu_ms`, including excluded waits inside a raw
+  container. The sum of row CPU, overlap CPU and unattributed CPU equals
+  request CPU. Raw interval coverage still defines `unattributed_ms`, so
+  that wall value can be zero while unattributed CPU is positive.
+  Structural fork/join contexts do not count as open work spans.
+  No CPU is split between threads: the encoder and NumPy pools run native
+  threads that no span opens, so that attribution would be a guess.
+- *CPU source.* CPU snapshots use `time.process_time_ns()`, the process-wide
+  user and system CPU clock that the call-span instrumentation already uses.
+  Sampling occurs at serialized interval boundaries while diagnostics are on.
+  The supported Linux profile also requires `/proc/self/task` for run-queue
+  diagnostics. Without that facility or the clock, CPU fields read unknown,
+  never 0, and the wall-time verdicts stand. Run-queue delay still comes from
+  the request thread's `schedstat`; it is a separate measured quantity.
 
 ## Risks / Trade-offs
 

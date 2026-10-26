@@ -93,7 +93,7 @@ def prepare_query_inputs(
     def encode(index: Any) -> PreparedQuery:
         identity = getattr(index, "identity", None)
         try:
-            with recall_space.encoding_for(index):
+            with _span(timings, "vector.embed"), recall_space.encoding_for(index):
                 vector = embeddings.embed_texts([query], is_query=True)[0]
             return PreparedQuery(index, identity, vector)
         except Exception as error:  # noqa: BLE001 - the existing lane classifies this failure.
@@ -1017,6 +1017,7 @@ def collect_candidates(
                             relation_type=neighbor.relation_type,
                             direction=neighbor.direction,
                             seed=neighbor.seed_rel,
+                            relation_label=neighbor.relation_label,
                         )
                     seen_target = set(typed_targets)
 

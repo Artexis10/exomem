@@ -345,7 +345,9 @@ def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
     nothing, so registering its real interval keeps the number honest without
     inventing clock noise, and the source says why it was free.
     """
-    with _span(timings, "filter_eligibility", source=find_types.SOURCE_CACHE, cache_hit=True):
+    with _span(
+        timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_CACHE, cache_hit=True
+    ):
         pass
 
 
@@ -1209,6 +1211,12 @@ class _MixedPlan:
     items: list[tuple[float, int, str, int, str]]
     omitted_by_parent: dict[str, int]
     truncation_targets: dict[str, tuple[int, str]]
+    unit_count: int
+
+
+@dataclass
+class _UnitCandidateWindow:
+    exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -1836,7 +1844,7 @@ def find(
         # base reads only the vault-scope set, so it never decides the other.
         if admit_path is None:
             return None
-        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+        with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
             return snapshot.admitted_paths(admission_scope, admit_path, page_of=_page_of)
 
     resolved_config = config if config is not None else _active_ranking()
@@ -1941,26 +1949,28 @@ def find(
                     return copy.deepcopy(cached_hits)
         if _cache_probe:
             return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
-        unit_hits = _find_semantic_units(
-            vault_root,
-            query=query,
-            limit=limit,
-            scope=walk_scope,
-            plan=filter_plan,
-            allowed_parent_paths=_admitted(walk_scope),
-            snapshot=snapshot,
-            prefer_active=prefer_active,
-            status_basis=status_basis,
-            config=resolved_config,
-            mode=mode,
-            degraded_out=degraded,
-            failed_out=failed,
-            retrieval_trace=retrieval_trace,
-            timings=timings,
-            prepared_queries=_prepared_queries,
-            parent_reads=unit_reads,
-            _defer_hydration=True,
-        )
+        unit_admitted = _admitted(walk_scope)
+        with _span(timings, "semantic_units"):
+            unit_hits = _find_semantic_units(
+                vault_root,
+                query=query,
+                limit=limit,
+                scope=walk_scope,
+                plan=filter_plan,
+                allowed_parent_paths=unit_admitted,
+                snapshot=snapshot,
+                prefer_active=prefer_active,
+                status_basis=status_basis,
+                config=resolved_config,
+                mode=mode,
+                degraded_out=degraded,
+                failed_out=failed,
+                retrieval_trace=retrieval_trace,
+                timings=timings,
+                prepared_queries=_prepared_queries,
+                parent_reads=unit_reads,
+                _defer_hydration=True,
+            )
         if relation_paths is not None:
             # A unit qualifies through its parent page (per-unit edge anchoring is
             # deferred); annotate the survivors with why the page participated.
@@ -2175,6 +2185,7 @@ def find(
     if _cache_probe:
         return _QueryPreparation(unit=mixed, page=True)
     mixed_unit_hits: list[SemanticUnitHit] = []
+    mixed_unit_window = _UnitCandidateWindow()
     if mixed:
         # Decided before the span: `filter_eligibility` is a top-level stage.
         unit_admitted = _admitted(walk_scope)
@@ -2198,6 +2209,7 @@ def find(
                 prepared_queries=_prepared_queries,
                 parent_reads=unit_reads,
                 _defer_hydration=True,
+                _candidate_window=mixed_unit_window,
             )
         if retrieval_trace is not None:
             retrieval_trace.snapshot_result_plan("unit")
@@ -2241,6 +2253,43 @@ def find(
     outside_selection = None
     selected_outside_hits: list[Hit] = []
 
+    def freeze_mixed_plan(page_paths: list[str]) -> _MixedPlan:
+        plan = _mixed_plan(page_paths, mixed_unit_hits, limit=limit, config=resolved_config)
+        if not mixed_unit_window.exhausted:
+            return plan
+        # A raw prefix cannot prove a positive cap-only omission count.
+        plan.omitted_by_parent.clear()
+        plan.truncation_targets.clear()
+        parents = {hit.unit_ref: hit.parent_path for hit in mixed_unit_hits}
+        represented = {
+            identity if priority == 0 else parents[identity]
+            for _score, priority, identity, _rank, _lane in plan.items
+        }
+        complete = False
+        if plan.unit_count >= limit:
+            try:
+                metadata = _managed_page_metadata(
+                    vault_root, represented, scope="vault",
+                    freshness_key=snapshot.for_scope("vault"), pending=pending,
+                    include_structure=True,
+                )
+                # Complete structural units bound matches before prose, query
+                # filtering and deduplication, including page-only parents.
+                complete = all(
+                    (row := metadata.get(path)) is not None
+                    and (parent := row.selected_parent) is not None
+                    and parent.structure.complete
+                    and parent.metadata.get("parent_source_hash") == row.content_hash
+                    and len(parent.structure.units) <= _MIXED_UNITS_PER_PARENT_CAP
+                    for path in represented
+                )
+            except RetrievalIndexWarming:
+                pass
+        if not complete:
+            failed.append("semantic_units_candidate_window")
+            _record_degradation("semantic_units_candidate_window")
+        return plan
+
     def select_mixed_pages(paths: list[str]) -> set[str]:
         nonlocal mixed_plan, mixed_widening, outside_selection
         page_paths = paths
@@ -2277,7 +2326,7 @@ def find(
                 mixed_widening = _widen_plan(paths, outside_paths, strong_paths, limit=limit)
                 page_paths = mixed_widening.paths
         primary_ranks.update({path: rank for rank, path in enumerate(paths, start=1)})
-        mixed_plan = _mixed_plan(page_paths, mixed_unit_hits, limit=limit, config=resolved_config)
+        mixed_plan = freeze_mixed_plan(page_paths)
         return {identity for _score, priority, identity, _rank, _lane in mixed_plan.items
                 if priority == 0 and identity in primary_ranks}
 
@@ -2303,7 +2352,7 @@ def find(
     # map to a KB-only walk in the underlying rankers.
     eligible_paths: set[str] | None = None
     if filter_plan.root is not None:
-        with _span(timings, "filter_eligibility"):
+        with _span(timings, _nested_name(timings, "filter_eligibility")):
             eligible_paths = _resolve_eligible_filter_paths(
                 vault_root,
                 scope=walk_scope,
@@ -2446,6 +2495,7 @@ def find(
     selected = hits
 
     def finish() -> list[Hit]:
+        nonlocal mixed_plan
         if isinstance(selected, _SelectedHits):
             with _span(timings, "semantic.search", elapsed_ms_field="finish_ms"):
                 hits = selected.finish()
@@ -2599,6 +2649,8 @@ def find(
                     hit.relation_match = _relation_match_dict(match, matched="self")
 
         if mixed:
+            if mixed_plan is None:
+                mixed_plan = freeze_mixed_plan([hit.path for hit in hits])
             hits = _merge_mixed_hits(
                 hits,
                 mixed_unit_hits,
@@ -3539,11 +3591,14 @@ def _find_semantic_units(
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
     _defer_hydration: bool = False,
+    _candidate_window: _UnitCandidateWindow | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
 
     def finish(hits):
+        if _candidate_window is not None:
+            _candidate_window.exhausted = candidate_window_exhausted
         return hits if _defer_hydration else _finish_unit_candidates(
             vault_root, hits, parent_reads=parent_reads, failed_out=failed_out,
         )
@@ -3584,7 +3639,7 @@ def _find_semantic_units(
             # Exact eligibility is normal-table metadata only. Hybrid/vector
             # content ranking consumes this finite candidate set independently,
             # so FTS absence cannot change the catalog outcome.
-            with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
                 exact_freshness = snapshot.for_scope(scope)
                 exact_repair = (
                     _bounded_lexical_repair_allowed(exact_freshness)
@@ -3729,7 +3784,7 @@ def _find_semantic_units(
 
     if not query.strip():
         if not records:
-            return []
+            return finish([])
         ordered = sorted(
             records.values(),
             key=lambda record: (
@@ -3750,7 +3805,7 @@ def _find_semantic_units(
 
     if mode == "keyword":
         if not records:
-            return []
+            return finish([])
         tokens = query.lower().split()
         ordered = sorted(
             (
@@ -3865,10 +3920,10 @@ def _find_semantic_units(
         )
 
     if not records:
-        if candidate_window_exhausted and failed_out is not None:
+        if candidate_window_exhausted and _candidate_window is None and failed_out is not None:
             failed_out.append("semantic_units_candidate_window")
             _record_degradation("semantic_units_candidate_window")
-        return []
+        return finish([])
 
     if indexed is None:
         indexed = lexstore.search_semantic_units(
@@ -3992,7 +4047,8 @@ def _find_semantic_units(
 
     if limit is not None:
         final_ranking = final_ranking[:limit]
-    if candidate_window_exhausted and (limit is None or len(final_ranking) < limit):
+    if (candidate_window_exhausted and _candidate_window is None
+            and (limit is None or len(final_ranking) < limit)):
         if failed_out is not None:
             failed_out.append("semantic_units_candidate_window")
         _record_degradation("semantic_units_candidate_window")
@@ -4070,7 +4126,7 @@ def _mixed_plan(
             rank,
             "unit",
         )
-        for rank, hit in enumerate(kept_units, start=1)
+        for rank, hit in enumerate(kept_units[:limit], start=1)
     )
     items = sorted(ranked, key=lambda item: (-item[0], item[1], item[2]))[:limit]
     parents = {hit.unit_ref: hit.parent_path for hit in kept_units}
@@ -4082,7 +4138,7 @@ def _mixed_plan(
                 truncation_targets[parent] = (priority, identity)
             else:
                 truncation_targets.setdefault(parent, (priority, identity))
-    return _MixedPlan(items, omitted_by_parent, truncation_targets)
+    return _MixedPlan(items, omitted_by_parent, truncation_targets, len(kept_units))
 
 
 def _merge_mixed_hits(
@@ -4761,6 +4817,7 @@ def _managed_page_metadata(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    include_structure: bool = False,
     recall_checkpoint: Any | None = None,
 ) -> dict[str, Any]:
     """Resolve current page metadata without opening canonical page files.
@@ -4790,6 +4847,7 @@ def _managed_page_metadata(
             parents_only=parents_only,
             include_ranking=include_ranking,
             include_occurrences=include_occurrences,
+            include_structure=include_structure,
             recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:
@@ -4808,56 +4866,65 @@ def _managed_page_metadata(
                 continue
             units: tuple[dict[str, Any], ...] = ()
             occurrences: tuple = ()
-            if include_units or include_occurrences:
-                # Parsing bounded, already-proven pending bytes is permitted;
-                # reopening the file here could observe a later commit instead.
-                # The frontmatter parser consumes one separator LF before the held body.
-                source = (
-                    "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n\n" + page.body
-                )
-                state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
-                units = tuple(
-                    structured_filters.unit_view(unit, instance=state.instance_id)
-                    for unit in state.document.units
-                )
-                if include_occurrences:
-                    receipt = pending.rows[rel]
-                    if page.snapshot_hash is None or receipt.after_hash != page.snapshot_hash:
-                        raise RetrievalIndexWarming(site="pending_metadata_incomplete")
-                    # Reconstruction parses held bytes; only the receipt's original
-                    # hash and current core inputs identify their canonical generation.
-                    parser, language_hash, relation_hash = semantic_index.current_registry_identity(vault_root)
-                    state = replace(
-                        state, parent_source_hash=page.snapshot_hash, parser_version=parser,
-                        language_registry_hash=language_hash, relation_registry_hash=relation_hash,
-                        parent_generation=semantic_index.parent_generation(
-                            parent_path=rel, parent_ref=state.parent_ref, parent_source_hash=page.snapshot_hash,
-                            language_registry_hash=language_hash, relation_registry_hash=relation_hash,
-                            parser_version=parser,
-                        ),
+            selected_parent = None
+            if include_units or include_occurrences or include_structure:
+                try:
+                    # Parsing bounded, already-proven pending bytes is permitted;
+                    # reopening the file here could observe a later commit instead.
+                    # The frontmatter parser consumes one separator LF before the held body.
+                    source = (
+                        "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n\n" + page.body
                     )
-                    parent = semantic_index.Interpretations(vault_root).parent(
-                        rel, semantic_index.structural_metadata(state),
-                    )
-                    if not parent.structure.complete:
-                        raise RetrievalIndexWarming(site="pending_metadata_incomplete")
-                    selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
-                    values = []
-                    for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
-                        key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
-                        selected_unit = selected_by_key.get(key)
-                        if selected_unit is None or selected_unit.unit_ref is None:
-                            continue
-                        row = (
-                            key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
-                            state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
-                            json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
-                            raw.line, raw.end_line, order,
+                    state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
+                    if include_units or include_occurrences:
+                        units = tuple(
+                            structured_filters.unit_view(unit, instance=state.instance_id)
+                            for unit in state.document.units
                         )
-                        unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
-                        unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
-                        values.append((lexstore._unit_hit(row, selected_unit, None), parent, unit_view, key))
-                    occurrences = tuple(values)
+                    if include_occurrences or include_structure:
+                        receipt = pending.rows[rel]
+                        if page.snapshot_hash is None or receipt.after_hash != page.snapshot_hash:
+                            raise RetrievalIndexWarming(site="pending_metadata_incomplete")
+                        # Reconstruction parses held bytes; only the receipt's original
+                        # hash and current core inputs identify their canonical generation.
+                        parser, language_hash, relation_hash = semantic_index.current_registry_identity(vault_root)
+                        state = replace(
+                            state, parent_source_hash=page.snapshot_hash, parser_version=parser,
+                            language_registry_hash=language_hash, relation_registry_hash=relation_hash,
+                            parent_generation=semantic_index.parent_generation(
+                                parent_path=rel, parent_ref=state.parent_ref, parent_source_hash=page.snapshot_hash,
+                                language_registry_hash=language_hash, relation_registry_hash=relation_hash,
+                                parser_version=parser,
+                            ),
+                        )
+                        parent = semantic_index.Interpretations(vault_root).parent(
+                            rel, semantic_index.structural_metadata(state),
+                        )
+                        if not parent.structure.complete and include_occurrences:
+                            raise RetrievalIndexWarming(site="pending_metadata_incomplete")
+                        selected_parent = parent
+                        if include_occurrences:
+                            selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
+                            values = []
+                            for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
+                                key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
+                                selected_unit = selected_by_key.get(key)
+                                if selected_unit is None or selected_unit.unit_ref is None:
+                                    continue
+                                row = (
+                                    key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
+                                    state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
+                                    json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
+                                    raw.line, raw.end_line, order,
+                                )
+                                unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
+                                unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
+                                values.append((lexstore._unit_hit(row, selected_unit, None), parent, unit_view, key))
+                            occurrences = tuple(values)
+                except (RetrievalIndexWarming, ValueError, OSError, KeyError, TypeError):
+                    if include_units or include_occurrences:
+                        raise
+                    # An optional bound stays unknown when its held proof is unavailable.
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
                 page.parent_media + ".md" if page.parent_media else None,
@@ -4868,6 +4935,7 @@ def _managed_page_metadata(
                 find_types.RankingPage.from_page(page) if include_ranking else None,
                 occurrences,
                 page.snapshot_hash,
+                selected_parent,
             )
     if any(
         rel not in metadata and not (pending is not None and pending.covers(rel)) for rel in paths
@@ -8115,14 +8183,20 @@ def evict_resolver_caches(vault_root: Path) -> int:
     return removed
 
 
+def reset_result_cache() -> int:
+    """Clear completed answers and checkpoints, retaining every substrate cache."""
+    with _FIND_CACHE_LOCK:
+        count = len(_FIND_CACHE)
+        _FIND_CACHE.clear()
+        _FIND_CACHE_CHECKPOINTS.clear()
+    return count
+
+
 def reset_page_and_result_caches() -> dict[str, int]:
     """Narrow latency-harness reset: keep resolver/freshness/catalog state warm."""
     page_entries = len(_CACHE.entries)
     _CACHE.clear()
-    with _FIND_CACHE_LOCK:
-        hot_entries = len(_FIND_CACHE)
-        _FIND_CACHE.clear()
-        _FIND_CACHE_CHECKPOINTS.clear()
+    hot_entries = reset_result_cache()
     return {"pages": page_entries, "hot_find": hot_entries}
 
 

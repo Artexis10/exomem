@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 91ec30ca98f01fa4e703ed24b815ea7100b5b9a0ae8fd448c790d14cf752b592
+  skill_contract: bcb1cba9085d93f261c220683ebb68431a845cab45b32738d6d9d972d93abe53
   version: "0.32.0"
 ---
 
@@ -66,7 +66,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Save intent or observed events; interpret an ambiguous action | `read_plans`, `change_plans`, `read_records`, `change_records`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `record_episode/read_episode` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
-| Review, adopt, audit, restructure, or maintain a vault | `read_review/triage_memory`, `triage_memory`, `read_adoption` and `change_adoption`, `check_memory/repair_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
+| Review, adopt, audit, restructure, or maintain a vault | `read_review/triage_memory`, `triage_memory`, `read_import` and `import_memory`, `check_memory/repair_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `read_schema/change_schema` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Configured governance policy or a reserved withhold notice | `read_governance/change_governance`, `manage_authorization_session`, `grant_session_access/change_session_access` | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
 
@@ -228,8 +228,7 @@ Registry promotion covers additive entries only. Changes to existing meanings,
 aliases, deprecation or deletion remain `restructure_execution`. The served map
 does not expand write scope or bypass v2 grants. An absent map grants no v1 authority.
 
-**The decider protocol**, for actions covered by the envelope.
-Read-only recall follows governance, without a capture or restructure disposition.
+**The decider protocol.** Read-only recall follows governance without a capture or restructure disposition.
 
 1. **Name the action class.** `engagement.envelope.promotion_classes` gives each
    promotion's class for you. An action that fits no class has no envelope cell
@@ -252,6 +251,9 @@ server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
 Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, execute at most one step per request, let resume continue that approval, and confirm compensation separately.
+
+An explicit undo request authorizes curation `revert` as `restructure_execution`.
+Pass the item's `revert_fingerprint` as `expected_plan_fingerprint`.
 
 **Standing delegation does not exist in v1.** "Always allow this" or "do this
 kind of thing from now on" for restructure execution is refused by name: it

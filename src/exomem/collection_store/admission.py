@@ -662,7 +662,8 @@ def _require_no_service(config, operation):
                   if operation == "adopt-local" else "")
         raise CollectionStoreError(
             "COLLECTION_STORE_SERVICE_ACTIVE",
-            f"a service ({holder}) holds this vault's writer lease; {served}stop it first")
+            f"a service ({holder}) holds this vault's writer lease, which expires in "
+            f"{max(1, round(record.expires_at - time.time()))} s unless the service renews it; {served}stop it first")
 
 
 def _apply_step(session, manager, fence_client, step, *, why, preview_id, acknowledge_skipped=False):

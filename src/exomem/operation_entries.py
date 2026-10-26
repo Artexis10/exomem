@@ -25,9 +25,8 @@ Effect = Literal["read", "write"]
 
 #: How the MCP surface publishes a command that has renderings. `nested` carries the
 #: operation in one `operation` object, and `grouped` lists only the grouped command.
-#: `grouped` stays selectable only as the baseline of the tool-selection eval, which
-#: compares each converted family with today's surface on one build; the round that ends
-#: that comparison removes it.
+#: `grouped` remains an internal spelling for compatibility and historical measurements;
+#: the server no longer offers the retired grouped comparison catalogue.
 ToolShape = Literal["nested", "grouped"]
 TOOL_SHAPES: tuple[str, ...] = get_args(ToolShape)
 DEFAULT_TOOL_SHAPE: ToolShape = "nested"
@@ -520,7 +519,7 @@ _TOOL_HELP = {
     "change_media": ("write", "Change media", "Process media or retry failed extraction."),
     "read_connections": ("read", "Read connections", "Find links, relations and entity candidates, or inspect a bounded graph neighborhood."),
     "change_connections": ("write", "Change connections", "Create a governed entity or accept a reviewed relation using current fingerprints."),
-    "read_schema": ("read", "Read schema", "Inspect, validate or preview schemas and vocabulary contracts without saving changes."),
+    "read_schema": ("read", "Read schema", "Inspect schemas without saving changes. Use preview for a registry delta merged with its live overlay, including collision and cap checks. Pass proposal={\"upsert\":{\"<key>\":{...}}}. Use validate-document for a complete registry document."),
     "change_schema": ("write", "Change schema", "Save, refresh or restore a reviewed schema or vocabulary contract."),
     "read_governance": ("read", "Read governance", "Inspect access policy, evaluate an audience or read vocabulary requests. Existing credential rules apply."),
     "change_governance": ("write", "Change governance", "Persist owner policy proposals, standing grants, rule changes or companion backfill. Existing owner checks apply."),
@@ -534,8 +533,8 @@ _TOOL_HELP = {
     "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
-    "read_adoption": ("read", "Read adoption", "Scan existing material without importing it, inspect adoption runs or read a bounded work item. Status retains recorded coverage and verification counts."),
-    "change_adoption": ("write", "Change adoption", "Save an adoption report, import selected originals or manage a collection adoption run. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage. Originals remain unchanged."),
+    "read_import": ("read", "Read import", "Scan existing material without importing it, inspect import runs or read a bounded work item. Stage external folders with the CLI import command first. Status retains recorded coverage and verification counts."),
+    "import_memory": ("write", "Import memory", "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage."),
 }
 
 
@@ -567,22 +566,22 @@ _REMAINING = {
     "compile_source": (None, (_row("compile", "prepare_note"),)),
     "query_dataset": (None, (_row("dataset", "read_memory"),)),
     "adopt_vault": ("mode", (
-        _row("scan-only", "read_adoption", (*_ADOPTION_SCAN_FIELDS, "semantic_max_files", "semantic_max_bytes", "semantic_example_limit")),
-        _row("save-manifest", "change_adoption", (*_ADOPTION_SCAN_FIELDS, "manifest_path")),
-        _row("copy-as-sources", "change_adoption", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
-        _row("compile-selected", "change_adoption", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
+        _row("scan-only", "read_import", (*_ADOPTION_SCAN_FIELDS, "semantic_max_files", "semantic_max_bytes", "semantic_example_limit")),
+        _row("save-manifest", "import_memory", (*_ADOPTION_SCAN_FIELDS, "manifest_path")),
+        _row("copy-as-sources", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
+        _row("compile-selected", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
     )),
     "adoption_studio": ("action", (
-        _row("start", "change_adoption", ("path", "include_hidden", "initialize_kb", "collection")),
-        _row("status", "read_adoption", ("run_id",)),
-        _row("select", "change_adoption", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
-        _row("plan", "change_adoption", ("run_id", "continuation"), ("run_id",)),
-        _row("apply", "change_adoption", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),
-        _row("cancel", "change_adoption", ("run_id", "why"), ("run_id",)),
-        _row("finish", "change_adoption", ("run_id", "write_manifest"), ("run_id",)),
-        _row("work-item", "read_adoption", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
-        _row("propose", "change_adoption", ("run_id", "proposals"), ("run_id",)),
-        _row("apply-proposal", "change_adoption", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True),
+        _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection")),
+        _row("status", "read_import", ("run_id",)),
+        _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
+        _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",)),
+        _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),
+        _row("cancel", "import_memory", ("run_id", "why"), ("run_id",)),
+        _row("finish", "import_memory", ("run_id", "write_manifest"), ("run_id",)),
+        _row("work-item", "read_import", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
+        _row("propose", "import_memory", ("run_id", "proposals"), ("run_id",)),
+        _row("apply-proposal", "import_memory", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True),
     )),
     "read_media": (None, (_row("video", "read_media"),)),
     "process_media": ("operation", (
@@ -667,14 +666,17 @@ def _schema_rows():
             ("restore", ("subject", "version", "expected_hash", "why", "registry_scope"), ("version", "why")),
         ):
             rows.append(_row(action, "change_schema" if action in {"save", "restore"} else "read_schema",
-                             fields, required, constraints=(_literal("subject", subject),), destructive=action in {"save", "restore"}))
+                             fields, required, kind="preview" if action == "propose" else None,
+                             constraints=(_literal("subject", subject),), destructive=action in {"save", "restore"}))
     # These are closed schema API subjects, not extensible vocabulary entry keys.
     for subject in ("contract", "categories", "relations", "traversal-profiles"):
         for action in ("infer", "validate", "diff"):
             fields = ("subject", "name", "project", "page_type", "strict", "compare_to", "proposal", "why", "expected_hash", "save", "context", "date_from", "date_to", "continuation", "limit", "include_model_suggestions")
             subject_constraint = _literal("subject", subject, subject == "contract")
             constraints = (subject_constraint, _literal("save", False, True)) if action == "infer" else (subject_constraint,)
-            rows.append(_row(action, "read_schema", fields, ("name",) if subject == "contract" else (), constraints=constraints))
+            # Registry document validation has different semantics from a live-delta preview.
+            kind = "validate-document" if action == "validate" and subject in registry_specs() else None
+            rows.append(_row(action, "read_schema", fields, ("name",) if subject == "contract" else (), kind=kind, constraints=constraints))
             if action == "infer":
                 rows.append(_row(action, "change_schema", fields, ("name",) if subject == "contract" else ("proposal",),
                                  kind="infer-and-save", constraints=(subject_constraint, _literal("save", True, implied=True)), destructive=True))
@@ -781,6 +783,7 @@ def _maintenance_rows():
         "resume": ("run_id", "plan_id", "vocabulary_ref", "vocabulary_fingerprint"),
         "propose-compensation": ("run_id",),
         "apply-compensation": ("run_id", "plan_id", "expected_plan_fingerprint", "why"),
+        "revert": ("review_ref", "expected_plan_fingerprint", "why"),
     }
     if set(fields_by_action) != set(CURATION_ACTIONS):
         raise RuntimeError("curation operation fields drifted from CURATION_ACTIONS")

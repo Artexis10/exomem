@@ -39,6 +39,7 @@ def import_test_sql(fixtures: Path) -> str:
             "redirect_uris jsonb, redirect_uris_digest bytea);",
             (fixtures / "exomem_cloud_imports.sql").read_text(encoding="utf-8"),
             (fixtures / "exomem_cloud_import_cleanup.sql").read_text(encoding="utf-8"),
+            _committed_sql(fixtures, "imports_migration"),
         ]
     )
 
@@ -52,4 +53,4 @@ def export_test_sql(fixtures: Path) -> str:
     local = (fixtures / "exomem_cloud_exports.sql").read_text(encoding="utf-8")
     if not _committed_sql(fixtures, "exports_migration").startswith(local):
         raise RuntimeError("exomem_cloud_exports.sql is not the Exomem half of the pinned migration 0066")
-    return local
+    return local + "\n" + _committed_sql(fixtures, "custody_migration")

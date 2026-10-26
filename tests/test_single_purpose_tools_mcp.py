@@ -450,23 +450,13 @@ def test_the_contact_spy_sees_a_write_that_is_allowed(build, seams) -> None:
 # --- (d) shapes ---------------------------------------------------------------------------
 
 
-def test_the_grouped_baseline_lists_the_grouped_commands_and_no_rendering(build) -> None:
-    async def scenario(client):
-        return {tool.name: tool for tool in await client.list_tools()}
-
-    grouped = _session(build("grouped"), scenario)
-
-    assert GROUPED <= set(grouped) and not RENDERED & set(grouped)
-    assert grouped["record_memory"].annotations.read_only_hint is False
-
-
-def test_both_shapes_resolve_one_logical_call_to_the_same_dispatch(build, seams) -> None:
+def test_rendered_and_compatibility_calls_keep_the_same_dispatch(build, seams) -> None:
     calls = {
         "nested": [
             ("read_records", {"operation": {"kind": "describe"}}),
             ("change_records", {"operation": {"kind": "append", **_APPEND}}),
         ],
-        "grouped": [
+        "compatibility": [
             ("record_memory", {"action": "describe"}),
             ("record_memory", {"action": "append", **_APPEND}),
         ],
@@ -478,19 +468,19 @@ def test_both_shapes_resolve_one_logical_call_to_the_same_dispatch(build, seams)
             return [await _call(client, name, arguments) for name, arguments in sequence]
 
         seams.dispatched.clear()
-        results = _session(build(shape), scenario)
+        results = _session(build(), scenario)
         writer_lease.reset_managers_for_tests()
         dispatched[shape] = (list(seams.dispatched), results)
 
     reached = {shape: dispatches for shape, (dispatches, _) in dispatched.items()}
     outcomes = {shape: [_envelope(result) for result in results] for shape, (_, results) in dispatched.items()}
-    assert reached["nested"] == reached["grouped"]
-    assert outcomes["nested"] == outcomes["grouped"]
+    assert reached["nested"] == reached["compatibility"]
+    assert outcomes["nested"] == outcomes["compatibility"]
 
 
-@pytest.mark.parametrize("shape", ["sideways", "flat"])
+@pytest.mark.parametrize("shape", ["sideways", "flat", "grouped"])
 def test_an_unknown_or_retired_shape_stops_the_server_build(build, shape) -> None:
-    with pytest.raises(RuntimeError, match="EXOMEM_MCP_TOOL_SHAPE must be one of nested, grouped"):
+    with pytest.raises(RuntimeError, match="EXOMEM_MCP_TOOL_SHAPE must be nested"):
         build(shape)
 
 

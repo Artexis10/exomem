@@ -53,8 +53,30 @@ ENTRY_FIELDS = frozenset(
     # nosemgrep: ep-word-set -- The generic registry entry schema defines these field names.
     {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
 )
-# nosemgrep: ep-word-set -- The save protocol fixes these three operation names.
-_DELTA_VERBS = frozenset({"upsert", "alias", "deprecate"})
+def delta_schema() -> dict[str, Any]:
+    """The closed delta grammar, shared by discovery and the registry parser."""
+    return {
+        "type": "object",
+        "description": (
+            "A delta merged with the live registry overlay before validation. "
+            "Use keyed upsert objects, not a complete registry document."
+        ),
+        "properties": {
+            "upsert": {"type": "object", "additionalProperties": {"type": "object"}},
+            "alias": {"type": "object", "additionalProperties": {
+                "type": "array", "items": {"type": "string"},
+            }},
+            "deprecate": {"type": "object", "additionalProperties": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+            }},
+            "remove": {"type": "array", "items": {"type": "string"}},
+        },
+        "minProperties": 1,
+        "additionalProperties": False,
+    }
+
+
+_DELTA_VERBS = frozenset(delta_schema()["properties"])
 _STATUSES = frozenset({"active", "deprecated"})
 #: A save that would grow an overlay past this many bytes is refused.
 MAX_OVERLAY_BYTES = 256 * 1024
@@ -133,6 +155,13 @@ class Adapter(Protocol):
     def put(self, document: dict[str, Any], key: str, entry: Entry, *, existing: bool) -> None:
         """Write one generic entry into the overlay document in its own grammar."""
 
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        """Drop one entry from the overlay document, as `put` writes it.
+
+        Only a registry that declares a usage check supplies this: removal is
+        offered where the server can first count what uses the key.
+        """
+
     def render(self, document: Mapping[str, Any]) -> str:
         """The overlay text for a document."""
 
@@ -162,6 +191,8 @@ class RegistrySpec:
     cap: int = 512
     #: How usage counts are read: `(vault_root, snapshot) -> Usage`.
     usage: Callable[[Path, Snapshot], Any] | None = None
+    #: Complete reference proof for removal when display counts cover only one axis.
+    removal_usage: Callable[[Path, Snapshot], Any] | None = None
     #: Whether the bootstrap vocabulary section lists this registry's keys. Some
     #: registries' keys are listed elsewhere or are too many for the compact payload.
     summarize_keys: bool = True
@@ -300,6 +331,9 @@ class FixedPackAdapter:
         row.pop("key")
         row.pop("origin")
         document["entries"][key] = row
+
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document["entries"].pop(key, None)
 
     def render(self, document: Mapping[str, Any]) -> str:
         return yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=True)
@@ -578,17 +612,22 @@ def _check_in_place(spec: RegistrySpec, before: Entry, after: Entry) -> None:
 
 
 def apply_delta(
-    spec: RegistrySpec, snapshot: Snapshot, delta: object
+    spec: RegistrySpec, snapshot: Snapshot, delta: object, *, usage: Any = None
 ) -> tuple[dict[str, Any], dict[str, Entry]]:
     """The overlay document after a delta, and each touched key's proposed entry.
 
     Pure: nothing is written. The caller validates the resulting registry,
     which may drop a proposed entry that fails validation; the proposed entry
     is still returned so a caller can say what it collides with.
+
+    `remove` names vault keys to undo. It needs `usage`, the registry's counted
+    usage: a key nothing uses leaves the overlay, and a used key is deprecated
+    instead so the pages that carry it keep resolving. A removed key is returned
+    as the entry it had.
     """
     if not isinstance(delta, Mapping) or not delta or set(delta) - _DELTA_VERBS:
         raise RegistryError(
-            "INVALID_REGISTRY_DELTA: a delta has upsert, alias and/or deprecate, "
+            "INVALID_REGISTRY_DELTA: a delta has upsert, alias, deprecate and/or remove, "
             'e.g. {"upsert": {"<key>": {...}}}'
         )
     document = spec.adapter.document(snapshot.overlay_text)
@@ -637,6 +676,15 @@ def apply_delta(
     deprecations = delta.get("deprecate", {})
     if not isinstance(deprecations, Mapping):
         raise RegistryError("INVALID_REGISTRY_DELTA: deprecate must be an object")
+    removals, deprecations = _split_removals(
+        spec,
+        working,
+        delta.get("remove", ()),
+        deprecations,
+        usage,
+        canonical,
+        named=set(upserts) | set(aliases) | set(deprecations),
+    )
     for raw_key, replacement in deprecations.items():
         key = canonical(raw_key, "deprecate")
         base = working.get(key)
@@ -669,7 +717,69 @@ def apply_delta(
         spec.adapter.put(document, key, entry, existing=True)
         working[key] = entry
         touched.append(key)
-    return document, {key: working[key] for key in dict.fromkeys(touched)}
+
+    removed = {key: working.pop(key) for key in removals}
+    for key in removals:
+        spec.adapter.remove(document, key)
+    touched.extend(removals)
+    return document, {
+        key: working[key] if key in working else removed[key] for key in dict.fromkeys(touched)
+    }
+
+
+def _split_removals(
+    spec: RegistrySpec,
+    working: Mapping[str, Entry],
+    raw: object,
+    deprecations: Mapping[str, Any],
+    usage: Any,
+    canonical: Callable[[object, str], str],
+    *,
+    named: set[str],
+) -> tuple[list[str], Mapping[str, Any]]:
+    """The keys a `remove` verb takes out, and the deprecations it turns into.
+
+    The decision is made here, from counted usage and never from the caller: a
+    key that nothing uses is removed; a used one is deprecated, to its parent
+    where the registry requires a replacement. A count that could not be read
+    is not a zero, so it refuses.
+    """
+    if not isinstance(raw, (list, tuple)):
+        raise RegistryError("INVALID_REGISTRY_DELTA: remove must be a list of keys")
+    if not raw:
+        return [], deprecations
+    if spec.usage is None:
+        raise RegistryError(
+            f"REMOVE_UNSUPPORTED: {spec.name} has no usage check, so a key cannot be shown "
+            "unused; deprecate it instead"
+        )
+    removals: list[str] = []
+    turned = dict(deprecations)
+    for raw_key in raw:
+        key = canonical(raw_key, "remove")
+        if key in named:
+            raise RegistryError(
+                f"INVALID_REGISTRY_DELTA: {key} is in remove and in another verb of the delta"
+            )
+        base = working.get(key)
+        if base is None:
+            raise RegistryError(
+                f"UNKNOWN_REGISTRY_KEY: remove names {key!r}, which is not registered"
+            )
+        if base.origin != "vault":
+            raise RegistryError(f"PACK_ENTRY_FIXED: {key!r} ships with Exomem and cannot be removed")
+        count = None if usage is None else usage.count(key)
+        if count is None:
+            reason = getattr(usage, "reason", None) or "not_counted"
+            raise RegistryError(
+                f"USAGE_UNAVAILABLE: removing {key} needs current usage counts ({reason}); "
+                "retry once the index is current"
+            )
+        if count == 0:
+            removals.append(key)
+        elif base.status != "deprecated":
+            turned[key] = base.parent if spec.replacement_required else None
+    return list(dict.fromkeys(removals)), turned
 
 
 def validate_replacements(spec: RegistrySpec, entries: Mapping[str, Entry]) -> None:
@@ -755,6 +865,7 @@ def commit(
     before_hash: str,
     previous: str | None,
     added: tuple[str, ...] = (),
+    required_guards: tuple[Any, ...] = (),
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
     from .. import registry_history, vault
@@ -783,7 +894,12 @@ def commit(
             added={spec.name: added},
             private=spec.instance_id != PUBLIC_INSTANCE,
             validate_bindings=admission.recheck,
+            required_guards=required_guards,
         )
     finally:
         invalidate(root, path=path)
+    if added:
+        from .. import promotions
+
+        promotions.record_registry(root, spec, added, rendered, version=history["version"])
     return history

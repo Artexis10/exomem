@@ -272,6 +272,7 @@ def test_studio_proposal_omits_due_advice_on_untouched_pages(tmp_path: Path) -> 
     assert ledger["emissions"] == before["emissions"]
 
 
+@pytest.mark.usefixtures("obligations_only")
 def test_maintain_fix_carries_one_block(vault: Path) -> None:
     _seed(vault)
     _repairable_overdue(vault, "carrier-fix")
@@ -537,15 +538,18 @@ def test_partial_source_adoption_omits_unrelated_due_advice(
 
 
 def test_source_adoption_keeps_global_due_counts(vault: Path) -> None:
-    """Source adoption updates write counts without surfacing unrelated due pages."""
+    """Source adoption counts the new Sources as outstanding, with no reconcile and no advice."""
     _seed(vault)
-    before_total = due_state_module.served(vault)["total"]
+    before = due_state_module.served(vault)
     before_writes = _ledger(vault)["writes"]
 
     response = _adopt(vault, count=12)
 
+    after = due_state_module.served(vault)
     assert _ledger(vault)["writes"] - before_writes == 12
-    assert due_state_module.served(vault)["total"] == before_total
+    # The twelve imported Sources are outstanding at once; no other category moved.
+    assert after["categories"]["unprocessed_source"] == before["categories"]["unprocessed_source"] + 12
+    assert after["total"] == before["total"] + 12
     assert "due_state" not in response
 
 

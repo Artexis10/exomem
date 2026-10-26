@@ -34,7 +34,7 @@ from exomem import (
 from exomem import server as server_module
 from exomem._hooks import exomem_capture_nudge as capture_hook
 
-SHAPES = ("nested", "grouped")
+SHAPES = ("nested",)
 GROUPED_NAMES = frozenset({"record_memory", "plan_memory"})
 RENDERED_NAMES = frozenset(
     spec.name for name, operations in operation_entries.OPERATIONS.items()

@@ -102,7 +102,7 @@ async def test_reconcile_prepare_survives_restart_with_real_c5(cell_db):
         # Each call uses fresh LoopMemory, as after process restart.
         cluster.observations[CELL] = replace(_observed_from_applied(cluster, CELL), pod_uses_volume=False)
         await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "prepare"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "prepare"
         jobs["prepare"] = ImportJob(succeeded=True, report={"recipient": "age1" + "a" * 58})
         await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert (await db.read_import(controller, CELL)).observed_state == "key_ready"
@@ -202,7 +202,15 @@ def test_cleanup_keeps_success_after_upload_expiry_and_honors_suspension_and_del
     assert decide_import(deleting, item, observed, {}, now=NOW) is None
 
 
-async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cell_db, monkeypatch):
+@pytest.mark.parametrize("report,expected", [
+    ({"ok": True, "files": 2, "bytes": 12}, (2, 12)),
+    ({"ok": True, "files": True, "bytes": 12}, (None, None)),
+    ({"ok": True, "files": 2, "bytes": -1}, (None, None)),
+    ({"ok": True, "files": 2**63, "bytes": 12}, (None, None)),
+    ({"ok": True, "files": 2, "bytes": 2**63}, (None, None)),
+    ({}, (None, None)),
+])
+async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cell_db, monkeypatch, report, expected, caplog):
     import asyncpg
 
     from cellctl import db, reconcile
@@ -239,10 +247,25 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
         await controller.execute("UPDATE exomem_cloud_cells SET hold_kind='import',hold_started_at=$2 WHERE cell_id=$1", CELL, current)
         cluster.observations[CELL] = replace(cluster.observations[CELL], statefulset_hold_kind="import",
                                             statefulset_hold_started_at=current, statefulset_replicas=0)
-        jobs.update({"import": ImportJob(exists=True, succeeded=True), "cleanup": ImportJob(exists=True, failed=True)})
+        jobs.update({"import": ImportJob(exists=True, succeeded=True, report=report),
+                     "cleanup": ImportJob(exists=True, failed=True)})
+        if expected[0] is not None:
+            write_import = db.write_import
+            async def report_write_failed(connection, selected_id, updates):
+                if "staged_files" in updates:
+                    raise RuntimeError("staging report write unavailable")
+                await write_import(connection, selected_id, updates)
+            with monkeypatch.context() as patch:
+                patch.setattr(db, "write_import", report_write_failed)
+                patch.setattr(cluster, "delete_job", lambda *args: pytest.fail("removed report before persistence"))
+                await step()
+            unrecorded = await db.read_import(controller, CELL)
+            assert unrecorded.observed_state == "importing" and unrecorded.staged_files is None
+            assert "RuntimeError" in caplog.text
         await step()
         pending = await db.read_import(controller, CELL)
         assert pending.observed_state == "cleanup_pending" and pending.error_code is None
+        assert (pending.staged_files, pending.staged_bytes) == expected
         assert (await db.select_all_rows(controller))[0].hold_kind == "import"
         jobs.clear()  # Kubernetes confirms both Job controllers and all pods are gone.
         current = pending.updated_at + timedelta(seconds=1)
@@ -276,7 +299,7 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
         assert (await db.select_all_rows(controller))[0].hold_kind == "import"
         cluster.observations[CELL] = replace(cluster.observations[CELL], pod_uses_volume=False)
         await step()
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True, pods_present=True)
         current += timedelta(seconds=30)
         await step()
@@ -287,6 +310,7 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
         assert (await db.select_all_rows(controller))[0].hold_kind is None
         assert await db.read_import(controller, CELL) is None
         assert await app.fetchval("SELECT observed_state FROM exomem_cloud_imports WHERE import_id=$1", import_id) == "done"
+        assert tuple(await app.fetchrow("SELECT staged_files,staged_bytes FROM exomem_cloud_imports WHERE import_id=$1", import_id)) == expected
         assert cluster.observations[CELL].statefulset_replicas == 1
     finally:
         await app.close()
@@ -372,7 +396,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
         jobs.clear()
 
         def removed_key_then_crash(manifest):
-            assert manifest["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+            assert manifest["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
             key_file.unlink(missing_ok=True)
             raise RuntimeError("cleanup process stopped after private key deletion")
 
@@ -383,9 +407,10 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
             caplog.clear()
         running = await db.read_import(controller, CELL)
         assert running.observed_state == "cleanup_running" and running.error_code == "IMPORT_FAILED"
+        assert running.staged_files is None and running.staged_bytes is None
         assert not key_file.exists()
         await step()  # A missing completion Job replays only idempotent local cleanup.
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True, pods_present=True)
         cleanup_calls = []
         def delete_ciphertext(self, item):
@@ -409,7 +434,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
         assert not ciphertext.exists()
         jobs.clear()  # The old completed Job also disappeared during the restart.
         await step()
-        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "discard"
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True)
 
         def stopping_journal_then_crash(namespace, name):
@@ -571,6 +596,7 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
             assert await finalizing is None
         running = await db.read_import(controller, CELL)
         assert running.observed_state == "cleanup_running" and running.error_code == "IMPORT_FAILED"
+        assert running.staged_files is None and running.staged_bytes is None
         held = (await db.select_all_rows(controller))[0]
         assert held.hold_kind == "import" and held.hold_started_at > old_hold
         assert adopted.is_dir() and cluster.observations[CELL].statefulset_replicas == 0
@@ -580,7 +606,7 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
         def run_discard(manifest):
             command = manifest["spec"]["template"]["spec"]["containers"][0]["command"]
             # Execute the real cell command with the rendered operation and its adoption flag.
-            assert cloud_import_job.main([*command[2:], "--vault", str(vault),
+            assert cloud_import_job.main([*command[command.index("cell-import") + 1:], "--vault", str(vault),
                                           "--termination-log", str(tmp_path / "result.json")]) == 0
             jobs["discard"] = ImportJob(exists=True, succeeded=True, pods_present=True)
 

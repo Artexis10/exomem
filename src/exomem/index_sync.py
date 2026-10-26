@@ -1842,7 +1842,17 @@ def upsert_after_write(
         if watcher_mode:
             from . import lexstore
 
-            lexstore.request_repair(vault_root)
+            # The batch disagreed with disk, so its lexical rows may be behind.
+            # Replay exactly its paths against current disk; the worker still
+            # escalates a failed replay to the whole-catalogue rebuild.
+            lexstore.request_repair(
+                vault_root,
+                deferred_paths=[
+                    *(item.path for item in batch.identity_paths),
+                    *(vault_root / rel for rel in (*batch.missing_paths, *(watcher_deleted_rels or []))),
+                ],
+                cause=lexstore.RepairCause.WATCHER_BATCH_STALE,
+            )
         return _stale_batch_report(
             vault_root,
             [item.rel_path for item in identity_items],

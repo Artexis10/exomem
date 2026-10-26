@@ -1364,6 +1364,7 @@ def presentation_relationship_resolver(
     lookup_path: Callable[[str], tuple[bool, str | None]] | None = None,
     observe_read: Callable[[vault.PathGuard], None] | None = None,
     wikilink_resolver: Callable[[], vault.WikilinkResolver] | None = None,
+    targeted_namespace_contains: Callable[[str], bool] | None = None,
 ) -> Callable[[str, str], tuple[str, str] | None] | None:
     """Resolve selected canonical relationships without disclosing withheld targets."""
     recipe = manifest.item_presentation
@@ -1394,8 +1395,13 @@ def presentation_relationship_resolver(
         if not record.ambiguous
     }
 
-    def resolve(kind: str, raw: str) -> tuple[str, str] | None:
+    def get_wikilinks():
         nonlocal wikilinks
+        if wikilinks is None:
+            wikilinks = wikilink_resolver()
+        return wikilinks
+
+    def resolve(kind: str, raw: str) -> tuple[str, str] | None:
         relative: str | None = None
         readable_relative: str | None = None
         parsed = (
@@ -1419,12 +1425,11 @@ def presentation_relationship_resolver(
         if relative is None:
             try:
                 target = memory_refs.resolve_identifier_read_only(root, raw)
-                if wikilinks is None:
-                    wikilinks = wikilink_resolver()
                 canonical, _warning = vault.normalize_wikilink(
                     target,
                     root,
-                    resolver=wikilinks,
+                    resolver_factory=get_wikilinks,
+                    targeted_namespace_contains=targeted_namespace_contains,
                     strict=True,
                 )
                 relative = canonical.split("#", 1)[0] + ".md"

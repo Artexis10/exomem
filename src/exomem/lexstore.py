@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import enum
 import functools
 import hashlib
 import itertools
@@ -831,6 +832,21 @@ _FULL_REBUILD_REQUESTED: set[Path] = set()
 #: That proof reads checkpoint metadata, which cannot attest rows, so any other
 #: cause clears its key here and keeps the rebuild.
 _LAG_ONLY_REBUILDS: set[Path] = set()
+
+
+class RepairCause(enum.StrEnum):
+    """Why a caller asked for a repair, as the token the worker logs.
+
+    A closed set, so a log line names a reason and never carries a path or an
+    error message.
+    """
+
+    WATCHER_BATCH_STALE = "watcher_batch_stale"
+    WATCHER_HANDOFF_FAILED = "watcher_handoff_failed"
+
+
+#: Why each pending request was made, until the worker names them in its pass line.
+_REPAIR_CAUSES: dict[Path, set[RepairCause]] = {}
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
 _REPAIRS_LOCK = threading.Lock()
 #: Reconcile source-proof outcomes — stable, content-free counters ONLY (no
@@ -1897,10 +1913,26 @@ def _schedule_runtime_catalog_repair(
         _schedule_repair(vault_root)
 
 
-def request_repair(vault_root: Path) -> None:
-    """Non-walking retry seam for a request refused by runtime admission."""
-    if maintained_content_index_enabled():
-        _schedule_repair(vault_root)
+def request_repair(
+    vault_root: Path,
+    *,
+    deferred_paths: list[Path] | None = None,
+    cause: RepairCause | None = None,
+) -> None:
+    """Non-walking retry seam for a request refused by runtime admission.
+
+    `deferred_paths` narrows the repair to a targeted retry of those paths (see
+    `_schedule_repair`); `cause` is the token the worker logs. A narrow
+    request that names nothing the catalogue indexes is dropped, never widened
+    into the whole-catalogue pass that an empty path list would request.
+    """
+    if not maintained_content_index_enabled():
+        return
+    if deferred_paths is not None:
+        deferred_paths = _lexical_markdown(deferred_paths)
+        if not deferred_paths:
+            return
+    _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
 
 
 def request_lag_repair(vault_root: Path) -> None:
@@ -2016,21 +2048,31 @@ def _request_full_rebuild(key: Path, *, lag_only: bool = False) -> None:
     _FULL_REBUILD_REQUESTED.add(key)
 
 
-def _yield_for_moving_source(
-    key: Path, paths: list[Path], error: _SourceMoved, *, lag_only: bool
+def _is_repair_contention(error: Exception) -> bool:
+    from .cli_ops import OpError
+    from .vault import VaultLockTimeout
+
+    # MUTATION_BUSY is the coordinator's closed error code for a bounded wait.
+    return isinstance(error, VaultLockTimeout) or (
+        isinstance(error, OpError) and error.code == "MUTATION_BUSY"
+    )
+
+
+def _yield_targeted_repair(
+    key: Path, paths: list[Path], error: Exception, *, lag_only: bool
 ) -> None:
-    """Keep a claim a moving source refused, and end this flight.
+    """Keep a claim a moving source or bounded lock wait refused.
 
     The caller holds `_REPAIRS_LOCK`, outside any full pass. Admission stays
-    revoked. Retrying now would meet the same edit, and any path queued
+    revoked. Retrying now would meet the same edit or holder, and any path queued
     meanwhile shares that transaction, so the flight always yields. The
     source's own event, the next proof that sees the lag, or the runtime's
     catalogue recovery backoff starts the next bounded attempt, and runs any
     work that arrived meanwhile.
     """
     log.info(
-        "lexical targeted repair kept paths=%d for a moving source (%s); "
-        "retrying when it settles",
+        "lexical targeted repair kept paths=%d (%s); "
+        "retrying on the next recovery trigger",
         len(paths),
         error,
     )
@@ -2039,7 +2081,9 @@ def _yield_for_moving_source(
     if paths:
         _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
     _REPAIRS_IN_FLIGHT.discard(key)
-    _set_repair_progress(key, "idle", result="source_changed")
+    _set_repair_progress(
+        key, "idle", result="source_changed" if isinstance(error, _SourceMoved) else "error"
+    )
 
 
 def _admit_if_current(vault_root: Path) -> bool:
@@ -2079,6 +2123,8 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     except _SourceMoved:
         raise
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
+        if _is_repair_contention(error):
+            raise
         log.info("lexical catch-up declined (%s); rebuilding", error)
         return False
 
@@ -2101,6 +2147,7 @@ def _schedule_repair(
     deferred_paths: list[Path] | None = None,
     pending_only: bool = False,
     lag_only: bool = False,
+    cause: RepairCause | None = None,
 ) -> bool:
     """Start at most one best-effort lexical repair per vault.
 
@@ -2123,6 +2170,9 @@ def _schedule_repair(
     lag-only, the worker first replays the exact registry delta and skips the
     whole-corpus pass only when the catalogue then proves exactly current.
 
+    `cause` names why the caller asked; the worker logs it with the pass it
+    starts, so a whole-corpus pass is attributable.
+
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
     fails escalates, and a rebuild request queued while a targeted retry is
@@ -2140,6 +2190,8 @@ def _schedule_repair(
         except Exception:  # noqa: BLE001 - scheduling must remain best-effort
             pass
     with _REPAIRS_LOCK:
+        if cause is not None:
+            _REPAIR_CAUSES.setdefault(key, set()).add(cause)
         if pending_only:
             if key in _REPAIRS_IN_FLIGHT:
                 return True
@@ -2197,6 +2249,7 @@ def _schedule_repair(
                             _LAG_ONLY_REBUILDS.discard(key)
                             published_handoff = key in _PUBLISHED_HANDOFF_PENDING
                             _PUBLISHED_HANDOFF_PENDING.discard(key)
+                    causes = _REPAIR_CAUSES.pop(key, set())
                     if not rebuild and not paths:
                         # Nothing left, and nothing can arrive between here and
                         # releasing the flight: a caller that takes this lock
@@ -2230,9 +2283,11 @@ def _schedule_repair(
                         _set_repair_progress(key, "targeted")
                     try:
                         caught_up = _caught_up_without_rebuild(vault_root, store)
-                    except _SourceMoved as error:
+                    except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
+                        if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
+                            raise
                         with _REPAIRS_LOCK:
-                            _yield_for_moving_source(key, paths, error, lag_only=True)
+                            _yield_targeted_repair(key, paths, error, lag_only=True)
                         return
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
@@ -2241,12 +2296,20 @@ def _schedule_repair(
                         outcome = "targeted"
                         if not paths:
                             continue
+                log.info(
+                    "lexical repair pass starting scope=%s paths=%d causes=%s",
+                    "full" if rebuild else "targeted",
+                    len(paths),
+                    ",".join(sorted(causes)) or "unattributed",
+                )
                 targeted_started = time.monotonic()
                 try:
                     full_pass = rebuild or not store.retry_deferred_upsert(paths)
-                except _SourceMoved as error:
+                except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
+                    if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
+                        raise
                     with _REPAIRS_LOCK:
-                        _yield_for_moving_source(key, paths, error, lag_only=False)
+                        _yield_targeted_repair(key, paths, error, lag_only=lag_only)
                     return
                 if paths and not rebuild:
                     # The deferral above logs "retrying these paths" and, until
@@ -3554,6 +3617,7 @@ class EligibilityMetadata:
     ranking: RankingPage | None = None
     occurrences: tuple[tuple[SemanticUnitLexicalHit, Any, Mapping[str, Any], str], ...] = ()
     content_hash: str | None = None
+    selected_parent: Any | None = None
 
 
 def parent_children_result(
@@ -3592,6 +3656,7 @@ def eligibility_metadata_result(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    include_structure: bool = False,
     recall_checkpoint: Any | None = None,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
     """Exact filter views and parent hints from one proven catalogue snapshot.
@@ -3599,6 +3664,7 @@ def eligibility_metadata_result(
     `parents_only` reads no filter view: its rows carry only the parent and
     `updated`, for a caller that decides on parents alone (recall admission).
     `include_ranking` adds snapshot-bound search and interpretation inputs.
+    `include_structure` adds selected structural summaries without occurrence rows.
     `recall_checkpoint` names the published projection to read, as for
     `search_bm25_result`.
     """
@@ -3611,6 +3677,7 @@ def eligibility_metadata_result(
             vault_root, conn, paths, include_units=include_units, parents_only=parents_only,
             include_ranking=include_ranking,
             include_occurrences=include_occurrences,
+            include_structure=include_structure,
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
         recall_checkpoint=recall_checkpoint,
@@ -3626,16 +3693,18 @@ def _eligibility_metadata_query(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    include_structure: bool = False,
 ) -> dict[str, EligibilityMetadata]:
     from .vocabulary.registry import RegistryError
 
     view = "NULL" if parents_only else "p.eligibility_view_json"
-    ranking = "p.ranking_json, p.content_hash" if include_ranking else "NULL, NULL"
+    ranking = "p.ranking_json" if include_ranking else "NULL"
+    content_hash = "p.content_hash" if include_ranking or include_occurrences or include_structure else "NULL"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking} "
+        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking}, {content_hash} "
         "FROM wanted w CROSS JOIN pages p ON p.path = w.path WHERE p.in_vault = 1",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
@@ -3659,44 +3728,53 @@ def _eligibility_metadata_query(
                 ranking=None if ranking is None else _ranking_metadata(ranking),
                 content_hash=content_hash,
             )
-        if not (include_units or include_occurrences):
+        if not (include_units or include_occurrences or include_structure):
             return result
         # Each page's units as its selected interpretation emits them; a page
         # the caller may not see keeps no units and is never interpreted.
         view = _SelectedUnits(vault_root, conn)
-        unit_rows = conn.execute(
-            f"SELECT {_OCCURRENCE_COLUMNS}, u.verdict, u.check_by_day FROM semantic_units u "
-            "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
-            "ORDER BY u.parent_path, u.source_order",
-            (json.dumps(sorted(result), ensure_ascii=False),),
-        )
         units: dict[str, list[dict[str, Any]]] = {}
         occurrences: dict[str, list[tuple]] = {}
-        for row, served in view.served(unit_rows):
-            path, verdict, check_by = row[1], row[17], row[18]
-            unit = dict(
-                category=served.category,
-                category_key=row[8],
-                kind=served.kind,
-                tags=json.loads(row[10]),
-                context=row[11],
-                form=row[6],
-                instance=view.instance(str(path)),
+        if include_units or include_occurrences:
+            unit_rows = conn.execute(
+                f"SELECT {_OCCURRENCE_COLUMNS}, u.verdict, u.check_by_day FROM semantic_units u "
+                "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
+                "ORDER BY u.parent_path, u.source_order",
+                (json.dumps(sorted(result), ensure_ascii=False),),
             )
-            if verdict is not None:
-                unit["verdict"] = verdict
-            if check_by is not None:
-                unit["check_by"] = date.fromisoformat(check_by)
-            units.setdefault(str(path), []).append(unit)
-            if include_occurrences:
-                parent = view.parents.parent(str(path))
-                occurrences.setdefault(str(path), []).append((_unit_hit(row, served, None), parent, unit, str(row[0])))
-        view.require_complete()
+            for row, served in view.served(unit_rows):
+                path, verdict, check_by = row[1], row[17], row[18]
+                unit = dict(
+                    category=served.category,
+                    category_key=row[8],
+                    kind=served.kind,
+                    tags=json.loads(row[10]),
+                    context=row[11],
+                    form=row[6],
+                    instance=view.instance(str(path)),
+                )
+                if verdict is not None:
+                    unit["verdict"] = verdict
+                if check_by is not None:
+                    unit["check_by"] = date.fromisoformat(check_by)
+                units.setdefault(str(path), []).append(unit)
+                if include_occurrences:
+                    parent = view.parents.parent(str(path))
+                    occurrences.setdefault(str(path), []).append((_unit_hit(row, served, None), parent, unit, str(row[0])))
+            view.require_complete()
         from dataclasses import replace
 
-        for path, values in units.items():
+        if include_occurrences or include_structure:
+            # Retain structural bounds even when no occurrence row survives.
+            # Unavailable bounds do not change the existing occurrence coverage outcome.
+            view.parents.prefetch(result)
+        for path in result:
+            parent = view.parents.parent(path) if include_occurrences or include_structure else None
+            if parent is not None and parent.metadata.get("parent_source_hash") != result[path].content_hash:
+                parent = None
             result[path] = replace(
-                result[path], units=tuple(values), occurrences=tuple(occurrences.get(path, ())),
+                result[path], units=tuple(units.get(path, ())),
+                occurrences=tuple(occurrences.get(path, ())), selected_parent=parent,
             )
     except RegistryError:
         # Unavailable definitions are a dependent outcome, not a corrupt snapshot.
@@ -3750,6 +3828,11 @@ def catalog_cache_token(vault_root: Path) -> str:
 # ------------------------------------------------------------------ write seams
 
 
+def _lexical_markdown(paths: list[Path]) -> list[Path]:
+    """The paths the lexical catalogue indexes: Markdown, minus sync-conflict copies."""
+    return [p for p in paths if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name]
+
+
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     """Keep the lexical index in lockstep with a writer's markdown change.
 
@@ -3761,7 +3844,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     """
     if not _catalog_usable():
         return True
-    md = [p for p in written_paths if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name]
+    md = _lexical_markdown(written_paths)
     if not md or not lexical_path(vault_root).exists():
         return True
     try:
@@ -3780,11 +3863,7 @@ def apply_watcher_batch(
     """Apply one already-published watcher generation to the lexical sidecar."""
     if not _catalog_usable():
         return True
-    md = [
-        path
-        for path in written_paths
-        if path.suffix.lower() == ".md" and ".sync-conflict-" not in path.name
-    ]
+    md = _lexical_markdown(written_paths)
     if not (md or removed_rel_paths) or not lexical_path(vault_root).exists():
         return True
     try:
@@ -6184,19 +6263,21 @@ class LexicalStore:
         Returns whether the rows landed. False escalates to `rebuild_atomic`,
         the answer to anything that is neither contention nor a moving source:
         a sqlite error or a failed read says the store or the disk is wrong,
-        and re-applying rows cannot fix either. A source that moved under the
-        apply raises `_SourceMoved` instead, so the caller keeps the claim.
+        and re-applying rows cannot fix either. Source movement and bounded
+        publication timeouts raise instead, so the caller keeps the claim.
         """
         if self._failed or not paths:
             return False
-        from .vault import VaultLockError
+        from .vault import VaultLockError, VaultLockTimeout
 
         try:
             source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
                 return self._apply_paths_locked(paths, [], source_proofs=source_proofs)
+        except VaultLockTimeout:
+            raise
         except VaultLockError as e:
-            log.info("lexical targeted retry still contended (%s); rebuilding", e)
+            log.info("lexical targeted retry lock failed (%s); rebuilding", e)
             return False
         except _SourceMoved:
             raise

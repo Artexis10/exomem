@@ -41,6 +41,7 @@ from . import (
     vocabulary_resolution,
 )
 from .kbdir import kb_prefix
+from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -453,14 +454,15 @@ def add(
         connector_boundary.require_create(vault_root, (folder_path / f"{date_iso}-{filename_slug}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
+    identity_warnings: list[str] = []
     if source_identity is not None:
-        existing = source_capture.find_capture(vault_root, source_identity)
+        existing = source_capture.find_capture(vault_root, source_identity, warnings=identity_warnings)
         if existing is not None:
             path, reference, original_digest = existing
             source_capture.require_authority(vault_root)
             if original_digest != capture_input_digest:
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
-            return AddResult(path=path, ref=reference, warnings=[], capture_outcome="reused")
+            return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
     if adoption_seed is not None:
         actual_destination = folder_path.relative_to(vault_root).as_posix()
         if adoption_seed.get("destination") != actual_destination:
@@ -642,7 +644,7 @@ def add(
         # Global index/log prose cannot carry the protected title or byte identity.
         writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
 
-    warnings: list[str] = list(slug_warnings) + tag_warnings
+    warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
     # "registered 'field-notebook'" reports what the write did, so routing it
     # through the suppression channel would let a dismissal hide a fact.
@@ -780,6 +782,13 @@ def add(
 
                 if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
                     run_fanout()
+
+    from . import due_state
+
+    # A new Source is outstanding from the moment it lands, so the backlog counts it now.
+    due_state.refresh_after_writes(
+        vault_root, [due_state.PageWrite(source_path.relative_to(vault_root).as_posix())]
+    )
 
     try:
         self_path = source_path.relative_to(vault_root).as_posix()
@@ -1258,7 +1267,7 @@ def _render_source(
         for paragraph in why_captured.strip().splitlines():
             lines.append(f"> {paragraph}")
         lines.append("")
-    lines.append("## Capture")
+    lines.append(CAPTURE_HEADING)
     lines.append("")
     lines.append(content.strip())
     lines.append("")

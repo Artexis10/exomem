@@ -108,9 +108,11 @@ from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
+from . import promotions as promotions_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import readiness as readiness_module
+from . import recall_timing as recall_timing_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
@@ -1866,14 +1868,20 @@ def op_bootstrap(
                     "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "
                     "Keep mentions through compaction and renewal; receipts are not mentions. "
                     "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
-                    "Absent advice proves nothing; prefer silence."
+                    "Absent advice proves nothing; prefer silence. "
+                    "Backlog: review a batch of the largest category, group it by topic, "
+                    "write each group with the usual writers, check outstanding fell. "
+                    "Dismissal is not completion."
                     if profile == "compact"
                     else
                     "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
                     "Raise at most one due item per maintained client conversation in the user's language. "
                     "Remember any due mention through hooks, MCP, REST, continuation, compaction and OAuth renewal; "
                     "receipt is not a mention. Dismissed or snoozed fingerprints stay quiet until state changes. "
-                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals."
+                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals. "
+                    "To work a backlog, review a batch of its largest category, group the batch by topic, "
+                    "write each group through the usual writers and confirm that the outstanding count fell. "
+                    "A dismissal is not completion: it lowers the visible count only."
                 ),
                 "relevant_due_handling": (
                     f"Read {tools_text('review_item_context')} with ref and expected_fingerprint; refresh on REVIEW_ITEM_CHANGED. "
@@ -2307,6 +2315,11 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
+        if "due_state" in core_payload:
+            # The summary is built after the surface filter, so its `next` route needs the same pass.
+            core_payload["due_state"] = _filter_bootstrap_payload(
+                core_payload["due_state"], active_descriptor
+            )
     # Compact sections and session carry the calling client's retained-ring advisory;
     # the core carries only a pointer. The bootstrap contract fixes the full-detail
     # profiles below; session already normalizes to compact.
@@ -3841,8 +3854,8 @@ def op_audit(
       Bare names resolve against filename stems AND frontmatter `title:`
       (so date-prefixed sources with a title match are not flagged).
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
-    - `unprocessed_source`: source with empty `ingested_into:` (no notes
-      have compiled from it yet)
+    - `unprocessed_source`: source that no live note compiles yet (no page
+      in its `ingested_into:` is live and cites it in its own `sources:`)
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
       original or remove the unsupported citation; audit never reconstructs it.
@@ -4251,7 +4264,10 @@ def op_propose_compilation(
 
     Returns:
         {suggested_note_type, suggested_title, suggested_sources,
-         suggested_connections, outline_markdown, warnings}.
+         suggested_connections, outline_markdown, source_excerpts, warnings}.
+        `source_excerpts` holds one bounded excerpt per source, with its
+        recorded import metadata, so the note can be written without a read
+        per source.
 
     Errors:
         INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).
@@ -4974,6 +4990,29 @@ def _replacement_review_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
+    """The origin a creation records for its `ref`; None when none was given.
+
+    A ref the caller cannot read, withheld or missing, is an origin of unknown
+    path, and never refuses the creation: both leave the same bytes.
+    """
+    if not ref:
+        return None
+    path: str | None = None
+    try:
+        resolved = _resolve_memory_identifier(vault_root, ref)
+        if (Path(vault_root) / resolved).is_file() and promotions_module.page_visible(
+            vault_root, resolved
+        ):
+            path = resolved
+    except Exception:  # noqa: BLE001 - what cannot be read is an unknown origin, whatever the cause
+        path = None
+    from .writer_lease import active_mutation_request_id
+
+    operation_id = active_mutation_request_id() if path else None
+    return {"path": path, "operation_id": operation_id}
+
+
 def op_link(
     vault_root: Path,
     entity_type: EntityTypeId,
@@ -4998,6 +5037,7 @@ def op_link(
     aliases: list[str] | None = None,
     registry_scope: str | None = None,
     relations: list[dict] | None = None,
+    ref: str | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -5045,6 +5085,7 @@ def op_link(
             a turn in that script reaches it. At most 8, one line and 64
             characters each; one any other page already answers to refuses.
         registry_scope: Public instance token or canonical private Scope ID; grants no authority.
+        ref: The page or write that led to this entity, kept in the log entry.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -5084,6 +5125,7 @@ def op_link(
             aliases=aliases,
             registry_scope=registry_scope,
             relations=relations,
+            origin=_creation_origin(vault_root, ref),
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -6452,45 +6494,47 @@ def op_ask_memory(
         explain: Add retrieval-plan and ranking evidence.
         purpose: Declared purpose; governance may widen or narrow visibility.
     """
-    # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
-    with state_paths_module.resolution_scope():
-        result = op_find(
-            vault_root,
-            query=query,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            categories=categories,
-            kinds=kinds,
-            source_kinds=source_kinds,
-            domains=domains,
-            relations=relations,
-            relation_of=relation_of,
-            relation_direction=relation_direction,
-            filters=filters,
-            result_level=result_level,
-            limit=limit,
-            continuation=continuation,
-            scope=scope,
-            mode=mode,
-            graph=graph,
-            rerank=rerank,
-            rerank_max_candidates=rerank_max_candidates,
-            prefer_compiled=prefer_compiled,
-            prefer_active=prefer_active,
-            prefer_used=prefer_used,
-            widen_outside_kb=widen_outside_kb,
-            pack=deep,
-            graph_enrich=graph_enrich,
-            detail=detail,
-            include_timings=include_timings,
-            explain=explain,
-            purpose=purpose,
-        )
-        return _with_due_state(vault_root, result, purpose=purpose)
+    with recall_timing_module.measure_recall(include_timings) as trace:
+        # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
+        with state_paths_module.resolution_scope():
+            result = op_find(
+                vault_root,
+                query=query,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                categories=categories,
+                kinds=kinds,
+                source_kinds=source_kinds,
+                domains=domains,
+                relations=relations,
+                relation_of=relation_of,
+                relation_direction=relation_direction,
+                filters=filters,
+                result_level=result_level,
+                limit=limit,
+                continuation=continuation,
+                scope=scope,
+                mode=mode,
+                graph=graph,
+                rerank=rerank,
+                rerank_max_candidates=rerank_max_candidates,
+                prefer_compiled=prefer_compiled,
+                prefer_active=prefer_active,
+                prefer_used=prefer_used,
+                widen_outside_kb=widen_outside_kb,
+                pack=deep,
+                graph_enrich=graph_enrich,
+                detail=detail,
+                include_timings=include_timings,
+                explain=explain,
+                purpose=purpose,
+            )
+            result = _with_due_state(vault_root, result, purpose=purpose)
+    return recall_timing_module.completed(result, trace)
 
 
 def _with_due_state(
@@ -8968,8 +9012,9 @@ def op_review_memory(
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
-    Attention reads; repairs use maintain_memory. Vocabulary path/query/family
-    submits a meaning question: requires write access, grants no page or vocabulary mutation authority.
+    Attention reads; repairs use maintain_memory. unprocessed-sources lists
+    Sources no live note cites; dismissal is not completion. Vocabulary
+    path/query/family submits a meaning question: requires write access, grants no page or vocabulary mutation authority.
 
     mode="audit", categories=["unresolved_source_citation"] finds citations
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
@@ -8989,17 +9034,16 @@ def op_review_memory(
         key: Provenance key filter.
         value: Provenance value filter.
         path: Provenance scan path; for evolution it selects the path route (`query`
-            unused; an unresolvable path raises); for vocabulary, the page the
-            question concerns.
+            unused); for vocabulary, the page the question concerns.
         state: open (default), all, snoozed or dismissed for attention/activation;
             vocabulary takes open or all.
         ref: `exomem://review/<id>` for item mode (upkeep refs revalidate one
             item) or `exomem://write-advisory-result/<id>` for
             write-advisory-result; for a vocabulary relation question, a current
             relation-queue candidate ref alongside its source path.
-        family: Vocabulary family for a meaning question; with `mode="vocabulary"`
-            requires `path` and `query`; an edge needs `relation-type/v1` and the
-            candidate `ref`. Creates only a review consideration.
+        family: Vocabulary family for a meaning question; an edge needs
+            `relation-type/v1` and the candidate `ref`. Creates only a review
+            consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
     """
@@ -9096,6 +9140,10 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         from . import upkeep as upkeep_module
 
+        if promotions_module.is_promotion_ref(ref):
+            from . import promotion_revert as promotion_revert_module
+
+            return promotion_revert_module.item(vault_root, ref)
         if upkeep_module.is_upkeep_ref(ref):
             # Before the attention scan: an upkeep item revalidates from its
             # own pages and never runs the whole-vault union.
@@ -9207,6 +9255,24 @@ def op_review_item_context(
         raise ValueError("INVALID_REVIEW_CONTEXT_ARGUMENTS: continuation requires a vocabulary ref")
     from . import upkeep as upkeep_module
 
+    if promotions_module.is_promotion_ref(ref):
+        from . import promotion_revert as promotion_revert_module
+
+        if (
+            max_body_chars != 4000
+            or max_related_pages != 8
+            or max_graph_nodes != 30
+            or max_graph_edges != 60
+            or max_history != 10
+            or max_evolution_versions != 10
+        ):
+            raise ValueError(
+                "INVALID_PROMOTION_CONTEXT_ARGUMENTS: a recent promotion's context accepts "
+                "only expected_fingerprint"
+            )
+        return promotion_revert_module.context(
+            vault_root, ref, expected_fingerprint=expected_fingerprint
+        )
     if upkeep_module.is_upkeep_ref(ref):
         if (
             max_graph_nodes != 30
@@ -9262,15 +9328,6 @@ def _refuse_pairless_stance(ref: str, action: str) -> None:
     )
 
 
-def _adoption_run_paths(result: Any) -> list[str]:
-    """Governed pages one Adoption Studio apply call just wrote, as that call reports them."""
-    if not isinstance(result, dict):
-        return []
-    applied = result.get("apply_result")
-    written = applied.get("written") if isinstance(applied, dict) else None
-    return list(dict.fromkeys(str(path) for path in written or []))
-
-
 def _adopted_paths(result: Any) -> list[str]:
     """Governed pages one adoption invocation just wrote, from its own outcomes.
 
@@ -9314,22 +9371,18 @@ def _audit_fix_paths(result: Any) -> list[str]:
 def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
     """Bring the due-state projection up to date for a batch's governed writes.
 
-    Bounded per page — one parse, four page-local predicates, one small JSON
-    replace — and best effort, exactly like the per-write delta it stands in
-    for. Without it a bulk adoption leaves the projection describing the vault
-    as it was before the batch, and the emission ledger's write count, which is
-    the denominator every "more automatic" claim is measured against, silently
-    under-reports the writes that actually happened.
+    Bounded per page — one parse, four page-local predicates — with one load and
+    one save of the projection for the whole batch, and best effort, exactly like
+    the per-write delta it stands in for. Without it a bulk adoption leaves the
+    projection describing the vault as it was before the batch, and the emission
+    ledger's write count, which is the denominator every "more automatic" claim is
+    measured against, silently under-reports the writes that actually happened.
     """
-    if not rel_paths:
-        return
     from . import due_state as due_state_module
 
-    for rel_path in rel_paths:
-        try:
-            due_state_module.apply_write_delta(vault_root, rel_path)
-        except Exception:  # noqa: BLE001 — a projection delta never breaks a write
-            log.debug("due-state delta failed for %s", rel_path, exc_info=True)
+    due_state_module.refresh_after_writes(
+        vault_root, [due_state_module.PageWrite(rel_path) for rel_path in rel_paths]
+    )
 
 
 def _carrying_due_state(vault_root: Path, result: Any) -> Any:
@@ -9725,6 +9778,16 @@ def op_triage_memory(
         )
     from . import upkeep as upkeep_module
 
+    if promotions_module.is_promotion_ref(ref):
+        _refuse_pairless_stance(ref, action)
+        return promotions_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if upkeep_module.is_upkeep_ref(ref):
         _refuse_pairless_stance(ref, action)
         return upkeep_module.triage(
@@ -9912,8 +9975,10 @@ def op_connect_memory(
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
         relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
     """
-    if registry_scope is not None and operation != "create-entity":
-        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
+    if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity or resolve-relation"
+        )
     if relations not in (None, []) and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: relations requires create-entity")
     _validate_vocabulary_binding(
@@ -9982,7 +10047,14 @@ def op_connect_memory(
         _, observation_offset = relation_vocabulary_module.continuation_offsets(
             continuation
         )
-        registry = relation_registry_module.load_registry(vault_root)
+        # An instance this caller cannot admit answers as the public one does, so the
+        # reply never says whether the scope exists or what it defines.
+        admitted = (
+            relation_registry_module.load_admitted(vault_root, registry_scope)
+            if registry_scope is not None
+            else None
+        )
+        registry = admitted or relation_registry_module.load_registry(vault_root)
         observations = memory_schema_module.indexed_relation_observations(
             vault_root,
             limit=limit,
@@ -10131,6 +10203,7 @@ def op_connect_memory(
             aliases=aliases,
             registry_scope=registry_scope,
             relations=relations,
+            ref=ref,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -10242,11 +10315,12 @@ def op_adoption_studio(
     """Review and import an existing collection of notes, documents, images, audio and video in a resumable run.
 
     Never rewrite, move or delete originals. Status/work-item read; other actions
-    save run state or material. Plan previews exact imports; apply commits that plan or refuses.
+    save run state or material. Apply commits the previewed plan or refuses.
 
     start scans; select chooses files; plan previews; apply copies each file
-    into Sources; cancel closes pre-apply; finish proves recall and reports
-    coverage. Repeat plan or apply with a returned `continuation`. Then
+    into Sources, and drafts a note under an own-note rule; cancel closes
+    pre-apply; finish proves recall and reports coverage. Repeat plan or apply
+    with a returned `continuation`. Then
     work-item reads context, propose submits proposals, apply-proposal
     approves one. Details: references/operations.md.
 
@@ -10255,24 +10329,23 @@ def op_adoption_studio(
         run_id: From `start`; required except for `start` and run-listing `status`.
         path: For `start`, subtree to scan (default: vault root).
         include_hidden: For `start`, include hidden files.
-        initialize_kb: For `start`, bootstrap a missing Knowledge Base
-            (otherwise KB_NOT_INITIALIZED).
+        initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
-        include: For `select`, paths whose files are selected, or
-            {path, source_kind, domain} to file a folder under registered keys.
+        include: For `select`, paths whose files are selected, or {path,
+            source_kind?, domain?} to file a folder under registered keys, or
+            {path, adopt_as: note, note_type, project?, domain?} for a draft
+            note of each Markdown file.
         exclude: For `select`, paths to deselect.
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
-        plan_id: For `apply`, from `plan`/`status`; a mismatch or changed
-            selection refuses with PLAN_STALE.
+        plan_id: For `apply`, from `plan`/`status`.
         continuation: For `plan` and `apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
         sources: For `work-item`, source paths instead of the first imports.
         ref: For `apply-proposal`, the `exomem://review/adoption/<id>` ref.
-        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint;
-            a mismatch refuses.
+        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
     """
@@ -10315,7 +10388,6 @@ def op_adoption_studio(
                     retry_failed=retry_failed,
                     only_paths=only_paths,
                 )
-                _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
             return _carrying_batch_advisories(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
@@ -10455,6 +10527,7 @@ def op_maintain_memory(
         "resume",
         "propose-compensation",
         "apply-compensation",
+        "revert",
     ]
     | None = None,
     run_id: str | None = None,
@@ -10564,6 +10637,7 @@ def op_maintain_memory(
                 "expected_plan_fingerprint",
                 "why",
             },
+            "revert": {"review_ref", "expected_plan_fingerprint", "why"},
         }
         allowed = allowed_by_action[curation_action]
         if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -10584,6 +10658,7 @@ def op_maintain_memory(
                 "expected_plan_fingerprint",
                 "why",
             },
+            "revert": {"review_ref", "expected_plan_fingerprint", "why"},
         }
         if any(supplied[name] is None for name in required_by_action[curation_action]):
             raise ValueError(
@@ -10623,6 +10698,16 @@ def op_maintain_memory(
             if curation_action == "propose-compensation":
                 assert run_id is not None
                 return curation_module.propose_compensation(vault_root, run_id=run_id)
+            if curation_action == "revert":
+                assert None not in (review_ref, expected_plan_fingerprint, why)
+                from . import promotion_revert as promotion_revert_module
+
+                return promotion_revert_module.revert(
+                    vault_root,
+                    review_ref=review_ref,
+                    expected_plan_fingerprint=expected_plan_fingerprint,
+                    why=why,
+                )
             assert curation_action == "apply-compensation"
             assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
             return curation_module.apply_compensation(
@@ -10848,8 +10933,8 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations. Inference reads unless
     save=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary
-    and usage; propose previews a delta; save applies upsert, alias or deprecate
-    with expected_hash and why; history lists kept versions; restore reverts one
+    and usage; propose previews a delta; save applies upsert, alias, deprecate or
+    remove with expected_hash and why; history lists kept versions; restore reverts one
     without rewriting pages.
     Operations: references/operation-routing.md.
 
@@ -10857,7 +10942,7 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
-            source-kinds, domains, statuses, planning-values or note-types);
+            source-kinds, domains, statuses, planning-values, note-types or homes);
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
@@ -13395,7 +13480,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("adopt",),
-        {"public_title": "Review and import existing material", "surface": "primary", "actions": ("adopt", "review", "save"), "first_run_safe": True},
+        {"public_title": "Review and import existing material", "preferred_name": "import_memory", "surface": "primary", "actions": ("adopt", "review", "save"), "first_run_safe": True},
     ),
     (
         "maintain_memory",
@@ -14121,7 +14206,9 @@ def simple_action_catalog(
     A route is stored as the grouped command call and spelled for `tool_shape` here, so
     the table names the tools the surface lists and keeps one definition of each call.
     """
-    known_commands = {command.public_name for command in PRODUCT_COMMANDS} | {"doctor"}
+    known_commands = {
+        name for command in PRODUCT_COMMANDS for name in (command.name, command.public_name)
+    } | {"doctor"}
     out: dict[str, dict] = {}
     for action in _SIMPLE_ACTIONS:
         definition = _SIMPLE_ACTION_DEFS[action]

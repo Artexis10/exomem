@@ -4,7 +4,9 @@ import dataclasses
 
 import pytest
 import test_single_purpose_tools_mcp as pilot_mcp
+import yaml
 from fastmcp.tools import ToolResult
+from jsonschema import Draft202012Validator, ValidationError
 from mcp.types import ImageContent
 from test_single_purpose_tools_mcp import _call, _session
 
@@ -56,6 +58,83 @@ def test_dataset_filters_keep_the_omitted_operator_and_do_not_contact_a_writer(v
     assert nested == legacy
     assert nested["rows"] == [{"value": "2", "label": "second"}]
     assert all(name == "query_dataset" for name, *_ in seams.rules)
+
+
+@pytest.mark.parametrize("condition", ["room", "collision", "cap"])
+def test_registry_preview_checks_the_live_overlay_without_replacing_it(vault, build, seams, monkeypatch, condition):
+    """A singleton document can validate while its delta fails against existing custom categories."""
+    from exomem import semantic_language_registry
+
+    count = semantic_language_registry.CATEGORY_SPEC.cap if condition == "cap" else 2
+    categories = {
+        f"existing_category_{index}": {"description": f"Retained category number {index}."}
+        for index in range(count)
+    }
+    categories["existing_category_0"]["aliases"] = ["shared_category_alias"]
+    overlay = semantic_language_registry.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(yaml.safe_dump({"schema_version": 1, "categories": categories, "kinds": {}}))
+    original = overlay.read_bytes()
+    entry = {"description": "A distinct proposed category."}
+    if condition == "collision":
+        entry["aliases"] = ["shared_category_alias"]
+    delta = {"upsert": {"proposed_category": entry}}
+
+    def ensure_writer(*args, **kwargs):
+        raise AssertionError("a registry preview must not acquire writer authority")
+
+    monkeypatch.setattr(writer_lease.LeaseManager, "ensure_writer", ensure_writer)
+
+    async def scenario(client):
+        tools = {tool.name: tool for tool in await client.list_tools()}
+        schema = Draft202012Validator(tools["read_schema"].input_schema)
+        arguments = {"operation": {"kind": "preview", "subject": "categories", "proposal": delta}}
+        schema.validate(arguments)
+        for malformed in ({"upsert": [{"key": "proposed_category", **entry}]},
+                          {"schema_version": 1, "categories": {"proposed_category": entry}}):
+            with pytest.raises(ValidationError):
+                schema.validate({"operation": {**arguments["operation"], "proposal": malformed}})
+        document = await _call(client, "read_schema", {"operation": {
+            "kind": "validate-document", "subject": "categories",
+            "proposal": {"schema_version": 1, "categories": {"proposed_category": entry}},
+        }})
+        compact = await _call(client, "read_schema", arguments)
+        grouped = await _call(client, "schema_memory", {
+            "operation": "propose", "subject": "categories", "proposal": delta,
+        })
+        return document, compact, grouped
+
+    document, compact, grouped = _session(build(), scenario)
+    assert document["valid"] is True
+    assert compact == grouped
+    assert compact["expected_hash"] != "none"
+    if condition == "cap":
+        assert compact["valid"] is False
+        assert "registry_cap" in {finding["code"] for finding in compact["findings"]}
+    elif condition == "collision":
+        assert "existing_category_0" in {collision["key"] for collision in compact["collisions"]}
+    else:
+        assert compact["valid"] is True
+        assert [item["key"] for item in compact["entries"]] == ["proposed_category"]
+    assert overlay.read_bytes() == original
+    assert {call["command"] for call in seams.dispatched} == {"schema_memory"}
+
+
+def test_import_run_remains_readable_through_the_deprecated_spelling(build, seams):
+    async def scenario(client):
+        tools = {tool.name for tool in await client.list_tools()}
+        assert {"import_memory", "read_import"} <= tools
+        assert "adoption_studio" not in tools
+        run = await _call(client, "import_memory", {"operation": {"kind": "start", "path": "."}})
+        run_id = run["run_id"]
+        current = await _call(client, "read_import", {"operation": {"kind": "status", "run_id": run_id}})
+        alias = await _call(client, "import_memory", {"action": "status", "run_id": run_id})
+        legacy = await _call(client, "adoption_studio", {"action": "status", "run_id": run_id})
+        return run_id, current, alias, legacy
+
+    run_id, current, alias, legacy = _session(build(), scenario)
+    assert [result["run_id"] for result in (current, alias, legacy)] == [run_id] * 3
+    assert {call["command"] for call in seams.dispatched} == {"adoption_studio"}
 
 
 def test_video_variant_retains_native_image_content(build, monkeypatch):

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import replace
@@ -16,7 +17,17 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import held_fs, record_formats, records, vault
 from exomem import structured_collections as collections
-from exomem.collection_store import chain, export, legacy, legacy_import, ownership, runtime, schema, views
+from exomem.collection_store import (
+    chain,
+    export,
+    governance,
+    legacy,
+    legacy_import,
+    ownership,
+    runtime,
+    schema,
+    views,
+)
 from exomem.collection_store.connection import CollectionStoreError, _writer_engine
 from exomem.governance.principal import library_scope, request_scope
 
@@ -509,6 +520,129 @@ def test_relationships_import_render_and_export_from_canonical_items_without_rec
             _, rendered = views.render_view(conn, views.store_identity(conn),
                 {"kind": "item", "row_id": row_id}, manifest, root=root)
             assert f"[[{target_path[:-3]}|Canonical target]]" in rendered
+
+
+@pytest.mark.parametrize("physical_target", ["forged", "missing"])
+def test_one_view_reconcile_resolves_explicit_canonical_relationship_without_a_vault_scan(
+        store, monkeypatch, physical_target):
+    text = manifest_text().replace(
+        "item_schema:\n",
+        "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\nitem_schema:\n",
+    ).replace("    count: {type: integer}\n", "    related: {type: link, link_kind: record}\n")
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    target_key = "22222222-2222-4222-8222-222222222222"
+    target = store.append_record(CID, item={"title": "Canonical target"},
+                                 item_key=target_key, why="capture")
+    store.reconcile_views()
+    target_path = target["affected_paths"][0]
+    source = store.append_record(CID, item={"title": "Source", "related": f"[[{target_path}]]"},
+                                 item_key=KEY, why="capture")
+    source_path = source["affected_paths"][0]
+    if physical_target == "forged":
+        (store.root / target_path).write_text("---\ntitle: Forged projection\n---\n")
+    else:
+        (store.root / target_path).unlink()
+    unrelated = store.root / "Unrelated"
+    unrelated.mkdir()
+    (unrelated / "page.md").write_text("# Unrelated\n")
+    real_iterdir = type(unrelated).iterdir
+    real_read_text = type(unrelated).read_text
+
+    def no_vault_scan(*_args, **_kwargs):
+        pytest.fail("one explicit relationship enumerated the vault namespace")
+
+    def bounded_iterdir(path):
+        assert path != unrelated, "one explicit relationship enumerated an unrelated directory"
+        return real_iterdir(path)
+
+    def bounded_read_text(path, *args, **kwargs):
+        assert path not in (unrelated / "page.md", store.root / target_path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(vault, "walk_vault_md", no_vault_scan)
+    monkeypatch.setattr(type(unrelated), "iterdir", bounded_iterdir)
+    monkeypatch.setattr(type(unrelated), "read_text", bounded_read_text)
+    result = store.reconcile_views(limit=1, after=source_path.removesuffix(".md"))
+
+    assert result["examined"] == 1
+    rendered = (store.root / source_path).read_text()
+    assert f"[[{target_path[:-3]}|Canonical target]]" in rendered
+    assert "Forged projection" not in rendered
+
+
+def test_targeted_relationship_namespace_matches_the_owned_overlay_and_full_vault_scanner(
+        store, monkeypatch):
+    store.create_collection(manifest_path(), manifest_text(), why="create", scaffold=False)
+    target = store.append_record(CID, item={"title": "Canonical target"}, item_key=KEY, why="capture")
+    target_path = target["affected_paths"][0]
+    paths = [
+        "Reference/plain.md", "Reference/ordinary.md", "Reference/SHOUTING.MD", "Reference/not-markdown.txt",
+        "Reference/copy.sync-conflict-20260101.md", ".git/hidden.md", ".obsidian/hidden.md",
+        "Knowledge Base/_Schema/hidden.md", "Knowledge Base/_trash/hidden.md",
+        "Knowledge Base/_Consolidation/hidden.md", "Reference/trailing./alias.md",
+        "Knowledge Base/Records/Work/Items/Unbound.md",
+    ]
+    for path in paths:
+        physical = store.root / path
+        physical.parent.mkdir(parents=True, exist_ok=True)
+        physical.write_text("# Ordinary target\n")
+    hardlink = store.root / "Reference/hardlink.md"
+    try:
+        os.link(store.root / "Reference/plain.md", hardlink)
+        paths.append("Reference/hardlink.md")
+    except OSError:
+        pass
+    symlink = store.root / "Reference/symlink.md"
+    try:
+        symlink.symlink_to(store.root / "Reference/SHOUTING.MD")
+        paths.append("Reference/symlink.md")
+    except OSError:
+        pass
+    paths += [target_path, "Reference/Missing.md", "Reference/PLAIN.md",
+              "Reference/../Reference/SHOUTING.MD", "Reference//SHOUTING.MD", "Reference/./SHOUTING.MD"]
+    operation = governance.OperationAuthorization(store.root, store.connection, mutation=False)
+    try:
+        full = views.presentation_wikilinks(operation)
+        assert target_path.removesuffix(".md") in full.full_paths
+        assert "Knowledge Base/Records/Work/Items/Unbound" not in full.full_paths
+        assert "Reference/SHOUTING.MD" in full.full_paths
+
+        def no_body_read(*_args, **_kwargs):
+            pytest.fail("namespace membership read a Markdown body")
+
+        monkeypatch.setattr(type(store.root), "read_text", no_body_read)
+        listings = {}
+        for path in paths:
+            candidate = path.removesuffix(".md")
+            assert views.presentation_namespace_contains(operation, candidate, listings) is (
+                candidate in full.full_paths
+            ), candidate
+    finally:
+        operation.close()
+
+
+def test_withheld_root_target_shadows_a_readable_kb_relative_relationship(store, monkeypatch):
+    text = manifest_text().replace(
+        "item_schema:\n",
+        "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\nitem_schema:\n",
+    ).replace("    count: {type: integer}\n", "    related: {type: link, link_kind: record}\n")
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    target = store.append_record(CID, item={"title": "Canonical target"}, item_key=KEY, why="capture")
+    target_path = target["affected_paths"][0]
+    root_path = target_path.removeprefix("Knowledge Base/")
+    physical = store.root / root_path
+    physical.parent.mkdir(parents=True)
+    physical.write_text("# Withheld root target\n")
+    manifest = collections.parse_manifest_bytes(store.root, manifest_path(), text.encode())
+    operation = governance.OperationAuthorization(store.root, store.connection, mutation=False)
+    original_allows = operation.allows_file
+    monkeypatch.setattr(operation, "allows_file", lambda path: path != root_path and original_allows(path))
+    try:
+        with views.presentation_resolver(store.connection, store.root, manifest, operation=operation) as resolve:
+            assert resolve("record", f"[[{root_path}]]") is None
+            assert resolve("record", f"[[{target_path}]]") == (target_path, "Canonical target")
+    finally:
+        operation.close()
 
 
 @pytest.mark.parametrize("change", ["target-edit", "new-ambiguity"])
