@@ -29,7 +29,7 @@ def pack(root: Path, spec: dict, destination: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["image-query", "speech"])
+    parser.add_argument("kind", choices=["image", "image-query", "speech"])
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -50,7 +50,37 @@ def main() -> None:
     root.mkdir(parents=True, exist_ok=False)
     for name in spec["metadata_files"]:
         shutil.copyfile(args.source / name, root / name)
-    if args.kind == "image-query":
+    if args.kind == "image":
+        import torch
+        from transformers import CLIPModel
+
+        clip = CLIPModel.from_pretrained(args.source, local_files_only=True).eval()
+
+        class ImageTower(torch.nn.Module):
+            """Vision tower plus its trained projection, as sentence-transformers runs them."""
+
+            def __init__(self, model):
+                super().__init__()
+                self.model = model
+
+            def forward(self, pixel_values):
+                return self.model.get_image_features(pixel_values=pixel_values)
+
+        exported = args.output / "image-export.onnx"
+        size = json.loads((args.source / spec["preprocessor_file"]).read_text())["crop_size"]
+        with torch.no_grad():
+            torch.onnx.export(
+                ImageTower(clip), (torch.zeros(1, 3, size, size),), exported,
+                input_names=[spec["input_name"]], output_names=[spec["output_name"]],
+                dynamic_axes={spec["input_name"]: {0: "batch_size"}, spec["output_name"]: {0: "batch_size"}},
+                opset_version=17, dynamo=False,
+            )
+        model = onnx.load(exported)
+        onnx.save_model(model, root / "model.onnx", save_as_external_data=True, all_tensors_to_one_file=True, location="model.onnx.data", size_threshold=1024)
+        exported.unlink()
+        for leftover in args.output.glob("image-export.onnx*"):
+            leftover.unlink()
+    elif args.kind == "image-query":
         if args.externalized:
             model = onnx.load(args.source / "model.onnx", load_external_data=False)
             locations = set()
@@ -120,6 +150,7 @@ def main() -> None:
         "model": spec["model"], "revision": spec["artifact"]["revision"],
         "source": spec["source"], "recipe": spec["recipe"],
         "qualified_external_input": args.externalized, "onnx": onnx.__version__,
+        **({"torch": __import__("torch").__version__, "transformers": __import__("transformers").__version__} if args.kind == "image" else {}),
         "recipe_sha256": sha256(Path(__file__)),
     }
     (root / "source.json").write_text(json.dumps(provenance, sort_keys=True, indent=2) + "\n")

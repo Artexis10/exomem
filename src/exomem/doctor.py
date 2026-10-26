@@ -2472,8 +2472,14 @@ def _check_models_cache() -> DoctorCheck:
         for name in expected
         if not _model_cached(hub, model_cache.snapshot_dirname(name))
     ]
-    if embeddings.clip_enabled() and not media_models.media_model_cached("image-query"):
-        missing.append(media_models.model_spec("image-query")["model"])
+    if embeddings.clip_enabled():
+        # The ONNX lane serves the image tower as a media artifact, not from the hub.
+        kinds = ("image-query",) if _serves_reranker_and_clip(backend) else ("image-query", "image")
+        missing.extend(
+            media_models.model_spec(kind)["model"]
+            for kind in kinds
+            if not media_models.media_model_cached(kind)
+        )
     if not missing:
         return _check(
             "models.cache",

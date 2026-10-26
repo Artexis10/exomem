@@ -1,4 +1,51 @@
 {
+  "image": {
+    "model": "sentence-transformers/clip-ViT-B-32",
+    "precision": "fp32",
+    "graph_file": "model.onnx",
+    "preprocessor_file": "preprocessor_config.json",
+    "input_name": "pixel_values",
+    "output_name": "image_embeds",
+    "dimensions": 512,
+    "image_space": "openai/clip-vit-base-patch32",
+    "metadata_files": [
+      "preprocessor_config.json",
+      "config.json",
+      "LICENSES.txt"
+    ],
+    "source": {
+      "license_sources": [
+        "https://raw.githubusercontent.com/openai/CLIP/b1c4b6be5871f1b94359ba55901627f29ecc9ae9/LICENSE"
+      ]
+    },
+    "recipe": {
+      "version": 1,
+      "script": "scripts/build-media-artifacts.py",
+      "pipeline": "vision tower plus visual projection exported at opset 17 from the pinned safetensors; external data with1024byte threshold; consumer preprocessing and L2 normalization"
+    },
+    "artifact": {
+      "revision": "327ab6726d33c0e22f920c83f2ff9e4bd38ca37f",
+      "source": [],
+      "quantization": "fp32",
+      "file_format": "onnx-external-data",
+      "digest": "40ced2760dd2d02b06ba11b5b72646efd8320269ab23b7433a53777c191d45b0",
+      "asset_digest": "06472c253f7849304a8e8838a74b5d40e71dc341d18c544cdf8067818c95e9a3",
+      "files": [
+        "model.onnx",
+        "model.onnx.data",
+        "preprocessor_config.json",
+        "config.json",
+        "source.json",
+        "LICENSES.txt"
+      ]
+    },
+    "source_files": {
+      "model.safetensors": "99d28a652e6ec46629ab7047a0ac82c69b1fe11e0ce672c43af65d3a9a3fc05d",
+      "config.json": "f77ab2f54a03090c5dcac397670c254c39cd7a311611cafb5a79de3b07cd13ff",
+      "preprocessor_config.json": "910e70b3956ac9879ebc90b22fb3bc8a75b6a0677814500101a4c072bd7857bd",
+      "LICENSES.txt": "4f89241cdfff298df93a6775d6b351e10de37e3bdecb4267ececaaf3c876a587"
+    }
+  },
   "image-query": {
     "model": "sentence-transformers/clip-ViT-B-32-multilingual-v1",
     "precision": "fp32",

@@ -1851,11 +1851,7 @@ def _warm_main(argv: list[str]) -> int:
     )
     if embeddings.clip_enabled():
         _step("multilingual image queries", embeddings.get_clip_query_model)
-        _step(
-            f"CLIP model {embeddings.CLIP_MODEL_NAME}",
-            embeddings.get_clip_model,
-            required=lane_serves_torch_models,
-        )
+        _step(f"CLIP image model {embeddings.CLIP_MODEL_NAME}", embeddings.get_clip_model)
     else:
         print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
 

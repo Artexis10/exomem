@@ -429,14 +429,26 @@ def _clip_device() -> str:
     return accel.select_device(override_env="EXOMEM_CLIP_DEVICE", avoid_cuda_when_asr=True)
 
 
+def _clip_image_lane_is_onnx() -> bool:
+    """The image tower follows the encoder lane: ONNX wherever torch is not served."""
+    return embedding_backend.resolve_backend() == embedding_backend.ONNX
+
+
 def get_clip_model():
-    """Lazy CLIP image and tag tower. Device via `_clip_device`."""
+    """Lazy CLIP image and tag tower: sentence-transformers, or its ONNX build on CPU."""
     global _CLIP_MODEL
     with runtime_resources.model_execution():
         if _CLIP_MODEL is not None:
             return _CLIP_MODEL
         with _CLIP_LOCK:
             if _CLIP_MODEL is not None:
+                return _CLIP_MODEL
+            if _clip_image_lane_is_onnx():
+                from .clip_image import OnnxClipImageEncoder
+
+                log.info("loading the ONNX CLIP image encoder on CPU")
+                _CLIP_MODEL = OnnxClipImageEncoder()
+                CLIP_GUARD.touch()
                 return _CLIP_MODEL
             runtime_resources.configure_torch()
             from sentence_transformers import SentenceTransformer
@@ -468,6 +480,36 @@ def get_clip_query_model():
         return _CLIP_QUERY_MODEL
 
 
+def clip_encoder_space() -> dict[str, str]:
+    """The image tower's vector space and the artifact that writes into it.
+
+    Both lanes write one space: the ONNX build passed the same-precision parity
+    bound against the sentence-transformers model, so it keeps the stored vectors.
+    """
+    from . import media_models
+
+    spec = media_models.model_spec("image")
+    artifact = (
+        f"onnx:{spec['artifact']['digest']}"
+        if _clip_image_lane_is_onnx()
+        else f"sentence-transformers:{CLIP_MODEL_NAME}"
+    )
+    return {
+        "space": spec["image_space"],
+        "width": str(spec["dimensions"]),
+        "precision": spec["precision"],
+        "artifact": artifact,
+    }
+
+
+def _clip_image_tower():
+    """Load the image tower, mapping a missing runtime or artifact to ClipUnavailable."""
+    try:
+        return get_clip_model()
+    except (ImportError, embedding_backend.ModelFilesUnavailable) as error:
+        raise ClipUnavailable(f"CLIP image encoder unavailable: {error}") from error
+
+
 def embed_image(path: Path) -> np.ndarray:
     """Encode decoded pixels as an L2-normalized float32 visual vector."""
     from . import image_codecs
@@ -477,10 +519,7 @@ def embed_image(path: Path) -> np.ndarray:
     except ImportError as error:
         raise ClipUnavailable(str(error)) from error
     with image as img:
-        try:
-            model = get_clip_model()
-        except ImportError as error:
-            raise ClipUnavailable(f"sentence-transformers not installed: {error}") from error
+        model = _clip_image_tower()
         with CLIP_GUARD.active(), runtime_resources.model_execution():
             vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
     return vec.astype(np.float32, copy=False)
@@ -506,6 +545,9 @@ def embed_clip_texts(texts: list[str]) -> np.ndarray:
     """
     if not texts:
         return np.zeros((0, CLIP_DIM), dtype=np.float32)
+    if _clip_image_lane_is_onnx():
+        # Tags score against CLIP's original text tower, which only the torch lane serves.
+        raise ClipUnavailable("image tags need the sentence-transformers CLIP text tower")
     try:
         model = get_clip_model()
     except ImportError as e:
@@ -916,10 +958,7 @@ def embed_video_scenes(
         from PIL import Image  # noqa: F401 — decoded frames are PIL images
     except ImportError as e:
         raise ClipUnavailable(f"Pillow not installed: {e}") from e
-    try:
-        model = get_clip_model()
-    except ImportError as e:
-        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
+    model = _clip_image_tower()
     pairs = sample_video_scenes(path)
     if not pairs:
         raise ClipUnavailable(f"no decodable video frames in {path.name}")
@@ -954,10 +993,7 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
         from PIL import Image  # noqa: F401 — frame.to_image() returns a PIL image
     except ImportError as e:
         raise ClipUnavailable(f"Pillow not installed: {e}") from e
-    try:
-        model = get_clip_model()
-    except ImportError as e:
-        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
+    model = _clip_image_tower()
     candidates = _sample_video_keyframes(path)
     if not candidates:
         raise ClipUnavailable(f"no decodable video frames in {path.name}")
@@ -1733,7 +1769,7 @@ def get_clip_index(vault_root: Path) -> ClipIndex:
     with _INDEX_CACHE_LOCK:
         idx = _CLIP_INDEX_CACHE.get(key)
         if idx is None:
-            idx = ClipIndex(vault_root)
+            idx = ClipIndex(vault_root, encoder_space=clip_encoder_space)
             _CLIP_INDEX_CACHE[key] = idx
         return idx
 
