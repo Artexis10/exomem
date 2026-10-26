@@ -40,6 +40,11 @@ metadata:
     app.kubernetes.io/part-of: exomem-cloud
 driver: {{ $local.driver }}
 deletionPolicy: Delete
+{{- if $local.reservations }}
+parameters:
+  csi.storage.k8s.io/snapshotter-secret-name: "${volumesnapshot.name}"
+  csi.storage.k8s.io/snapshotter-secret-namespace: {{ $local.reservation_namespace | quote }}
+{{- end }}
 ---
 {{- end }}
 # D3: k3s bundles neither the snapshot CRDs nor a controller (spike 1.1).
@@ -249,12 +254,12 @@ spec:
         object.spec == oldObject.spec &&
         object.metadata.?labels == oldObject.metadata.?labels &&
         object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences &&
-        variables.newAnnotations.all(key, key.startsWith('capacity.topolvm.io/') ||
+        variables.newAnnotations.all(key, key.startsWith('capacity.topolvm.io/') || key.startsWith('reservation.topolvm.io/') ||
           (key in variables.oldAnnotations && variables.oldAnnotations[key] == variables.newAnnotations[key])) &&
-        variables.oldAnnotations.all(key, key.startsWith('capacity.topolvm.io/') || key in variables.newAnnotations) &&
+        variables.oldAnnotations.all(key, key.startsWith('capacity.topolvm.io/') || key.startsWith('reservation.topolvm.io/') || key in variables.newAnnotations) &&
         object.metadata.?finalizers.orValue([]).filter(name, name != 'topolvm.io/node') ==
           oldObject.metadata.?finalizers.orValue([]).filter(name, name != 'topolvm.io/node')
-      message: TopoLVM's node agent changes only its Node's capacity.topolvm.io/ annotations and the topolvm.io/node finalizer.
+      message: TopoLVM's node agent changes only its Node's capacity.topolvm.io/ and reservation.topolvm.io/ annotations and the topolvm.io/node finalizer.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -262,5 +267,163 @@ metadata:
   name: exomem-topolvm-node-self
 spec:
   policyName: exomem-topolvm-node-self
+  validationActions: [Deny]
+{{- end }}
+
+{{- if .Values.cellStorage.local.enabled }}
+{{- $storage := include "exomem.cellStorage" . | fromJson }}
+{{- $classes := deepCopy .Values.topolvm.lvmd.deviceClasses }}
+{{- range $classes }}
+{{- if $storage.local.reservations }}
+{{- if or (ne .type "thin") (ne (float64 (index . "thin-pool" "overprovision-ratio")) (float64 1)) }}
+{{- fail "reservation policy requires a thin pool with overprovision ratio 1" }}
+{{- end }}
+{{- $_ := set . "reservation-policy" (dict
+    "backup-concurrency" $.Values.cellStorage.local.backupConcurrencyPerNode
+    "ordinary-volume-cap-bytes" (mul (int (default 20 $storage.max_cell_gib)) 1073741824)
+    "lock-directory" "/run/topolvm") }}
+{{- end }}
+{{- end }}
+{{- $config := deepCopy (default dict .Values.topolvm.lvmd.additionalLVMDYamlContent) }}
+{{- $_ := set $config "socket-name" (default "/run/topolvm/lvmd.sock" .Values.topolvm.lvmd.socketName) }}
+{{- $_ := set $config "device-classes" $classes }}
+{{- with .Values.topolvm.lvmd.lvcreateOptionClasses }}
+{{- $_ := set $config "lvcreate-option-classes" . }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-local-lvmd-config
+  namespace: {{ .Release.Namespace }}
+data:
+  lvmd.yaml: |
+    {{- toYaml $config | nindent 4 }}
+{{- end }}
+
+{{- if and .Values.cellStorage.local.enabled .Values.cellStorage.local.reservations }}
+---
+# D12: constrain the added patch permission to source reservation requests.
+# RBAC cannot restrict patch fields, and the node-agent binding excludes cellctl's identity.
+# Prevent rewriting source, node or lineage fields. A wrong refusal delays this local cell's request;
+# its tenant waits for growth or backup while the existing volume keeps serving.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cellctl-reservations
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["topolvm.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["logicalvolumes", "logicalvolumes/status"]
+  matchConditions:
+    - name: cellctl-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:{{ .Values.cellctl.namespace }}:cellctl'
+  validations:
+    - expression: >-
+        request.operation == 'UPDATE' && request.subResource == '' &&
+        object.spec.deviceClass == '{{ (include "exomem.cellStorage" . | fromJson).local.device_class }}' &&
+        !has(oldObject.spec.source) &&
+        object.spec.all(key, key in ['backupFamilyRequest', 'reservationTargetBytes', 'reservationTargetPhysicalUUID'] ||
+          (key in oldObject.spec && object.spec[key] == oldObject.spec[key])) &&
+        oldObject.spec.all(key, key in ['backupFamilyRequest', 'reservationTargetBytes', 'reservationTargetPhysicalUUID'] ||
+          key in object.spec) &&
+        object.metadata.?labels == oldObject.metadata.?labels &&
+        object.metadata.?annotations == oldObject.metadata.?annotations &&
+        object.metadata.?finalizers == oldObject.metadata.?finalizers &&
+        object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences
+      message: cellctl may update only the reservation requests of ordinary cell volumes.
+    - expression: >-
+        !has(object.spec.backupFamilyRequest) ||
+        (object.spec.backupFamilyRequest.operation in ['Begin', 'End'] &&
+          object.spec.backupFamilyRequest.physicalSourceUUID == oldObject.status.physicalUUID &&
+          object.spec.backupFamilyRequest.expectedClosedEpoch >= 0 &&
+          object.spec.backupFamilyRequest.requestID.matches('^[0-9a-f]{32}$'))
+      message: a backup family request must bind its source physical UUID and immutable request identity.
+    - expression: >-
+        !has(object.spec.reservationTargetBytes) ||
+        (object.spec.reservationTargetPhysicalUUID == oldObject.status.physicalUUID &&
+          object.spec.reservationTargetBytes >= 0)
+      message: a target reservation must bind its source physical UUID.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cellctl-reservations
+spec:
+  policyName: exomem-cellctl-reservations
+  validationActions: [Deny]
+{{- end }}
+
+{{- if and .Values.cellStorage.local.enabled .Values.cellStorage.local.reservations }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.cellStorage.local.reservationNamespace }}
+  labels:
+    app.kubernetes.io/part-of: exomem-cloud
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snapshot-family-reader
+  namespace: {{ .Values.cellStorage.local.reservationNamespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snapshot-family-reader
+  namespace: {{ .Values.cellStorage.local.reservationNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: snapshot-family-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.topolvm.fullnameOverride }}-controller
+    namespace: {{ .Release.Namespace }}
+---
+# Only family capabilities enter this namespace. The provider needs no cell credential access.
+# A wrong refusal delays this cell's backup while its serving volume remains available.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-reservation-secrets
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: reservation-namespace
+      expression: request.namespace == '{{ .Values.cellStorage.local.reservationNamespace }}'
+  variables:
+    - name: target
+      expression: dyn(object)
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:serviceaccount:{{ .Values.cellctl.namespace }}:cellctl' &&
+        ({{ include "exomem.familySecretShape" . | nindent 8 }})
+      message: only cellctl may write immutable family capabilities with their exact cell and request identity.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-reservation-secrets
+spec:
+  policyName: exomem-reservation-secrets
   validationActions: [Deny]
 {{- end }}

@@ -210,7 +210,7 @@ The unmatched ordinary charge covers physical reservations not already represent
   - A cell's size is its row's `storage_gib`, which Substrate owns (column default 10). New cells take 4 GiB when the cutover (task 7.2) changes Substrate's default for new cells.
   - A migrating cell keeps its row's size unless the operator lowers it before the restore, never below what the cell uses.
   - A larger `storage_gib` expands a cell's claim through TopoLVM's online expansion, and also restarts the cell once. `storage_gib` is part of the render digest, which the pod template carries, so cellctl re-applies the cell as a digest change (D4). D10's automatic growth leaves the digest as it is and does not restart the cell.
-- **Snapshot reserve:** the effective D12 reserve is the larger of twice the largest source times configured concurrency and all outstanding family reservations. A backup does not change published slots while that effective reserve and ordinary charges remain unchanged.
+- **Snapshot reserve:** the effective D12 reserve is the larger of twice the largest source times configured concurrency and all outstanding family reservations. Admission also reserves for the prospective default cell and larger outstanding database commitments. It uses the larger of that prospective reserve and the provider's effective reserve, including on an empty pool. A backup does not change published slots while that reserve and ordinary charges remain unchanged.
 - **Allocation backstop:** the scheduler can use cached capacity, but every provider mutation enforces D12 against fresh physical inventory. A delayed request can wait for room; it cannot spend an earlier capacity sample.
 - **Published slots:** the minimum of the qualified occupancy, CPU, memory and storage terms.
 - **No pool, no slots:** a node whose storage driver has not published a pool publishes zero slots. Once the configured domain is local, that is what keeps cells off the control-plane node: it has no cell pool. No separate rule names the server.
@@ -316,6 +316,10 @@ For one pool, let `A` charge every ordinary physical LV at the larger of its vir
 
 The effective backup reserve is `max(2 * L * C, sum(outstanding family reservations))`. Each active or retiring family reserves twice its frozen source size. An ordinary create or growth requires prospective `A + reserve <= physical pool size`. New families also respect configured concurrency; lowering concurrency never releases an outstanding family's charge.
 
+For an existing ordinary LV, cellctl first requests a monotonic target reservation through its LogicalVolume request/status. The provider atomically records that target against the physical UUID after checking the prospective budget. Cellctl renders a larger PVC only after the acknowledgement. Recording a target does not resize the LV. The recorded charge survives daemon and controller restarts, never shrinks below an accepted target, and ends with physical deletion. This uses the existing bounded source-LV metadata, not another request journal.
+
+The acknowledgement echoes the physical UUID, requested bytes and observed generation. Cellctl accepts only the exact target result. A no-room result preserves the serving volume's Ready state and retries as room changes. Family closure reconciles before target growth, including while the source object is being deleted, so a target refusal cannot block cleanup.
+
 A family owns at most one snapshot and one clone, each no larger than its frozen source size. Freeze each role's child identity before its allocation. Their ownership tags enter the same LVM command that creates them. A partial multi-command operation retains a recognizable charge and recorded target. Recovery completes or cleans that operation before reporting a ready volume.
 
 Before a family has captured its snapshot, growth of that source waits for the snapshot or family closure. This prevents a larger source from exceeding the frozen reservation; the growing cell pays a brief retry delay and keeps its desired target. Once the snapshot exists, source growth uses the prospective budget without changing that snapshot's size. Cellctl renders the clone request from the family's frozen snapshot size, independently of later serving-volume growth.
@@ -342,6 +346,12 @@ The CSI controller copies the submitted family token and expected immediate sour
 
 For a clone, the controller copies the token bound to that particular snapshot LogicalVolume. It never reads the serving source's current family. The existing snapshot handle remains an opaque LogicalVolume identity; no larger composite handle is needed. LVMD checks the unchanged token and physical source incarnation inside its transaction before allocation.
 
+Guarded family Secrets live in one Helm-owned reservation namespace. The existing TopoLVM controller ServiceAccount receives Secret `get` there, without `list`, `watch` or access to cell credentials. Cellctl retains its existing write-only Secret permission. It gains no RBAC-management privilege. A namespace-specific policy permits only the fixed cellctl writer, immutable Opaque Secrets, the two CSI fields and consistent cell/request labels. The cellctl scope policy permits only those family Secret operations there; workloads and namespace deletion remain refused. This prevents credential mixing. A false refusal delays that backup while its cell continues serving.
+
+Guarded snapshot and clone names combine the cell ID with the request ID already persisted on the hold. One helper supplies rendering, observation and cleanup names. Concurrent cells therefore cannot collide in the shared namespace. Legacy holds keep their earlier names. Cleanup deletes the exact family Secret through a dedicated method; it never weakens the existing cell-secret ownership guard. The hold identity remains until provider closure, child absence and successful or 404 Secret deletion. Cross-namespace owner references do not perform this cleanup.
+
+Snapshot absence alone does not prove its content disappeared. Cleanup also observes no VolumeSnapshotContent with the exact deletion-secret name and namespace. It includes terminating or retained content because the sidecar still needs that credential lookup. A failed list leaves cleanup pending. Content with another capability reference does not block this request.
+
 Deleting the Secret after closure cannot revive a request. A queued operation that already copied its old token still meets provider revocation. Legacy snapshots without a family token use ordinary full-size accounting, preserving existing CSI semantics.
 
 #### Process fence and proof
@@ -354,7 +364,24 @@ The descriptor approach remains unproved until the sandbox exercises that exact 
 
 The decisive drill delays a command across daemon death, closes a family before a delayed Begin, retries old tokens after a new Begin, recreates a physical source, and reduces concurrency across restart. It also competes ordinary growth with two full backup cycles and retained orphan volumes. Observe physical sizes, charges, lock ownership and serving readiness at each boundary. No gain or production-readiness claim follows from source reasoning alone.
 
+The existing node controller publishes a derived budget frame under `reservation.topolvm.io/<device-class>`. One fresh provider observation supplies its timestamp, physical pool size, ordinary charges, effective reserve and eligible allocation identities. All physical orphans contribute to ordinary charges. Individual allocation details need cover only ordinary volumes represented by current LogicalVolume objects; unmatched physical charges remain in the aggregate. Cellctl credits a counted commitment only when its PV, LogicalVolume and physical UUID match that frame. It never combines a cached free-space value with another inventory. Missing or expired frames use existing capacity freshness handling without claiming a fresh positive observation. This is a replaceable observation, not a reservation ledger or new controller.
+
+The frame advertises `refresh_after_seconds` from the existing provider heartbeat interval. Cellctl accepts it for two advertised intervals, including one grace heartbeat. Mutation notifications refresh the same observation. The publisher preserves its original `observed_at`; neither an unchanged annotation nor a cellctl pass makes an old frame fresh. This provider freshness window differs from the database capacity snapshot window.
+
+The pinned Helm dependency renders its old LogicalVolume schema directly and has no CRD disable value. Guarded installation uses Helm's supported post-renderer to replace that one schema with generated output from the canonical provider overlay. A source generator and check keep the shipped schema in step. Legacy rendering remains unchanged. This avoids vendoring the upstream chart; guarded activation must use the documented post-renderer.
+
 Provider policy derives from the existing storage cap and backup concurrency. Published local import limits stay NULL until this boundary and its paired cellctl integration pass their sandbox proof. Enabling guarded allocation requires old unguarded temporary operations to drain and physical inventory to fit the invariant. Rollback stops new guarded allocation, retains family metadata, and closes outstanding families before an older provider resumes mutations.
+
+Changing the reservation namespace uses the existing paired rollout procedure. It does not support overlapping namespace configurations. Keep the old namespace and its reader Role until cleanup finishes. The pinned snapshotter reads deletion credentials from the namespace recorded on each VolumeSnapshotContent before it calls CSI DeleteSnapshot. A closed provider family alone does not prove that those references are gone.
+
+1. Finish guarded holds and their normal cleanup under the old configuration.
+2. Stop cellctl before the final inspection; serving cells continue running.
+3. Verify no outstanding families, hold identities, family Secrets or old-namespace VolumeSnapshotContent references remain.
+4. If work remains, resume the old configuration and repeat the drain.
+5. Change Helm and LocalStorage together, including the namespace, reader Role, binding and snapshot-class parameter.
+6. Restart cellctl with the new configuration; new holds use the new namespace.
+
+Do not disable reservations to drain existing families. Their cleanup still needs guarded reconciliation. This procedure avoids extra hold metadata and RBAC retirement machinery. It costs a brief pause in lifecycle processing when the namespace changes.
 
 ### Archive order
 

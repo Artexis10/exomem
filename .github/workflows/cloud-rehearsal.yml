@@ -117,9 +117,66 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  local-reservation-host-proof:
+    name: Native LVM reservation proof on disposable host
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'local-storage-drill'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: infra/topolvm/upstream-commit
+      - name: Install runner storage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends lvm2 thin-provisioning-tools unzip
+          sudo modprobe dm_thin_pool
+      - name: Build canonical provider and negative controls
+        env:
+          GOMAXPROCS: "2"
+          GOFLAGS: -p=2
+        run: bash infra/cloud-rehearsal/reservations/build.sh "$RUNNER_TEMP/reservation-build"
+      - name: Prove native locking and physical accounting
+        run: |
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,RUNNER_TEMP \
+            bash infra/cloud-rehearsal/reservations/run.sh "$RUNNER_TEMP/reservation-build"
+      - name: Retain compiled provider for the cluster drill
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: local-reservation-provider
+          path: |
+            ${{ runner.temp }}/reservation-build/canonical/build/lvmd
+            ${{ runner.temp }}/reservation-build/canonical/build/hypertopolvm
+            ${{ runner.temp }}/reservation-build/canonical/build/reservation-host-proof
+            ${{ runner.temp }}/reservation-build/canonical/config/crd/bases/topolvm.io_logicalvolumes.yaml
+            ${{ runner.temp }}/reservation-build/canonical/provenance.json
+            ${{ runner.temp }}/reservation-build/canonical/upstream-commit
+            ${{ runner.temp }}/reservation-build/evidence/source-identity.txt
+            ${{ runner.temp }}/reservation-build/evidence/assembled-files.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain host proof evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: local-reservation-host-proof
+          path: ${{ runner.temp }}/reservation-build/evidence
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove owned build scratch
+        if: always()
+        run: sudo rm -rf -- "$RUNNER_TEMP/reservation-build"
+
   local-storage-drill:
     name: Local-storage node-loss drill on disposable K3s
-    needs: checks
+    needs: [checks, local-reservation-host-proof]
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'local-storage-drill'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -128,6 +185,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/substrate-test-contract
+      - name: Download the proved provider binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: local-reservation-provider
+          path: ${{ runner.temp }}/reservation-provider
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -148,6 +210,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/drill-diagnostics
+          RESERVATION_PROVIDER_ROOT: ${{ runner.temp }}/reservation-provider/canonical
         run: |
           uv run --frozen exomem-cloud-rehearsal local-storage-drill --report "${RUNNER_TEMP}/local-storage-drill-report.json"
       - name: Summarize the report

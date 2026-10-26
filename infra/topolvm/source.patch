@@ -1,0 +1,932 @@
+diff --git a/api/v1/logicalvolume_types.go b/api/v1/logicalvolume_types.go
+index 97d6014..8b447a9 100644
+--- a/api/v1/logicalvolume_types.go
++++ b/api/v1/logicalvolume_types.go
+@@ -9,16 +9,30 @@ import (
+ // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
+ // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+ 
++// These operations are the closed backup-family request protocol.
++const (
++	BackupFamilyBegin = "Begin"
++	BackupFamilyEnd   = "End"
++)
++
+ // LogicalVolumeSpec defines the desired state of LogicalVolume
++// Family bindings are immutable because delayed CSI requests must retain their reservation.
++// +kubebuilder:validation:XValidation:rule="has(self.familyToken) == has(oldSelf.familyToken) && (!has(self.familyToken) || self.familyToken == oldSelf.familyToken)",message="familyToken is immutable"
++// +kubebuilder:validation:XValidation:rule="has(self.immediateSourceUUID) == has(oldSelf.immediateSourceUUID) && (!has(self.immediateSourceUUID) || self.immediateSourceUUID == oldSelf.immediateSourceUUID)",message="immediateSourceUUID is immutable"
+ type LogicalVolumeSpec struct {
++	ReservationTargetPhysicalUUID string `json:"reservationTargetPhysicalUUID,omitempty"`
++	ReservationTargetBytes        int64  `json:"reservationTargetBytes,omitempty"`
+ 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
+ 	// Important: Run "make" to regenerate code after modifying this file
+ 
+-	Name                string            `json:"name"`
+-	NodeName            string            `json:"nodeName"`
+-	Size                resource.Quantity `json:"size"`
+-	DeviceClass         string            `json:"deviceClass,omitempty"`
+-	LvcreateOptionClass string            `json:"lvcreateOptionClass,omitempty"`
++	FamilyToken         string               `json:"familyToken,omitempty"`
++	ImmediateSourceUUID string               `json:"immediateSourceUUID,omitempty"`
++	BackupFamilyRequest *BackupFamilyRequest `json:"backupFamilyRequest,omitempty"`
++	Name                string               `json:"name"`
++	NodeName            string               `json:"nodeName"`
++	Size                resource.Quantity    `json:"size"`
++	DeviceClass         string               `json:"deviceClass,omitempty"`
++	LvcreateOptionClass string               `json:"lvcreateOptionClass,omitempty"`
+ 
+ 	// 'source' specifies the logicalvolume name of the source; if present.
+ 	// This field is populated only when LogicalVolume has a source.
+@@ -32,14 +46,47 @@ type LogicalVolumeSpec struct {
+ 	AccessType string `json:"accessType,omitempty"`
+ }
+ 
++// BackupFamilyRequest binds Begin and End to the same pre-Begin physical identity.
++type BackupFamilyRequest struct {
++	// Begin and End are the closed provider operation protocol.
++	// +kubebuilder:validation:Enum=Begin;End
++	Operation           string `json:"operation"`
++	PhysicalSourceUUID  string `json:"physicalSourceUUID"`
++	ExpectedClosedEpoch int64  `json:"expectedClosedEpoch"`
++	RequestID           string `json:"requestID"`
++}
++
++type BackupFamilyStatus struct {
++	Token              string `json:"token,omitempty"`
++	SourceSizeBytes    int64  `json:"sourceSizeBytes"`
++	State              string `json:"state"`
++	ClosedEpoch        int64  `json:"closedEpoch"`
++	Epoch              int64  `json:"epoch"`
++	RequestID          string `json:"requestID,omitempty"`
++	PhysicalSourceUUID string `json:"physicalSourceUUID"`
++}
++
+ // LogicalVolumeStatus defines the observed state of LogicalVolume
++type ReservationTargetResult struct {
++	PhysicalUUID       string `json:"physicalUUID"`
++	RequestedBytes     int64  `json:"requestedBytes"`
++	ReservedBytes      *int64 `json:"reservedBytes,omitempty"`
++	Code               int32  `json:"code"`
++	Message            string `json:"message,omitempty"`
++	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
++}
++
+ type LogicalVolumeStatus struct {
++	ReservationTargetResult *ReservationTargetResult `json:"reservationTargetResult,omitempty"`
++	ReservedBytes           int64                    `json:"reservedBytes,omitempty"`
+ 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
+ 	// Important: Run "make" to regenerate code after modifying this file
+-	VolumeID    string             `json:"volumeID,omitempty"`
+-	Code        codes.Code         `json:"code,omitempty"`
+-	Message     string             `json:"message,omitempty"`
+-	CurrentSize *resource.Quantity `json:"currentSize,omitempty"`
++	PhysicalUUID string              `json:"physicalUUID,omitempty"`
++	BackupFamily *BackupFamilyStatus `json:"backupFamily,omitempty"`
++	VolumeID     string              `json:"volumeID,omitempty"`
++	Code         codes.Code          `json:"code,omitempty"`
++	Message      string              `json:"message,omitempty"`
++	CurrentSize  *resource.Quantity  `json:"currentSize,omitempty"`
+ }
+ 
+ //+kubebuilder:object:root=true
+@@ -60,6 +107,9 @@ func (lv *LogicalVolume) IsCompatibleWith(lv2 *LogicalVolume) bool {
+ 	if lv.Spec.Name != lv2.Spec.Name {
+ 		return false
+ 	}
++	if lv.Spec.FamilyToken != lv2.Spec.FamilyToken || lv.Spec.ImmediateSourceUUID != lv2.Spec.ImmediateSourceUUID || lv.Spec.AccessType != lv2.Spec.AccessType {
++		return false
++	}
+ 	if lv.Spec.Source != lv2.Spec.Source {
+ 		return false
+ 	}
+diff --git a/cmd/lvmd/app/root.go b/cmd/lvmd/app/root.go
+index eea12cf..a824d7f 100644
+--- a/cmd/lvmd/app/root.go
++++ b/cmd/lvmd/app/root.go
+@@ -126,7 +126,7 @@ func subMain(parentCtx context.Context) error {
+ 	wg, pprofServer, metricsServer := startMetricsAndProfilingServers(logger)
+ 
+ 	go func() {
+-		ticker := time.NewTicker(10 * time.Minute)
++		ticker := time.NewTicker(lvmd.WatchRefreshInterval)
+ 		for {
+ 			select {
+ 			case <-ctx.Done():
+diff --git a/internal/controller/logicalvolume_controller.go b/internal/controller/logicalvolume_controller.go
+index 4395579..ebd8454 100644
+--- a/internal/controller/logicalvolume_controller.go
++++ b/internal/controller/logicalvolume_controller.go
+@@ -104,6 +104,25 @@ func (r *LogicalVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Reques
+ 			return ctrl.Result{}, err
+ 		}
+ 
++		if lv.Status.PhysicalUUID == "" {
++			if _, err := r.volumeExists(ctx, log, lv); err != nil {
++				return ctrl.Result{}, err
++			}
++			if lv.Status.PhysicalUUID == "" {
++				return ctrl.Result{}, status.Error(codes.Unavailable, "physical volume identity observation is pending")
++			}
++			if err := r.client.Status().Update(ctx, lv); err != nil {
++				return ctrl.Result{}, err
++			}
++			return ctrl.Result{RequeueAfter: requeueIntervalForSimpleUpdate}, nil
++		}
++		// Closure can release the room needed by a pending ordinary target.
++		if err := r.reconcileBackupFamily(ctx, lv); err != nil {
++			return ctrl.Result{}, err
++		}
++		if err := r.reconcileReservationTarget(ctx, lv); err != nil {
++			return ctrl.Result{}, err
++		}
+ 		err := r.expandLV(ctx, log, lv)
+ 		if err != nil {
+ 			log.Error(err, "failed to expand LV", "name", lv.Name)
+@@ -118,6 +137,13 @@ func (r *LogicalVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Reques
+ 	}
+ 
+ 	log.Info("start finalizing LogicalVolume", "name", lv.Name)
++	// End must remain reachable while RemoveLV waits for family closure.
++	if request := lv.Spec.BackupFamilyRequest; request != nil && request.Operation == topolvmv1.BackupFamilyEnd {
++		if err := r.reconcileBackupFamily(ctx, lv); err != nil {
++			return ctrl.Result{}, err
++		}
++	}
++
+ 	err := r.removeLVIfExists(ctx, log, lv)
+ 	if err != nil {
+ 		return ctrl.Result{}, err
+@@ -171,6 +197,11 @@ func (r *LogicalVolumeReconciler) volumeExists(ctx context.Context, log logr.Log
+ 		if v.Name != string(lv.UID) {
+ 			continue
+ 		}
++		lv.Status.PhysicalUUID = v.PhysicalUuid
++		// Guarded physical existence is not readiness: resume its persisted intent.
++		if v.ReservedTargetBytes != 0 {
++			return false, nil
++		}
+ 		return true, nil
+ 	}
+ 	return false, nil
+@@ -179,7 +210,7 @@ func (r *LogicalVolumeReconciler) volumeExists(ctx context.Context, log logr.Log
+ func (r *LogicalVolumeReconciler) createLV(ctx context.Context, log logr.Logger, lv *topolvmv1.LogicalVolume) error {
+ 	// When lv.Status.Code is not codes.OK (== 0), CreateLV has already failed.
+ 	// LogicalVolume CRD will be deleted soon by the controller.
+-	if lv.Status.Code != codes.OK {
++	if lv.Status.Code != codes.OK && lv.Status.Code != codes.ResourceExhausted && lv.Status.Code != codes.Unavailable && lv.Status.Code != codes.Aborted && lv.Status.Code != codes.DeadlineExceeded {
+ 		return nil
+ 	}
+ 
+@@ -217,17 +248,19 @@ func (r *LogicalVolumeReconciler) createLV(ctx context.Context, log logr.Logger,
+ 			}
+ 			sourceVolID := sourcelv.Status.VolumeID
+ 			currentSize := sourcelv.Status.CurrentSize.Value()
+-			if reqBytes < currentSize {
++			if lv.Spec.FamilyToken == "" && reqBytes < currentSize {
+ 				return fmt.Errorf("cannot create new LV, requested size %d is smaller than source LV size %d", reqBytes, currentSize)
+ 			}
+ 
+ 			// Create a snapshot lv
+ 			resp, err := r.lvService.CreateLVSnapshot(ctx, &proto.CreateLVSnapshotRequest{
+-				Name:         string(lv.UID),
+-				DeviceClass:  lv.Spec.DeviceClass,
+-				SourceVolume: sourceVolID,
+-				SizeBytes:    reqBytes,
+-				AccessType:   lv.Spec.AccessType,
++				Name:                string(lv.UID),
++				DeviceClass:         lv.Spec.DeviceClass,
++				SourceVolume:        sourceVolID,
++				FamilyToken:         lv.Spec.FamilyToken,
++				ImmediateSourceUuid: lv.Spec.ImmediateSourceUUID,
++				SizeBytes:           reqBytes,
++				AccessType:          lv.Spec.AccessType,
+ 			})
+ 			if err != nil {
+ 				code, message := extractFromError(err)
+@@ -255,6 +288,7 @@ func (r *LogicalVolumeReconciler) createLV(ctx context.Context, log logr.Logger,
+ 			volume = resp.Volume
+ 		}
+ 
++		lv.Status.PhysicalUUID = volume.PhysicalUuid
+ 		lv.Status.VolumeID = volume.Name
+ 		lv.Status.CurrentSize = resource.NewQuantity(volume.SizeBytes, resource.BinarySI)
+ 		lv.Status.Code = codes.OK
+diff --git a/internal/controller/logicalvolume_controller_test.go b/internal/controller/logicalvolume_controller_test.go
+index f486db8..29ee02a 100644
+--- a/internal/controller/logicalvolume_controller_test.go
++++ b/internal/controller/logicalvolume_controller_test.go
+@@ -10,6 +10,8 @@ import (
+ 	topolvmv1 "github.com/topolvm/topolvm/api/v1"
+ 	"github.com/topolvm/topolvm/pkg/lvmd/proto"
+ 	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
+ 	corev1 "k8s.io/api/core/v1"
+ 	storegev1 "k8s.io/api/storage/v1"
+ 	"k8s.io/apimachinery/pkg/api/resource"
+@@ -44,13 +46,15 @@ func (MockVGServiceClient) Watch(ctx context.Context, in *proto.Empty, opts ...g
+ }
+ 
+ type MockLVServiceClient struct {
++	proto.LVServiceClient
+ }
+ 
+ // CreateLV implements proto.LVServiceClient.
+ func (c MockLVServiceClient) CreateLV(ctx context.Context, in *proto.CreateLVRequest, opts ...grpc.CallOption) (*proto.CreateLVResponse, error) {
+ 	lv := proto.LogicalVolume{
+-		Name:      in.Name,
+-		SizeBytes: in.SizeBytes,
++		Name:         in.Name,
++		PhysicalUuid: "physical-" + in.Name,
++		SizeBytes:    in.SizeBytes,
+ 	}
+ 	*volumes = append(*volumes, &lv)
+ 	createResponse := proto.CreateLVResponse{
+@@ -230,3 +234,7 @@ var _ = Describe("LogicalVolume controller", func() {
+ 		}, "2s").Should(BeTrue())
+ 	})
+ })
++
++func (MockLVServiceClient) GetBackupFamily(context.Context, *proto.FamilyRequest, ...grpc.CallOption) (*proto.FamilyResponse, error) {
++	return nil, status.Error(codes.Unimplemented, "reservation policy is not enabled")
++}
+diff --git a/internal/driver/controller.go b/internal/driver/controller.go
+index 8116e87..d203c14 100644
+--- a/internal/driver/controller.go
++++ b/internal/driver/controller.go
+@@ -277,7 +277,14 @@ func (s controllerServerNoLocked) CreateVolume(ctx context.Context, req *csi.Cre
+ 	}
+ 	name = strings.ToLower(name)
+ 
+-	volume, err := s.lvService.CreateVolume(ctx, node, deviceClass, lvcreateOptionClass, name, sourceName, requestCapacityBytes)
++	binding := k8s.FamilyBinding{}
++	if sourceVol != nil {
++		binding = k8s.FamilyBinding{Token: sourceVol.Spec.FamilyToken, ImmediateSourceUUID: sourceVol.Status.PhysicalUUID}
++	}
++	if binding.Token != "" && binding.ImmediateSourceUUID == "" {
++		return nil, status.Error(codes.Unavailable, "snapshot physical UUID is pending")
++	}
++	volume, err := s.lvService.CreateVolume(ctx, node, deviceClass, lvcreateOptionClass, name, sourceName, requestCapacityBytes, binding)
+ 	if err != nil {
+ 		_, ok := status.FromError(err)
+ 		if !ok {
+@@ -375,7 +382,12 @@ func (s controllerServerNoLocked) CreateSnapshot(ctx context.Context, req *csi.C
+ 	deviceClass := sourceVol.Spec.DeviceClass
+ 	sourceVolName := sourceVol.Spec.Name
+ 	currentSize := sourceVol.Status.CurrentSize
+-	snapshot, err := s.lvService.CreateSnapshot(ctx, node, deviceClass, sourceVolName, name, accessType, *currentSize)
++	// Secret data belongs to this immutable snapshot request, not the serving LV.
++	binding := k8s.FamilyBinding{Token: req.GetSecrets()["topolvm.io/backup-family-token"], ImmediateSourceUUID: req.GetSecrets()["topolvm.io/immediate-source-uuid"]}
++	if binding.Token != "" && binding.ImmediateSourceUUID == "" {
++		return nil, status.Error(codes.InvalidArgument, "family snapshot requires its submitted immediate source UUID")
++	}
++	snapshot, err := s.lvService.CreateSnapshot(ctx, node, deviceClass, sourceVolName, name, accessType, *currentSize, binding)
+ 	if err != nil {
+ 		_, ok := status.FromError(err)
+ 		if !ok {
+diff --git a/internal/driver/internal/k8s/logicalvolume_service.go b/internal/driver/internal/k8s/logicalvolume_service.go
+index 06af4d3..37852ad 100644
+--- a/internal/driver/internal/k8s/logicalvolume_service.go
++++ b/internal/driver/internal/k8s/logicalvolume_service.go
+@@ -153,8 +153,14 @@ func NewLogicalVolumeService(mgr manager.Manager) (*LogicalVolumeService, error)
+ 	}, nil
+ }
+ 
++// FamilyBinding carries the submitted request binding, never the root's current family.
++type FamilyBinding struct {
++	Token               string
++	ImmediateSourceUUID string
++}
++
+ // CreateVolume creates volume
+-func (s *LogicalVolumeService) CreateVolume(ctx context.Context, node, dc, oc, name, sourceName string, requestBytes int64) (*topolvmv1.LogicalVolume, error) {
++func (s *LogicalVolumeService) CreateVolume(ctx context.Context, node, dc, oc, name, sourceName string, requestBytes int64, binding ...FamilyBinding) (*topolvmv1.LogicalVolume, error) {
+ 	logger.Info("k8s.CreateVolume called", "name", name, "node", node, "size", requestBytes, "sourceName", sourceName)
+ 	var lv *topolvmv1.LogicalVolume
+ 	// if the create volume request has no source, proceed with regular lv creation.
+@@ -190,6 +196,10 @@ func (s *LogicalVolumeService) CreateVolume(ctx context.Context, node, dc, oc, n
+ 		}
+ 	}
+ 
++	if len(binding) != 0 {
++		lv.Spec.FamilyToken = binding[0].Token
++		lv.Spec.ImmediateSourceUUID = binding[0].ImmediateSourceUUID
++	}
+ 	return s.createAndWait(ctx, lv)
+ }
+ 
+@@ -235,7 +245,7 @@ func (s *LogicalVolumeService) DeleteVolume(ctx context.Context, volumeID string
+ }
+ 
+ // CreateSnapshot creates a snapshot of existing volume.
+-func (s *LogicalVolumeService) CreateSnapshot(ctx context.Context, node, dc, sourceVol, sname, accessType string, snapSize resource.Quantity) (*topolvmv1.LogicalVolume, error) {
++func (s *LogicalVolumeService) CreateSnapshot(ctx context.Context, node, dc, sourceVol, sname, accessType string, snapSize resource.Quantity, binding ...FamilyBinding) (*topolvmv1.LogicalVolume, error) {
+ 	logger.Info("CreateSnapshot called", "name", sname)
+ 	snapshotLV := &topolvmv1.LogicalVolume{
+ 		ObjectMeta: metav1.ObjectMeta{
+@@ -251,11 +261,24 @@ func (s *LogicalVolumeService) CreateSnapshot(ctx context.Context, node, dc, sou
+ 		},
+ 	}
+ 
++	if len(binding) != 0 {
++		snapshotLV.Spec.FamilyToken = binding[0].Token
++		snapshotLV.Spec.ImmediateSourceUUID = binding[0].ImmediateSourceUUID
++		existing := new(topolvmv1.LogicalVolume)
++		err := s.getter.Get(ctx, client.ObjectKey{Name: sname}, existing)
++		if err != nil && !apierrors.IsNotFound(err) {
++			return nil, err
++		}
++		// A retry keeps its captured size even after the serving source grows.
++		if err == nil && existing.Spec.FamilyToken == snapshotLV.Spec.FamilyToken && existing.Spec.ImmediateSourceUUID == snapshotLV.Spec.ImmediateSourceUUID && snapshotLV.Spec.FamilyToken != "" {
++			snapshotLV.Spec.Size = existing.Spec.Size
++		}
++	}
+ 	return s.createAndWait(ctx, snapshotLV)
+ }
+ 
+ // ExpandVolume expands volume
+-func (s *LogicalVolumeService) ExpandVolume(ctx context.Context, volumeID string, requestBytes int64) (*topolvmv1.LogicalVolume, error) {
++func (s *LogicalVolumeService) ExpandVolume(ctx context.Context, volumeID string, requestBytes int64, binding ...FamilyBinding) (*topolvmv1.LogicalVolume, error) {
+ 	logger := logger.WithValues("volume_id", volumeID, "size", requestBytes)
+ 	logger.Info("k8s.ExpandVolume called")
+ 	request := resource.NewQuantity(requestBytes, resource.BinarySI)
+@@ -395,6 +418,9 @@ func (s *LogicalVolumeService) waitForVolumeProvisioning(ctx context.Context, lv
+ 			return true, nil
+ 		}
+ 
++		if newLV.Status.Code == codes.ResourceExhausted || newLV.Status.Code == codes.Unavailable || newLV.Status.Code == codes.Aborted || newLV.Status.Code == codes.DeadlineExceeded {
++			return false, status.Error(newLV.Status.Code, newLV.Status.Message)
++		}
+ 		if newLV.Status.Code != codes.OK {
+ 			if err := s.writer.Delete(ctx, &newLV); err != nil {
+ 				// log this error but do not return this error, because newLV.Status.Message is more important
+diff --git a/internal/lvmd/command/lvm.go b/internal/lvmd/command/lvm.go
+index 691e17c..15e2433 100644
+--- a/internal/lvmd/command/lvm.go
++++ b/internal/lvmd/command/lvm.go
+@@ -195,6 +195,7 @@ func (vg *VolumeGroup) convertLV(lv lv) *LogicalVolume {
+ 		uint32(lv.minor),
+ 		lv.tags,
+ 		lv.attr,
++		lv.uuid,
+ 	}
+ }
+ 
+@@ -443,6 +444,7 @@ type LogicalVolume struct {
+ 	devMinor uint32
+ 	tags     []string
+ 	attr     string
++	uuid     string
+ }
+ 
+ // Name returns a volume name.
+@@ -485,7 +487,7 @@ func (l *LogicalVolume) Origin(ctx context.Context) (*LogicalVolume, error) {
+ 
+ // IsThin checks if the volume is thin volume or not.
+ func (l *LogicalVolume) IsThin() bool {
+-	return l.attr[0] == byte(VolumeTypeThinVolume)
++	return len(l.attr) > 0 && l.attr[0] == byte(VolumeTypeThinVolume)
+ }
+ 
+ // Pool returns thin pool if this is a thin pool, or nil if not.
+diff --git a/internal/lvmd/command/lvm_command.go b/internal/lvmd/command/lvm_command.go
+index f6a74ff..1e90681 100644
+--- a/internal/lvmd/command/lvm_command.go
++++ b/internal/lvmd/command/lvm_command.go
+@@ -78,6 +78,10 @@ func callLVMStreamed(ctx context.Context, logVerbosity int, args ...string) (io.
+ 	// of leaving it running on the node. exec.Command ignores ctx and
+ 	// accumulates orphans under repeated timeout scenarios (#1163).
+ 	cmd := exec.CommandContext(ctx, wholeCommand[0], wholeCommand[1:]...)
++	// A direct *os.File preserves the locked open description through nsenter.
++	if file, ok := ctx.Value(transactionKey{}).(*os.File); ok {
++		cmd.Stdin = file
++	}
+ 	cmd.Env = os.Environ()
+ 	cmd.Env = append(cmd.Env, "LC_ALL=C")
+ 	return runCommand(ctx, logVerbosity, cmd)
+diff --git a/internal/lvmd/command/lvm_lvs.go b/internal/lvmd/command/lvm_lvs.go
+index fd91394..c74ac62 100644
+--- a/internal/lvmd/command/lvm_lvs.go
++++ b/internal/lvmd/command/lvm_lvs.go
+@@ -27,7 +27,7 @@ type lv struct {
+ }
+ 
+ func (u *lv) isThinPool() bool {
+-	return u.attr[0] == 't'
++	return len(u.attr) > 0 && u.attr[0] == 't'
+ }
+ 
+ func (u *lv) UnmarshalJSON(data []byte) error {
+diff --git a/internal/lvmd/command/lvm_state_json.go b/internal/lvmd/command/lvm_state_json.go
+index df0e8ab..1979bb5 100644
+--- a/internal/lvmd/command/lvm_state_json.go
++++ b/internal/lvmd/command/lvm_state_json.go
+@@ -36,7 +36,7 @@ func getLVMState(ctx context.Context) ([]vg, []lv, error) {
+ 	args := []string{
+ 		"--reportformat", "json",
+ 		"--units", "b", "--nosuffix",
+-		"--configreport", "vg", "-o", "vg_name,vg_uuid,vg_size,vg_free",
++		"--configreport", "vg", "-o", "vg_name,vg_uuid,vg_size,vg_free,vg_extent_size",
+ 		"--configreport", "lv", "-o", "lv_uuid,lv_name,lv_full_name,lv_path,lv_size," +
+ 			"lv_kernel_major,lv_kernel_minor,origin,origin_size,pool_lv,lv_tags," +
+ 			"lv_attr,vg_name,data_percent,metadata_percent,pool_lv",
+diff --git a/internal/lvmd/command/lvm_vgs.go b/internal/lvmd/command/lvm_vgs.go
+index af397ce..210664c 100644
+--- a/internal/lvmd/command/lvm_vgs.go
++++ b/internal/lvmd/command/lvm_vgs.go
+@@ -8,18 +8,20 @@ import (
+ )
+ 
+ type vg struct {
+-	name string
+-	uuid string
+-	size uint64
+-	free uint64
++	name       string
++	uuid       string
++	size       uint64
++	free       uint64
++	extentSize uint64
+ }
+ 
+ func (u *vg) UnmarshalJSON(data []byte) error {
+ 	type vgInternal struct {
+-		Name string `json:"vg_name"`
+-		UUID string `json:"vg_uuid"`
+-		Size string `json:"vg_size"`
+-		Free string `json:"vg_free"`
++		Name       string `json:"vg_name"`
++		UUID       string `json:"vg_uuid"`
++		Size       string `json:"vg_size"`
++		Free       string `json:"vg_free"`
++		ExtentSize string `json:"vg_extent_size"`
+ 	}
+ 
+ 	var temp vgInternal
+@@ -40,6 +42,12 @@ func (u *vg) UnmarshalJSON(data []byte) error {
+ 		return convErr
+ 	}
+ 
++	if temp.ExtentSize != "" {
++		u.extentSize, convErr = strconv.ParseUint(temp.ExtentSize, 10, 64)
++		if convErr != nil {
++			return convErr
++		}
++	}
+ 	return nil
+ }
+ 
+@@ -51,7 +59,7 @@ func getVGReport(ctx context.Context, name string) (vg, error) {
+ 	}
+ 	res := new(vgReport)
+ 	args := []string{
+-		"vgs", name, "-o", "vg_uuid,vg_name,vg_size,vg_free", "--units", "b", "--nosuffix", "--reportformat", "json",
++		"vgs", name, "-o", "vg_uuid,vg_name,vg_size,vg_free,vg_extent_size", "--units", "b", "--nosuffix", "--reportformat", "json",
+ 	}
+ 	err := callLVMInto(ctx, res, verbosityLVMStateNoUpdate, args...)
+ 
+diff --git a/internal/lvmd/device_class_manager.go b/internal/lvmd/device_class_manager.go
+index 2012799..8aaa9f8 100644
+--- a/internal/lvmd/device_class_manager.go
++++ b/internal/lvmd/device_class_manager.go
+@@ -3,6 +3,7 @@ package lvmd
+ import (
+ 	"errors"
+ 	"fmt"
++	"path/filepath"
+ 	"regexp"
+ 
+ 	"github.com/topolvm/topolvm"
+@@ -66,6 +67,19 @@ func ValidateDeviceClasses(deviceClasses []*lvmdTypes.DeviceClass) error {
+ 			return fmt.Errorf("target 'type' of device-class can be one of '%[1]s' or '%[2]s' or empty to default to '%[1]s'", lvmdTypes.TypeThick, lvmdTypes.TypeThin)
+ 		}
+ 
++		if p := dc.ReservationPolicy; p != nil {
++			if dc.Type != lvmdTypes.TypeThin || dc.ThinPoolConfig == nil || dc.ThinPoolConfig.OverprovisionRatio != 1 {
++				return fmt.Errorf("reservation policy requires a thin pool with ratio 1")
++			}
++			if p.OrdinaryVolumeCapBytes == 0 || !filepath.IsAbs(p.LockDirectory) {
++				return fmt.Errorf("reservation policy requires a positive cap and absolute lock directory")
++			}
++			// Arbitrary LVM options could override guarded sizes, tags or foreground execution.
++			if len(dc.LVCreateOptions) != 0 {
++				return fmt.Errorf("reservation policy does not permit lvcreate-options")
++			}
++		}
++
+ 		name := dc.VolumeGroup
+ 
+ 		// thinpool validation, ignore any thinpoolconfig if Type is not TypeThin
+diff --git a/internal/lvmd/embed.go b/internal/lvmd/embed.go
+index 31d8340..5a5c709 100644
+--- a/internal/lvmd/embed.go
++++ b/internal/lvmd/embed.go
+@@ -33,7 +33,7 @@ func NewEmbeddedServiceClients(ctx context.Context, dcmapper *DeviceClassManager
+ 	}()
+ 
+ 	go func() {
+-		ticker := time.NewTicker(10 * time.Minute)
++		ticker := time.NewTicker(WatchRefreshInterval)
+ 		for {
+ 			select {
+ 			case <-ctx.Done():
+@@ -158,3 +158,23 @@ func (l *embeddedServiceClients) GetLVList(ctx context.Context, in *proto.GetLVL
+ func (l *embeddedServiceClients) GetFreeBytes(ctx context.Context, in *proto.GetFreeBytesRequest, _ ...grpc.CallOption) (*proto.GetFreeBytesResponse, error) {
+ 	return l.vgServiceServer.GetFreeBytes(ctx, in)
+ }
++
++func (l *embeddedServiceClients) BeginBackupFamily(ctx context.Context, in *proto.FamilyRequest, _ ...grpc.CallOption) (*proto.FamilyResponse, error) {
++	return l.lvServiceServer.BeginBackupFamily(ctx, in)
++}
++
++func (l *embeddedServiceClients) EndBackupFamily(ctx context.Context, in *proto.FamilyRequest, _ ...grpc.CallOption) (*proto.FamilyResponse, error) {
++	return l.lvServiceServer.EndBackupFamily(ctx, in)
++}
++
++func (l *embeddedServiceClients) GetBackupFamily(ctx context.Context, in *proto.FamilyRequest, _ ...grpc.CallOption) (*proto.FamilyResponse, error) {
++	return l.lvServiceServer.GetBackupFamily(ctx, in)
++}
++
++func (l *embeddedServiceClients) GetPoolBudget(ctx context.Context, in *proto.GetPoolBudgetRequest, _ ...grpc.CallOption) (*proto.GetPoolBudgetResponse, error) {
++	return l.lvServiceServer.GetPoolBudget(ctx, in)
++}
++
++func (l *embeddedServiceClients) ReserveLVTarget(ctx context.Context, in *proto.ReserveLVTargetRequest, _ ...grpc.CallOption) (*proto.ReserveLVTargetResponse, error) {
++	return l.lvServiceServer.ReserveLVTarget(ctx, in)
++}
+diff --git a/internal/lvmd/lvservice.go b/internal/lvmd/lvservice.go
+index d595516..21e0fd3 100644
+--- a/internal/lvmd/lvservice.go
++++ b/internal/lvmd/lvservice.go
+@@ -24,9 +24,10 @@ func NewLVService(dcmapper *DeviceClassManager, ocmapper *LvcreateOptionClassMan
+ 
+ type lvService struct {
+ 	proto.UnimplementedLVServiceServer
+-	dcmapper   *DeviceClassManager
+-	ocmapper   *LvcreateOptionClassManager
+-	notifyFunc func()
++	dcmapper           *DeviceClassManager
++	ocmapper           *LvcreateOptionClassManager
++	reservationBackend func(*lvmdTypes.DeviceClass) reservationBackend
++	notifyFunc         func()
+ }
+ 
+ func (s *lvService) notify() {
+@@ -36,12 +37,18 @@ func (s *lvService) notify() {
+ }
+ 
+ func (s *lvService) CreateLV(ctx context.Context, req *proto.CreateLVRequest) (*proto.CreateLVResponse, error) {
++	if err := validCallerTags(req.Tags); err != nil {
++		return nil, err
++	}
+ 	logger := log.FromContext(ctx).WithValues("name", req.GetName())
+ 
+ 	dc, err := s.dcmapper.DeviceClass(req.DeviceClass)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	}
++	if dc.ReservationPolicy != nil {
++		return s.guardedCreate(ctx, dc, req)
++	}
+ 	pool, err := storagePoolForDeviceClass(ctx, dc)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.Internal, "failed to get pool from device class: %v", err)
+@@ -97,7 +104,8 @@ func (s *lvService) CreateLV(ctx context.Context, req *proto.CreateLVRequest) (*
+ 
+ 	return &proto.CreateLVResponse{
+ 		Volume: &proto.LogicalVolume{
+-			Name: lv.Name(),
++			Name:         lv.Name(),
++			PhysicalUuid: lv.UUID(),
+ 			// convert to int64 because lvmd internals and lvm use uint64 but CSI uses int64.
+ 			// For most conventional lvm use cases overflow here will never occur (9223372 TB or above cause overflow)
+ 			SizeBytes: int64(lv.Size()),
+@@ -114,6 +122,9 @@ func (s *lvService) RemoveLV(ctx context.Context, req *proto.RemoveLVRequest) (*
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	}
++	if dc.ReservationPolicy != nil {
++		return s.guardedRemove(ctx, dc, req)
++	}
+ 
+ 	vg, err := command.FindVolumeGroup(ctx, dc.VolumeGroup)
+ 	if errors.Is(err, command.ErrNotFound) {
+@@ -123,6 +134,22 @@ func (s *lvService) RemoveLV(ctx context.Context, req *proto.RemoveLVRequest) (*
+ 		return nil, err
+ 	}
+ 
++	existing, err := vg.FindVolume(ctx, req.Name)
++	if err != nil {
++		if errors.Is(err, command.ErrNotFound) {
++			return nil, status.Error(codes.NotFound, "physical volume is absent")
++		}
++		return nil, err
++	}
++	pool, err := existing.Pool(ctx)
++	if err != nil {
++		return nil, err
++	}
++	// A class must never mutate a different pool through its shared VG.
++	if (dc.Type == lvmdTypes.TypeThick && pool != nil) || (dc.Type == lvmdTypes.TypeThin && (pool == nil || pool.Name() != dc.ThinPoolConfig.Name)) {
++		return nil, status.Error(codes.NotFound, "physical volume is outside this device class")
++	}
++
+ 	if err := vg.RemoveVolume(ctx, req.GetName()); errors.Is(err, command.ErrNotFound) {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	} else if err != nil {
+@@ -138,11 +165,17 @@ func (s *lvService) RemoveLV(ctx context.Context, req *proto.RemoveLVRequest) (*
+ }
+ 
+ func (s *lvService) CreateLVSnapshot(ctx context.Context, req *proto.CreateLVSnapshotRequest) (*proto.CreateLVSnapshotResponse, error) {
++	if err := validCallerTags(req.Tags); err != nil {
++		return nil, err
++	}
+ 	logger := log.FromContext(ctx).WithValues("name", req.GetName())
+ 	dc, err := s.dcmapper.DeviceClass(req.DeviceClass)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	}
++	if dc.ReservationPolicy != nil {
++		return s.guardedSnapshot(ctx, dc, req)
++	}
+ 	var snapType string
+ 	switch dc.Type {
+ 	case lvmdTypes.TypeThin:
+@@ -170,6 +203,15 @@ func (s *lvService) CreateLVSnapshot(ctx context.Context, req *proto.CreateLVSna
+ 		return nil, status.Error(codes.Internal, err.Error())
+ 	}
+ 
++	sourcePool, err := sourceLV.Pool(ctx)
++	if err != nil {
++		return nil, err
++	}
++	// Thin snapshots inherit their source pool, so a class cannot select another.
++	if sourcePool == nil || sourcePool.Name() != dc.ThinPoolConfig.Name {
++		return nil, status.Error(codes.NotFound, "snapshot source is outside this device class")
++	}
++
+ 	if !sourceLV.IsThin() {
+ 		return nil, status.Error(codes.Unimplemented, "snapshot can be created for only thin volumes")
+ 	}
+@@ -255,7 +297,8 @@ func (s *lvService) CreateLVSnapshot(ctx context.Context, req *proto.CreateLVSna
+ 
+ 	return &proto.CreateLVSnapshotResponse{
+ 		Snapshot: &proto.LogicalVolume{
+-			Name: snapLV.Name(),
++			Name:         snapLV.Name(),
++			PhysicalUuid: snapLV.UUID(),
+ 			// convert to int64 because lvmd internals and lvm use uint64 but CSI uses int64.
+ 			// For most conventional lvm use cases overflow here will never occur (9223372 TB or above cause overflow)
+ 			SizeBytes: int64(snapLV.Size()),
+@@ -272,6 +315,9 @@ func (s *lvService) ResizeLV(ctx context.Context, req *proto.ResizeLVRequest) (*
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	}
++	if dc.ReservationPolicy != nil {
++		return s.guardedResize(ctx, dc, req)
++	}
+ 	pool, err := storagePoolForDeviceClass(ctx, dc)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.Internal, "failed to get pool from device class: %v", err)
+diff --git a/internal/lvmd/vgservice.go b/internal/lvmd/vgservice.go
+index 6e82411..f2ff675 100644
+--- a/internal/lvmd/vgservice.go
++++ b/internal/lvmd/vgservice.go
+@@ -37,6 +37,22 @@ func (s *vgService) GetLVList(ctx context.Context, req *proto.GetLVListRequest)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	}
++	if dc.ReservationPolicy != nil {
++		response := &proto.GetLVListResponse{}
++		service := &lvService{dcmapper: s.dcManager}
++		err := service.withReservation(ctx, dc, func(_ context.Context, _ reservationBackend, i *physicalInventory) error {
++			for _, volume := range i.volumes {
++				target, err := reservedTarget(volume)
++				if err != nil {
++					return err
++				}
++				volume.ReservedTargetBytes = target
++				response.Volumes = append(response.Volumes, volume)
++			}
++			return nil
++		})
++		return response, err
++	}
+ 	pool, err := storagePoolForDeviceClass(ctx, dc)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.Internal, "failed to get pool from device class: %v", err)
+@@ -55,13 +71,14 @@ func (s *vgService) GetLVList(ctx context.Context, req *proto.GetLVListRequest)
+ 		}
+ 
+ 		vols = append(vols, &proto.LogicalVolume{
+-			Name:      lv.Name(),
+-			SizeBytes: int64(lv.Size()),
+-			DevMajor:  lv.MajorNumber(),
+-			DevMinor:  lv.MinorNumber(),
+-			Tags:      lv.Tags(),
+-			Path:      lv.Path(),
+-			Attr:      lv.Attr(),
++			Name:         lv.Name(),
++			PhysicalUuid: lv.UUID(),
++			SizeBytes:    int64(lv.Size()),
++			DevMajor:     lv.MajorNumber(),
++			DevMinor:     lv.MinorNumber(),
++			Tags:         lv.Tags(),
++			Path:         lv.Path(),
++			Attr:         lv.Attr(),
+ 		})
+ 	}
+ 	return &proto.GetLVListResponse{Volumes: vols}, nil
+@@ -72,6 +89,22 @@ func (s *vgService) GetFreeBytes(ctx context.Context, req *proto.GetFreeBytesReq
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.NotFound, "%s: %s", err.Error(), req.DeviceClass)
+ 	}
++	if dc.ReservationPolicy != nil {
++		service := &lvService{dcmapper: s.dcManager}
++		budget, err := service.GetPoolBudget(ctx, &proto.GetPoolBudgetRequest{DeviceClass: req.DeviceClass})
++		if err != nil {
++			return nil, err
++		}
++		used, err := addBytes(budget.OrdinaryBytes, budget.EffectiveBackupReserveBytes)
++		if err != nil {
++			return nil, err
++		}
++		var free uint64
++		if used < budget.PoolSizeBytes {
++			free = budget.PoolSizeBytes - used
++		}
++		return &proto.GetFreeBytesResponse{FreeBytes: free}, nil
++	}
+ 	pool, err := storagePoolForDeviceClass(ctx, dc)
+ 	if err != nil {
+ 		return nil, status.Errorf(codes.Internal, "failed to get pool from device class: %v", err)
+@@ -141,6 +174,23 @@ func (s *vgService) send(server proto.VGService_WatchServer) error {
+ 			if err != nil {
+ 				return status.Errorf(codes.Internal, "failed to get pool usage: %v", err)
+ 			}
++			var reservationBudget *proto.GetPoolBudgetResponse
++			if dc.ReservationPolicy != nil {
++				service := &lvService{dcmapper: s.dcManager}
++				budget, err := service.GetPoolBudget(server.Context(), &proto.GetPoolBudgetRequest{DeviceClass: dc.Name})
++				if err != nil {
++					return err
++				}
++				reservationBudget = budget
++				used, err := addBytes(budget.OrdinaryBytes, budget.EffectiveBackupReserveBytes)
++				if err != nil {
++					return err
++				}
++				opb = 0
++				if used < budget.PoolSizeBytes {
++					opb = budget.PoolSizeBytes - used
++				}
++			}
+ 			tpi.OverprovisionBytes = opb
+ 			if dc.Default {
+ 				res.FreeBytes = opb
+@@ -151,10 +201,11 @@ func (s *vgService) send(server proto.VGService_WatchServer) error {
+ 
+ 			// include thinpoolitem in the response
+ 			res.Items = append(res.Items, &proto.WatchItem{
+-				DeviceClass: dc.Name,
+-				FreeBytes:   vgFree,
+-				SizeBytes:   vgSize,
+-				ThinPool:    tpi,
++				DeviceClass:       dc.Name,
++				FreeBytes:         vgFree,
++				SizeBytes:         vgSize,
++				ThinPool:          tpi,
++				ReservationBudget: reservationBudget,
+ 			})
+ 		}
+ 
+diff --git a/internal/runners/metrics_exporter.go b/internal/runners/metrics_exporter.go
+index 74db663..226f2d1 100644
+--- a/internal/runners/metrics_exporter.go
++++ b/internal/runners/metrics_exporter.go
+@@ -245,6 +245,12 @@ func (m *metricsExporter) updateNode(ctx context.Context, wc proto.VGService_Wat
+ 		nodeMetadata2 := nodeMetadata.DeepCopy()
+ 
+ 		controllerutil.AddFinalizer(nodeMetadata2, topolvm.GetNodeFinalizer())
++		if nodeMetadata2.Annotations == nil {
++			nodeMetadata2.Annotations = map[string]string{}
++		}
++		if err := m.annotateReservations(ctx, nodeMetadata2, res.Items); err != nil {
++			return err
++		}
+ 
+ 		nodeMetadata2.Annotations[topolvm.GetCapacityKeyPrefix()+topolvm.DefaultDeviceClassAnnotationName] = strconv.FormatUint(res.FreeBytes, 10)
+ 		for _, item := range res.Items {
+diff --git a/pkg/lvmd/proto/lvmd.proto b/pkg/lvmd/proto/lvmd.proto
+index 4180caf..2f38d23 100644
+--- a/pkg/lvmd/proto/lvmd.proto
++++ b/pkg/lvmd/proto/lvmd.proto
+@@ -20,6 +20,9 @@ message LogicalVolume {
+     repeated string tags = 5;               // Tags to add to the volume during creation
+     int64 size_bytes = 6;                   // Volume size in canonical CSI bytes.
+     string path = 7;                        // Path to the lv as per lvm.
++    string physical_uuid = 9;
++    string pool = 10;
++    uint64 reserved_target_bytes = 11;
+     string attr = 8;                        // Attributes of the lv.
+ 
+     reserved 2;
+@@ -55,6 +58,9 @@ message CreateLVSnapshotRequest {
+     string access_type = 6;                 // Access type of snapshot
+     int64 size_bytes = 7;                   // Volume size in canonical CSI bytes.
+ 
++    string family_token = 8;
++    string immediate_source_uuid = 9;
++
+     reserved 5;
+ }
+ 
+@@ -116,10 +122,66 @@ message WatchItem {
+     string device_class = 2;
+     uint64 size_bytes = 3; // Size of volume group in bytes.
+     ThinPoolItem thin_pool = 4;
++    GetPoolBudgetResponse reservation_budget = 5;
++}
++
++// Family states and operations are a closed allocation protocol, not vocabulary.
++message FamilyRequest {
++    string device_class = 1;
++    string source_volume = 2;
++    string physical_source_uuid = 3;
++    uint64 expected_closed_epoch = 4;
++    string request_id = 5;
++}
++message FamilyResponse {
++    string token = 1;
++    uint64 source_size_bytes = 2;
++    string state = 3;
++    uint64 closed_epoch = 4;
++    uint64 epoch = 5;
++    string request_id = 6;
++    string physical_source_uuid = 7;
++}
++message GetPoolBudgetRequest { string device_class = 1; }
++message PhysicalAllocation {
++    string name = 1;
++    string physical_uuid = 2;
++    string pool = 3;
++    uint64 size_bytes = 4;
++    uint64 reserved_bytes = 5;
++    bool ordinary = 6;
++    repeated string tags = 7;
++}
++message GetPoolBudgetResponse {
++    uint64 pool_size_bytes = 1;
++    uint64 ordinary_bytes = 2;
++    uint64 effective_backup_reserve_bytes = 3;
++    uint64 outstanding_family_reservation_bytes = 4;
++    uint64 largest_size_bytes = 5;
++    uint64 backup_concurrency = 6;
++    repeated PhysicalAllocation allocations = 7;
++    string observed_at = 8;
++    uint64 refresh_after_seconds = 9;
++}
++
++message ReserveLVTargetRequest {
++    string device_class = 1;
++    string source_volume = 2;
++    string physical_source_uuid = 3;
++    uint64 target_bytes = 4;
++}
++message ReserveLVTargetResponse {
++    uint64 reserved_bytes = 1;
++    string physical_uuid = 2;
+ }
+ 
+ // Service to manage logical volumes of the volume group.
+ service LVService {
++    rpc ReserveLVTarget(ReserveLVTargetRequest) returns (ReserveLVTargetResponse);
++    rpc BeginBackupFamily(FamilyRequest) returns (FamilyResponse);
++    rpc EndBackupFamily(FamilyRequest) returns (FamilyResponse);
++    rpc GetBackupFamily(FamilyRequest) returns (FamilyResponse);
++    rpc GetPoolBudget(GetPoolBudgetRequest) returns (GetPoolBudgetResponse);
+     // Create a logical volume.
+     rpc CreateLV(CreateLVRequest) returns (CreateLVResponse);
+     // Remove a logical volume.
+diff --git a/pkg/lvmd/types/types.go b/pkg/lvmd/types/types.go
+index c5182a5..e0fe9b7 100644
+--- a/pkg/lvmd/types/types.go
++++ b/pkg/lvmd/types/types.go
+@@ -35,7 +35,15 @@ type DeviceClass struct {
+ 	// Type is the name of logical volume target, supports 'thick' (default) or 'thin' currently
+ 	Type DeviceType `json:"type"`
+ 	// ThinPoolConfig holds the configuration for thinpool in this volume group corresponding to the device-class
+-	ThinPoolConfig *ThinPoolConfig `json:"thin-pool"`
++	ThinPoolConfig    *ThinPoolConfig    `json:"thin-pool"`
++	ReservationPolicy *ReservationPolicy `json:"reservation-policy,omitempty"`
++}
++
++// ReservationPolicy enables full-size admission for a thin pool.
++type ReservationPolicy struct {
++	BackupConcurrency      uint64 `json:"backup-concurrency"`
++	OrdinaryVolumeCapBytes uint64 `json:"ordinary-volume-cap-bytes"`
++	LockDirectory          string `json:"lock-directory"`
+ }
+ 
+ type LvcreateOptionClass struct {

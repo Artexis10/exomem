@@ -7,14 +7,17 @@ separate charge for every outstanding database commitment.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from kubernetes.utils.quantity import parse_quantity
 
 from .manifests import JOB_CPU_REQUEST, JOB_MEMORY_REQUEST, ResourceSettings
+from .storage.topolvm import protocol_integer
 from .storage_config import LocalStorage
 
 GIB = 1024**3
@@ -64,6 +67,52 @@ class LogicalVolumeRecord:
 
 
 @dataclass(frozen=True)
+class PoolBudget:
+    pool_size_bytes: int
+    ordinary_bytes: int
+    effective_backup_reserve_bytes: int
+    largest_size_bytes: int
+    allocations: tuple[tuple[str, str, int], ...]
+
+
+def parse_budget_frame(raw: str | None, *, node_uid: str, now: datetime) -> PoolBudget | None:
+    """Read one provider observation, never a pool reconstructed from cached free bytes."""
+    try:
+        frame = json.loads(raw) if raw else None
+        if (not isinstance(frame, dict) or type(frame.get("version")) is not int or frame["version"] != 1
+                or not node_uid or frame.get("node_uid") != node_uid):
+            return None
+        observed = datetime.fromisoformat(frame["observed_at"].replace("Z", "+00:00"))
+        heartbeat = frame.get("refresh_after_seconds")
+        if (observed.utcoffset() != UTC.utcoffset(observed) or not protocol_integer(heartbeat) or heartbeat == 0
+                or not 0 <= (now - observed).total_seconds() <= 2 * heartbeat):
+            return None
+        # These byte fields and allocation keys are fixed by the provider's version-1 protocol.
+        fields = ("pool_size_bytes", "ordinary_bytes", "effective_backup_reserve_bytes", "largest_size_bytes")
+        if not all(protocol_integer(frame.get(key)) for key in fields):
+            return None
+        allocations = frame.get("allocations")
+        if not isinstance(allocations, list):
+            return None
+        identities = set()
+        parsed = []
+        for allocation in allocations:
+            if (not isinstance(allocation, dict) or not all(isinstance(allocation.get(key), str) and allocation[key]
+                    for key in ("name", "physical_uuid")) or not protocol_integer(allocation.get("reserved_bytes"))):
+                return None
+            identity = (allocation["name"], allocation["physical_uuid"])
+            if identity in identities:
+                return None
+            identities.add(identity)
+            parsed.append((*identity, allocation["reserved_bytes"]))
+        if sum(size for _, _, size in parsed) > frame["ordinary_bytes"]:
+            return None
+        return PoolBudget(*(frame[key] for key in fields), tuple(parsed))
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+
+
+@dataclass(frozen=True)
 class LocalCapacityObservation:
     """What TopoLVM publishes for the cell pool on each node (D6)."""
 
@@ -71,6 +120,10 @@ class LocalCapacityObservation:
     # driver publishes no pool (the control-plane server has none).
     free_bytes: dict[str, int | None] = field(default_factory=dict)
     volumes: tuple[LogicalVolumeRecord, ...] = ()
+    budgets: dict[str, PoolBudget | None] = field(default_factory=dict)
+    # PV -> LogicalVolume -> physical UUID, with both volumes pinned to this node.
+    cell_allocations: dict[str, tuple[str, str, str]] = field(default_factory=dict)
+    cell_volume_ids: dict[str, str] = field(default_factory=dict)
     reserved_nodes: frozenset[str] = frozenset()
     # cell id -> the node its local volume is pinned to.
     cell_nodes: dict[str, str] = field(default_factory=dict)
@@ -99,15 +152,12 @@ def pool_takes(local: LocalStorage, *, free_bytes: int | None, added_bytes: int,
 def compute_local_capacity(
     observation: LocalCapacityObservation, *, local: LocalStorage, cell_sizes: dict[str, int]
 ) -> dict[str, NodeCapacity]:
-    """D6: floor((pool size - snapshot reserve) / default cell size) per node.
+    """Publish absolute slots while admission separately counts each cell commitment.
 
-    TopoLVM publishes free bytes, not the pool's size, and at overprovision
-    ratio 1.0 the pool is those free bytes plus the size of every volume in
-    it. Snapshots and clones are volumes too, so a backup moves bytes from
-    free to used and the slots stay put. The reserve is twice the largest
-    cell for each backup the node may run at once. `cell_sizes` holds every
-    non-deleted cell's size in GiB: admission counts each as one row, so a
-    cell larger than the default takes its extra slots here.
+    Guarded pools retain physical orphan charges and credit each matched commitment once.
+    The reserve covers both provider families and prospective default or larger committed sources.
+    Unguarded pools preserve the earlier free-space and Kubernetes-volume observation.
+    Larger cells consume their extra default-size slots in either mode.
     """
 
     default = local.default_cell_gib * GIB
@@ -119,10 +169,31 @@ def compute_local_capacity(
         # back. Leaving both out can only under-count.
         if volume.device_class == local.device_class and volume.created and not volume.deleting:
             used[volume.node] += volume.size
+    unbound_largest = max((size for cell_id, size in cell_sizes.items()
+                           if cell_id not in observation.cell_nodes), default=0)
     cells_on = Counter(observation.cell_nodes.values())
     result: dict[str, NodeCapacity] = {}
-    for node, free in observation.free_bytes.items():
-        if free is None:
+    for node, free in (observation.budgets if local.reservations else observation.free_bytes).items():
+        budget = observation.budgets.get(node)
+        if local.reservations and budget is not None:
+            allocations = {(name, physical_uuid): size for name, physical_uuid, size in budget.allocations}
+            credited = set()
+            credit = 0
+            for cell_id, (name, physical_uuid, cell_node) in observation.cell_allocations.items():
+                identity = (name, physical_uuid)
+                if cell_node == node and cell_id in cell_sizes and identity in allocations and identity not in credited:
+                    credit += min(allocations[identity], cell_sizes[cell_id] * GIB)
+                    credited.add(identity)
+            # Admission must also leave backup room for the first source and outstanding larger commitments.
+            largest_commitment = max((size for cell_id, size in cell_sizes.items()
+                                      if observation.cell_nodes.get(cell_id) == node), default=0)
+            prospective_reserve = snapshot_reserve_bytes(local, max(unbound_largest, largest_commitment))
+            effective_reserve = max(budget.effective_backup_reserve_bytes, prospective_reserve)
+            available = budget.pool_size_bytes - effective_reserve - (budget.ordinary_bytes - credit)
+            slots = 0 if node in observation.reserved_nodes else max(0, available // default)
+            result[node] = NodeCapacity(slots, cells_on[node], True)
+            continue
+        if local.reservations or free is None:
             result[node] = NodeCapacity(cell_slots=0, attachments_used=cells_on[node], limit_known=False)
             continue
         slots = 0 if node in observation.reserved_nodes else max(0, (free + used[node] - reserve) // default)

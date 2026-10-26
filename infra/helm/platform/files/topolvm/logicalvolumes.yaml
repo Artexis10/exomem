@@ -1,0 +1,200 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: logicalvolumes.topolvm.io
+spec:
+  group: topolvm.io
+  names:
+    kind: LogicalVolume
+    listKind: LogicalVolumeList
+    plural: logicalvolumes
+    singular: logicalvolume
+  scope: Cluster
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: LogicalVolume is the Schema for the logicalvolumes API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              LogicalVolumeSpec defines the desired state of LogicalVolume
+              Family bindings are immutable because delayed CSI requests must retain their reservation.
+            properties:
+              accessType:
+                description: |-
+                  'accessType' specifies how the user intends to consume the snapshot logical volume.
+                  Set to "ro" when creating a snapshot and to "rw" when restoring a snapshot or creating a clone.
+                  This field is populated only when LogicalVolume has a source.
+                type: string
+              backupFamilyRequest:
+                description: BackupFamilyRequest binds Begin and End to the same pre-Begin
+                  physical identity.
+                properties:
+                  expectedClosedEpoch:
+                    format: int64
+                    type: integer
+                  operation:
+                    description: Begin and End are the closed provider operation protocol.
+                    enum:
+                    - Begin
+                    - End
+                    type: string
+                  physicalSourceUUID:
+                    type: string
+                  requestID:
+                    type: string
+                required:
+                - expectedClosedEpoch
+                - operation
+                - physicalSourceUUID
+                - requestID
+                type: object
+              deviceClass:
+                type: string
+              familyToken:
+                type: string
+              immediateSourceUUID:
+                type: string
+              lvcreateOptionClass:
+                type: string
+              name:
+                type: string
+              nodeName:
+                type: string
+              reservationTargetBytes:
+                format: int64
+                type: integer
+              reservationTargetPhysicalUUID:
+                type: string
+              size:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              source:
+                description: |-
+                  'source' specifies the logicalvolume name of the source; if present.
+                  This field is populated only when LogicalVolume has a source.
+                type: string
+            required:
+            - name
+            - nodeName
+            - size
+            type: object
+            x-kubernetes-validations:
+            - message: familyToken is immutable
+              rule: has(self.familyToken) == has(oldSelf.familyToken) && (!has(self.familyToken)
+                || self.familyToken == oldSelf.familyToken)
+            - message: immediateSourceUUID is immutable
+              rule: has(self.immediateSourceUUID) == has(oldSelf.immediateSourceUUID)
+                && (!has(self.immediateSourceUUID) || self.immediateSourceUUID ==
+                oldSelf.immediateSourceUUID)
+          status:
+            properties:
+              backupFamily:
+                properties:
+                  closedEpoch:
+                    format: int64
+                    type: integer
+                  epoch:
+                    format: int64
+                    type: integer
+                  physicalSourceUUID:
+                    type: string
+                  requestID:
+                    type: string
+                  sourceSizeBytes:
+                    format: int64
+                    type: integer
+                  state:
+                    type: string
+                  token:
+                    type: string
+                required:
+                - closedEpoch
+                - epoch
+                - physicalSourceUUID
+                - sourceSizeBytes
+                - state
+                type: object
+              code:
+                description: |-
+                  A Code is a status code defined according to the [gRPC documentation].
+
+                  Only the codes defined as consts in this package are valid codes. Do not use
+                  other code values.  Behavior of other codes is implementation-specific and
+                  interoperability between implementations is not guaranteed.
+
+                  [gRPC documentation]: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
+                format: int32
+                type: integer
+              currentSize:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              message:
+                type: string
+              physicalUUID:
+                description: |-
+                  INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
+                  Important: Run "make" to regenerate code after modifying this file
+                type: string
+              reservationTargetResult:
+                description: LogicalVolumeStatus defines the observed state of LogicalVolume
+                properties:
+                  code:
+                    format: int32
+                    type: integer
+                  message:
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  physicalUUID:
+                    type: string
+                  requestedBytes:
+                    format: int64
+                    type: integer
+                  reservedBytes:
+                    format: int64
+                    type: integer
+                required:
+                - code
+                - physicalUUID
+                - requestedBytes
+                type: object
+              reservedBytes:
+                format: int64
+                type: integer
+              volumeID:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

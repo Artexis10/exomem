@@ -334,16 +334,25 @@ def containerd_mount(stack: Stack) -> str:
     )
 
 
+def image_data_mounts(stack: Stack, image: str, prefix: str, *, temporary: bool = False) -> list[str]:
+    """Keep image-declared data on owned volumes or disposable helper tmpfs."""
+    ensure_image(image)
+    declared = json.loads(run(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", image]).stdout)
+    mounts = []
+    for index, path in enumerate(sorted(declared or {})):
+        if temporary:
+            mounts += ["--tmpfs", path]
+        else:
+            volume = data_volume(stack, f"{prefix}-{index}")
+            mounts += ["--mount", f"type=volume,source={volume},target={path}"]
+    return mounts
+
+
 def _start_k3s(stack: Stack) -> K3s:
     name = f"exo-rehearsal-k3s-{stack.run_id}"
     mount = containerd_mount(stack)
     args = ["server", *SERVER_ARGS, *node_args(stack)]
-    ensure_image(images.K3S)
-    declared = json.loads(run(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", images.K3S]).stdout)
-    mounts = []
-    for index, path in enumerate(sorted(declared or {})):
-        volume = data_volume(stack, f"node-{index}")
-        mounts += ["--mount", f"type=volume,source={volume},target={path}"]
+    mounts = image_data_mounts(stack, images.K3S, "node")
     stack.containers.append(name)
     run(
         [

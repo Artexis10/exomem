@@ -198,7 +198,7 @@ Encrypted cluster-state snapshots MAY retain the cell's Secret until their reten
 
 ### Requirement: Capacity is published from observed limits
 
-For each node in the configured cell storage domain, cellctl SHALL publish `cell_slots` from the node's observed storage. On local storage, the storage term SHALL subtract the effective backup reserve and unmatched ordinary physical charges from physical pool size, then divide by default cell volume size. The effective reserve SHALL cover configured concurrency and all outstanding families. A physical reservation already represented by a counted cell commitment SHALL NOT be charged twice. The result is further bounded by any qualified occupancy, CPU and memory limits. A cell larger than the default size SHALL consume additional slots in proportion to its size. A node whose storage capacity is not positively observed, including a node with no cell storage pool, SHALL publish zero slots. Admission SHALL count non-deleted cell rows against the sum of `cell_slots`. No second admission ledger SHALL exist. Provider charges SHALL follow physical volumes and bounded backup families until their cleanup is acknowledged. Cached Kubernetes capacity SHALL NOT authorize a provider mutation.
+For each node in the configured cell storage domain, cellctl SHALL publish `cell_slots` from the node's observed storage. On local storage, the storage term SHALL subtract the effective backup reserve and unmatched ordinary physical charges from physical pool size, then divide by default cell volume size. The effective reserve SHALL cover configured concurrency and all outstanding families. Admission SHALL also reserve for the prospective default cell and larger outstanding database commitments, including on an empty pool. A physical reservation already represented by a counted cell commitment SHALL NOT be charged twice. The result is further bounded by any qualified occupancy, CPU and memory limits. A cell larger than the default size SHALL consume additional slots in proportion to its size. A node whose storage capacity is not positively observed, including a node with no cell storage pool, SHALL publish zero slots. Admission SHALL count non-deleted cell rows against the sum of `cell_slots`. No second admission ledger SHALL exist. Provider charges SHALL follow physical volumes and bounded backup families until their cleanup is acknowledged. Cached Kubernetes capacity SHALL NOT authorize a provider mutation.
 
 #### Scenario: Node is full
 
@@ -361,3 +361,24 @@ Each backup family SHALL bind a physical source incarnation, expected epoch and 
 
 - **WHEN** a snapshot or clone remains after cleanup fails
 - **THEN** its family remains charged and reconciliation retries without completing the hold
+
+
+### Requirement: Backup capability transport cannot grant access to cell credentials
+
+Guarded family Secrets SHALL occupy a reservation-only namespace. The provider controller SHALL receive only Secret get there, without Secret list, watch or access in cell namespaces. Cellctl SHALL write immutable Secrets containing exactly the two CSI capability fields. Admission SHALL prevent credential mixing. Cellctl's namespace exception SHALL permit only family Secret operations.
+
+#### Scenario: The snapshotter reads its family capability
+
+- **WHEN** the provider controller requests the active family's Secret
+- **THEN** Kubernetes permits the exact get in the reservation namespace
+- **AND** cell credential get and reservation Secret list or watch remain forbidden
+
+### Requirement: Backup capability cleanup retains request identity
+
+Guarded snapshot, clone and Secret names SHALL derive from the persisted cell and request identity. Concurrent cells SHALL not share a Secret name. Cleanup SHALL delete only that exact Secret and retain the hold identity until provider closure, child absence and successful or already-absent Secret deletion. Before deleting the Secret, cleanup SHALL observe no VolumeSnapshotContent with that exact deletion-secret name and namespace. A failed observation SHALL leave cleanup pending. Legacy holds SHALL retain their existing names.
+
+#### Scenario: Old cleanup follows a newer request
+
+- **WHEN** cleanup of an older backup request retries after another request begins
+- **THEN** it cannot delete the newer request's Secret
+- **AND** a failed Secret deletion leaves the old cleanup identity available for retry
