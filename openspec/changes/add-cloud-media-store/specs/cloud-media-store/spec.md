@@ -47,7 +47,7 @@ The system SHALL decide an original's state through one function, from the prese
 
 ### Requirement: Eviction frees volume space only from confirmed, idle originals
 
-When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The eviction target SHALL be lower than the online-growth trigger. An original SHALL be eligible only when it is cached, idle for at least the configured minimum idle age by the cell's own last-read record, and has no pending or running media job, hydration or download.
+When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The eviction target SHALL be lower than the online-growth trigger. An original SHALL be eligible only when it is cached, idle for at least the configured minimum idle age by the cell's own last-read record, and has no pending or running media job, hydration or download. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
 
 #### Scenario: A media-heavy cell fills up
 
@@ -59,6 +59,11 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 - **WHEN** an original has a pending media job or an active download
 - **THEN** eviction skips it
+
+#### Scenario: A vault restore brings back a reference to a destroyed version
+
+- **WHEN** an owner restores an exported vault into the same cell, and a restored sidecar pins a version that was destroyed after the export
+- **THEN** the head check finds the version absent, the original returns to `local` and is offloaded again, and it is never evicted on the old reference
 
 #### Scenario: The stored copy is unconfirmed
 
@@ -108,7 +113,7 @@ The cell SHALL encrypt each original with `age` to its own X25519 recipient befo
 
 A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT hide, list or delete.
 
-The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report the set generation it has loaded. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
+The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
 A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no other egress.
 
@@ -139,7 +144,7 @@ Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that
 Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
 
 Only cellctl's key-management authority SHALL destroy versions. It SHALL destroy them only within a backup hold, after that hold's backup and prune succeed, and only a version that meets all of these:
-- it was uploaded before the capture of the newest retained snapshot;
+- it appears in a listing of the cell's media prefix that cellctl completed before it took the capture of the newest retained snapshot;
 - no retained snapshot's manifest names it or lists its object name under a protection record;
 - every retained snapshot of the cell has a readable manifest.
 

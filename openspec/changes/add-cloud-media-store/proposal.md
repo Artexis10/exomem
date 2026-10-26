@@ -14,7 +14,7 @@ Originals must still stay byte-identical as evidence. The owner must be able to 
 
 ## What Changes
 
-- **Encrypted media store, per cell.** Every original that a governed sidecar binds by SHA-256 is written through to a per-cell object store. The cell encrypts it before it leaves. Object names are keyed digests, so the provider cannot match a stored object to a known file.
+- **Encrypted media store, per cell.** Every original that a governed sidecar binds by SHA-256 is written through to a per-cell object store. The cell encrypts it before it leaves. Object names are keyed digests, so the provider cannot match a stored object to a known file by name; object sizes stay visible.
 - **The volume becomes a verified cache.** An original stays at its vault path until the cell needs the space. The largest, longest-idle originals leave the volume first, and only after their stored copy is confirmed. Notes, sidecars, extracted text, embeddings and datasets never leave the volume.
 - **One more sidecar state.** A sidecar gains a governed stored-object reference that pins an exact stored version. A missing original with a reference is *evicted*, never deleted. Every reader and every deletion path resolves an original through one state function.
 - **A media edge.** A new in-cluster service moves ciphertext between cells and the media bucket. It holds the only bucket credential, and that credential cannot destroy versions. It verifies a per-cell credential that cellctl signs, and it accepts the credential only while cellctl lists it as active. A selected cell gains one egress edge, to the edge's fixed address.

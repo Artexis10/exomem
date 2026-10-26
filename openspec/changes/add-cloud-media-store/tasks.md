@@ -25,7 +25,8 @@
   - a corrupt object fails with `MEDIA_ORIGINAL_UNVERIFIED` and leaves the path empty;
   - reconciliation over a hydrated file with a new inode and change time rewrites no sidecar;
   - eviction and hydration fire no fan-out;
-  - eviction skips pending and unconfirmed originals.
+  - eviction skips pending and unconfirmed originals;
+  - a vault restore that brings back a reference to a destroyed version re-offloads the original and never evicts it on that reference.
 - [ ] 3.6 Report evicted originals as stored in processing status, and hydrate before an explicit re-process. Verify: processing tests for both.
 
 ## 4. Platform (D4–D7, D9, D10)

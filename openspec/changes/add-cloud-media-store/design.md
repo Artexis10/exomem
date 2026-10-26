@@ -71,7 +71,7 @@ Alternative: **references in cell-local custody state.** If that state were lost
 
 When volume use passes the eviction target, the cell evicts cached originals until use falls below the target minus a margin. The target is a configured fraction, set below the online-growth trigger (80%), so a media-heavy cell evicts before it grows.
 
-- **Candidates:** originals in the cached state, idle for at least the minimum idle age, with no pending or running media job, hydration or download.
+- **Candidates:** originals in the cached state, idle for at least the minimum idle age, with no pending or running media job, hydration or download, and whose pinned version a head request confirms exists with the recorded size. A reference to an absent version counts as no reference, and the original is offloaded again.
 - **Order:** largest first within the eligible set, ties broken by longest idle. This frees the space with the fewest evictions.
 - **Idle time:** the cell's own last-read record, not file access time.
 
@@ -87,7 +87,7 @@ Hydration concurrency and temporary space are bounded, so a bulk re-encode or an
 
 The cell encrypts each original with `age` to its own X25519 recipient before upload. `age` streams 64 KiB authenticated chunks, and the cell image already ships it for imports.
 
-The object name is HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. A bucket listing then cannot confirm that a tenant holds a known file. An offload reuses a stored version only when a live sidecar already references that version. Otherwise it uploads a new version, so identical originals inside one cell usually share one version.
+The object name is HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. A bucket listing then cannot match a stored object to a known file by name. Object sizes stay visible, because `age` ciphertext size follows plaintext size, so a file of distinctive length can be confirmed by size. An offload reuses a stored version only when a live sidecar already references that version. Otherwise it uploads a new version, so identical originals inside one cell usually share one version.
 
 On the media-storage path, the media edge and the provider see only ciphertext. Playback and export are other paths, and D8 and the table below cover them.
 
@@ -117,7 +117,7 @@ A new in-cluster service, the media edge, moves ciphertext between cells and the
 
 - **Network.** A selected cell's runtime gains one egress edge, to the edge's ClusterIP and port, with no DNS. The export packing step (D8) reaches it on the same terms and has no other egress.
 - **Authentication.** cells carry no ServiceAccount token. cellctl signs a per-cell edge credential with its own signing key, binding audience, cell ID and version, and renders it into the cell's Secret. The edge holds only the public key. It maps the credential's cell ID to that cell's object prefix and accepts no prefix from the request.
-- **Revocation.** A valid signature is not enough. cellctl publishes the active set: each selected cell's ID and current credential version. The edge accepts a credential only while its cell and version are in that set. Rotation bumps the version, and the old credential stops working once the edge loads the new set. The edge reports the set generation it has loaded, so cellctl can observe when a revocation takes effect.
+- **Revocation.** A valid signature is not enough. cellctl publishes the active set: each selected cell's ID and current credential version. The edge accepts a credential only while its cell and version are in that set. Rotation bumps the version, and the old credential stops working once the edge loads the new set. The edge reports a set generation only after it has loaded that set and drained every request accepted under an earlier one, so cellctl can observe when a revocation takes effect.
 - **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge cannot hide, list or delete. Its bucket key cannot delete file versions. Only cellctl's key-management authority destroys versions (D9).
 - **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing and alerts when a cell exceeds its allowance plus retained-version headroom. The alert detects abuse; it does not prevent it. Until the operator revokes it, an active cell credential can upload unreferenced objects below the per-object bound. Each such object costs storage, and the operator carries that exposure.
 
@@ -154,7 +154,8 @@ The same provider holds backups and media. A second copy at another provider was
   - A separate *upload* step without the media key transfers the archive as today's export does.
 
   The archive's format and delivery stay those of the export contract. Export of more media than the staging volume can hold is an open question; until it is settled, no cell other than the canary may store more media than its export can stage (D11).
-- **Restore.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because no version that a retained snapshot references is destroyed (D9). A restored reference reads its pinned version, so a restore needs no reactivation step.
+- **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because no version that a retained snapshot references is destroyed (D9). A restored reference reads its pinned version, so a restore needs no reactivation step.
+- **Restore from an export.** A vault restored from an export can carry references to versions destroyed since the export. So the cell confirms with a head request that a pinned version exists before it evicts an original or reuses the version. A reference to an absent version counts as no reference, and the original is offloaded again (D3).
 
 The job ledger is the job architecture. A Postgres-backed task queue such as Procrastinate was considered and does not fit: a cell runs on SQLite and holds no Postgres.
 
@@ -170,12 +171,12 @@ Collection is new lifecycle logic. No existing sweep supplies it: the archive me
 
   At every capture after step 1, the clone holds the record, the synced reference, or both. A reuse also checks that a live sidecar references the version at the moment its record commits.
 - **Destroy.** cellctl destroys versions only in the backup hold, after that hold's backup and prune succeed. Holds are exclusive per cell, so no restore and no other capture runs in between. It destroys a version only if all of these hold:
-  - the version was uploaded before the capture of the newest retained snapshot;
+  - the version appears in a listing of the cell's media prefix that cellctl completed before it took the newest retained snapshot's capture;
   - no retained snapshot's manifest names that version or lists its object name under a protection record;
   - every retained snapshot has a readable manifest. Otherwise nothing is destroyed for that cell.
 
   cellctl then deletes the manifests of pruned snapshots.
-- **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. A version uploaded after the newest capture is never a candidate. A restore brings back sidecars whose versions some retained manifest names.
+- **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. Only versions in a listing that cellctl completed before the newest capture are candidates, so no clocks are compared. A restic restore brings back sidecars whose versions some retained manifest names.
 - **Owner deletion.** An original the owner deletes leaves the store when the last retained backup that references it is pruned, as deleted vault files leave restic today.
 - **Cell deletion.** cellctl works in this order:
   1. Remove the cell from the edge's active set.
