@@ -188,24 +188,38 @@ The record proves that a received event exists and when the shipper went silent.
 
 ### Requirement: Tenants see the operator access the record received
 
-The platform SHALL derive each cell's access log from the access record into the control database. The control plane SHALL serve it, including while the cell is locked or stopped. Entries SHALL appear within ten minutes of receipt. The log SHALL list:
+The platform SHALL derive each cell's access log from the access record into the control database.
+The control plane SHALL serve it while the cell is locked, stopped or deleted, until the log's retention ends.
+Entries SHALL appear within ten minutes of receipt. The log SHALL list:
 - every received connect-subresource or Secret event in the cell's namespace;
 - every received node session on the node that hosted the cell at that time;
 - every break-glass credential issued while the cell ran;
 - every image or configuration change to the component that derives the log;
 - every gap in the record.
 
-Each entry SHALL give time, identity tier (routine, deploy, admin, or service for a credential that a running service holds), action, target and any stated reason. It SHALL NOT contain vault content, and it SHALL render every field as text. The log SHALL state that it lists what the record received.
+Each entry SHALL give time, identity tier (routine, deploy, admin, or service for a credential that a running service holds), action and target.
+It SHALL show a stated reason only where a content-free structured source supplies one; otherwise the reason SHALL be unavailable.
+It SHALL NOT collect free-text reasons or copy arbitrary annotations into a reason.
+It SHALL NOT contain vault content, and it SHALL render every field as text.
+The log SHALL state that it lists what the record received.
 
 #### Scenario: Break-glass exec into a tenant's cell
 
 - **WHEN** the operator opens a break-glass exec session in a tenant's cell namespace
-- **THEN** that tenant's access log shows the session within ten minutes, with time, tier, target and reason, and another tenant's log does not show it
+- **THEN** that tenant's access log shows the session within ten minutes, with time, tier and target, and another tenant's log does not show it
+- **AND** it shows the reason only from a content-free structured source, or reports that the reason is unavailable
 
 #### Scenario: Locked cell's access log
 
 - **WHEN** a tenant opens the access log of their locked or stopped cell
 - **THEN** the control plane serves it
+
+#### Scenario: Fresh access after cell deletion
+
+- **WHEN** a former owner signs in to read a deleted cell's log before its retention ends
+- **THEN** the existing sign-in machinery authenticates the retained owner and issues only retained-log access
+- **AND** the session cannot reach another tenant's log or any Cloud, MCP, billing or provisioning route
+- **AND** later re-admission does not widen that session's access
 
 #### Scenario: Record gap
 

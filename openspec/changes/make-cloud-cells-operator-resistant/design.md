@@ -265,7 +265,7 @@ cellctl derives each cell's access log from the record into the control database
 - an image or configuration change to cellctl, which derives this log;
 - a gap in the heartbeat.
 
-Entries appear within ten minutes of receipt. An entry shows time, identity tier (routine, deploy, admin, or service for a credential that a running service holds, such as cellctl's or the CSI driver's), action, target and, where given, the stated reason. It shows no content, and renders every field as text. The view states the D4 limit: it lists what the record received.
+Entries appear within ten minutes of receipt. An entry shows time, identity tier (routine, deploy, admin, or service for a credential that a running service holds, such as cellctl's or the CSI driver's), action and target. It shows a stated reason only where a content-free structured source supplies one. It shows no content, and renders every field as text. The view states the D4 limit: it lists what the record received.
 
 ### D6. Three access tiers; admin capabilities need the operator's presence
 
@@ -321,6 +321,143 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
 This is the one mechanism that stops adversary 1 before the fact. A presence check needs a human by design: its purpose is to keep automation that holds the operator's credentials away from content. A wrongly firing check costs the operator a touch for each admin session, Terraform run or escrow decryption. A missing or incompatible authenticator blocks administration until it is available, and the operator pays that delay. A skipped check would cost an unrecorded read of a tenant's vault. The exemptions keep releases and running services out of that cost.
 
 The remaining agent path is code. An agent that can merge to `main` can ship code that leaks content in the next release. That path leaves a public pull request, commit and release, and the required checks run on it, but on this solo-maintained repository no second person reviews it. It is a stated limit, disclosed beside the claims (D7).
+
+#### Batch B source and sandbox plan
+
+Batch B covers the access record, tenant access log and access tiers together.
+Its outcome is a stopped-cell log of received events and visible gaps, with scoped deploy credentials unable to reach content.
+Source delivery does not establish that these properties hold in production.
+Live bucket creation, credential migration, repository administration and hardware presence checks remain separate operator-run steps.
+
+**Shipper.** Use Vector 0.60.0 for the K3s audit file and journald sources, disk buffering and the S3-compatible sink.
+Fluent Bit 5.1.4 has an S3-specific spool and retry behavior that makes backlog and loss harder to observe.
+Keep the existing Ansible and K3s deployment paths; add no recording service or custom shipper.
+Configure a bounded disk buffer, its overflow behavior and alerts explicitly.
+Use a batch timeout below five minutes, initially 30 seconds, then measure healthy delivery in the sandbox.
+Disable the S3 health check that needs bucket listing for a write-only node key.
+Configure journal recovery across boots explicitly; the source defaults to the current boot.
+
+Construct each shipped event from an explicit metadata schema.
+Parse Kubernetes audit JSON and the request URI with maintained parsers, retaining the path and dropping the query.
+Do not forward request or response bodies, annotations, user extras, user-agent strings or status messages.
+Drop command arguments and environment data from node records, including raw journal messages and sudo command fields.
+The existing local audit policy can still retain raw request bodies; this plan makes no claim that local logs are content-free.
+Tests inject canaries into each discarded field and inspect uploaded objects, buffers and diagnostics.
+The shipper does not classify content by matching words.
+
+Use Vector's `static_metrics` source and `metric_to_log` transform for a structured heartbeat through the same sink.
+Configure its interval, node identity and boot identity; generate no user content.
+Keep generation time separate from provider receipt time, because a buffered heartbeat can arrive late.
+A missing or late heartbeat is a visible gap, not evidence that no access occurred.
+No cell service, node login or controller reconciliation waits on an upload.
+
+**Node sessions.** Reuse the OpenSSH PAM session boundary and sudo's existing Linux audit producer.
+A small optional PAM adapter records only authentication method, a SHA-256 fingerprint, source address and session identifiers.
+OpenSSH supplies `SSH_AUTH_INFO_0` before `pam_open_session`; this is distinct from the post-authentication `SSH_USER_AUTH` file.
+Parse the versioned OpenSSH format and hash the decoded authentication blob.
+Label a certificate blob fingerprint as such; do not call it the subject key's fingerprint.
+Do not persist the raw key, certificate, principals, key ID, environment or command.
+Pair open and close records only with complete node, boot and monitor-lifetime identifiers.
+Malformed identity is unavailable; an abrupt disconnect can leave an unknown end.
+The adapter adds no authentication decision, forced command or network dependency to login.
+Read structured systemd audit fields for sudo, and configure denied escalation records without enabling a second raw JSON log.
+The sandbox records its exact Ubuntu, OpenSSH, PAM, sudo and systemd versions.
+Live package and audit-source equivalence remains unverified until the operator-run check.
+
+**Storage and derivation.** Extend the existing durability Terraform with a default-disabled access-record bucket and separate writer and reader credentials.
+Its default compliance retention is configured, with a floor of one year.
+The node key has `writeFiles`, without read, delete or retention administration.
+This key can still add or hide object versions; readers must use exact retained versions rather than trust the latest visible name.
+Owner-key deletion and retention-shortening refusals require live B2 proof; an S3 emulator cannot prove them.
+
+Use B2's maintained signed object notifications to submit exact bucket, key and version receipts to the existing control plane.
+The pinned B2 provider exposes `b2_bucket_notification_rules`; no new receiver service is required.
+The receiver verifies the raw-body HMAC and configured bucket before it commits a deduplicated receipt and acknowledges it.
+It never fetches a caller-supplied URL.
+cellctl reads exact versions with the separate read credential and derives the tenant events in bounded batches.
+Persist receipt identity and processing state so duplicate delivery and process death do not duplicate entries or lose progress.
+Do not infer a complete record from a notification, cursor or heartbeat.
+Notification availability, suspension and latency remain live inputs; Backblaze documents an account enablement requirement.
+The access log shows unknown or delayed coverage when the receipt path is unavailable.
+Do not enable the ten-minute claim until the deployed receipt path passes its integration check.
+
+Add placement history from observed cell Pod identity, node and lifecycle evidence.
+The current cell row holds only the latest node; it cannot reconstruct earlier placement.
+Keep source time, provider receipt time and observation time separate.
+Unknown placement intervals remain gaps; do not guess a node from the current row.
+Attribute a node session to each cell whose recorded placement overlaps it.
+Retain received events and placement evidence for the access-log retention, including stopped, locked and deleted cells.
+Store the schema and grants with the control-plane migrations and keep the controller's fixture synchronized through the existing contract path.
+The control plane authorizes each page against the retained tenant owner, paginates by a stable key and renders fields as text.
+A deleted cell's ordinary Cloud sessions remain revoked.
+Extend the existing browser-challenge and magic-link path with a retained-log-only purpose and session.
+This covers Cloud-only owners who have no account password; use the existing web-account login where it is available.
+Bind the restricted session to the retained owner and log scope, without restoring cell, MCP, billing or provisioning access.
+Re-admission must not promote a restricted session to an ordinary Cloud session.
+It reports the collection window and partial or failed state beside the entries.
+Do not collect free-text reasons or copy arbitrary annotations into a reason.
+Show the reason as unavailable when no content-free structured source supplies one; add no reason taxonomy or content classifier.
+
+**Deploy boundary.** Use Kyverno 1.19.2 for image verification and native Kubernetes admission for field confinement.
+Pin its tagged `policies.kyverno.io/v1beta1` API, run admission only, and disable digest mutation and background evaluation.
+Limit platform image patches initially to cellctl, whose signed producer exists in this repository.
+Keep the workload-to-family mapping in chart configuration, sourced from the existing release build plan.
+The gateway has a different producer; it does not inherit cellctl's release identity.
+Other workload changes remain admin actions until their producer contracts exist.
+
+Add the image-only CEL policy and scoped deploy identity; neither exists in the current chart.
+Keep the existing broad operator bearer admin-only.
+Give the control plane a separate deploy principal for the existing image-setting and rollout actions, with no generic admin route access.
+Image requests retain the configured-repository and exact-digest checks.
+The admission verifier checks the release workflow, issuer, release ref, source and exact digest for the required family.
+It applies to new cell StatefulSets and image-changing updates by cellctl, plus named platform image patches by the deploy identity.
+Unchanged-image reconciliation and ordinary Pod restarts do not fetch registry evidence.
+Private-registry access uses a read-only credential; a cache miss has no offline guarantee.
+Verifier failure holds a new image or fresh cell, rather than an existing cell's process restart.
+The operator pays a delayed deploy; this prevents unverified code from mounting tenant content.
+
+The existing release verifier binds the signed image index and checks BuildKit targets across every executable platform.
+Reuse that check; do not build another registry or signature verifier.
+Kyverno's supported metadata API cannot read the embedded BuildKit statement bodies.
+After the existing check succeeds, the publisher emits a standard signed in-toto family assertion for the same index digest.
+Derive the assertion from the existing build plan and verified result, not a second family list or a mutable image tag.
+Sequence this source change after the active publisher batch; it places no hold on that batch's ordinary release.
+
+Cover direct cellctl Jobs with a native admission policy whose parameter is the cell's StatefulSet in the request namespace.
+Require every Job container and init-container image to match that admitted cell image, without another registry lookup.
+The namespace selector must scope parameter resolution before match conditions.
+The current controller applies the StatefulSet before Jobs, including a rollback image before restore Jobs.
+Import, backup and export-verification Jobs remain in the cell namespace; export verification still receives no cell keys or volume.
+Admin scratch restore Jobs stay outside the deploy and cellctl identities.
+Do not create a name-based exception, trust an annotation, or use a desired database image as verification evidence.
+
+**Delivery and proof.** Build one cohesive source batch across the runtime and control-plane repositories, disabled until its operational prerequisites hold.
+Use existing authentication, controller, scheduler, migration and UI components; add no parallel journal or release service.
+The custom PAM adapter covers only missing authentication-blob and session-boundary metadata.
+Its maintenance cost is compatibility with the pinned OpenSSH/PAM format, checked on package changes.
+The signed family assertion bridges the maintained release check to the maintained admission verifier.
+
+The highest-level check runs a disposable Ubuntu workflow and an isolated tenant pair with external effects blocked.
+It exercises SSH session types, permitted and denied sudo, break-glass and Secret events, buffered restart, and interrupted receipt processing.
+It traces exact stored versions into derived rows and each tenant's stopped-cell view, with counts and privacy canaries.
+After deletion, a fresh retained-log login must read the owner's retained log and fail every ordinary Cloud and cross-tenant route.
+Healthy delivery must meet five minutes to storage and ten minutes to the tenant log; outages show gaps and recover without blocking cells.
+Admission permits the correct signed family and denies unsigned, cross-family and non-image changes.
+With registry access blocked, existing Pod restarts and Jobs under the admitted cell image still proceed.
+Use CI or a disposable VM for kernel audit behavior; do not modify the WSL host's audit or service configuration.
+Run the full relevant suites on CI, followed by one exact-content independent security review and outcome verification.
+The operator-run packet names the live preconditions, undo and per-mode claim checks before any activation.
+Do not remove existing credentials or enforce hardware-only SSH until a fresh presence check and tested recovery path exist.
+Keep actual credential identifiers and account details in governed operational evidence; source records only the generic permissions and custody boundary.
+
+Primary contracts checked on 2026-10-26:
+- Vector 0.60.0: <https://vector.dev/releases/0.60.0/>, <https://vector.dev/docs/reference/configuration/sources/static_metrics/> and <https://vector.dev/docs/reference/configuration/sinks/aws_s3/>.
+- OpenSSH 9.6p1 PAM handoff: <https://github.com/openssh/openssh-portable/blob/V_9_6_P1/auth-pam.c>.
+- Linux-PAM 1.5.3 adapter boundary: <https://github.com/linux-pam/linux-pam/blob/v1.5.3/modules/pam_exec/pam_exec.c>.
+- sudo 1.9.15p5 audit producer: <https://github.com/sudo-project/sudo/blob/SUDO_1_9_15p5/plugins/sudoers/linux_audit.c>.
+- systemd 255 audit fields: <https://github.com/systemd/systemd/blob/v255/src/journal/journald-audit.c>.
+- B2 notification semantics: <https://www.backblaze.com/docs/cloud-storage-event-notifications-reference-guide> and <https://github.com/Backblaze/terraform-provider-b2/blob/v0.12.1/docs/resources/bucket_notification_rules.md>.
+- Kyverno 1.19.2 API and evaluator: <https://github.com/kyverno/kyverno/releases/tag/v1.19.2> and <https://github.com/kyverno/kyverno/blob/v1.19.2/pkg/image/verification/evaluator/policy.go>.
 
 ### D7. Claims follow the mechanisms in force, per mode
 
