@@ -263,18 +263,37 @@ def test_a_file_that_changes_while_it_is_archived_fails_without_a_torn_archive_a
 
 
 @needs_age
-def test_a_same_size_save_between_the_scan_and_the_read_does_not_abandon_the_import(tmp_path):
+@pytest.mark.skipif(os.name == "nt", reason="creating a symbolic link needs a privilege on Windows")
+def test_a_folder_swapped_for_a_link_while_it_is_archived_refuses_the_import_and_archives_no_outside_byte(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "b.bin").write_bytes(b"o" * 200_000)
     folder = tmp_path / "notes"
-    folder.mkdir()
-    (folder / "a.txt").write_text("before the save")
-    identity, recipient = _age_keys(tmp_path)
+    (folder / "sub").mkdir(parents=True)
+    (folder / "sub" / "a.bin").write_bytes(b"x" * 200_000)
+    (folder / "sub" / "b.bin").write_bytes(b"y" * 200_000)
+    # The outside file has the declared size and modification time, so only its identity tells it apart.
+    declared = (folder / "sub" / "b.bin").stat().st_mtime_ns
+    os.utime(outside / "b.bin", ns=(declared, declared))
+    _, recipient = _age_keys(tmp_path)
     cloud = FakeCloud(recipient)
-    cloud.after_registration = lambda: (folder / "a.txt").write_text("after the save!")
+    swapped = False
 
-    result = asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
+    def swap_the_folder_for_a_link_after_the_first_file_was_started(line: str) -> None:
+        # The folder entry was checked before the first file; the second file is opened through the link, same size.
+        nonlocal swapped
+        if line.startswith("Archiving and encrypting:") and not swapped:
+            swapped = True
+            shutil.move(folder / "sub", tmp_path / "moved-away")
+            (folder / "sub").symlink_to(outside, target_is_directory=True)
 
-    assert result["observed_state"] == "done"
-    assert _members(identity, cloud.ciphertext) == {"a.txt": b"after the save!"}
+    progress = Progress(swap_the_folder_for_a_link_after_the_first_file_was_started, interval=0)
+    with pytest.raises(CloudImportError) as failed:
+        asyncio.run(cloud.run(folder, tmp_path / "checkpoint", progress=progress))
+
+    assert swapped
+    assert (failed.value.phase, failed.value.code) == ("archive", "SOURCE_CHANGED")
+    assert cloud.uploaded == {} and not (tmp_path / "checkpoint/archive.age").exists()
 
 
 @needs_age

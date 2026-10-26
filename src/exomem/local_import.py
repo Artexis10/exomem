@@ -38,6 +38,9 @@ _LOCK_SUFFIX = ".lock"
 _CHUNK = 1 << 20
 # A journal line reaches the disk after this many records; a loss in a crash only costs a recopy.
 _SYNC_EVERY = 200
+# held_fs refuses with a closed set of codes. These two follow from the file's own name and path, so a rerun is
+# refused the same way; any other code (IO_REFUSED, IDENTITY_CHANGED, CROSS_DEVICE) comes from the disk and can clear.
+_REFUSED_ON_EVERY_RUN = frozenset({"DESTINATION_EXISTS", "UNSAFE_PATH"})
 _SHOWN_FAILURES = 5
 
 
@@ -238,6 +241,11 @@ class _Stream:
             yield block
 
 
+def _refusal(error: held_fs.HeldFsError) -> dict:
+    """The outcome of a vault refusal; it is final when a rerun would be refused the same way."""
+    return {"code": "STAGING_REFUSED", "detail": error.code, "final": error.code in _REFUSED_ON_EVERY_RUN}
+
+
 def _copy_file(fs, directory, root: Path, staged_root: Path, item: Kept) -> dict:
     """Publish one file from the original into the staged folder; return its record or its failure code."""
     try:
@@ -253,8 +261,7 @@ def _copy_file(fs, directory, root: Path, staged_root: Path, item: Kept) -> dict
         leaf = item.rel.rsplit("/", 1)[-1]
         published = held_fs.publish_bytes(fs, directory, leaf, held_fs.Chunks(open=stream.parts))
         if not published.ok:
-            # The vault gives the same refusal for the same name on every run, so a rerun cannot fix it.
-            return {"code": "STAGING_REFUSED", "detail": published.error.code, "final": True}
+            return _refusal(published.error)
         after = os.fstat(descriptor)
         if stream.size != item.size or after.st_size != item.size or after.st_mtime_ns != before.st_mtime_ns:
             # The original changed while it was read, so the staged bytes may mix two versions.
@@ -323,7 +330,8 @@ class _Run:
                      if _is_staged(self.staged_root, item, self.verified.get(item.rel))}
         self.pending = [item for item in selection.kept if item.rel not in self.done]
         self.needed = sum(item.size for item in self.pending)
-        # A rerun can copy a file in `failures` (it changed or could not be read); one in `refused` is final.
+        # A rerun can copy a file in `failures` (it changed, could not be read, or the disk refused it).
+        # A file in `refused` is final.
         self.failures: list[tuple[str, str]] = []
         self.refused: list[tuple[str, str]] = []
 
@@ -371,7 +379,7 @@ class _Run:
                         directory = None
                     made = filesystem.parent(parent, create=True, access="mutate")
                     if not made.ok:
-                        self._fail(item.rel, {"code": "STAGING_REFUSED", "detail": made.error.code, "final": True})
+                        self._fail(item.rel, _refusal(made.error))
                         open_parent = None
                         continue
                     directory, open_parent = made.require(), parent
@@ -442,8 +450,8 @@ def stage(folder: Path, vault: Path, *, include_hidden: bool = False, use_gitign
 
     The result has `ok` false and the code `COPY_INCOMPLETE` when some files changed or could not be read while
     copying. The import then stays open, and the same command run again retries only those files under the same
-    import id. A file that the vault refuses is final: it is left out with its code, counted in `refused_by_vault`,
-    and the import finishes without it.
+    import id. A file that the vault refuses for its name or path is final: it is left out with its code, counted in
+    `refused_by_vault`, and the import finishes without it. A refusal that comes from the disk keeps the import open.
     """
     from .adoption_run import IMPORT_STAGE_DIR
     from .cloud_import import DEFAULT_RESERVE_BYTES

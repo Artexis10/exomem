@@ -217,6 +217,30 @@ def test_a_file_the_vault_refuses_is_left_out_with_its_code_and_the_import_still
     assert captured.err.strip().splitlines()[-1].startswith("Next: run adoption_studio start")
 
 
+def test_a_file_the_disk_refuses_keeps_the_import_open_and_a_rerun_copies_it(tmp_path, monkeypatch):
+    vault = _vault(tmp_path)
+    folder = _folder(tmp_path, {"a.txt": b"first", "z.txt": b"last"})
+    publish = local_import.held_fs.publish_bytes
+
+    def disk_refuses_the_last_file(fs, directory, leaf, *arguments, **options):
+        if leaf == "z.txt":
+            return local_import.held_fs.HeldResult(error=local_import.held_fs.HeldFsError("IO_REFUSED", "disk is full"))
+        return publish(fs, directory, leaf, *arguments, **options)
+
+    monkeypatch.setattr(local_import.held_fs, "publish_bytes", disk_refuses_the_last_file)
+    first = stage(folder, vault)
+
+    # A refusal from the disk can clear, so the import is not called finished with a file missing.
+    assert (first["ok"], first["code"], first["failed_while_copying"], first["refused_by_vault"]) == (False, "COPY_INCOMPLETE", 1, 0)
+    assert first["manifest"].endswith(".partial.jsonl")
+
+    monkeypatch.setattr(local_import.held_fs, "publish_bytes", publish)
+    second = stage(folder, vault)
+
+    assert second["ok"] and second["import_id"] == first["import_id"]
+    assert _tree(vault / second["start_path"] / "Field Notes") == {"a.txt": b"first", "z.txt": b"last"}
+
+
 def test_resume_removes_staged_files_the_folder_no_longer_selects_and_records_each_removal(tmp_path):
     vault = _vault(tmp_path)
     files = {f"{name}.txt": name.encode() * 100 for name in ("a", "b", "c", "d")}

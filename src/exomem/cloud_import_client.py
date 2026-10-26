@@ -199,7 +199,7 @@ class _CountingWriter:
 
 
 def _add_selected(archive: tarfile.TarFile, root: Path, selection: import_selection.Selection) -> None:
-    """Add the selected files, each opened without following a link, checked against its declared size and while it is read."""
+    """Add the selected files, each opened without following a link and checked against the walk and while it is read."""
     made: set[str] = set()
     for item in selection.kept:
         parts = item.rel.split("/")[:-1]
@@ -217,9 +217,8 @@ def _add_selected(archive: tarfile.TarFile, root: Path, selection: import_select
             raise _SourceChanged from None
         with os.fdopen(descriptor, "rb") as handle:
             before = os.fstat(descriptor)
-            # Only a size that differs from the declared bytes makes the declaration false. A same-size save
-            # between the scan and this read is archived as it now stands; a change during the read is caught below.
-            if not stat.S_ISREG(before.st_mode) or before.st_size != item.size:
+            if (not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != item.identity
+                    or (before.st_size, before.st_mtime_ns) != (item.size, item.mtime_ns)):
                 raise _SourceChanged
             try:
                 archive.addfile(archive.gettarinfo(arcname=item.rel, fileobj=handle), handle)
