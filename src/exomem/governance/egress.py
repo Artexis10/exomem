@@ -8166,8 +8166,9 @@ def filter_withheld_entries(
             if (inspection_evidence.root != vault_root.resolve()
                     or inspection_evidence.principal != (principal if principal is not None else effective_principal())):
                 canonical_governance.OperationAuthorization.refuse()
-            if inspection_evidence.history is not None:
-                def recheck_history():
+            query_state = inspection_evidence.query_sources or inspection_evidence.history
+            if query_state is not None:
+                def recheck_query():
                     return filter_withheld_entries(
                         vault_root, payload, principal=principal, purpose=purpose,
                         _artifact_scan_demand=_artifact_scan_demand,
@@ -8175,12 +8176,12 @@ def filter_withheld_entries(
                         _current_parent_binding=_current_parent_binding)
 
                 if writer is not None:
-                    with writer.read_collection(inspection_evidence.history.collection_id):
-                        return recheck_history()
-                server = store_runtime.projection_route(vault_root, inspection_evidence.history.manifest_path)
+                    with writer.read_collection(query_state.collection_id):
+                        return recheck_query()
+                server = store_runtime.projection_route(vault_root, query_state.manifest_path)
                 if server is None:
                     canonical_governance.OperationAuthorization.refuse()
-                return server.call(recheck_history, read_only=True, wake_maintenance=False)
+                return server.call(recheck_query, read_only=True, wake_maintenance=False)
             if not store_runtime.served(vault_root):
                 canonical_governance.OperationAuthorization.refuse()
             # Only a store writer in this process seals an inspection, and the serving store
@@ -8469,7 +8470,6 @@ def filter_withheld_entries(
         ):
             return None
         if (location == ("source_versions",) and inspection_evidence is not None
-                and inspection_evidence.history is None
                 and _is_admitted_source_versions(node)):
             # Exact admitted metadata has no ordinary references or nested text.
             # The always-on credential scrubber still visits every string later.

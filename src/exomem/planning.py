@@ -547,6 +547,7 @@ def query(
                 authorize_path=adapter_authorize_path,
             )
             source_versions = list(result.source_versions)
+            hierarchy_contributors = ()
             if isinstance(hierarchy, Mapping) and isinstance(hierarchy.get("nodes"), list):
                 hierarchy_ids = {
                     node["plan_id"]
@@ -556,6 +557,9 @@ def query(
                 snapshot = record_formats.load_adapter(
                     vault_root, manifest, authorize_path=adapter_authorize_path
                 ).read()
+                hierarchy_contributors = tuple((record.identity.key, record.source.hash)
+                                               for record in snapshot.records
+                                               if record.identity.key in hierarchy_ids)
                 known_paths = {version.path for version in source_versions}
                 source_versions.extend(
                     record.source
@@ -596,8 +600,9 @@ def query(
                 },
                 manifest,
             )
-            if writer is not None and include_agent_history:
-                projected = writer._operation.query_history_evidence(projected, writer, manifest)
+            if writer is not None:
+                projected = writer._operation.query_metadata_evidence(
+                    projected, writer, manifest, result, contributors=hierarchy_contributors)
         egress.emit_boundary_receipt(collector)
         return projected
 
