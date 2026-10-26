@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands
 from exomem import append_to_file as append_module
+from exomem import commands, relation_review
 from exomem import create_directory as mkdir_module
 from exomem import create_file as create_file_module
 from exomem import delete_directory as rmdir_module
@@ -26,7 +26,6 @@ from exomem import list_inbound_links as inbound_module
 from exomem import list_trash as list_trash_module
 from exomem import move_file as move_module
 from exomem import recover_from_trash as recover_module
-from exomem import relation_review
 from exomem import set_frontmatter_field as set_fm_module
 from exomem.command_surface import listed_names
 from exomem.operation_entries import DEFAULT_TOOL_SHAPE

@@ -122,7 +122,7 @@ def test_the_episode_ask_names_enough_fields_for_a_valid_record():
     call = {name: [f"a {name} item"] if name in {"worked_on", "decided", "open"} else f"a {name}" for name in named}
     recap = episode_capture.prepare(
         episode=None,
-        when=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        when=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
         audience="owner",
         **{"subject": "s", "summary": "s", **call},
     )

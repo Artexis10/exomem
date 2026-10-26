@@ -18,8 +18,8 @@ from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.__main__ import main
 from exomem.command_surface import listed_names
-from exomem.operation_entries import DEFAULT_TOOL_SHAPE
 from exomem.governance import principal as principal_module
+from exomem.operation_entries import DEFAULT_TOOL_SHAPE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTHORING_TOOLS = (

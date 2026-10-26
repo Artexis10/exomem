@@ -527,6 +527,44 @@ with open(sys.argv[1], "wb") as capture:
     assert json.loads(frames[1]) == envelope
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Process custody uses Linux /proc start times")
+def test_prepared_execution_stops_its_server_when_evidence_copy_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval import session
+
+    slot = Slot(tmp_path / "slot")
+    slot.runtime.mkdir(parents=True)
+    slot.cwd.mkdir()
+    inputs = replace(_inputs(arm="P"), cwd=slot.cwd, argv=(
+        sys.executable, "-c", "import sys; sys.stdin.readline()",
+    ))
+    executor = ClaudeSessionExecutor(Layout(tmp_path), {"P": arm_specs()["P"]}, "m", "v", {}, turn_timeout=5)
+    failure = OSError("evidence copy failed")
+
+    def copy_failure(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(session.shutil, "copytree", copy_failure)
+    server = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={},
+    )
+    try:
+        (slot.runtime / "tap.jsonl").write_text(json.dumps({
+            "event": "server_started", "pid": server.pid,
+            "start_ticks": session.process_start_ticks(server.pid),
+        }) + "\n", encoding="utf-8")
+
+        with pytest.raises(OSError) as raised:
+            executor.execute_prepared(inputs, tmp_path / "attempt", slot)
+
+        assert raised.value is failure
+        server.wait(timeout=5)
+    finally:
+        if server.poll() is None:
+            server.kill()
+        server.wait(timeout=5)
+
+
 @pytest.mark.parametrize("eventually_ready", [True, False], ids=["ready", "setup-timeout"])
 def test_the_ready_gate_holds_requests_without_spending_the_turn_budget_or_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eventually_ready: bool) -> None:
     from membench.utility.switch_eval import session
