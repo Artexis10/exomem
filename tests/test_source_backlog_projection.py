@@ -158,6 +158,25 @@ def test_a_compact_bootstrap_points_at_the_next_batch_and_keeps_dismissals_outst
     )
 
 
+def test_dismissing_every_item_still_serves_the_outstanding_backlog(
+    imported: tuple[Path, list[str]],
+) -> None:
+    vault, _sources = imported
+    for row in due_state_module.served_entries(vault):
+        commands.op_triage_memory(vault, ref=row["ref"], action="dismiss", why="grouped later")
+
+    block = _block(vault)
+    assert block["total"] == 0
+    assert block["categories"] == {}
+    assert block["outstanding_total"] == 3
+    assert block["outstanding"] == {"unprocessed_source": 3}
+
+    summary = commands.op_bootstrap(vault)["due_state"]
+    assert summary["total"] == 0
+    assert summary["visible_outstanding"] == {"unprocessed_source": [0, 3]}
+    assert "next" not in summary
+
+
 def test_a_surface_without_review_gets_the_counts_but_no_route_to_a_missing_tool(
     imported: tuple[Path, list[str]],
 ) -> None:

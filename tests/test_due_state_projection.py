@@ -903,7 +903,9 @@ def test_a_dismissal_through_the_review_surface_stops_every_carrier_counting(
 
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
 
-    assert _served(vault) is None
+    dismissed = _served(vault)
+    assert dismissed["total"] == 0, "a dismissed item is no longer counted as visible"
+    assert dismissed["outstanding_total"] == 1, "dismissal does not complete the work"
 
 
 def test_a_snooze_through_the_review_surface_is_quiet_only_until_it_lapses(
@@ -920,8 +922,8 @@ def test_a_snooze_through_the_review_surface_is_quiet_only_until_it_lapses(
         vault, ref=item.ref, action="snooze", until="2026-08-20", why="after the demo"
     )
 
-    assert _served(vault, today=TODAY) is None
-    assert _served(vault, today=dt.date(2026, 8, 20)) is None
+    assert _served(vault, today=TODAY)["total"] == 0
+    assert _served(vault, today=dt.date(2026, 8, 20))["total"] == 0
     lapsed = _served(vault, today=dt.date(2026, 8, 21))
     assert lapsed is not None and lapsed["total"] == 1
 
@@ -935,7 +937,7 @@ def test_a_reopen_through_the_review_surface_makes_it_count_again(vault: Path) -
     _assert_fused(item)
 
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
-    assert _served(vault) is None
+    assert _served(vault)["total"] == 0
 
     commands.op_triage_memory(vault, ref=item.ref, action="reopen")
 
@@ -955,7 +957,7 @@ def test_a_material_change_resurfaces_a_dismissed_item_under_a_new_fingerprint(
     before = due_state_module.served_entries(vault, today=TODAY)[0]["fingerprint"]
 
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
-    assert _served(vault) is None
+    assert _served(vault)["total"] == 0
 
     # The author edits the prediction itself -- new knowledge, not a reformat.
     _write(

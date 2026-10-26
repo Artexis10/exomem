@@ -3957,19 +3957,21 @@ def served(
     principal: Any = None,
     purpose: str | None = None,
 ) -> dict[str, Any] | None:
-    """The wire block for the requesting audience, or None when nothing is due.
+    """The wire block for the requesting audience, or None when nothing is outstanding.
 
     `total` and `categories` count what review state leaves visible.
     `outstanding_total` and `outstanding` count the same rows before dismissal
     and snoozing, under the same disclosure rule, so a dismissal never reads as
-    progress: only finishing the work lowers them.
+    progress: only finishing the work lowers them. When every outstanding row is
+    dismissed or snoozed the block still arrives, with `total` 0 and no
+    categories, because the work is still there.
     """
     rows = served_entries(
         vault_root, today=today, principal=principal, purpose=purpose, include_triaged=True
     )
-    result = block(rows)
-    if result is None:
+    if not rows:
         return None
+    result = block(rows) or {"total": 0, "categories": {}, "top": []}
     return {**result, "outstanding_total": len(rows), "outstanding": _counted(rows)}
 
 
