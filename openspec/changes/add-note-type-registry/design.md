@@ -114,6 +114,27 @@ S4b is a separate task group in this change, delivered later. It covers the writ
 - A restricted writer applies the shipped meaning, so its write can skip an obligation that a vault type adds, such as a semantic unit. → The owner's audit and activation review classify the page under the owner's registry and report the gap.
 - Claim rows follow a save or restore only when their page is next written or the store is rebuilt. → S4b binds the claim store to the registry digest.
 
+## Amendment (2026-10-26): shared folders and homes
+
+The owner chose shared topic folders: one folder may hold notes of several types. Decision 1 changes in what a folder means, not in its uniqueness.
+
+- A type folder keeps compiled intent, but it accepts a page of any compiled type. A compiled type is valid anywhere under the Notes root that no exemption covers. `COMPILED_TYPE_MISMATCH` now means "a page in a type folder needs a compiled type", and `COMPILED_DESTINATION_MISMATCH` means "a compiled page outside Notes".
+- Type folders stay unique and immutable. An older release would otherwise refuse the overlay with `NOTE_TYPE_FOLDER_TAKEN` and lose every vault type on rollback.
+- Shared folders come from homes. A home is an entry in a new overlay-only `homes` registry (`_Schema/homes.yaml`, empty shipped pack): a folder under Notes and the topic and project keys that it serves. The substrate gives it inspect, save, history, restore and revert. A home is not a domain attribute, because shipped domain entries such as `equipment` cannot be overridden by an overlay.
+- Placement order: a research note goes to its project's home, else to its research folder. Any other compiled type goes to the home of the first topic, in the order the caller gives, that has one. Everything else goes to the type default with today's partitions and stems. The plural `projects` does not place a page, because that would move every insight that names projects. A superseding page keeps its predecessor's folder.
+- Placement can change who sees a page, because governance scopes and private vocabulary instances bind to paths. Creation therefore refuses a home whose scope differs from the type default's, with `HOME_CHANGES_SCOPE`, and then runs `page_scope` on the final path. This fails closed because it is authorization.
+- A home folder is validated with `compiled_route_exempt`, the same single source that type folders use, so a home cannot silently drop its pages out of governance.
+- A near-miss topic whose candidate has a home goes through the existing vocabulary decision, so a typo cannot file a note in the wrong place.
+- The creation draft reports the chosen folder, its basis and the one `schema_memory` call that would make a topic a home. Creating a home is an owner `proactive_capture` promotion and surfaces in `recent_promotions`.
+- The notes index counts by top-level Notes folder with registry labels, and gives each home a section. The research-folder contradiction demotion becomes a project-key rule.
+
+## S4b decisions (2026-10-26)
+
+- Partition and stem kinds are closed attribute values that code implements: partitions `project`, `domain`, `medium` and `none`; stems `slug` and `dated`. The shipped pack reproduces today's layout.
+- A promoted type inherits its parent's role, flags, partition and stem kinds.
+- The generic `fields` parameter is deferred until a vault type declares typed fields of its own. A promoted type without them needs no new tool parameter.
+- Index entries follow homes and type folders as above.
+
 ## S4a / S4b split
 
 **S4a, read side.** S4a adds the registry, pack, admission and predicates. It moves every read-side set and the semantic gate's destinations onto them. It also delivers the ranking map, contract text, skills, catalogue identity and unregistered debt. It changes no write path, tool parameter or page.

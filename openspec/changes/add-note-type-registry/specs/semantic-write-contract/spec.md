@@ -12,10 +12,12 @@ register more. The canonical destination resolver SHALL map each compiled type t
 its registered folder; the shipped pack sets `Notes/Research`, `Notes/Insights`,
 `Notes/Failures`, `Notes/Patterns`, `Notes/Experiments`, and `Notes/Productions`,
 respectively. The resolver SHALL apply the existing index, log, schema/admin,
-template, dataset-card, hub, snapshot, and activation exclusions. Structural
-validation SHALL reject a canonical compiled destination with missing/wrong compiled
-type and SHALL reject a recognized compiled type at a noncanonical destination
-before applicability is evaluated.
+template, dataset-card, hub, snapshot, and activation exclusions. A type folder
+keeps compiled intent but SHALL accept a page of any compiled type, and a page of
+a compiled type SHALL be valid in any folder under the Notes root that no exemption
+covers, including a registered home. Structural validation SHALL reject a page in a
+type folder whose type is missing or not compiled, and SHALL reject a recognized
+compiled type outside the Notes root, before applicability is evaluated.
 
 The boundary SHALL then expose one deterministic
 `requires_semantic_unit(after_state)` predicate, separate from relation
@@ -66,7 +68,19 @@ interpreted as an inactive page or a false minimum-unit obligation.
 #### Scenario: A vault-registered compiled type has compiled intent
 - **WHEN** the admitted note-type registry gives a vault-defined type note-type role `compiled` and folder `Notes/<Name>`
 - **THEN** a page of that type in that folder has compiled intent and follows the shared minimum-unit predicate
-- **AND** the same type in another compiled folder fails structural validation
+- **AND** the same type in another compiled folder or a home under Notes passes structural validation
+
+#### Scenario: A type folder holds several compiled types
+- **WHEN** an `insight` page is created in `Notes/Research/<Project>`
+- **THEN** structural validation accepts it and the page keeps the obligations of `insight`
+
+#### Scenario: A type folder still requires a compiled type
+- **WHEN** Tier 2 creates an untyped or non-compiled page in `Notes/Insights`
+- **THEN** structural validation refuses it with `COMPILED_TYPE_MISMATCH`
+
+#### Scenario: A compiled type outside Notes is refused
+- **WHEN** a page of a compiled type is created outside the Notes root
+- **THEN** structural validation refuses it with `COMPILED_DESTINATION_MISMATCH`
 
 ### Requirement: Observe-Memory Refusals Distinguish Legacy Schema From Policy
 

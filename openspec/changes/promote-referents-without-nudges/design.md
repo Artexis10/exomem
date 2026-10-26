@@ -12,6 +12,15 @@ Revision 3 follows the recheck (REQUEST_CHANGES, 1 blocking and 5 major findings
 Revision 4 follows a third recheck (0 blocking and 2 major findings): it moves removal and revert onto tools that are already destructive, and counts twin false positives per repeat.
 Revision 5 separates the revert fingerprint from the entry's review fingerprint, so a revert binds to the state the user saw while dismissal identity stays stable.
 
+## Amendment (2026-10-26)
+
+The owner approved the autonomous organisation plan. It amends this design as follows; the decisions below keep their history.
+
+- **Decision 3, items 3 to 5.** `create-entity` typed edges shipped as the separate `relations=[{kind,target}]` parameter, so `connections` gains no item union. The `add-relation` operation is dropped: agents author typed edges through `relations` items and `## Relations` bullets. Edge removal survives only as an internal curation step that the promotion revert runs; no tool gains a removal operation.
+- **Decision 3, item 6.** Organisation PR B replaces "endpoints never refuse a write" with a barrier: a newly added generic edge that touches an entity, where an active non-generic relation fits both endpoints, refuses before commit with at most 4 options and a one-retry route that keeps the generic relation with a recorded reason. Note-to-note generic edges are never refused; they get a warning and post-commit options. `endpoints` uses a typed grammar (`entity:<type>`, `entity:*`, `role:<note role>`) and lands with the barrier.
+- **Decision 7.** The rule that the baseline exists before any part of this change merges is replaced. Organisation PR A carries no behaviour layer, so the baseline is main with PR A.
+- **Decision 8.** Organisation PR B replaces the f33 protocol with the revised one: small paired development rounds, then one blind held-out run of 40 independent situations under a new preregistered amendment. The f33 amendment stays filed, sealed and unrun.
+
 ## Owner decisions (decided 2026-10-10)
 
 - **O1. Outcome.** Entity, category, relationship and type creation is first class and fully dynamic, and a promotion reaches all future interactions.

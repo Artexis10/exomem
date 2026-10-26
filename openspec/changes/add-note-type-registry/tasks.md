@@ -15,17 +15,30 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 - [x] 1.9 Add the registry's effective digest to the catalogue identity. Verify that a save and a restore reach the next `find` and write without a restart or rebuild.
 - [x] 1.10 Teach the role rule in contract version 7, render the shipped list from the pack and fix `search_guidance.compiled_types`; remove the `COMPILED_TYPES` sentences. Verify skill-contract validation, the no-leak scan and the bootstrap budgets.
 - [x] 1.11 Regenerate the scaffold copies, plugins, cloud plugin and v5 candidate through their producers; verify the frozen v1 to v4 identities and the legacy contract digest.
-- [ ] 1.12 Turn the workflow test green and run the full suite at the completion boundary.
-- [ ] 1.13 Obtain an exact independent review that names C4 and C6, the product and proof weight and a net call. Pass full CI, merge and verify the ordinary release.
+- [x] 1.12 Turn the workflow test green and run the full suite at the completion boundary.
+  Evidence: S4a merged in #1647 (`fb74f8c57`) with `test_a_vault_compiled_type_takes_compiled_behaviour_until_restored` green.
+- [x] 1.13 Obtain an exact independent review that names C4 and C6, the product and proof weight and a net call. Pass full CI, merge and verify the ordinary release.
+  Evidence: #1647 merged after review and CI and shipped in the ordinary release that followed it.
+
+## 2A. Homes and shared type folders (organisation PR A)
+
+- [ ] 2A.1 Add the `homes` registry adapter, empty pack and `RegistrySpec`, with folder validation through `compiled_route_exempt` and one home per topic or project key. Check: save, history and restore through `schema_memory(subject="homes")`; a reserved segment and a duplicate key refuse.
+- [ ] 2A.2 Let a type folder accept any compiled type and a compiled type sit anywhere under Notes; reword the two findings. Check: an insight in `Notes/Research/<Project>` is accepted; an untyped page in `Notes/Insights` refuses; a compiled page outside Notes refuses.
+- [ ] 2A.3 Replace the per-type branches of `note._resolve_path` with the placement order, keeping partitions and stems for the type default, and keep a superseding page in its predecessor's folder. Check: a topic home receives an insight and a failure; with no homes, every destination is unchanged.
+- [ ] 2A.4 Refuse a home whose governance or vocabulary-instance scope differs from the type default's (`HOME_CHANGES_SCOPE`), then run `page_scope` on the final path. Check: the refusal writes nothing.
+- [ ] 2A.5 Report `placement` in the creation draft, with the folder, the basis and the home-making call; route a near-miss topic with a home through the vocabulary decision.
+- [ ] 2A.6 Count notes by top-level Notes folder with registry labels and give homes index sections; make the research-folder contradiction demotion a project-key rule. Check: a home's pages appear in `Notes/index.md` and in `index_drift`.
+- [ ] 2A.7 Update the authoring contract's role rule and homes text, bump the contract version once, and regenerate the scaffold, plugin and Cloud copies through their producers; frozen v1 to v4 keep their bytes.
 
 ## 2. S4b: write side and promotion
 
-- [ ] 2.1 Record the S4b decisions for partition kinds, stem kinds, the `fields` shape, typed-field declaration and index entries in `design.md`. Verify `openspec validate --strict`.
+- [x] 2.1 Record the S4b decisions for partition kinds, stem kinds, the `fields` shape, typed-field declaration and index entries in `design.md`. Verify `openspec validate --strict`.
+  Recorded in design.md, "S4b decisions (2026-10-26)".
 - [ ] 2.2 Red first: add the programme task 4.3 proof. Promote `meeting-note` under `insight`, create one through `remember` in `Notes/Meetings` with compiled behaviour, then restore it away with page bytes kept.
 - [ ] 2.3 Add promotion under a parent that supplies role and flags; verify promotion, history and restore through `schema_memory`.
 - [ ] 2.4 Move folders, partitions, stems, required fields, statuses, sections, claim sections and typed fields onto the registry for the typed writer. Verify that the existing suites pass unchanged.
 - [ ] 2.5 Create the notes index entry and count for a new compiled folder; verify that a promoted type's pages appear in `Notes/index.md`.
-- [ ] 2.6 Add the generic `fields` parameter to `remember` and `replace_memory` on the current local and Cloud surfaces. Verify the tool budgets and current descriptors.
+- [ ] 2.6 Deferred (2026-10-26) until a vault type declares typed fields; see design.md. Add the generic `fields` parameter to `remember` and `replace_memory` on the current local and Cloud surfaces. Verify the tool budgets and current descriptors.
 - [ ] 2.7 Replace the sink exemption of `entity` and `production-log` with a declared attribute; verify the episode sink report on both types.
 - [ ] 2.8 Replace the experiment-only lifecycle in audit, artifact-role state and due state with a declared attribute; verify unfinished-experiment findings and artifact-role origins unchanged.
 - [ ] 2.9 Move the experiment-owned `outcome` rule onto the registry's typed fields, and add its `note-type-contract` delta; verify every frontmatter write boundary.
