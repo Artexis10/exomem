@@ -82,7 +82,7 @@ def submit(
                     {
                         (
                             str(candidate.get("relation_type") or ""),
-                            relation_queue.epistemic_graph_module._with_md(
+                            relation_queue.epistemic_graph_module._page_rel(
                                 str(candidate.get("to") or "")
                             ),
                         )
