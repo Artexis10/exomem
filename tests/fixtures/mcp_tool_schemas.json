@@ -106,7 +106,7 @@
         },
         "path": {
           "default": "",
-          "description": "For `start`, subtree to scan (default: vault root).",
+          "description": "For `start`, subtree to scan (default: vault root). For run-listing `status`, count distinct filed originals in this subtree; omit for the legacy listing. An incomplete count is null; `complete` is false.",
           "type": "string"
         },
         "include_hidden": {
