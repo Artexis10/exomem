@@ -28,8 +28,9 @@ empty-query browse is outside these ceilings and targets.
 
 The measured principal SHALL be the vault owner, identified through the
 product's owner-authority path without changes to that path. An admitted non-owner
-principal SHALL run the same series, reported separately. That series becomes
-gating once admission no longer sizes the candidate pool.
+principal SHALL run the same series in the absolute reference record, reported
+separately. That series becomes gating once admission no longer sizes the
+candidate pool, and only then joins the paired comparison.
 
 On the live cell, contention during a series SHALL be judged per sample from
 the request thread's run-queue delay. Each sample's timing diagnostics record
@@ -73,7 +74,7 @@ governed write changed is not an index build.
 
 - **WHEN** a gate measures a series
 - **THEN** the owner's identity comes from the product's owner-authority path, and no authority check is patched
-- **AND** the admitted non-owner series is reported with its own percentiles and count
+- **AND** the admitted non-owner series is reported in the absolute reference record with its own percentiles and count
 - **AND** the admitted series fails the gate only once admission no longer sizes the candidate pool
 
 #### Scenario: Requests outside the warm contract are reported apart
@@ -469,8 +470,11 @@ hash that supplies their disclosed excerpt or frame annotation.
 
 ### Requirement: Search Latency Is Gated Before Release
 
-In the scheduled and dispatched full CI, the `retrieval-latency` job SHALL
-gate warm search latency with the served query encoder. It SHALL compare head
+In the scheduled and dispatched full CI, the `recall-latency-paired` jobs SHALL
+gate warm search latency with the served query encoder, one job per series of
+the reference case file. The paired comparison SHALL sample only the principals
+whose series gate; until admission no longer sizes the candidate pool, that is
+the owner. It SHALL compare head
 with the pairing base: the most recent release tag. That base is code only. It
 moves when a release is tagged, and no vault data, live-cell result or box load
 moves it. Both arms run in a process restricted to two CPUs, on the same
@@ -563,7 +567,7 @@ Release. A release with no attached summary SHALL show
 #### Scenario: A constant-factor regression blocks the release
 
 - **WHEN** a merged change makes warm hybrid requests slower than the most recent release tag by more than 10%, with 95% confidence over the paired cases
-- **THEN** the next scheduled or dispatched full CI run fails the `retrieval-latency` job and names the series and the stages where the time moved
+- **THEN** the next scheduled or dispatched full CI run fails that series' `recall-latency-paired` job and names the series and the stages where the time moved
 - **AND** the release evidence check stays red until a full run passes
 
 #### Scenario: A runtime dependency regression stays visible
@@ -583,7 +587,7 @@ Release. A release with no attached summary SHALL show
 
 - **WHEN** an accept record covers the hybrid series up to 1.20
 - **AND** the keyword series is 30% slower, or the hybrid series is 3 times slower
-- **THEN** the `retrieval-latency` job fails and names the uncovered or exceeded series
+- **THEN** the `recall-latency-paired` job of each uncovered or exceeded series fails and names it
 
 #### Scenario: An accept record expires with its tag
 

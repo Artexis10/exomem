@@ -15,13 +15,16 @@ The runner clears inherited `VIRTUAL_ENV` and places the tag environment inside 
 It checks the lock hash after preparation and verifies the worker's interpreter prefix before accepting its measurements.
 Preparation stays outside request timers. Cleanup resumes owned workers before removing the scratch directory and the tag runtime.
 Each case runs three times per arm, with the first arm alternating between cases.
+The paired run samples only the principals that the contract's `paired.principals`
+lists, today the owner. Full CI runs one `recall-latency-paired` job per series of
+the case file (`--paired --series NAME`), so each comparison fits its job budget.
 The inactive worker stops outside measurement so its native pool cannot slow the other arm.
 The adapter wraps real timing boundaries and delegates their original bodies.
 It does not replace principal resolution or release decisions.
 Each worker resolves `ask_memory` from its own command registry and binds it once.
 The request timer covers the returned callable, including dispatcher ownership,
 terminal checks, postfiltering and logging, for both owner and admitted principals.
-The `request-latency-v3` contract names this boundary `recall-bound-command-v1`.
+The `request-latency-v4` contract names this boundary `recall-bound-command-v1`.
 Historical leaf measurements use a different boundary and cannot certify it.
 Transport, authentication middleware, FastMCP serialization and the live server's
 active-surface descriptor remain outside this in-process measurement.

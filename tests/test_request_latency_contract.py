@@ -119,7 +119,7 @@ def test_the_packaged_contract_keeps_owners_and_strict_comparisons() -> None:
     contract = load_contract()
     raw = json.loads(files("exomem").joinpath("request_latency_contract.json").read_text())
     assert contract.revision == raw["revision"]
-    assert contract.revision == "request-latency-v3"
+    assert contract.revision == "request-latency-v4"
     assert contract.bar("activation-live-warm").comparison == "<"
     assert contract.bar("governed-hybrid").threshold_ms == 200
     assert contract.bar("governed-keyword").threshold_ms == 100

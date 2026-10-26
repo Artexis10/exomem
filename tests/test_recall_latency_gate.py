@@ -1433,6 +1433,14 @@ def test_tag_runtime_ignores_the_callers_project_and_operation_settings(tmp_path
     assert not (caller / "uv.lock").exists()
 
 
+def test_a_paired_series_the_case_file_lacks_refuses_before_any_runtime(tmp_path: Path, monkeypatch) -> None:
+    """A renamed or mistyped CI series must not measure nothing and report green."""
+    monkeypatch.setattr(gate, "_prepare_tag_runtime", lambda *args: pytest.fail("prepared a runtime"))
+    with pytest.raises(gate.MeasurementRefused, match="paired-series-unknown"):
+        gate.paired_run(base=tmp_path, tag="v1.0.0", scratch=tmp_path, profile={},
+                        cases=[{"id": "hybrid-00", "series": "hybrid"}], series="hybird")
+
+
 @pytest.mark.parametrize("changed_lock, reason", [
     (False, "tag-runtime-install-failed"), (True, "tag-runtime-lock-changed"),
 ])

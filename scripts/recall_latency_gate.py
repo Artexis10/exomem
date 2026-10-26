@@ -872,6 +872,8 @@ def _sample_from_envelope(data: Any) -> Sample:
 BENCHMARK = ROOT / "benchmarks/recall-latency"
 REFERENCE = CONTRACT.references[HYBRID_BAR.reference]
 PAIRING = REFERENCE["paired"]
+#: The principals whose paired series gate; the paired run samples only these.
+PAIRED_PRINCIPALS = tuple(PAIRING["principals"])
 
 
 class MeasurementRefused(ValueError):
@@ -978,7 +980,7 @@ def compare_pairs(samples: list[dict], *, tag: str, accept: dict | None = None) 
                         statistics.median(stage_values["base"])
                     )
         report = {"principal": principal_name, "series": series_name,
-                  **paired_statistic(ratios), "gating": principal_name == "owner"}
+                  **paired_statistic(ratios), "gating": principal_name in PAIRED_PRINCIPALS}
         report["state"] = "failed" if broken else (
             "insufficient samples" if "lower" not in report else
             "failed" if report["lower"] > PAIRING["margin"] else "passed"
@@ -1541,7 +1543,13 @@ class _Worker:
 
 
 def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
-               cases: list[dict], accept_path: Path = BENCHMARK / "accept.json") -> dict:
+               cases: list[dict], accept_path: Path = BENCHMARK / "accept.json",
+               series: str | None = None) -> dict:
+    if series is not None:
+        # One CI job per series keeps each paired comparison inside its job budget.
+        cases = [case for case in cases if case["series"] == series]
+        if not cases:
+            raise MeasurementRefused("paired-series-unknown")
     if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < REFERENCE["reference_cpus"]:
         raise MeasurementRefused("two-cpu-reference-unavailable")
     cpus = sorted(os.sched_getaffinity(0))[:REFERENCE["reference_cpus"]]
@@ -1566,7 +1574,7 @@ def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
         first_cases = {case["series"]: case for case in reversed(cases)}
         for worker in workers.values():
             try:
-                for principal_name in ("owner", "admitted"):
+                for principal_name in PAIRED_PRINCIPALS:
                     for case in first_cases.values():
                         worker.exchange({**case, "principal": principal_name,
                                          "rows": REFERENCE["stage_rows"]})
@@ -1574,7 +1582,7 @@ def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
                 worker.pause()
         for case_index, case in enumerate(cases):
             order = ("base", "head") if case_index % 2 == 0 else ("head", "base")
-            for principal_name in ("owner", "admitted"):
+            for principal_name in PAIRED_PRINCIPALS:
                 for repeat in range(PAIRING["repeats"]):
                     for arm in order:
                         worker = workers[arm]
@@ -1589,8 +1597,10 @@ def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
         accept, accept_state = read_accept(tag, accept_path)
         reports = compare_pairs(samples, tag=tag, accept=accept)
         return {"schema_version": 1, "mode": "paired", "tag": tag,
-                "state": "failed" if any(row["gating"] and row["state"] not in ("passed", "accepted")
-                                         for row in reports) else "passed",
+                # A selection with no gating series measured nothing and cannot pass.
+                "state": "failed" if not any(row["gating"] for row in reports) or any(
+                    row["gating"] and row["state"] not in ("passed", "accepted") for row in reports
+                ) else "passed",
                 "contract_revision": CONTRACT.revision, "accept_record": accept_state,
                 "source_digest": profile["source"]["sha256"], "environment": environments,
                 "unmeasured": profile["unmeasured"], "series": reports, "samples": samples}
@@ -1694,7 +1704,7 @@ def live_cli(transport: ServedTransport, *, cases_path: Path, corpus_path: Path 
     return 0
 
 
-def paired_cli(output: Path) -> int:
+def paired_cli(output: Path, *, series: str | None = None) -> int:
     """Resolve the most recent release tag and measure both arms on this runner."""
     import subprocess
     import tempfile
@@ -1725,7 +1735,8 @@ def paired_cli(output: Path) -> int:
             # Git owns this archive; the checkout contains no external tar input.
             subprocess.run(["tar", "-xf", str(archive), "-C", str(base)], check=True)
             phase = "paired-measurement"
-            report = paired_run(base=base, tag=tag, scratch=scratch, profile=profile, cases=cases)
+            report = paired_run(base=base, tag=tag, scratch=scratch, profile=profile, cases=cases,
+                                series=series)
             report["source_digest"] = digest
     except (ValueError, OSError, subprocess.SubprocessError, ValidationError) as error:
         # Closed local error codes; never print arbitrary subprocess output.
@@ -1749,6 +1760,7 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--encoder-cache-key", action="store_true", help=argparse.SUPPRESS)
     source.add_argument("--validate-summary", type=Path, help="validate a content-free stored summary")
     source.add_argument("--paired", action="store_true", help="compare with the latest release")
+    parser.add_argument("--series", help="limit --paired to one series of the case file")
     source.add_argument("--worker-source", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-cpus", help=argparse.SUPPRESS)
     parser.add_argument("--worker-vault", type=Path, help=argparse.SUPPRESS)
@@ -1793,7 +1805,7 @@ def main(argv: list[str] | None = None) -> int:
         print("digest=" + embedding_backend.served_artifact(embeddings.MODEL_NAME).digest)
         return 0
     if args.paired:
-        return paired_cli(args.output)
+        return paired_cli(args.output, series=args.series)
     if args.reference:
         return absolute_cli(args.output, quiescence_bound=args.quiescence_bound)
     if args.mcp_url:

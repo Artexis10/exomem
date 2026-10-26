@@ -61,7 +61,7 @@ The slices follow the gate, so each one reports a before and an after on the sam
   - ground the BM25 and keyword targets with a replay on a new connection per request, on SQLite 3.45.1 and 3.46.1, over the whole query mix with the 15-40 word band included, and with keyword recall's page reads and hit construction inside the keyword row; until then report both stages against 8 ms and apply no twice-budget rule to them;
   - record the SQLite version in every summary, and give no ceiling verdict for a workstation run on a SQLite outside the reference; keep the reference versions (today 3.45.1 in CI's system Python, 3.46.1 on Cloud cells) with the gate's other inputs under `benchmarks/recall-latency/`, so that a SQLite upgrade in CI or the Cloud image is a one-line data change;
   - in absolute mode, check the ceilings (200 ms p95 for every warm hybrid series, 100 ms p95 for keyword recall) and unknown samples; report each hybrid p95 beside the 100 ms target, the keyword p95 beside the 50 ms target and each p50 beside the 50 ms target, and record each target as met or missed; report each stage row against its budget, failing a row above twice its budget without failing the series; record the encode's measured floor when its p95 exceeds its budget; and write the content-free summary with the state that 5.6 and 6.9 record: passed, failed, refused or not measured; the state gates nothing;
-  - in paired mode, compare head with the most recent release tag in the `retrieval-latency` job (10% margin, 95% interval), report a stage that the tag does not span as "not comparable", and cache the encoder artifact by digest;
+  - in paired mode, compare head with the most recent release tag in one `recall-latency-paired` job per series (10% margin, 95% interval), report a stage that the tag does not span as "not comparable", and cache the encoder artifact by digest;
   - load each arm's runtime dependencies from its source lock, prepare an isolated frozen tag environment, and record lock digests and environment policies; refuse a failed tag preparation without substituting head's dependencies;
   - use one private measurement adapter for both arms, preserving their actual collectors, authority paths and public diagnostic suppression; pause only the inactive owned benchmark worker outside sample timers, and resume it during cleanup;
   - conserve process CPU across row, overlap and unattributed buckets, including excluded waits; support explicit fork/join branch lifetimes, declare serial execution, and report unknown paths without inventing membership; verify internal gaps and shared setup/response work;
@@ -165,3 +165,10 @@ earlier ceiling of 3 was below the egress release floor. Every admitted hit was
 then a withheld notice and every unit result was empty, so that series timed
 notices instead of results. A model-free test checks that the admitted principal
 receives the owner's unit and mixed hits.
+
+At today's latency the paired step could not finish inside the 30-minute
+`retrieval-latency` shard: owner calls take 0.2-3.5 s and admitted unit and mixed
+calls about 21 s, so both principals need hours. Full CI now runs one
+`recall-latency-paired` job per case-file series, owner only, under a 45-minute
+cap. Contract revision `request-latency-v4` adds `paired.principals`; the
+admitted series stays in the absolute record until it gates.

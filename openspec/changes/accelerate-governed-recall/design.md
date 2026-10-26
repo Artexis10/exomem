@@ -763,9 +763,11 @@ threshold, and compares work between two corpus sizes as ratios.
   page (decision 8). The BM25 and keyword step ratios pass, because their
   matched rows are the same at both sizes.
 
-**Paired comparison, full CI.** The `retrieval-latency` job runs on shared
-`ubuntu-24.04` runners and feeds `gate` and release evidence, so it applies no
-absolute threshold.
+**Paired comparison, full CI.** The `recall-latency-paired` jobs run on shared
+`ubuntu-24.04` runners, one job per series of the case file, and feed `gate`
+and release evidence, so they apply no absolute threshold. They sample only the
+contract's `paired.principals`, today the owner: at today's latency both
+principals together need hours, and the admitted series does not gate yet.
 
 - *Arms.* Head and the pairing base, installed side by side in one job on one
   runner, against one reference corpus generated once, with the same cases. The
@@ -843,7 +845,7 @@ Control justification:
 - *A wrong firing* comes only from runner noise, because both arms are code
   and run on one runner, one corpus and one case list. It turns the full run
   red, and the release evidence check stays red with it. The agent or operator
-  who drives the release pays: one rerun of the failed `retrieval-latency` job
+  who drives the release pays: one rerun of the failed `recall-latency-paired` job
   (`gh run rerun <run-id> --failed`) and a release delay of that job's
   duration. A green rerun clears it. No user and no pull request is gated, and
   vault data or the shared box's load cannot fire it.
