@@ -19,11 +19,13 @@ import {
   initialSelection,
   junkCount,
   legalStep,
+  outcomeGroups,
   overrideFile,
   phaseScreen,
   planBullets,
   pollDelay,
   progressLine,
+  resultTitle,
   runOfTerminal,
   selectionCounts,
   selectionFromRules,
@@ -749,13 +751,8 @@ function populateResult() {
   setStatus("");
   const result = applyResult();
   const failed = result.failed || [];
-  const copied = result.copied || [];
   const title = byId("adopt-result-title");
-  if (title) {
-    title.textContent = failed.length
-      ? `${copied.length} files are in · ${failed.length} couldn't be copied`
-      : `All set — ${copied.length} files are in ✓`;
-  }
+  if (title) title.textContent = resultTitle(result);
   const verify = byId("adopt-verify");
   if (verify) verify.textContent = verificationLine();
 
@@ -789,14 +786,7 @@ function applyResult() {
 }
 
 function outcomesToResult() {
-  const outcomes = (run && run.outcomes) || {};
-  const copied = [];
-  const failed = [];
-  for (const [path, outcome] of Object.entries(outcomes)) {
-    if (outcome.status === "applied" || outcome.status === "already-applied") copied.push({original_path: path, ...outcome});
-    else if (outcome.status === "failed") failed.push({path, code: outcome.code, reason: outcome.reason});
-  }
-  return {copied, failed};
+  return outcomeGroups(run && run.outcomes);
 }
 
 function verificationLine() {
@@ -1105,7 +1095,9 @@ async function doAsk() {
 function populateCancelled() {
   const node = byId("adopt-cancelled-text");
   if (node) {
-    const applied = outcomesToResult().copied.length;
+    // An item still owed its note has its Source in, so its copy is safe too.
+    const result = outcomesToResult();
+    const applied = result.copied.length + result.remaining.length;
     node.textContent = applied
       ? `Stopped. The ${applied} files already copied are safe; your originals are untouched either way.`
       : "Stopped. Nothing was copied or changed.";

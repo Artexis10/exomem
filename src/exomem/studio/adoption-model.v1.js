@@ -223,6 +223,31 @@ export function failureGroups(failed) {
   return [...groups.values()];
 }
 
+// The run's per-item outcomes, grouped as the person sees them. The statuses are the
+// engine's outcome values. `source-applied` is an own-note item whose Source is in and
+// whose note is still owed, so it is remaining work, as the engine's progress counts it.
+export function outcomeGroups(outcomes) {
+  const copied = [];
+  const remaining = [];
+  const failed = [];
+  for (const [path, outcome] of Object.entries(outcomes || {})) {
+    const status = outcome && outcome.status;
+    if (status === "applied" || status === "already-applied") copied.push({original_path: path, ...outcome});
+    else if (status === "source-applied") remaining.push({original_path: path, ...outcome});
+    else if (status === "failed") failed.push({path, code: outcome.code, reason: outcome.reason});
+  }
+  return {copied, remaining, failed};
+}
+
+// The result screen's title. "All set" only when nothing is still owed or failed.
+export function resultTitle({copied = [], remaining = [], failed = []} = {}) {
+  if (!remaining.length && !failed.length) return `All set — ${copied.length} files are in ✓`;
+  const parts = [`${copied.length} files are in`];
+  if (remaining.length) parts.push(`${remaining.length} still to finish`);
+  if (failed.length) parts.push(`${failed.length} couldn't be copied`);
+  return parts.join(" · ");
+}
+
 export function staleNotice(detail) {
   const raw = detail && (detail.changed_count ?? detail.changedCount);
   const count = Number(raw) || 0;
