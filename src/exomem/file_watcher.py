@@ -2139,7 +2139,9 @@ class FileWatcher:
                 try:
                     from . import lexstore
 
-                    lexstore.request_repair(self._vault_root)
+                    lexstore.request_repair(
+                        self._vault_root, cause=lexstore.RepairCause.WATCHER_HANDOFF_FAILED
+                    )
                 except Exception:  # noqa: BLE001 - the periodic reconcile remains the final belt
                     pass
             else:
