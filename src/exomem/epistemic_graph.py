@@ -5607,6 +5607,12 @@ class EpistemicGraphIndex:
           nothing is converging it. Routed to the incremental path, which
           defers and queues without publishing over the gap -- the
           acknowledgement is never advanced on a promise.
+        * `graph_sync_acknowledgement_covers` -- the sidecar already
+          acknowledges this exact checkpoint, and only its availability marker
+          is withdrawn. The watcher's echo of a write that a drain already
+          repaired arrives here. Nothing is wrong with the lineage, so a caller
+          that may stop at queued takes the incremental path; a standalone
+          caller still rebuilds, because it has to see a converged graph.
         """
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
@@ -5620,6 +5626,13 @@ class EpistemicGraphIndex:
             )
         finally:
             snapshot.close()
+        acknowledged = _graph_sync_acknowledgement(values)
+        # Exact identity, not `GraphBuildOutcome.covers`: an acknowledgement at
+        # a later generation proves no lineage for this checkpoint.
+        if acknowledged is not None and graph_sync.GraphBuildOutcome.covering(
+            acknowledged
+        ) == graph_sync.GraphBuildOutcome.covering(checkpoint):
+            return "graph_sync_acknowledgement_covers"
         predecessor = checkpoint.generation - 1
         if predecessor == 0:
             if (
@@ -5628,7 +5641,6 @@ class EpistemicGraphIndex:
             ):
                 return "available"
             return "graph_sync_predecessor_present_at_genesis"
-        acknowledged = _graph_sync_acknowledgement(values)
         if acknowledged is None:
             return "graph_sync_acknowledgement_absent"
         if acknowledged.generation != predecessor:
@@ -10511,6 +10523,21 @@ def upsert_after_write(
             predecessor_state = index._graph_sync_predecessor_state(required)
             unreadable = predecessor_state == "graph_sync_predecessor_unreadable"
             covered_gap = predecessor_state == "graph_sync_gap_covered_by_receipts"
+            # A sidecar that already acknowledges this checkpoint owes no
+            # whole-vault pass. A caller that may stop at queued takes the
+            # incremental path, which queues the paths behind the withdrawn
+            # marker; a standalone caller still has to see a converged graph.
+            acknowledged_here = (
+                predecessor_state == "graph_sync_acknowledgement_covers"
+                and _caller_can_carry_pending(vault_root, mutation_coordinator)
+            )
+            if acknowledged_here:
+                log.info(
+                    "graph dispatch routed a covering acknowledgement to incremental "
+                    "repair external_pending=%s generation=%s",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
             if covered_gap:
                 # Task 1.13. The gap is real and the rebuild is not the repair:
                 # the queue already holds every generation it skipped, and the
@@ -10537,7 +10564,12 @@ def upsert_after_write(
                     freshness.external_pending(vault_root),
                     required.generation,
                 )
-            if predecessor_state != "available" and not unreadable and not covered_gap:
+            if (
+                predecessor_state != "available"
+                and not unreadable
+                and not covered_gap
+                and not acknowledged_here
+            ):
                 # #576 F3, applied to the gate the incremental table does not
                 # cover. `fallback()` logs which of the nine bail-out reasons
                 # fired; this door precedes `refresh_paths` entirely, so
