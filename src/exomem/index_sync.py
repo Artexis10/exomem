@@ -1804,9 +1804,12 @@ def upsert_after_write(
 
         graph_component = (
             _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
-            # Operational writes must leave existing graph debt with its durable owner.
+            # Operational writes must leave existing graph debt with its durable
+            # owner, and so must a caller that may stop at queued: the drain
+            # converges the marker off this thread.
             if not active_derived_batch_custody(vault_root)
             and deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            and not epistemic_graph.caller_can_carry_pending(vault_root)
             else None
         )
         return IndexSyncReport(

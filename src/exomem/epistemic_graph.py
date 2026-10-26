@@ -6178,14 +6178,11 @@ class EpistemicGraphIndex:
             report["_durable_before_rebuild"] = 1
         if report.pop("_rebuild_after_release", False):
             durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
-            if _parent_receipted_graph_handoff_active(
-                self.vault_root, self._mutation_coordinator.state_root
+            if _caller_can_carry_pending(
+                self.vault_root, self._mutation_coordinator
+            ) and self._leave_rebuild_to_the_drain(
+                graph_checkpoint, durable_before_rebuild=durable_before_rebuild
             ):
-                required = graph_checkpoint or graph_sync.read_checkpoint(self.vault_root)
-                if required is not None and not durable_before_rebuild:
-                    deferred_index.advance_graph_full_rebuild(
-                        self.vault_root, after_generation=required.generation
-                    )
                 return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
             try:
                 with _logged_whole_vault_rebuild(
@@ -6227,8 +6224,10 @@ class EpistemicGraphIndex:
                 }
         # Standalone callers have already left the graph mutation hold. Command
         # callers and receipted parent handoffs retain their exact registration
-        # for the response boundary to start without blocking publication.
-        if not _caller_can_carry_pending(self.vault_root, self._mutation_coordinator):
+        # for the response boundary to start without blocking publication. A
+        # background caller has no boundary, so it starts the registration here
+        # and its waiver spends no time joining it.
+        if not _caller_has_pending_boundary(self.vault_root, self._mutation_coordinator):
             graph_sync.start_registered(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
             )
@@ -6248,6 +6247,42 @@ class EpistemicGraphIndex:
                     else None,
                 )
         return report
+
+    def _leave_rebuild_to_the_drain(
+        self,
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None,
+        *,
+        durable_before_rebuild: bool,
+    ) -> bool:
+        """Hand a deferring caller's whole-vault pass to the drain. False to run it here.
+
+        A caller that may stop at queued never runs that pass on its own thread.
+        A defer disposition has already queued its paths. A rebuild disposition
+        knows only that the scope is wider, so it advances the full marker the
+        drain converges. A receipted parent handoff without a checkpoint keeps
+        its own durable full receipt as that debt. A marker that cannot be
+        written leaves the pass to the caller, so the graph is never left
+        stale without a record of the debt.
+        """
+        if durable_before_rebuild:
+            return True
+        required = graph_checkpoint or graph_sync.read_checkpoint(self.vault_root)
+        if required is None and _parent_receipted_graph_handoff_active(
+            self.vault_root, self._mutation_coordinator.state_root
+        ):
+            return True
+        try:
+            deferred_index.advance_graph_full_rebuild(
+                self.vault_root,
+                after_generation=required.generation if required is not None else 0,
+            )
+        except Exception:  # noqa: BLE001 - an unrecorded debt is paid inline instead
+            log.warning(
+                "graph whole-vault debt could not be recorded; rebuilding inline",
+                exc_info=True,
+            )
+            return False
+        return True
 
     def _refresh_paths_locked(
         self,
@@ -10114,23 +10149,50 @@ def _caller_can_carry_pending(
     vault_root: Path,
     mutation_coordinator: mutation_lock.VaultMutationCoordinator,
 ) -> bool:
-    """Whether this caller has a response envelope that can report `pending`.
+    """Whether this caller's contract allows it to stop at `queued`.
 
-    Deferring repair to the queue is only honest for a caller that can *say* the
-    graph has not converged. A mutation request can: its terminal carries the
-    `graph_sync` field. A receipted parent media handoff can retain its exact
-    durable full receipt for recovery. A direct library caller cannot -- it
-    returns a leaf result with nowhere to put the outcome, and its contract has
-    always been a converged graph, which is why `_join_registered_standalone`
-    joins the rebuild to completion for exactly this case.
+    Deferring repair to the queue is only honest for a caller whose contract is
+    not a converged graph. A caller under a response boundary
+    (`_caller_has_pending_boundary`) can say the graph has not converged. A
+    background caller inside `graph_sync.standalone_join_waived` has nobody
+    waiting on it: the receipt-owned fan-out and the operator's receipt repair
+    hold a durable receipt, and the file watcher's dispatch and reconcile hold
+    the queue. A direct library caller has neither -- it returns a leaf result
+    with nowhere to put the outcome, and its contract has always been a
+    converged graph, which is why `_join_registered_standalone` joins the
+    rebuild to completion for exactly this case.
 
     Deferring for a standalone caller does not merely under-report; it changes
     what the next call in the same process observes. Ten governance and
     deletion-lineage tests failed on that, because the operation after a delete
     read a graph that used to be current by the time it ran.
+    """
+    return graph_sync.standalone_join_is_waived() or _caller_has_pending_boundary(
+        vault_root, mutation_coordinator
+    )
 
-    Same predicate as `_join_registered_standalone`, deliberately: the caller
-    that joins is precisely the caller that must not defer.
+
+def caller_can_carry_pending(vault_root: Path) -> bool:
+    """`_caller_can_carry_pending` for a caller outside this module."""
+    from .writer_lease import active_manager
+
+    return _caller_can_carry_pending(
+        vault_root, active_manager()._mutation_coordinator_for(vault_root)
+    )
+
+
+def _caller_has_pending_boundary(
+    vault_root: Path,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether a response boundary will start this caller's registered work.
+
+    A mutation request's terminal carries the `graph_sync` field, a direct
+    mutation guard reports to its own boundary, and a receipted parent media
+    handoff retains its exact durable full receipt for recovery. Each of those
+    starts the registered rebuild itself, so the refresh and the dispatch leave
+    it registered. A background caller has no such boundary: it may stop at
+    queued, but registered work it leaves behind still has to start here.
     """
     from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
 
@@ -10187,7 +10249,7 @@ def _join_registered_standalone(
         # request-local waiter; releasing it here turns a healthy graph handoff
         # into GRAPH_SYNC_HANDOFF_MISSING before the parent can finalize.
         return result
-    if _caller_can_carry_pending(vault_root, mutation_coordinator):
+    if _caller_has_pending_boundary(vault_root, mutation_coordinator):
         return result
     assert result.checkpoint is not None
     try:

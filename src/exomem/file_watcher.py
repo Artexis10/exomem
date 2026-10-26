@@ -31,6 +31,7 @@ registry is opportunistic: a missed registration merely costs the old harmless e
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -42,6 +43,7 @@ import weakref
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import freshness, index_sync, media_processing, mode, semantic_writes
 from .kbdir import kb_dirname, kb_prefix
@@ -997,6 +999,24 @@ def _graph_incompleteness_scope(
     return paths or None
 
 
+def _background_graph_caller(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a watcher step as a background graph caller.
+
+    Nobody waits on the watcher for a converged graph: the durable queue owns
+    the repair its dispatch defers. Inside `graph_sync.standalone_join_waived`
+    its graph dispatch stops at queued instead of joining a whole-vault pass.
+    """
+
+    @functools.wraps(method)
+    def run(self: FileWatcher, *args: Any, **kwargs: Any) -> Any:
+        from . import graph_sync
+
+        with graph_sync.standalone_join_waived():
+            return method(self, *args, **kwargs)
+
+    return run
+
+
 class FileWatcher:
     """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced."""
 
@@ -1272,6 +1292,7 @@ class FileWatcher:
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
         return media, ups, del_rels, pending_epoch, access_policy, self_authored
 
+    @_background_graph_caller
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
@@ -1382,6 +1403,7 @@ class FileWatcher:
             except OSError:
                 continue
 
+    @_background_graph_caller
     def _reconcile_once(self, *, seed: bool) -> bool:
         """Re-derive the freshness maps from a fresh walk. `seed=True` on the
         first pass installs the maps and marks the scopes live; later passes
