@@ -12,7 +12,7 @@ paths, so `note.py` compares a home's scope with the type default's before it wr
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
@@ -53,12 +53,12 @@ class HomeSet:
     """The homes of one vault and the lookups placement needs."""
 
     homes: tuple[Home, ...] = ()
-    by_topic: Mapping[str, Home] = MappingProxyType({})
-    by_project: Mapping[str, Home] = MappingProxyType({})
+    by_topic: Mapping[str, Home] = field(default_factory=lambda: MappingProxyType({}))
+    by_project: Mapping[str, Home] = field(default_factory=lambda: MappingProxyType({}))
     #: Findings of an invalid overlay. The homes then stay empty, as the pack alone.
     findings: tuple[Mapping[str, Any], ...] = ()
     content_hash: str = registry.NO_OVERLAY_HASH
-    entries: Mapping[str, registry.Entry] = MappingProxyType({})
+    entries: Mapping[str, registry.Entry] = field(default_factory=lambda: MappingProxyType({}))
 
     def containing(self, folder_parts: tuple[str, ...]) -> Home | None:
         """The active home whose folder holds a path's folder (the deepest, if nested)."""
