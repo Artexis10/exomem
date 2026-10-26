@@ -202,6 +202,7 @@ def build_cluster_config() -> ClusterConfig:
     return ClusterConfig(
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
+        key_retention_sources=tuple(json.loads(os.environ.get("CELLCTL_KEY_RETENTION_SOURCES", "[]"))),
         resources=ResourceSettings(
             cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
             cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),

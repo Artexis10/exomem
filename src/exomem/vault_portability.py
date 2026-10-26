@@ -977,6 +977,7 @@ def stream_quiesced_vault(
     limits: PortabilityLimits | None = None,
 ) -> dict[str, Any]:
     """Write the canonical ZIP to a bounded sink; publication requires independent verification."""
+    # PortabilityContext fixes the quiesced lifecycle token.
     _validate_context(context, allowed_states={"quiesced"})
     effective_limits = limits or PortabilityLimits()
     _validate_limits(effective_limits)

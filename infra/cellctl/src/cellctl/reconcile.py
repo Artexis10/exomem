@@ -57,6 +57,7 @@ from .exports import (
     export_deadline,
     export_size,
     settle_step,
+    verification_secret_name,
 )
 from .exports import HOLD as EXPORT_HOLD
 from .exports import job_name as export_job_name
@@ -78,6 +79,7 @@ from .manifests import (
     render_cell_manifests,
     render_clone_claim,
     render_export_job,
+    render_export_verification_secret,
     render_import_job,
     render_restore_job,
     render_volume_snapshot,
@@ -107,7 +109,7 @@ from .state import (
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
 from .storage.topolvm import LocalVolumeState, cell_data_absent
-from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
+from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
 
 logger = logging.getLogger("cellctl")
 
@@ -413,6 +415,7 @@ class ClusterConfig:
     # (e.g. "https://s3.us-west-002.backblazeb2.com" in production, a local
     # MinIO URL in the 3.10 test).
     object_storage_endpoint: str = ""
+    key_retention_sources: tuple[dict, ...] = ()
     resources: ResourceSettings = ResourceSettings()
     model_env: dict[str, str] | None = None
     capacity: CapacityConfig = CapacityConfig()
@@ -519,10 +522,11 @@ class ClusterGateway:
     ) -> dict[str, ClusterObservation | Exception]: ...  # pragma: no cover
     def apply_all(self, manifests: list[dict]) -> None: ...  # pragma: no cover
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
-    def delete_cell_secrets(self, namespace: str) -> bool: ...  # pragma: no cover
+    def delete_cell_secrets(self, namespace: str) -> None: ...  # pragma: no cover
+    def delete_secret(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
-    def observe_export_job(self, namespace: str, export_id: str): ...  # pragma: no cover
+    def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False): ...  # pragma: no cover
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None: ...  # pragma: no cover
     def retain_volume(self, name: str) -> None: ...  # pragma: no cover
     def delete_claim(self, namespace: str) -> None: ...  # pragma: no cover
@@ -1112,6 +1116,9 @@ async def reconcile_once(
     now = now or datetime.now(UTC)
     memory = memory if memory is not None else LoopMemory()
 
+    # Database-only retirement runs before Kubernetes or provider availability can delay it.
+    await db.retire_content_keys(connection, now)
+
     # D4 self-check: without cellctl's own admission confinement in place,
     # its ClusterRole is close to cluster-admin. Do nothing this pass rather
     # than act unconfined.
@@ -1120,7 +1127,7 @@ async def reconcile_once(
         (cluster_config.isolation_policy_name, cluster_config.isolation_binding_name,
          {"param_name": ISOLATION_PARAM_NAME}),
     ]
-    if cluster_config.storage.local is not None:
+    if cluster_config.storage.local is not None or cluster_config.storage.per_cell_class is not None:
         checks.append((RETAINED_DELETE_POLICY_NAME, RETAINED_DELETE_POLICY_NAME, {"param_selects_all": True}))
     for policy_name, binding_name, param in checks:
         if not cluster.admission_policy_present(policy_name, binding_name, **param):
@@ -1660,14 +1667,29 @@ async def _reconcile_row(
 
     from .imports import ImportLimits, ImportStorage, decide_import, job_name
 
-    if row.desired_state == "deleted":
-        await db.retire_content_keys(connection, row.cell_id, now)
-        row = dataclass_replace(row, cell_root_key_wrapped=None, cell_root_key_version=None,
-                                backup_key_wrapped=None, backup_key_version=None,
-                                content_keys_retired_at=row.content_keys_retired_at or now)
-        # A failed provider read must never preserve live Kubernetes child keys.
-        if observation.namespace_exists:
+    if row.desired_state == "deleted" and not _identity_conflict(row, observation, cluster_config.storage):
+        try:
             cluster.delete_cell_secrets(namespace_name(row.cell_id))
+        except ApiException as error:
+            logger.warning("cellctl: child key retirement pending for cell %s: %s",
+                           row.cell_id, _describe_error(error))
+
+    old_storage_class = json.loads(row.custody_observation or "{}").get("retained_old_storage_class")
+    old_is_hetzner = (old_storage_class == LEGACY_CLASS or cluster_config.storage.per_cell_class is not None
+                      and old_storage_class == cluster_config.storage.per_cell_class)
+    if (old_is_hetzner and row.desired_state != "deleted" and row.relocation_old_volume_id is not None
+            and row.volume_id is not None and row.volume_id != row.relocation_old_volume_id
+            and observation.namespace_move_accepted_volume == row.relocation_old_volume_id):
+        try:
+            old_absent = _hetzner_volume_absent(row.relocation_old_volume_id, volume_provider, now, memory)
+        except Exception as error:  # noqa: BLE001 -- missing retirement evidence must not stop cell service
+            logger.warning("cellctl: retained-volume absence unknown for cell %s: %s", row.cell_id,
+                           _describe_error(error))
+        else:
+            if old_absent:
+                accepted = {"relocation_old_volume_id": None, "relocation_accepted_at": now}
+                await db.write_observed(connection, row.cell_id, accepted)
+                row = dataclass_replace(row, **accepted)
 
     if row.desired_state != "deleted":
         storage = cluster_config.storage
@@ -1677,6 +1699,29 @@ async def _reconcile_row(
         if limits != row.import_limits:
             await db.write_observed(connection, row.cell_id, {"import_limits": limits})
             row = dataclass_replace(row, import_limits=limits)
+    if row.desired_state != "deleted":
+        storage_class = observation.pvc_storage_class or observation.pv_storage_class
+        custody = {
+            "volume": ("per-cell-key" if storage_class == cluster_config.storage.per_cell_class
+                       and storage_class is not None and row.cell_root_key_wrapped is not None
+                       else "unsupported-local" if cluster_config.storage.is_local(storage_class)
+                       else "legacy-shared-key" if storage_class == LEGACY_CLASS else "unknown"),
+            "retained_old_volume": row.relocation_old_volume_id,
+            "retained_old_storage_class": old_storage_class if row.relocation_old_volume_id else None,
+            "scratch": "configured" if observation.statefulset_render_digest == render_digest else "unknown",
+            "node_swap": "unknown",
+            "node_core_policy": "unknown",
+            "compliance": "unmet" if storage_class != cluster_config.storage.per_cell_class or
+                          row.relocation_old_volume_id else "unknown",
+            "source": "controller-manifest-and-pvc",
+            "core_dumps": "configured" if observation.statefulset_render_digest == render_digest else "unknown",
+        }
+        previous = json.loads(row.custody_observation or "{}")
+        previous.pop("observed_at", None)
+        if custody != previous:
+            encoded = json.dumps({**custody, "observed_at": now.isoformat()}, sort_keys=True)
+            await db.write_observed(connection, row.cell_id, {"custody_observation": encoded})
+            row = dataclass_replace(row, custody_observation=encoded)
     receipt = storage_receipt(row, observation, cluster_config.storage, now=now)
     if receipt:
         await db.write_observed(connection, row.cell_id, receipt)
@@ -1687,7 +1732,7 @@ async def _reconcile_row(
         jobs = cluster.observe_import_jobs(namespace_name(row.cell_id), item.import_id)
         import_decision = decide_import(row, item, observation, jobs, now=now, config=config)
     exports = await db.read_exports(connection, row.cell_id)
-    await _settle_exports(connection, row, exports, secrets_config, object_storage, cluster_config, config, now, memory)
+    await _settle_exports(connection, cluster, row, exports, secrets_config, object_storage, cluster_config, config, now, memory)
     # One export is packed at a time (C6's open index); after it ends, the
     # newest one still owns the hold it has to release.
     export_item = next((export for export in exports if export.observed_state in (None, "packing")), None)
@@ -1701,7 +1746,8 @@ async def _reconcile_row(
     if export_item is not None and import_decision is None and not _identity_conflict(
             row, observation, cluster_config.storage) and not (
             claim_missing(observation) and row.volume_id is not None and row.desired_state != "deleted"):
-        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id)
+        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id,
+                                                verify=export_item.archive_version_id is not None)
         volume_unavailable = (
             relocation_volume(row, observation, cluster_config.storage) is not None
             or planned_move_volume(row, observation, cluster_config.storage) is not None
@@ -1760,6 +1806,23 @@ async def _reconcile_row(
         observation = _augment_deletion_observation(
             observation, row, cluster, object_storage, volume_provider, now, memory, storage=cluster_config.storage
         )
+        # Namespace, volume and private-object absence bound every live content copy before expiry starts.
+        if (observation.namespace_absent_confirmed and observation.pv_absent_confirmed
+                and observation.backup_objects_absent_confirmed and row.last_live_key_destroyed_at is None):
+            prior = json.loads(row.custody_observation or "{}")
+            if prior.get("volume") == "per-cell-key" and not prior.get("retained_old_volume"):
+                sources = list(cluster_config.key_retention_sources)
+                inventory = json.dumps(sources, sort_keys=True)
+                # These source kinds fix the retirement evidence protocol, not tenant vocabulary.
+                complete = {source.get("kind") for source in sources} >= {
+                    "control_database", "cluster_datastore", "object_versions"}
+                windows = [source.get("retention_seconds") for source in sources]
+                known = (complete and all(type(window) is int and window >= 0 for window in windows)
+                         and all(source.get("source") and source.get("observed_at") for source in sources))
+                updates = {"last_live_key_destroyed_at": now, "key_retention_sources": inventory,
+                           "keys_expire_at": now + timedelta(seconds=max(windows)) if known else None}
+                await db.write_observed(connection, row.cell_id, updates)
+                row = dataclass_replace(row, **updates)
 
     decision = import_decision or export_decision or decide(
         row,
@@ -1877,6 +1940,19 @@ async def _reconcile_row(
     # D4 relocation: the old PV is set to Retain one pass, and its claim is
     # deleted only on a later pass that observes Retain (admission checks it
     # again). Neither depends on the StatefulSet's apply.
+    if decision.relocation_volume is not None and row.relocation_old_volume_id != decision.relocation_volume:
+        target = observation.namespace_move_storage_class or (cluster_config.storage.local.class_name
+                 if cluster_config.storage.local else cluster_config.storage.per_cell_class)
+        prior_custody = json.loads(row.custody_observation or "{}")
+        prior_custody.update(retained_old_volume=decision.relocation_volume,
+                             retained_old_storage_class=observation.pvc_storage_class or observation.pv_storage_class)
+        journal = {"relocation_old_volume_id": decision.relocation_volume,
+                   "relocation_target_storage_class": target, "relocation_accepted_at": None,
+                   "custody_observation": json.dumps(prior_custody, sort_keys=True)}
+        await db.write_observed(connection, row.cell_id, journal)
+        row = dataclass_replace(row, **journal)
+        decision.row_updates.update(journal)
+
     if decision.retain_volume or decision.delete_claim:
         try:
             if decision.retain_volume:
@@ -2081,8 +2157,13 @@ async def _reconcile_row(
             if decision.run_export_job:
                 deadline = int(export_deadline(row, config).total_seconds())
                 size = export_size(row)
-                part_urls = await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
-                                                    expires_in=deadline)
+                part_urls = ([] if export_item.archive_version_id else
+                             await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
+                                                     expires_in=deadline))
+                verify_url = (await asyncio.to_thread(export_storage.link, export_item,
+                                                      expires_in=deadline) if export_item.archive_version_id else None)
+                if verify_url:
+                    cluster.apply_all([render_export_verification_secret(spec, export_item, verify_url)])
                 _run_cell_job(cluster, row.cell_id, render_export_job(
                     spec, export_item, size, part_urls=part_urls, deadline_seconds=deadline), job_refused)
             if decision.create_snapshot and local is not None:
@@ -2176,7 +2257,7 @@ async def _export_storage(
 
 
 async def _remove_export(
-    connection: asyncpg.Connection, row: CellRow, item: ExportRow, storage: ExportStorage | None,
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, storage: ExportStorage | None,
     updates: dict[str, object],
 ) -> None:
     """Deletes every version of the export's object and aborts its uploads,
@@ -2186,6 +2267,7 @@ async def _remove_export(
     deletion that runs before its key goes is the final removal."""
 
     try:
+        cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id))
         if storage is not None:
             await asyncio.to_thread(storage.remove, item)
     except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
@@ -2194,11 +2276,11 @@ async def _remove_export(
         if row.desired_state == "deleted" and updates:
             await db.write_export(connection, item.export_id, updates)
         return
-    await db.write_export(connection, item.export_id, {**updates, "upload_id": None})
+    await db.write_export(connection, item.export_id, {**updates, "upload_id": None, "archive_version_id": None})
 
 
 async def _settle_exports(
-    connection: asyncpg.Connection, row: CellRow, exports: list[ExportRow], secrets_config: SecretsConfig,
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, exports: list[ExportRow], secrets_config: SecretsConfig,
     object_storage, cluster_config: ClusterConfig, config: ReconcileConfig, now: datetime, memory: LoopMemory,
 ) -> None:
     """C6 work that needs no hold: expire and remove ready exports, answer link
@@ -2219,7 +2301,7 @@ async def _settle_exports(
         if item.download_url is not None:
             # A link is withdrawn before its object goes, so none outlives a failed removal.
             await db.write_export(connection, item.export_id, {"download_url": None, "download_url_expires_at": None})
-        await _remove_export(connection, row, item, storage, updates)
+        await _remove_export(connection, cluster, row, item, storage, updates)
 
 
 async def _export_transport(
@@ -2246,12 +2328,15 @@ async def _export_transport(
             decision.export_transport = "remove"
             decision.stop_export_job = True
         else:
-            decision.export_updates.update(archive_version_id=version, upload_id=None)
+            decision.export_updates.update(archive_version_id=version)
+            cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
     await db.write_export(connection, item.export_id, decision.export_updates)
     if decision.export_transport == "remove":
-        await _remove_export(connection, row, item, storage, {})
+        await _remove_export(connection, cluster, row, item, storage, {})
     if decision.stop_export_job:
+        cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id))
         cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
+        cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id, verify=True))
     # The row hold survives a crash before the StatefulSet has been stopped.
     if decision.hold_kind == EXPORT_HOLD and (row.hold_kind != EXPORT_HOLD or row.hold_started_at != decision.hold_started_at):
         await db.write_observed(connection, row.cell_id,

@@ -328,7 +328,9 @@ async def test_capacity_snapshot_is_atomic_and_serializes_cutover_with_admission
 async def test_atomic_root_conversion_preserves_legacy_password_under_competing_retries(cell_db):
     """A split or racing conversion must never strand an existing restic repository."""
     import asyncio
+
     from cellctl.reconcile import _resolve_secret_material
+
     from .test_reconcile import _secrets_config
 
     cell_id = "aaaaaaaaaaaaaaaa"
@@ -359,6 +361,7 @@ async def test_atomic_root_conversion_preserves_legacy_password_under_competing_
 
 async def test_deleted_cell_cannot_mint_or_restore_content_keys(cell_db):
     from cellctl.reconcile import _resolve_secret_material
+
     from .test_reconcile import _secrets_config
 
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "retired-cell")

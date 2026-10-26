@@ -150,13 +150,14 @@ async def lock_cell(connection: asyncpg.Connection, cell_id: str) -> CellRow:
     return _row_from_record(record)
 
 
-async def retire_content_keys(connection: asyncpg.Connection, cell_id: str, now: datetime) -> None:
+async def retire_content_keys(connection: asyncpg.Connection, now: datetime) -> None:
     """Retire decryption material before any provider cleanup can block."""
     await connection.execute(
         "UPDATE exomem_cloud_cells SET cell_root_key_wrapped=NULL, cell_root_key_version=NULL, "
         "backup_key_wrapped=NULL, backup_key_version=NULL, "
-        "content_keys_retired_at=COALESCE(content_keys_retired_at,$2) "
-        "WHERE cell_id=$1 AND desired_state='deleted'", cell_id, now)
+        "content_keys_retired_at=COALESCE(content_keys_retired_at,$1) "
+        "WHERE desired_state='deleted' AND (content_keys_retired_at IS NULL "
+        "OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL)", now)
 
 
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:
@@ -437,7 +438,8 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
 
     records = await connection.fetch(
         "SELECT * FROM exomem_cloud_exports WHERE cell_id=$1 AND ("
-        "observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL OR export_id = ("
+        "observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL "
+        "OR archive_version_id IS NOT NULL OR export_id = ("
         "SELECT export_id FROM exomem_cloud_exports WHERE cell_id=$1 ORDER BY created_at DESC, export_id DESC LIMIT 1)) "
         "ORDER BY created_at, export_id", cell_id,
     )
@@ -452,7 +454,7 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
 # C6 column grants fix this controller-owned subset.
 EXPORT_COLUMNS = frozenset({
     "observed_state", "error_code", "archive_bytes", "archive_sha256", "archive_version_id", "upload_id",
-    "ready_at", "expires_at", "download_url", "download_url_expires_at",
+    "ready_at", "expires_at", "download_url", "download_url_expires_at", "packing_report",
 })
 
 
@@ -470,5 +472,10 @@ async def write_export(connection: asyncpg.Connection, export_id: str, updates: 
     if link_issued:
         assignments = ", ".join(filter(None, [
             assignments, "link_issued_at = GREATEST(clock_timestamp(), COALESCE(link_requested_at, '-infinity'))"]))
-    await connection.execute(f"UPDATE exomem_cloud_exports SET {assignments} WHERE export_id=$1",
+    condition = ""
+    if updates.get("observed_state") == "ready":
+        # A newer supersede or cell deletion wins over a stale verification result.
+        condition = (" AND requested_state <> 'superseded' AND EXISTS (SELECT 1 FROM exomem_cloud_cells c "
+                     "WHERE c.cell_id=exomem_cloud_exports.cell_id AND c.desired_state <> 'deleted')")
+    await connection.execute(f"UPDATE exomem_cloud_exports SET {assignments} WHERE export_id=$1{condition}",
                              uuid.UUID(export_id), *parameters)

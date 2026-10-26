@@ -162,6 +162,17 @@ def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(c
     assert "private-record" not in caplog.text
 
 
+@pytest.mark.parametrize("remaining", ["job", "pod"])
+def test_export_verification_still_observes_its_packing_predecessor(remaining):
+    """Verification cannot release the cell's hold while a packing Job or Pod can still own its volume."""
+    export_id = "00000000-0000-4000-8000-000000000001"
+    name = "export-00000000000040008000000000000001"
+    client = _client(hold_started_at=None, jobs={name: _job()} if remaining == "job" else {},
+                     pods=[_job_pod(name, snapshot_id="{}")] if remaining == "pod" else [])
+    observed = client.observe_export_job(NAMESPACE, export_id, verify=True)
+    assert observed.present and not observed.succeeded
+
+
 def test_claim_observation_reads_status_capacity_and_filesystem_resize_condition() -> None:
     from cellctl.storage_config import DEFAULT_STORAGE, LEGACY_CLASS
 

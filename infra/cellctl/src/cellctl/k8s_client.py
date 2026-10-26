@@ -178,13 +178,17 @@ class ClusterClient:
     def run_job(self, manifest: dict) -> None:
         self.apply(manifest)
 
-    def delete_cell_secrets(self, namespace: str) -> None:
-        """Retire the cell's children without waiting for namespace or provider cleanup."""
+    def delete_secret(self, namespace: str, name: str) -> None:
+        """Delete one controller-owned capability; unrelated exports keep their own Secrets."""
         try:
-            self._core.delete_namespaced_secret("cell-credentials", namespace)
+            self._core.delete_namespaced_secret(name, namespace)
         except ApiException as error:
             if error.status != 404:
                 raise
+
+    def delete_cell_secrets(self, namespace: str) -> None:
+        """Retire the cell's children without waiting for namespace or provider cleanup."""
+        self.delete_secret(namespace, "cell-credentials")
 
 
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
@@ -268,11 +272,11 @@ class ClusterClient:
             result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods))
         return result
 
-    def observe_export_job(self, namespace: str, export_id: str):
+    def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False):
         """C6: the export's one Job, its pods and its termination report."""
         from .exports import ExportJob, job_name
 
-        name = job_name(export_id)
+        name = job_name(export_id, verify=verify)
         job = self._get_job(namespace, name)
         pods = self._core.list_namespaced_pod(namespace, label_selector=f"batch.kubernetes.io/job-name={name}").items
         # Terminating pods still hold the volume until Kubernetes removes them.
@@ -302,7 +306,15 @@ class ClusterClient:
             # The controller removes terminal Jobs; retain the private-safe reason before it does.
             logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None
-        return ExportJob(job is not None, active, succeeded, failed, report, bool(pods), finished_at)
+        predecessor = None
+        if verify:
+            # The packing Job's Pod must release its volume before verification can finish the hold.
+            predecessor_name = job_name(export_id)
+            predecessor = self._get_job(namespace, predecessor_name)
+            pods += self._core.list_namespaced_pod(namespace,
+                label_selector=f"batch.kubernetes.io/job-name={predecessor_name}").items
+        return ExportJob(job is not None or predecessor is not None, active, succeeded, failed, report,
+                         bool(pods), finished_at)
 
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
@@ -590,6 +602,7 @@ class ClusterClient:
             namespace_volume_lost=namespace_volume_lost,
             namespace_move_volume=namespace_move_volume,
             namespace_move_storage_class=namespace_annotations.get("exomem.io/move-storage-class"),
+            namespace_move_accepted_volume=namespace_annotations.get("exomem.io/move-accepted-volume"),
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,

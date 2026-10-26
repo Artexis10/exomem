@@ -35,6 +35,26 @@ class PartStore(BaseHTTPRequestHandler):
     """Object storage at its presigned-URL boundary: one part per PUT, S3's MD5 ETag back."""
 
     parts: dict[str, bytes] = {}
+    objects: dict[str, bytes] = {}
+    ranges: list[tuple[int, int]] = []
+
+    def do_GET(self):  # noqa: N802 - http.server's handler name
+        body = self.objects.get(self.path)
+        if body is None:
+            self.send_error(403)
+            return
+        requested = self.headers.get("Range", "")
+        if not requested.startswith("bytes="):
+            self.send_error(400)
+            return
+        start, end = map(int, requested.removeprefix("bytes=").split("-"))
+        end = min(end, len(body) - 1)
+        self.ranges.append((start, end))
+        self.send_response(206)
+        self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        self.wfile.write(body[start:end + 1])
 
     def do_PUT(self):  # noqa: N802 - http.server's handler name
         body = self.rfile.read(int(self.headers["Content-Length"]))
@@ -64,6 +84,8 @@ def storage(tmp_path):
     key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                            serialization.NoEncryption()))
     PartStore.parts = {}
+    PartStore.objects = {}
+    PartStore.ranges = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), PartStore)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_path, key_path)
@@ -111,12 +133,41 @@ def test_a_held_cells_export_uploads_a_verifiable_archive_and_reports_only_its_s
     assert not list((tmp_path / "staging").glob("*.zip"))  # the node's staging disk is freed
 
 
-def test_an_archive_larger_than_its_parts_is_refused_before_any_upload(vault, tmp_path, storage):
+def test_an_archive_larger_than_its_parts_never_reports_success(vault, tmp_path, storage):
     """Defect: a too-small upload is completed as a truncated archive, or blamed on the owner's vault."""
     status, report = _cell_export(vault, tmp_path, storage, part_bytes=1024,
                                   urls=[f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber=1"])
     assert status == 1 and report["error"] == "EXPORT_FAILED"
-    assert storage["parts"] == {}
+    assert len(storage["parts"]) == 1
+    assert not list((tmp_path / "staging").iterdir())
+
+
+def test_completed_export_uses_range_reads_and_rejects_corruption_and_expired_versions(vault, tmp_path, storage, monkeypatch):
+    """The runtime verifies the completed bytes, while a corrupt or unavailable version never gets a success report."""
+    monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
+    urls = [f"{storage['base']}/part-{number}" for number in range(200)]
+    status, packed = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, urls=urls)
+    assert status == 0, packed
+    archive = b"".join(storage["parts"][f"/part-{number}"] for number in range(packed["parts"]))
+    signed_path = "/completed%2Fprivate?versionId=exact&token=encoded%2Fplus%2B%3D"
+    PartStore.objects[signed_path] = archive
+    verified = cloud_export.verify_remote_export(f"{storage['base']}{signed_path}",
+        cell_id=CELL, archive_bytes=packed["bytes"], archive_sha256=packed["sha256"], max_bytes=1024**3)
+    assert verified == {"bytes": len(archive), "sha256": packed["sha256"], "verified": True}
+    assert PartStore.ranges and all(end - start < 1024 * 1024 for start, end in PartStore.ranges)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setenv("EXOMEM_EXPORT_VERIFY_URL", f"{storage['base']}{signed_path}")
+    verification_log = tmp_path / "outcome.json"
+    assert cloud_export.main(["--verify", "--export-id", str(uuid.uuid4()), "--max-bytes", str(1024**3),
+        "--archive-bytes", str(len(archive)), "--archive-sha256", packed["sha256"],
+        "--archive-version-id", "exact", "--termination-log", str(verification_log)]) == 0
+    assert json.loads(verification_log.read_text()) == {**verified, "version": "exact"}
+    assert storage["base"] not in verification_log.read_text()
+    PartStore.objects["/completed?versionId=corrupt"] = archive[:-22] + bytes(22)
+    for version in ("corrupt", "expired"):
+        with pytest.raises(cloud_export.ExportRefused, match="^EXPORT_FAILED$"):
+            cloud_export.verify_remote_export(f"{storage['base']}/completed?versionId={version}",
+                cell_id=CELL, archive_bytes=len(archive), archive_sha256=packed["sha256"], max_bytes=1024**3)
 
 
 def test_the_cells_size_bounds_the_export_in_place_of_the_default_limit(vault, tmp_path, storage):

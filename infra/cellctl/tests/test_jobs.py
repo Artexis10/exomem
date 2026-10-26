@@ -174,11 +174,9 @@ def test_restore_and_backup_are_scoped_to_vault_and_host_leaving_the_volume_root
     repo = f"s3:{ENDPOINT}/exomem-cloud-backups/cells/aaaaaaaaaaaaaaaa"
     restore = render_restore_job(spec, bucket_name="exomem-cloud-backups", endpoint=ENDPOINT, snapshot_id=SNAPSHOT_ID)
     restore_container = restore["spec"]["template"]["spec"]["containers"][0]
-    assert restore_container["command"] == [
-        "sh",
-        "-c",
-        f"restic restore {SNAPSHOT_ID} --target / --delete --include /data/vault --include /data/host",
-    ]
+    script = restore_container["command"][2]
+    assert "ulimit -c 0" in script
+    assert script.endswith(f"restic restore {SNAPSHOT_ID} --target / --delete --include /data/vault --include /data/host")
     assert {"name": "RESTIC_REPOSITORY", "value": repo} in restore_container["env"]
     backup = render_backup_job(spec, bucket_name="exomem-cloud-backups", endpoint=ENDPOINT)
     script = backup["spec"]["template"]["spec"]["containers"][0]["command"][2]

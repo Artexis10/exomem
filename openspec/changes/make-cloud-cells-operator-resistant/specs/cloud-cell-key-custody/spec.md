@@ -45,11 +45,33 @@ A cell whose volume was created under a shared passphrase SHALL count as migrate
 - **WHEN** a cell runs on storage that cannot yet carry a per-cell volume key
 - **THEN** its status reports that the per-cell key requirement is not met
 
+#### Scenario: A streamed owner export completes
+
+- **WHEN** the cell uploads its canonical archive one part at a time
+- **THEN** the controller completes a private object and records its immutable version and packing report while the export remains preparing
+- **AND** a cell-image Job verifies only that version through bounded Range reads with the canonical archive verifier
+- **AND** the export becomes ready only when the full archive, manifest, size and hash pass
+- **AND** failed, superseded or deleted exports remove their unpublished object through the existing cleanup path
+
+
 ### Requirement: Deleting a cell expires its keys by a stated date
 
 When a cell is deleted, the platform SHALL destroy every live copy of its cell root key, of the content keys under it and of any infrastructure key. That covers control-database rows, Secrets and the tenant's wraps.
 
-Copies inside platform backups SHALL expire with those backups' retention. Platform backups include control-database backups, cluster datastore snapshots and backup object versions. The deletion record SHALL carry `keys_expire_at`, the deletion time plus the longest of those retentions. The platform SHALL report the cell's keys destroyed only after that time. Until then, the platform SHALL say which platform backups still hold copies.
+Copies inside platform backups SHALL expire with those backups' retention. Platform backups include control-database backups, cluster datastore snapshots and backup object versions. The deletion record SHALL retain each deployed policy's source, window and observation time. It SHALL set `keys_expire_at` only after the last live key copy is absent and every retention window is known. The date SHALL start at the last live copy's destruction, plus the longest retention window. Unknown retention or absence SHALL remain unknown. The platform SHALL report the cell's keys destroyed only after the proven date. Until then, the platform SHALL say which platform backups can still hold copies.
+
+Database retirement SHALL precede Kubernetes and provider probes. The controller SHALL delete the cell's child Secret independently of provider cleanup. A running or terminating workload SHALL prevent a claim that all live copies are absent. A legacy shared passphrase or a retained old volume SHALL prevent a finite destruction claim without its own evidence.
+
+#### Scenario: A provider cannot answer during deletion
+
+- **WHEN** a deleted cell's provider cannot confirm volume or object absence
+- **THEN** the controller still retires its live database content wraps
+- **AND** it attempts child Secret deletion independently, retains the cleanup credential, and reports unresolved copies as unknown
+
+#### Scenario: A retention policy is unknown
+
+- **WHEN** one deployed backup source has no observed retention window
+- **THEN** `keys_expire_at` remains unknown, and the platform does not report complete key destruction
 
 #### Scenario: Live copies at deletion
 

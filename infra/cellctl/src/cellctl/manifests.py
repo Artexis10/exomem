@@ -21,7 +21,7 @@ from .storage_config import LEGACY_CLASS
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
 # already converged.
-RENDER_VERSION = 1
+RENDER_VERSION = 2
 
 NAMESPACE_PREFIX = "exo-cell-"
 GATEWAY_NAMESPACE = "exomem-cloud"
@@ -561,6 +561,14 @@ def check_model_env(model_env: object) -> None:
             raise ValueError(f"cell model environment may not set {key}")
 
 
+def _cell_command(command: list[str], *, scratch: bool = True) -> list[str]:
+    """Disable core files before any cell process; content scratch stays outside backup roots."""
+    setup = "ulimit -c 0 && "
+    if scratch:
+        setup += "mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && "
+    return ["sh", "-c", setup + 'exec "$@"', "cell-process", *command]
+
+
 def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     env = [
         {"name": "EXOMEM_CLOUD_CELL", "value": "1"},
@@ -593,7 +601,7 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": "/data/vault"},
-            {"name": "TMPDIR", "value": "/tmp"},
+            {"name": "TMPDIR", "value": "/data/scratch/tmp"},
             {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"},
         ]
     )
@@ -612,7 +620,7 @@ def _init_env(spec: CellManifestSpec) -> list[dict]:
         # custody root and redact its own output.
         {"name": "EXOMEM_CLOUD_CELL", "value": "1"},
         {"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
-        {"name": "TMPDIR", "value": "/tmp"},
+        {"name": "TMPDIR", "value": "/data/scratch/tmp"},
     ]
     if spec.local_volume:
         # D5: optional, and present from the cell's first render, so the key
@@ -706,7 +714,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                             "name": INIT_CONTAINER_NAME,
                             "image": spec.image,
                             "imagePullPolicy": "IfNotPresent",
-                            "command": ["exomem", "cell-init"],
+                            "command": _cell_command(["exomem", "cell-init"]),
                             "args": ["--vault", "/data/vault", "--json"],
                             "env": _init_env(spec),
                             "resources": {
@@ -730,7 +738,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                             "name": "exomem",
                             "image": spec.image,
                             "imagePullPolicy": "IfNotPresent",
-                            "command": [
+                            "command": _cell_command([
                                 "exomem",
                                 "--transport",
                                 "http",
@@ -738,7 +746,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                                 "0.0.0.0",
                                 "--port",
                                 str(CELL_PORT),
-                            ],
+                            ]),
                             "ports": [
                                 {"name": "http", "containerPort": CELL_PORT, "protocol": "TCP"}
                             ],
@@ -792,7 +800,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                             "name": "data",
                             "persistentVolumeClaim": {"claimName": spec.pvc_name},
                         },
-                        {"name": "tmp", "emptyDir": {}},
+                        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
                     ],
                 },
             },
@@ -893,7 +901,7 @@ def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
             "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "backup-password"}},
         },
         {"name": "RESTIC_CACHE_DIR", "value": "/cache"},
-        {"name": "TMPDIR", "value": "/tmp"},
+        {"name": "TMPDIR", "value": "/data/scratch/tmp"},
     ]
 
 
@@ -933,8 +941,8 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
 def _job_volumes(*, data_read_only: bool, pvc_name: str) -> list[dict]:
     return [
         {"name": "data", "persistentVolumeClaim": {"claimName": pvc_name, "readOnly": data_read_only}},
-        {"name": "cache", "emptyDir": {}},
-        {"name": "tmp", "emptyDir": {}},
+        {"name": "cache", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
+        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
     ]
 
 
@@ -972,8 +980,13 @@ def _job_pod_spec(
                 "name": job_kind,
                 "image": spec.image,
                 "imagePullPolicy": "IfNotPresent",
-                "command": ["sh", "-c", " && ".join(command)],
-                "env": _restic_env(spec, repo),
+                "command": ["sh", "-c", "ulimit -c 0 && " +
+                            ("" if data_read_only else "mkdir -p /data/scratch/tmp /data/scratch/cache && ") +
+                            " && ".join(command)],
+                "env": [({"name": entry["name"], "value": "/tmp"} if data_read_only and entry["name"] == "TMPDIR"
+                         else {"name": entry["name"], "value": "/data/scratch/cache"}
+                         if not data_read_only and entry["name"] == "RESTIC_CACHE_DIR" else entry)
+                        for entry in _restic_env(spec, repo)],
                 "resources": {
                     "requests": {"cpu": JOB_CPU_REQUEST, "memory": JOB_MEMORY_REQUEST},
                     "limits": {"cpu": JOB_CPU_LIMIT, "memory": "1Gi"},
@@ -1120,7 +1133,7 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
         command += ["--request", json.dumps(item.request(), separators=(",", ":")), "--url", url]
     pod = _job_pod_spec(spec, job_kind="import", command=[], data_read_only=False, repo="")
     container = pod["containers"][0]
-    container["command"] = command
+    container["command"] = _cell_command(command)
     container["env"] = _init_env(spec) + [
         {"name": "EXOMEM_IMPORT_MAX_MEMBERS", "value": str(MAX_MEMBERS)},
         {"name": "EXOMEM_IMPORT_RESERVE_BYTES", "value": str(RESERVE_BYTES)},
@@ -1139,16 +1152,27 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
 JOB_KIND_EXPORT = "export"
 
 
-def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str], deadline_seconds: int) -> dict:
-    """C6: the cell's own `exomem cell-export` under the export hold. It packs
-    the stopped cell's volume into a staging emptyDir as large as its parts and
-    uploads the ZIP to the presigned parts; it holds no object-storage key."""
-    from .exports import job_name
+def render_export_verification_secret(spec: CellManifestSpec, item, url: str) -> dict:
+    """Keep the short-lived content-read capability out of routine-readable workload metadata."""
+    from .exports import verification_secret_name
 
+    return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": verification_secret_name(item.export_id), "namespace": spec.namespace,
+                         "labels": _labels(spec)}, "data": {"get-url": _b64(url)}}
+
+
+def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str], deadline_seconds: int) -> dict:
+    """C6: stream one staged part, or verify the private completed version under the same hold."""
+    from .exports import job_name, verification_secret_name
+
+    verify = item.archive_version_id is not None
     command = ["exomem", "cell-export", "--export-id", item.export_id, "--part-bytes", str(size.part_bytes),
                "--max-bytes", str(size.max_bytes)]
     for url in part_urls:
         command += ["--part-url", url]
+    if verify:
+        command += ["--verify", "--archive-bytes", str(item.archive_bytes),
+                    "--archive-sha256", item.archive_sha256, "--archive-version-id", item.archive_version_id]
     # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
     # read a WAL-mode store on a read-only mount once its -shm file is gone, and
     # the export reads the collection store. The hold keeps the runtime stopped.
@@ -1156,18 +1180,21 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
     pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="",
                         tolerate_cordon=spec.local_volume)
     container = pod["containers"][0]
-    container["command"] = command
+    container["command"] = _cell_command(command)
     container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}]
-    container["volumeMounts"].append({"name": "staging", "mountPath": "/staging"})
-    # Reserve the disk-backed archive so concurrent exports cannot overcommit node storage.
-    staging_bytes = str(size.parts * size.part_bytes)
-    container["resources"]["requests"]["ephemeral-storage"] = staging_bytes
-    container["resources"]["limits"]["ephemeral-storage"] = staging_bytes
-    pod["volumes"].append({"name": "staging", "emptyDir": {"sizeLimit": staging_bytes}})
+    if verify:
+        # Verification sees only its signed object version, never a cell volume or a cell key Secret.
+        container["command"] = _cell_command(command, scratch=False)
+        container["env"] = [{"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
+                            {"name": "TMPDIR", "value": "/tmp"},
+                            {"name": "EXOMEM_EXPORT_VERIFY_URL", "valueFrom": {"secretKeyRef": {
+                                "name": verification_secret_name(item.export_id), "key": "get-url"}}}]
+        container["volumeMounts"] = [{"name": "tmp", "mountPath": "/tmp"}]
+        pod["volumes"] = [{"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}
     return {
         "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": job_name(item.export_id), "namespace": spec.namespace,
+        "metadata": {"name": job_name(item.export_id, verify=verify), "namespace": spec.namespace,
                      "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}},
         # No TTL: cellctl deletes the Job once C6 records its outcome.
         "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,

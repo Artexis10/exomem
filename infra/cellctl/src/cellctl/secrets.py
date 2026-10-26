@@ -37,7 +37,7 @@ def bearer_matches(presented: str, *, key: bytes, cell_id: str) -> bool:
 
 
 def generate_backup_data_key() -> bytes:
-    """A fresh random 32-byte per-cell restic/backup data key."""
+    """A fresh random 32-byte key for cell roots and restic secrets."""
 
     return os.urandom(32)
 

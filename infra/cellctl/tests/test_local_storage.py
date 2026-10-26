@@ -137,11 +137,8 @@ def test_a_local_volume_is_matched_to_the_node_its_pv_is_pinned_to(listed: str, 
         "agent-2", stop_confirmed, absent)
 
 
-def test_with_no_local_class_an_existing_cells_render_digest_does_not_move() -> None:
-    # The digest is every converged cell's restart trigger: a value that moves
-    # with no local class configured restarts every production cell on the
-    # next deploy. Captured from c298b7954, before local storage existed, for a
-    # Hetzner cell with production's chart defaults.
+def test_local_class_configuration_does_not_restart_an_existing_hetzner_cell() -> None:
+    # Enabling local classes does not change an existing Hetzner cell's render.
     from cellctl.reconcile import _compute_render_digest
 
     row = _row(generation=3, backup_key_version=1, b2_key_version=1)
@@ -152,8 +149,9 @@ def test_with_no_local_class_an_existing_cells_render_digest_does_not_move() -> 
         resources=ResourceSettings(cpu_request="250m", memory_request="1Gi"),
     )
 
+    configured = dataclasses.replace(config, storage=MIGRATING)
     assert _compute_render_digest(row, config, _secrets_config(), STORAGE_CLASS) == (
-        "3a08b2c74eae86e9d927d4b127ee8e7f64703145889368dc1675c9ca0f0cd2e0"
+        _compute_render_digest(row, configured, _secrets_config(), STORAGE_CLASS)
     )
 
 

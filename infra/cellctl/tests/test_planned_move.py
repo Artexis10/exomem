@@ -324,8 +324,9 @@ def test_cellctl_agrees_with_the_removal_playbook_on_where_a_moved_cell_fits() -
         assert takes == case["takes_the_moving_cell"], case["name"]
 
 
-async def test_a_planned_move_through_the_controller_backs_up_first_then_restores_onto_a_local_claim(
-    cell_db: CellDatabase,
+@pytest.mark.parametrize("per_cell_destination", [False, True])
+async def test_a_planned_move_through_the_controller_backs_up_first_then_restores_onto_a_fresh_claim(
+    cell_db: CellDatabase, per_cell_destination: bool,
 ) -> None:
     # Task 7.3 after the cutover: a cell on its Hetzner volume moves to local
     # storage. The old claim keeps its class while it exists (the field is
@@ -356,7 +357,9 @@ async def test_a_planned_move_through_the_controller_backs_up_first_then_restore
         "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A, "ready": True,
         "volume_id": "vol-old", "node": "server", "last_backup_at": STARTED, "last_backup_snapshot": LAST_BACKUP})
     cluster = Gateway()
-    config = ClusterConfig(object_storage_bucket="b", storage=CUT_OVER)
+    destination = "cell-key-storage" if per_cell_destination else LOCAL.class_name
+    storage = StorageConfig(per_cell_class=destination) if per_cell_destination else CUT_OVER
+    config = ClusterConfig(object_storage_bucket="b", storage=storage)
     on_hetzner = dict(pvc_storage_class=STORAGE_CLASS, pv_name="pv-old", pvc_volume_id="vol-old", pvc_exists=True)
     stopped = dict(pod_exists=False, pod_uses_volume=False, pod_ready=False)
     cluster.observations[cell_id] = _bound(STORAGE_CLASS, statefulset_row_generation=1, **on_hetzner)
@@ -364,7 +367,8 @@ async def test_a_planned_move_through_the_controller_backs_up_first_then_restore
     def observe(**overrides) -> None:
         annotations = cluster.applied[(namespace, "StatefulSet", "cell")]["metadata"]["annotations"]
         cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id, **{
-            **on_hetzner, "statefulset_relocation_volume": annotations.get(RELOCATION_ANNOTATION),
+            **on_hetzner, "namespace_move_storage_class": destination if per_cell_destination else None,
+            "statefulset_relocation_volume": annotations.get(RELOCATION_ANNOTATION),
             "statefulset_backup_outcome": annotations.get(BACKUP_OUTCOME_ANNOTATION), **overrides})
 
     def claim_class() -> str:
@@ -412,7 +416,41 @@ async def test_a_planned_move_through_the_controller_backs_up_first_then_restore
     # Hetzner claim applied again in the pass that deleted it would bind a new
     # Hetzner volume, and the restore would land there.
     after_delete = cluster.events[cluster.events.index(("delete claim", namespace)) + 1:]
-    assert [event for event in after_delete if event[0] == "apply claim"] == [("apply claim", LOCAL.class_name)]
-    assert claim_class() == LOCAL.class_name
+    assert [event for event in after_delete if event[0] == "apply claim"] == [("apply claim", destination)]
+    assert claim_class() == destination
     restore = cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2]
     assert FRESH_BACKUP in restore and LAST_BACKUP not in restore
+
+
+async def test_move_acceptance_keeps_old_volume_until_exact_mark_and_provider_absence(cell_db):
+    """An acceptance mark cannot hide a retained rollback volume that the provider still holds."""
+    import json
+
+    from cellctl import db
+    from cellctl.storage.interface import VolumeInfo
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "accepted-move")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    provider = FakeHetznerVolumeProvider([VolumeInfo("vol-old", "node-old", {})])
+    try:
+        await db.write_observed(connection, cell_id, {
+            "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A,
+            "ready": True, "volume_id": "vol-new", "relocation_old_volume_id": "vol-old",
+            "custody_observation": json.dumps({"retained_old_storage_class": STORAGE_CLASS}),
+        })
+        cluster.observations[cell_id] = _bound(STORAGE_CLASS, pvc_volume_id="vol-new", pvc_exists=True,
+            namespace_move_accepted_volume="vol-old")
+        for minute in (0, 1):
+            await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(),
+                ClusterConfig(object_storage_bucket="b"), now=NOW + timedelta(minutes=minute))
+            assert (await db.select_all_rows(connection))[0].relocation_old_volume_id == "vol-old"
+        provider.remove_volume("vol-old")
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(),
+            ClusterConfig(object_storage_bucket="b"), now=NOW + timedelta(minutes=2))
+        row = (await db.select_all_rows(connection))[0]
+        assert row.relocation_old_volume_id is None
+        assert row.relocation_accepted_at == NOW + timedelta(minutes=2)
+    finally:
+        await connection.close()

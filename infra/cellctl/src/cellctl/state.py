@@ -178,6 +178,7 @@ class ClusterObservation:
     # the volume a healthy cell is on, so the cell moves to a new claim.
     namespace_move_volume: str | None = None
     namespace_move_storage_class: str | None = None
+    namespace_move_accepted_volume: str | None = None
 
     pvc_bound: bool = False
     pvc_volume_id: str | None = None
