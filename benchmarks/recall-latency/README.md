@@ -6,6 +6,8 @@ paired margin and sample minimum. This directory owns reference data and schemas
 
 `--paired` compares the current checkout with the latest GitHub Release tag.
 Both persistent workers use the same corpus, cases, encoder digest and two CPUs.
+The report keeps the resident profile's artifact digest, which has 16 hexadecimal characters.
+The encoder cache uses the separate full hash of the published artifact.
 The head arm keeps the parent benchmark interpreter. CI starts it with the frozen `recall-benchmark` dependency group.
 The tag arm uses one isolated runtime from its archived `uv.lock`, with only the `embeddings-onnx` extra and no default groups.
 The current pinned uv reads that lock with `--frozen --no-config`; it never resolves or updates the tag lock.

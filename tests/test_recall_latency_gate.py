@@ -1299,11 +1299,18 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
     import managed_recall
     import synth_vault
 
-    from exomem import due_state, embeddings, recall_space
+    from exomem import due_state, embedding_backend, embeddings, recall_space
 
     (tmp_path / "Knowledge Base").mkdir()
     identity = SimpleNamespace(dim=2, fingerprint="reference-space")
-    artifact = SimpleNamespace(artifact_digest="reference-artifact", fingerprint=lambda: identity.fingerprint)
+    artifact_root = tmp_path / "artifact"
+    artifact_root.mkdir()
+    for name in embedding_backend._ARTIFACT_FILES:
+        (artifact_root / name).write_bytes(b"small test artifact")
+    artifact = SimpleNamespace(
+        artifact_digest=embedding_backend._artifact_digest(artifact_root),
+        fingerprint=lambda: identity.fingerprint,
+    )
     index = SimpleNamespace(identity=identity, rebuild_all=lambda: None)
     monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(profile=artifact))
     monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: SimpleNamespace(shape=(1, 2)))
@@ -1311,7 +1318,14 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
     monkeypatch.setattr(recall_space, "current_identity", lambda _dim: identity)
     monkeypatch.setattr(synth_vault, "reference_source", lambda *_args: (["reference"], "source-digest"))
     monkeypatch.setattr(synth_vault, "gen_reference_vault", lambda *_args: [])
-    monkeypatch.setattr(gate, "_stored_corpus", lambda *_args: {})
+    # The mocked generator creates no pages or vectors.
+    census = {
+        "pages": 0, "chunks": 0, "units": 0, "unit_pages": 0,
+        "vector_units": 0, "median_page_bytes": 0, "spot_checks": 0,
+        "vocabulary_terms": 0, "wikilinks_min": 0, "wikilinks_max": 0,
+        "transcript_pages": 0,
+    }
+    monkeypatch.setattr(gate, "_stored_corpus", lambda *_args: census)
     if not persisted:
         monkeypatch.setattr(due_state, "save", lambda *_args: None)
     admitted = []
@@ -1322,8 +1336,20 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
 
     monkeypatch.setattr(managed_recall, "enter_managed_recall", enter_managed)
     if persisted:
-        gate._prepare_worker(tmp_path, {"profile": {}})
+        environment = gate._prepare_worker(tmp_path, {"profile": {}})
         assert admitted == [True]
+        startup = {
+            "runtime_prefix": sys.prefix,
+            "runtime_lock_digest": gate._runtime_lock_digest(ROOT),
+            "runtime_policy": "parent-benchmark",
+        }
+        environment.update(gate._runtime_provenance(ROOT, startup))
+        report = {
+            "schema_version": 1, "mode": "absolute", "state": "not measured",
+            "contract_revision": gate.CONTRACT.revision, "series": [], "samples": [],
+            "environment": {"head": environment},
+        }
+        gate.validate_document(json.loads(json.dumps(report, allow_nan=False)), "summary.schema.json")
     else:
         with pytest.raises(gate.MeasurementRefused, match="advisory-projection-unavailable"):
             gate._prepare_worker(tmp_path, {"profile": {}})

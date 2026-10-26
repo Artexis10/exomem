@@ -767,8 +767,9 @@
           ]
         },
         "encoder_digest": {
+          "description": "EncoderProfile reports the first 16 hexadecimal digits of the resident artifact hash.",
           "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "pattern": "^[a-f0-9]{16}$"
         },
         "encoder_identity": {
           "type": "string",
