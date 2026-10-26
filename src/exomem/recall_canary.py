@@ -13,6 +13,7 @@ import math
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -87,7 +88,8 @@ def _compile_response_schema(schema):
     return Draft202012Validator(schema, registry=Registry())
 
 
-def _canary_cases(raw: bytes):
+def load_cases(raw: bytes):
+    """Parse and validate a case file; the sole loader for every runner of this observer."""
     from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
     operation_validators = {}
@@ -147,6 +149,8 @@ def _canary_cases(raw: bytes):
             "read_plans",
         ]
         bar_id: str = Field(default="programme-public-warm", min_length=1)
+        # A runner-owned label for reporting cases together; the observer never reads it.
+        group: str | None = Field(default=None, min_length=1)
         arguments: dict[str, JsonValue]
         expected: Expected | SchemaExpected
 
@@ -187,6 +191,10 @@ def _canary_cases(raw: bytes):
     if len({case.id for case in cases}) != len(cases):
         raise ValueError("case identities must be unique")
     return cases
+
+
+# canary_systemd imports the old private name; it moves to load_cases with its next edit.
+_canary_cases = load_cases
 
 
 def _at_path(data: Any, path: list[str | int]) -> Any:
@@ -259,6 +267,52 @@ def _canary_result(result, expected, *, diagnostics=None) -> tuple[str, str | No
             pass
         return outcome, "missing-material"
     return outcome, None
+
+
+@dataclass(frozen=True, slots=True)
+class Measurement:
+    """One timed call: elapsed time to the parsed terminal, then the assertion verdict."""
+
+    elapsed_ms: float
+    outcome: str
+    failure: str | None
+    terminal_received: bool
+    # Safe projection of a mismatch; empty unless the failure is `unexpected-response`.
+    diagnostics: dict[str, Any]
+
+
+async def measure_call(client, case, timeout: float) -> Measurement:
+    """Time one case call on a connected client, then run the case's assertions.
+
+    The timer stops when the client returns its parsed terminal or fails, before any
+    source or schema assertion. Every runner of this observer measures through here.
+    """
+    call_start = time.perf_counter()
+    diagnostics: dict[str, Any] = {}
+    terminal_received = False
+    try:
+        try:
+            async with asyncio.timeout(timeout):
+                result = await client.call_tool(
+                    case.tool,
+                    case.arguments,
+                    raise_on_error=False,
+                    timeout=timeout,
+                )
+                terminal_received = True
+        finally:
+            # Parsed caller terminals end timing before observer assertions.
+            elapsed = (time.perf_counter() - call_start) * 1000
+        outcome, failure = _canary_result(result, case.expected, diagnostics=diagnostics)
+    except Exception:  # noqa: BLE001 - no remote exception text enters evidence
+        outcome, failure = "error", "call-failed"
+    return Measurement(
+        elapsed_ms=elapsed,
+        outcome=outcome,
+        failure=failure,
+        terminal_received=terminal_received,
+        diagnostics=diagnostics if failure == "unexpected-response" else {},
+    )
 
 
 def _canary_warning(report: dict[str, Any]) -> dict[str, Any]:
@@ -410,39 +464,21 @@ async def run_mcp_canary(
                 observations = []
                 for repetition in range(samples + int(warm_up)):
                     warming = warm_up and repetition == 0
-                    call_start = time.perf_counter()
-                    diagnostics = {}
-                    terminal_received = False
-                    try:
-                        try:
-                            async with asyncio.timeout(timeout_seconds):
-                                result = await client.call_tool(
-                                    case.tool,
-                                    case.arguments,
-                                    raise_on_error=False,
-                                    timeout=timeout_seconds,
-                                )
-                                terminal_received = True
-                        finally:
-                            # Parsed caller terminals end timing before observer assertions.
-                            elapsed = (time.perf_counter() - call_start) * 1000
-                        outcome, failure = _canary_result(
-                            result, case.expected, diagnostics=diagnostics
-                        )
-                    except Exception:  # noqa: BLE001 - no remote exception text enters evidence
-                        outcome, failure = "error", "call-failed"
+                    measurement = await measure_call(client, case, timeout_seconds)
+                    elapsed = measurement.elapsed_ms
+                    outcome, failure = measurement.outcome, measurement.failure
                     series["attempts"].append(
                         {
                             "phase": "warm-up" if warming else "measured",
                             "elapsed_ms": elapsed,
                             "outcome": outcome,
                             "failure": failure,
-                            **(diagnostics if failure == "unexpected-response" else {}),
+                            **measurement.diagnostics,
                         }
                     )
                     if not warming:
                         series["measured_attempts"] += 1
-                        series["observed_terminals"] += int(terminal_received)
+                        series["observed_terminals"] += int(measurement.terminal_received)
                         observations.append(
                             latency_watch.make_sample(
                                 at=time.time(),

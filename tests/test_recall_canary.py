@@ -926,6 +926,34 @@ def test_mcp_invalid_case_bar_cannot_fall_back_or_connect(tmp_path, damage):
     assert report["cases"] == []
 
 
+def test_a_runner_times_a_grouped_case_through_the_observer_itself():
+    from fastmcp import Client, FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def read_memory(path: str) -> dict:
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": path}]}
+
+    case = {**_canary_case(), "tool": "read_memory", "arguments": {"path": "p"}, "group": "note-read"}
+    [loaded] = gate.load_cases(json.dumps([case]).encode())
+
+    async def measure():
+        async with Client(server) as client:
+            return await gate.measure_call(client, loaded, 30.0)
+
+    measurement = asyncio.run(measure())
+    assert loaded.group == "note-read"
+    assert (measurement.outcome, measurement.failure, measurement.terminal_received) == (
+        "ok",
+        None,
+        True,
+    )
+    assert measurement.elapsed_ms > 0
+    with pytest.raises(ValueError):
+        gate.load_cases(json.dumps([{**case, "group": ""}]).encode())
+
+
 def test_mcp_terminal_timing_excludes_costly_observer_assertions(tmp_path, monkeypatch):
     import time
     from types import SimpleNamespace
