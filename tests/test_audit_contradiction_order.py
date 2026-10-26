@@ -35,14 +35,15 @@ _TODAY = dt.date(2026, 6, 27)
 _BODY = "Zylo narwhal quokka substrate measure-not-judge corpus contradiction body."
 
 
-def _seed(vault: Path, rel: str) -> str:
+def _seed(vault: Path, rel: str, project: str | None = None) -> str:
     """Write a minimal active read-write compiled page. Returns the sidecar key
     (vault-relative WITH 'Knowledge Base/' and .md)."""
     p = vault / "Knowledge Base" / rel
     p.parent.mkdir(parents=True, exist_ok=True)
+    project_line = f"project: {project}\n" if project else ""
     p.write_text(
         "---\ntype: insight\nstatus: active\n"
-        f"created: 2026-01-01\nupdated: 2026-01-01\n---\n\n# {rel}\n\n{_BODY}\n",
+        f"{project_line}created: 2026-01-01\nupdated: 2026-01-01\n---\n\n# {rel}\n\n{_BODY}\n",
         encoding="utf-8",
     )
     return f"Knowledge Base/{rel}"
@@ -55,6 +56,7 @@ def _install(
     *,
     floor: float = 0.5,
     ceiling: float = 0.95,
+    projects: dict[str, str] | None = None,
 ) -> dict[tuple[str, str], tuple[str, str]]:
     """Seed each pair's two notes and patch `all_vectors` so the planted pair has
     exactly the given cosine (orthonormal per-pair 2-D blocks → zero cross-pair
@@ -68,8 +70,8 @@ def _install(
     order: list[str] = []
     out: dict[tuple[str, str], tuple[str, str]] = {}
     for i, (rel_a, rel_b, cos) in enumerate(pairs):
-        key_a = _seed(vault, rel_a)
-        key_b = _seed(vault, rel_b)
+        key_a = _seed(vault, rel_a, (projects or {}).get(rel_a))
+        key_b = _seed(vault, rel_b, (projects or {}).get(rel_b))
         va = np.zeros(dim, dtype=np.float32)
         vb = np.zeros(dim, dtype=np.float32)
         va[2 * i] = 1.0
@@ -193,6 +195,10 @@ def test_same_family_pair_demoted_below_lower_priority_cross_family(
              "Notes/Research/Q/api-architecture.md", 0.9),
             ("Notes/Insights/x-a.md", "Notes/Insights/x-b.md", 0.6),
         ],
+        projects={
+            "Notes/Research/Q/svc-architecture.md": "q",
+            "Notes/Research/Q/api-architecture.md": "q",
+        },
     )
     pf = _pair_findings(_run(vault))
     order = [_pair_key(f) for f in pf]
@@ -207,6 +213,27 @@ def test_same_family_pair_demoted_below_lower_priority_cross_family(
     # Demoted despite the higher raw priority.
     assert by[family].meta["priority"] > by[cross].meta["priority"]
     assert "Same-family" in by[family].detail
+
+
+def test_project_key_decides_the_family_not_the_folder(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One project's notes filed in two folders are one family; two untagged notes
+    # that share a folder are not.
+    _install(
+        vault,
+        monkeypatch,
+        [
+            ("Notes/Equipment/p-a.md", "Notes/Insights/p-b.md", 0.9),
+            ("Notes/Research/Q/u-a.md", "Notes/Research/Q/u-b.md", 0.8),
+        ],
+        projects={"Notes/Equipment/p-a.md": "q", "Notes/Insights/p-b.md": "q"},
+    )
+    by = {_pair_key(f): f for f in _pair_findings(_run(vault))}
+    tagged = tuple(sorted(("Knowledge Base/Notes/Equipment/p-a.md", "Knowledge Base/Notes/Insights/p-b.md")))
+    untagged = tuple(sorted(("Knowledge Base/Notes/Research/Q/u-a.md", "Knowledge Base/Notes/Research/Q/u-b.md")))
+    assert by[tagged].meta["same_family"] is True
+    assert by[untagged].meta["same_family"] is False
 
 
 # ---------------- cap + explicit count ----------------

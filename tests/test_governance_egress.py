@@ -3098,6 +3098,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "resume": False,
         "propose-compensation": False,
         "apply-compensation": False,
+        # A revert removes edges and trashes a page, so it is a write like apply.
+        "revert": False,
     }
 
     # A Records import's mode decides: preview and status read, start and cancel write.

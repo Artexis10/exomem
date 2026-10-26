@@ -205,17 +205,54 @@ def resolve_topics(taxonomy: source_taxonomy.SourceTaxonomy, values: Iterable[ob
 
 
 def plan_topic_registrations(
-    vault_root: Path, values: str | list[str]
+    vault_root: Path,
+    values: str | list[str],
+    *,
+    home_topics: frozenset[str] = frozenset(),
+    decision: dict[str, Any] | None = None,
 ) -> tuple[list[str], source_taxonomy.TaxonomyPlan, list[str]]:
-    """Resolve page topics and fold all introductions into one capture-style plan."""
-    requested = [values] if isinstance(values, str) else values
-    if not isinstance(requested, list):
+    """Resolve page topics and fold all introductions into one capture-style plan.
+
+    A topic that closely resembles a domain served by a home (`home_topics`) would
+    file its page in another folder than the topic it resembles. That choice goes
+    through the vocabulary decision; any other near miss stays a warning.
+    """
+    if not isinstance(values, (str, list)):
         raise VocabularyResolutionError("INVALID_SOURCE", "topics must be a domain key or a list of domain keys")
+    requested = [values] if isinstance(values, str) else list(values)
     taxonomy, _, snapshot = _strict_taxonomy(Path(vault_root))
     try:
         resolutions = [taxonomy.resolve_domain(value) for value in requested]
     except source_taxonomy.TaxonomyError as error:
         raise VocabularyResolutionError("INVALID_SOURCE", str(error)) from error
+    decided: set[int] = set()
+    for index, resolution in enumerate(resolutions):
+        if resolution.status != "unregistered" or resolution.close_match not in home_topics:
+            continue
+        evidence = _preparation_evidence(
+            taxonomy,
+            str(requested[index]),
+            _nearby_definitions(taxonomy, str(requested[index]), resolution),
+            snapshot,
+        )
+        if decision is None:
+            raise VocabularyResolutionError(
+                "VOCABULARY_DECISION_REQUIRED",
+                "a topic resembling a domain with a home needs an explicit vocabulary decision",
+                {"vocabulary_preparation": evidence},
+            )
+        try:
+            canonical, _kind = _apply_decision(taxonomy, resolution, decision, evidence)
+        except VocabularyResolutionError as error:
+            if error.code == "VOCABULARY_DEFERRED":
+                error.details["requested"] = str(requested[index])
+            raise
+        decided.add(index)
+        if canonical != resolution.key:
+            requested[index] = canonical
+            resolutions[index] = taxonomy.resolve_domain(canonical)
+        # One decision answers one preparation, so a further homed near miss stays a warning.
+        break
     plan = source_taxonomy.plan_registrations(vault_root, domains=resolutions)
     if plan.writes and registry_text_snapshot(plan.source_text) != snapshot:
         raise VocabularyResolutionError(
@@ -225,8 +262,8 @@ def plan_topic_registrations(
     if topics.unresolved:
         raise VocabularyResolutionError("INVALID_SOURCE", "topics must resolve to active domain keys")
     warnings = [f"NEW_DOMAIN: registered {item.key!r}" for item in plan.introductions]
-    for resolution in resolutions:
-        if resolution.close_match:
+    for index, resolution in enumerate(resolutions):
+        if resolution.close_match and index not in decided:
             warnings.append(
                 f"DOMAIN_NEAR_MISS: {resolution.key!r} closely resembles existing domain "
                 f"{resolution.close_match!r}. Kept as supplied — re-capture with the "

@@ -9,8 +9,10 @@ as an authoring contract.
 from __future__ import annotations
 
 import re
-from collections.abc import Set
+from collections.abc import Iterator, Sequence, Set
 from dataclasses import dataclass
+
+from markdown_it import MarkdownIt
 
 from . import relation_registry
 
@@ -205,3 +207,22 @@ def interpret_markdown_relations(
 
 def _normalize_heading(value: str) -> str:
     return re.sub(r"[\s_-]+", "_", value.strip().lower()).strip("_")
+
+
+def heading_title(text: str) -> str:
+    """Title of a heading given with or without its `#` markers."""
+    return next((title for _line, _level, title in iter_headings([text])), text.strip())
+
+
+def heading_key(title: str) -> str:
+    """Key under which two spellings of a heading name the same section."""
+    return _normalize_heading(title)
+
+
+def iter_headings(lines: Sequence[str]) -> Iterator[tuple[int, int, str]]:
+    """Yield `(line index, level, title)` for each heading outside a code fence."""
+    tokens = MarkdownIt("commonmark").parse("\n".join(line.rstrip("\r\n") for line in lines))
+    for index, token in enumerate(tokens):
+        if (token.type == "heading_open" and token.level == 0 and token.map is not None
+                and token.markup.startswith("#")):
+            yield token.map[0], int(token.tag[1:]), tokens[index + 1].content

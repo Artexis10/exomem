@@ -1686,6 +1686,7 @@ def bulk_upsert_records(
             rel_path_no_ext=manifest.storage.source.removesuffix(".md"),
             bodies=audit_bodies,
             operation_token=f"{profile.name}:{manifest.collection_id}:bulk:{batch_id}",
+            machine_generated=True,
         )
         if log_plan.warning is not None:
             raise collections.CollectionError(
@@ -5320,6 +5321,7 @@ def _plan_required_audit(
         rel_path_no_ext=manifest.storage.source.removesuffix(".md"),
         body=body,
         operation_token=f"{profile.name}:{manifest.collection_id}:{key}:{token_hash}",
+        machine_generated=True,
     )
     if plan.warning is not None:
         raise collections.CollectionError(

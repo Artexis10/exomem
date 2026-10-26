@@ -73,6 +73,14 @@ def attach_evidence(
     return result
 
 
+def requires_stable_provenance(vault_root: Path) -> bool:
+    """An approval context cannot bind a fresh, unpersisted metric timestamp."""
+    context = _OPERATION.get()
+    if context is None or context.vault_root != Path(vault_root).resolve():
+        return False
+    return vocabulary_authority.VocabularyAuthority(context.vault_root).runtime_status().mode != "v1"
+
+
 def deterministic_memory_id() -> str | None:
     """Return the next stable generated page identity for an activated write.
 
