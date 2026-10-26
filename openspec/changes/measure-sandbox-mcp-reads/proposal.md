@@ -12,9 +12,11 @@ The durable decision is to extend that observer with selectable configured bars 
 - Validate collection operation shapes and every selected bar before connecting.
 - Report each case's bar, measured terminal count, and descriptive p50 and p95, including failed attempts.
 - Stop caller timing when FastMCP returns its parsed terminal, before checking source truth or schemas.
+- Decide bar coverage with one predicate on the bar, so selection, the pre-connection check and the summarizer agree, including for typed tools and the `deep` flag.
+- Expose the timed call and case loader to other runners, and add the paired MCP read reference and a pending bar to the latency contract.
 - Keep the wider sandbox programme open: frozen source truth, nine operation families, matched pairs, layer profiles, and a configurable CI gate.
 
-The initial p95 target of 150 ms is provisional. Matched evidence must establish an applicable budget before any acceptance or improvement claim.
+The configured private-sandbox target is p95 below 100 ms for the six collection-store read groups. It is an acceptance bar for the sandbox copy only and never gates a shared runner. Paired allowances stay provisional until matched runs of identical code establish them.
 
 ## Capabilities
 

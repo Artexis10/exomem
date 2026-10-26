@@ -6,6 +6,9 @@
 - [x] 1.2 Select configured bars per case; verify thresholds, minimums, default sample counts, and invalid selections before connection.
 - [x] 1.3 Stop timing at the parsed terminal; verify assertion cost stays outside elapsed time and failures retain timing.
 - [x] 1.4 Report descriptive p50, p95, and terminal counts; verify failed and unattempted cases preserve honest evidence.
+- [x] 1.5 Decide bar coverage with one `LatencyBar.covers(tool, deep)` predicate; verify with the FastMCP suite that typed tools report their own tool and that a `deep` mismatch fails before connecting.
+- [x] 1.6 Expose `measure_call` and `load_cases` with an optional case `group`; verify a runner times a grouped case and that the canary report is unchanged.
+- [x] 1.7 Add the `mcp-read-paired` reference and a pending worker-socket bar under `request-latency-v5`; verify earlier rows are unchanged and the bar never labels live traffic.
 
 ## 2. Frozen sandbox and source truth
 
@@ -17,7 +20,7 @@
 
 - [ ] 3.1 Run matched cases on frozen arms; report per-case differences and confidence intervals with unchanged source keys.
 - [ ] 3.2 Attribute transport, authentication, governance, egress, rendering, store, and serialization costs; report unavailable layers explicitly.
-- [ ] 3.3 Establish configured budgets from matched evidence; retain 150 ms as provisional until the evidence supports acceptance.
+- [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 target of 100 ms for the six collection-store groups.
 - [ ] 3.4 Repair the largest measured costs without weakening governance; verify each correction through the same instrument and boundary.
 
 ## 4. CI and delivery
