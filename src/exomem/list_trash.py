@@ -152,10 +152,18 @@ def list_trash(
 
             target = by_name.get(target_name)
             target_rel = f"{date_rel}/{target_name}"
-            from .originals import original_state
+            from .originals import binding_for, original_state
 
             if target is None:
-                if original_state(vault_root, target_rel).state != "evicted":
+                binding = binding_for(vault_root)
+                try:
+                    stored = binding is not None and original_state(vault_root, target_rel, binding=binding).state == "evicted"
+                except reserved_paths.ReservedPathLeafError as error:
+                    if error.code != "RESERVED_PATH":
+                        raise
+                    # An excluded private alias cannot prove a stored original.
+                    stored = False
+                if not stored:
                     orphan_sidecars.append(sidecar_rel)
                     continue
                 target_kind = "file"

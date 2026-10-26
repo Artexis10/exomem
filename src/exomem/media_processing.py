@@ -1533,7 +1533,7 @@ def mark_processing_unavailable(
     preserve = _preserve_module()
     changed = 0
     for job in jobs:
-        if job.id is None:
+        if job.id is None or job.media_type == media_jobs.OFFLOAD_MEDIA_TYPE:
             continue
         written: list[Path] = []
         publication_intents: list[object] = []

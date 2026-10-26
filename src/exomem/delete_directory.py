@@ -20,10 +20,11 @@ import hashlib
 import json
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types, reserved_paths, semantic_contract
+from . import media_types, originals, reserved_paths, semantic_contract
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -74,6 +75,14 @@ class DeleteDirectoryError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
+def _read_tree(vault_root: Path, rel_path: str) -> tuple[reserved_paths.GenericTreeFile, ...]:
+    try:
+        return reserved_paths.read_generic_tree(vault_root, rel_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        code = "NOT_FOUND" if error.code == "MISSING" else "RESERVED_PATH"
+        raise DeleteDirectoryError(code=code, reason="directory could not be acquired through the generic boundary") from None
+
+
 def delete_directory(
     vault_root: Path,
     *,
@@ -85,10 +94,8 @@ def delete_directory(
     today: dt.date | None = None,
     now: dt.datetime | None = None,
 ) -> DeleteDirectoryResult:
-    from .media_store import local_originals
-
-    with local_originals(vault_root, (path,)):
-        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now)
+    with ExitStack() as originals_context:
+        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
 
 
 def _delete_directory_local(
@@ -101,6 +108,7 @@ def _delete_directory_local(
     allow_curated: bool = False,
     today: dt.date | None = None,
     now: dt.datetime | None = None,
+    originals_context: ExitStack,
 ) -> DeleteDirectoryResult:
     if not confirm:
         raise DeleteDirectoryError(
@@ -160,22 +168,19 @@ def _delete_directory_local(
     # Acquire and classify every child before counts, link scans, markers, or
     # lifecycle planning.  The later lifecycle snapshot rechecks the same
     # content immediately before its retained directory rename.
-    try:
-        tree = reserved_paths.read_generic_tree(vault_root, rel_path)
-    except reserved_paths.ReservedPathLeafError as error:
-        code = "NOT_FOUND" if error.code == "MISSING" else "RESERVED_PATH"
-        raise DeleteDirectoryError(
-            code=code,
-            reason="directory could not be acquired through the generic boundary",
-        ) from None
+    tree = _read_tree(vault_root, rel_path)
+    from .media_store import bound_originals, local_originals
+
+    evicted = (tuple(item for item in bound_originals(vault_root, root=abs_path) if item.state == "evicted")
+               if originals.binding_for(vault_root) is not None else ())
+    files = sorted({*(abs_path / item.relative_path for item in tree), *(item.path for item in evicted)})
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(
         vault_root,
-        (rel_path, *(f"{rel_path}/{item.relative_path}" for item in tree)),
+        (rel_path, *(item.relative_to(vault_root).as_posix() for item in files)),
         DeleteDirectoryError,
     )
-    files = [abs_path / item.relative_path for item in tree]
     if files and not recursive:
         raise DeleteDirectoryError(
             code="NOT_EMPTY",
@@ -293,6 +298,10 @@ def _delete_directory_local(
                 "DELETE_FAILED",
                 "trash metadata destination could not be acquired safely",
             ) from None
+    initial_tree_state = tuple(sorted(
+        [(f"{rel_path.rstrip('/')}/{item.relative_path}", hashlib.sha256(item.snapshot.data).hexdigest()) for item in tree]
+        + [(item.path.relative_to(vault_root).as_posix(), item.binary_sha256) for item in evicted]
+    ))
     # Capture vault-relative paths for every .md file in the doomed tree —
     # before the move, while they still resolve under vault_root. Used to
     # purge the embedding sidecar after the trash move succeeds.
@@ -323,15 +332,6 @@ def _delete_directory_local(
         op="delete_directory (trash)",
         rel_path_no_ext=rel_path,
         body=log_body,
-    )
-    initial_tree_state = tuple(
-        sorted(
-            (
-                f"{rel_path.rstrip('/')}/{item.relative_path}",
-                hashlib.sha256(item.snapshot.data).hexdigest(),
-            )
-            for item in tree
-        )
     )
     catalog_removals = tuple(
         catalog_publication.CatalogRemoval(
@@ -366,6 +366,12 @@ def _delete_directory_local(
                 reason=str(error),
             ) from error
 
+    originals_context.enter_context(local_originals(vault_root, (rel_path,)))
+    if evicted:
+        tree = _read_tree(vault_root, rel_path)
+        if tuple(sorted((f"{rel_path.rstrip('/')}/{item.relative_path}", hashlib.sha256(item.snapshot.data).hexdigest())
+                        for item in tree)) != initial_tree_state:
+            raise DeleteDirectoryError("PATH_GUARD_CHANGED", "directory contents changed before the trash transition")
     from . import graph_sync
 
     try:

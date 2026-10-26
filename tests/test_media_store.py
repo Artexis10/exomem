@@ -51,7 +51,7 @@ def _offload(vault: Path, path: Path):
     from exomem import media_jobs, media_store
 
     ledger = media_jobs.MediaJobStore(vault)
-    queued = ledger.get_by_binary(path)
+    queued = ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
     if queued is not None:
         claimed = ledger.claim_next()
         assert claimed.binary_path == path
@@ -131,9 +131,180 @@ def test_offload_demand_survives_processing_completion_and_discard(vault: Path):
     store.enqueue(MediaJob(binary, claimed.sidecar_path, "binary", do_ocr=False, do_offload=True))
     assert not store.complete_offload(offload_job)
     store.complete(offload_job)
-    assert store.get_by_binary(binary).do_offload
-    store.discard(store.get_by_binary(binary))
-    assert store.get_by_binary(binary).do_offload
+    assert store.get_by_binary(binary, media_type="binary").do_offload
+    store.discard(store.get_by_binary(binary, media_type="binary"))
+    assert store.get_by_binary(binary, media_type="binary").do_offload
+
+
+def test_completed_local_transcript_retires_work_from_a_previous_release_ledger(vault: Path):
+    from exomem import media_jobs, media_processing
+
+    path = _preserved(vault)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
+        connection.execute("ALTER TABLE jobs DROP COLUMN do_offload")
+    assert media_processing.reconcile_media(vault, path, explicit=False).state == "completed"
+    assert not store.has_binary(path)
+
+
+@pytest.mark.parametrize("state", ["blocked", "failed"])
+def test_offload_runs_without_changing_an_extraction_verdict(vault: Path, selected_store, monkeypatch, state):
+    import base64
+
+    from exomem import media_jobs, media_processing, media_store, media_worker, preserve
+
+    with monkeypatch.context() as unselected:
+        unselected.delenv("EXOMEM_MEDIA_STORE_CONFIG")
+        captured = preserve.preserve(vault, scope="Test", category="waiting", filename="sample.mp4",
+                                     content_base64=base64.b64encode(b"recording bytes").decode())
+        path = vault / captured.path
+        media_processing.reconcile_media(vault, path, explicit=False)
+        ledger = media_jobs.MediaJobStore(vault)
+        processing = ledger.claim_next()
+        assert ledger.mark(processing, state, "speech engine unavailable", blocked_reason=media_jobs.ENGINE_UNAVAILABLE)
+    verdict = ledger.get(processing.id)
+    assert media_store.enqueue_offload(vault, path) == 1
+    assert media_store.enqueue_offload(vault, path) == 0
+    assert ledger.get_by_binary(path) == verdict
+    before = (vault / captured.sidecar_path).read_bytes()
+    assert media_processing.mark_processing_unavailable(vault, reason="runtime unavailable", next_action="restore the runtime") == 0
+    assert (vault / captured.sidecar_path).read_bytes() == before
+    offload_job = ledger.claim_next()
+    assert offload_job.do_offload and not offload_job.do_ocr
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._process(offload_job).state == "complete"
+    ledger.complete(offload_job)
+    assert originals.original_state(vault, path).state == "cached"
+    assert ledger.get(processing.id) == verdict
+    assert not media_store.evict(vault, path)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_unconfirmed_delete_refuses_before_store_access(vault: Path, selected_store, kind):
+    from exomem import delete_directory, delete_file, media_store
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    root = Path(selected_store[0]["root"])
+    root.rename(root.with_name("offline-objects"))
+    operation = delete_file.delete_file if kind == "file" else delete_directory.delete_directory
+    error = delete_file.DeleteFileError if kind == "file" else delete_directory.DeleteDirectoryError
+    target = path if kind == "file" else path.parent
+    with pytest.raises(error) as refused:
+        operation(vault, path=target.relative_to(vault).as_posix(), confirm=False)
+    assert refused.value.code == "UNCONFIRMED"
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_append_only_delete_refuses_before_store_access(vault: Path, selected_store, kind):
+    from exomem import delete_directory, delete_file, media_store
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    root = Path(selected_store[0]["root"])
+    root.rename(root.with_name("offline-objects"))
+    operation = delete_file.delete_file if kind == "file" else delete_directory.delete_directory
+    error = delete_file.DeleteFileError if kind == "file" else delete_directory.DeleteDirectoryError
+    target = path if kind == "file" else path.parent
+    with pytest.raises(error) as refused:
+        operation(vault, path=target.relative_to(vault).as_posix(), confirm=True)
+    assert refused.value.code == "APPEND_ONLY"
+    assert not path.exists()
+
+
+def test_delete_preview_and_path_or_access_refusals_do_not_materialize(vault: Path, selected_store, monkeypatch):
+    from exomem import (
+        delete_directory,
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+    )
+    from exomem.governance import catalog_publication, egress
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"stored original")
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="transcript", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    root = Path(selected_store[0]["root"])
+    root.rename(root.with_name("offline-objects"))
+    relative = path.relative_to(vault).as_posix()
+    with pytest.raises(delete_directory.DeleteDirectoryError) as not_empty:
+        delete_directory.delete_directory(vault, path=path.parent.relative_to(vault).as_posix(), confirm=True)
+    assert not_empty.value.code == "NOT_EMPTY"
+    with pytest.raises(delete_file.DeleteFileError) as invalid:
+        delete_file.delete_file(vault, path="../outside.txt", confirm=True)
+    assert invalid.value.code == "INVALID_PATH"
+    with pytest.raises(delete_file.DeleteFileError) as stale:
+        delete_file.delete_file(vault, path=relative, confirm=True, expected_hash="0" * 64)
+    assert stale.value.code == "STALE_DELETE"
+    preview = delete_file.delete_file(vault, path=relative, confirm=True, validate_only=True)
+    assert preview.content_hash == hashlib.sha256(b"stored original").hexdigest()
+
+    def refuse_catalog(*args, **kwargs):
+        raise catalog_publication.CatalogPublicationError("catalog unavailable")
+
+    with monkeypatch.context() as refused_catalog:
+        refused_catalog.setattr(catalog_publication, "prepare_catalog_membership_batch", refuse_catalog)
+        with pytest.raises(delete_file.DeleteFileError) as file_catalog:
+            delete_file.delete_file(vault, path=relative, confirm=True)
+        assert file_catalog.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+        with pytest.raises(delete_directory.DeleteDirectoryError) as directory_catalog:
+            delete_directory.delete_directory(vault, path=path.parent.relative_to(vault).as_posix(), confirm=True, recursive=True)
+        assert directory_catalog.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda *_args, **_kwargs: lambda _path: False)
+    with pytest.raises(delete_file.DeleteFileError) as withheld:
+        delete_file.delete_file(vault, path=relative, confirm=True)
+    assert withheld.value.code == "NOT_FOUND"
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_authorized_delete_holds_original_pins_through_the_transition(vault: Path, selected_store, monkeypatch, kind):
+    from exomem import (
+        delete_directory,
+        delete_file,
+        graph_sync,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+    )
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"stored original")
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="transcript", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    begin = graph_sync.begin_deletion_transition
+
+    def contend(*args, **kwargs):
+        assert path.read_bytes() == b"stored original"
+        assert not media_store.evict(vault, path)
+        return begin(*args, **kwargs)
+
+    monkeypatch.setattr(graph_sync, "begin_deletion_transition", contend)
+    if kind == "file":
+        trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+        copied = vault / trashed.trash_path
+    else:
+        trashed = delete_directory.delete_directory(vault, path=path.parent.relative_to(vault).as_posix(), confirm=True, recursive=True)
+        copied = vault / trashed.trash_path / path.name
+    assert copied.read_bytes() == b"stored original"
+    assert originals.original_state(vault, path).state == "missing"
 
 
 def test_store_failure_keeps_the_job_and_committed_protection(vault: Path, selected_store, monkeypatch):
@@ -151,7 +322,7 @@ def test_store_failure_keeps_the_job_and_committed_protection(vault: Path, selec
     with pytest.raises(reserved_paths.ReservedPathLeafError):
         media_store.offload(vault, path)
     assert originals.original_state(vault, path).state == "local"
-    assert ledger.get_by_binary(path).state == "pending"
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).state == "pending"
     with sqlite3.connect(ledger.path) as captured:
         assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
 
@@ -217,7 +388,7 @@ def test_changed_pending_bytes_drop_the_old_stored_version(vault: Path, selected
     path.write_bytes(b"replacement bytes while extraction is pending")
     media_processing.reconcile_media(vault, path, explicit=False)
     assert originals.original_state(vault, path).reference is None
-    assert media_jobs.MediaJobStore(vault).get_by_binary(path).do_offload
+    assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
 
 
 def test_watcher_can_read_an_existing_ledger_before_the_media_schema_upgrade(vault: Path, selected_store):
@@ -233,7 +404,7 @@ def test_watcher_can_read_an_existing_ledger_before_the_media_schema_upgrade(vau
     watcher._record(path, deleted=False)
     watcher._flush()
     assert originals.original_state(vault, path).reference is None
-    assert media_jobs.MediaJobStore(vault).get_by_binary(path).do_offload
+    assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
 
 
 def test_placement_before_cache_row_crash_recovers_without_provenance_rewrite(vault: Path, selected_store, monkeypatch):

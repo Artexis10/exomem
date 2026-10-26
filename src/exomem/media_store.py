@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from . import held_fs, originals, reserved_paths
-from .media_jobs import MediaJob, MediaJobStore, pid_alive
+from .media_jobs import OFFLOAD_MEDIA_TYPE, MediaJob, MediaJobStore, pid_alive
 from .originals import OriginalSnapshot, StoredObject, original_state
 
 
@@ -308,18 +308,16 @@ def processing_status(vault: Path) -> list[dict[str, object]]:
 def enqueue_offload(vault: Path, path: Path) -> int:
     if originals.binding_for(vault) is None:
         return 0
-    from . import media_types
-
     snapshot = original_state(vault, path)
     if snapshot.state != "local" or snapshot.binary_sha256 is None:
         return 0
     store = MediaJobStore(vault)
-    current = store.get_by_binary(snapshot.path)
+    current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
         return 0
-    # "binary" is the offload-only job token, not a vocabulary classification.
+    # A separate row keeps offload runnable without changing extraction verdicts.
     store.enqueue(MediaJob(snapshot.path, snapshot.sidecar_path,
-                           media_types.media_type_for(snapshot.path) or "binary",
+                           OFFLOAD_MEDIA_TYPE,
                            do_ocr=False, do_offload=True))
     return 1
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import datetime as dt
 import inspect
+import json
 import os
 import pickle
 import sqlite3
@@ -1844,11 +1845,18 @@ def test_list_trash_treats_private_sidecar_alias_as_physically_absent(
     assert "PRIVATE-TRASH-SENTINEL" not in repr(after)
 
 
+@pytest.mark.parametrize("configured", [False, True])
 def test_list_trash_treats_private_target_alias_as_physically_absent(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
 ) -> None:
     from exomem import list_trash as list_trash_module
 
+    if configured:
+        config = tmp_path / "media.json"
+        config.write_text(json.dumps({"vaults": {str(tmp_path): {"store": "test-store"}}}))
+        monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
     governance = tmp_path / "Knowledge Base" / "_Governance"
     trash = tmp_path / "Knowledge Base" / "_trash" / "2026-08-21"
     governance.mkdir(parents=True)

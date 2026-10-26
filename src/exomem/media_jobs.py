@@ -28,6 +28,8 @@ RUNNING = "running"
 BLOCKED = "blocked"
 FAILED = "failed"
 COMPLETED = "completed"
+# This queue token names offload-only work, not a vocabulary classification.
+OFFLOAD_MEDIA_TYPE = "binary"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
 # Bump when _key's composition changes so existing stores re-key on next open.
@@ -556,7 +558,13 @@ class MediaJobStore:
             # coordination boundary is still held.  An empty new database does
             # not create WAL/SHM merely by negotiating WAL mode.
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("COMMIT")
+            try:
+                self._migrate_offload_columns(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                conn.close()
+                raise
         try:
             reserved_paths._publish_sqlite_owner_family(
                 self.vault_root,
@@ -573,6 +581,7 @@ class MediaJobStore:
         conn = self._connect()
         try:
             with conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS jobs (
@@ -600,10 +609,7 @@ class MediaJobStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS jobs_binary_rel ON jobs(binary_rel)"
                 )
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-                if "do_offload" not in columns:
-                    conn.execute("ALTER TABLE jobs ADD COLUMN do_offload INTEGER NOT NULL DEFAULT 0")
-                    conn.execute("ALTER TABLE jobs ADD COLUMN offload_generation INTEGER NOT NULL DEFAULT 0")
+                self._migrate_offload_columns(conn)
                 # Protections deliberately have no job foreign key: completing,
                 # discarding or rebuilding work must never unprotect an upload.
                 conn.execute("CREATE TABLE IF NOT EXISTS media_protections ("
@@ -662,6 +668,16 @@ class MediaJobStore:
                 self._migrate_job_key(conn)
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_offload_columns(conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if not columns:
+            return
+        if "do_offload" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN do_offload INTEGER NOT NULL DEFAULT 0")
+        if "offload_generation" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN offload_generation INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _migrate_claim_revision(conn: sqlite3.Connection) -> None:
@@ -1640,12 +1656,18 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def get_by_binary(self, binary_path: Path) -> MediaJob | None:
-        """Return the exact durable row for one vault-relative binary."""
+    def get_by_binary(self, binary_path: Path, *, media_type: str | None = None) -> MediaJob | None:
+        """Return processing work, or the exact requested queue kind, for a binary."""
         binary_rel = self._relative(binary_path)
         conn = self._connect()
         try:
-            row = conn.execute("SELECT * FROM jobs WHERE binary_rel = ?", (binary_rel,)).fetchone()
+            if media_type is None:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE binary_rel = ? AND media_type != ? ORDER BY id LIMIT 1",
+                    (binary_rel, OFFLOAD_MEDIA_TYPE),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM jobs WHERE job_key = ?", (self._key(binary_rel, media_type),)).fetchone()
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -2078,8 +2100,8 @@ class MediaJobStore:
             do_ocr=bool(row["do_ocr"]),
             do_clip=bool(row["do_clip"]),
             do_reembed=bool(row["do_reembed"]),
-            do_offload=bool(row["do_offload"]),
-            offload_generation=int(row["offload_generation"]),
+            do_offload=bool(row["do_offload"]) if "do_offload" in row.keys() else False,
+            offload_generation=int(row["offload_generation"]) if "offload_generation" in row.keys() else 0,
             attempts=int(row["attempts"]),
             claim_revision=int(row["claim_revision"]),
             ocr_generation=int(row["ocr_generation"]),
