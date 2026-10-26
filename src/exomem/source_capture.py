@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import stat
@@ -29,6 +30,21 @@ _IDENTITY = TypeAdapter(SourceIdentity)
 
 class SourceCaptureError(ValueError):
     """A coded refusal before a durable capture effect."""
+
+
+def validate_sha256(value: str) -> str:
+    """Validate the caller's SHA-256 assertion without changing its meaning."""
+    # SHA-256 hexadecimal is a fixed wire format, not a semantic vocabulary.
+    if (not isinstance(value, str) or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)):
+        raise SourceCaptureError("INVALID_SOURCE_HASH: expected_sha256 must contain 64 lowercase hexadecimal characters")
+    return value
+
+
+def verify_sha256(expected: str | None, actual: str) -> None:
+    """Refuse altered original bytes before the writer publishes anything."""
+    if expected is not None and not hmac.compare_digest(validate_sha256(expected), actual):
+        raise SourceCaptureError("SOURCE_HASH_MISMATCH: original bytes differ from expected_sha256; send the original file through an upload handoff or file handle")
 
 
 def validate_identity(value: object) -> SourceIdentity:

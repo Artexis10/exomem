@@ -309,7 +309,7 @@
     }
   },
   "capture_source": {
-    "description": "Save raw text or file handles losslessly in Sources/.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
+    "description": "Save authored text or exact original file handles in Sources/.\n\nFor material you did not author, send original bytes through `files`.\nWithout a handle, request transfer_artifact(upload, lane=source, hold=true,\nexpected_sha256=...) and use exomem attach --handoff-file. Do not retype originals.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -451,6 +451,37 @@
           ],
           "type": "object",
           "description": "Opaque text identity; identical inputs reuse the Source indefinitely."
+        },
+        "expected_sha256": {
+          "type": "string",
+          "description": "SHA-256 of intended UTF-8 content or one original file's bytes. A mismatch refuses capture before storage. This is not the rendered page hash."
+        },
+        "correction": {
+          "additionalProperties": false,
+          "properties": {
+            "supersedes": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "expected_hash": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            "reason": {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "supersedes",
+            "expected_hash",
+            "reason"
+          ],
+          "type": "object",
+          "description": "Capture a corrected Source with supersedes, expected_hash and reason. The historical page hash guards the predecessor; its original bytes stay unchanged."
         },
         "response_detail": {
           "default": "compact",
@@ -3234,6 +3265,11 @@
           "maxLength": 1024,
           "type": "string",
           "description": "Next-page token of a view."
+        },
+        "follow_corrections": {
+          "default": true,
+          "description": "Follow corrected Sources; false reads the exact historical page. Unit reads always stay exact.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -4467,7 +4503,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
+    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nTo send a local original without another credential, use upload with\nhold=true and expected_sha256, then exomem attach --handoff-file.\nRedeem its held handle through capture_source for raw material.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4486,7 +4522,12 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "Optional assertion of the original version to recover."
+          "description": "SHA-256 of intended upload bytes, or the original version to recover."
+        },
+        "hold": {
+          "default": false,
+          "description": "Prepare a one-use upload bound to this MCP session; requires expected_sha256.",
+          "type": "boolean"
         },
         "response_detail": {
           "default": "compact",

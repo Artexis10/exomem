@@ -1209,6 +1209,9 @@ def _capture_source_adoption(
                 index=selected_index,
             )
             _validate_staged_adoption(artifact, envelope)
+            from .source_capture import verify_sha256
+
+            verify_sha256(source_fields.get("expected_sha256"), artifact.sha256)
         except SafeFetchError as fetch_error:
             error = fetch_error
             if receipt is not None:

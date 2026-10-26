@@ -35,6 +35,7 @@ from . import (
     project_keys,
     schema,
     source_capture,
+    source_corrections,
     source_taxonomy,
     tag_variants,
     temporal,
@@ -45,7 +46,9 @@ from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
+    CreateOnlyConflict,
     InvalidSlugError,
+    PathGuardError,
     PlannedWrite,
     PreparedBinaryContent,
     batch_atomic_write,
@@ -271,6 +274,8 @@ def add(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    expected_sha256: str | None = None,
+    correction: source_corrections.SourceCorrection | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -298,6 +303,13 @@ def add(
     """
     from .governance import raw_protection as raw_guard
 
+    if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
+        raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
+    correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    if expected_sha256 is not None:
+        source_capture.validate_sha256(expected_sha256)
+        if artifact is None:
+            source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
     if source_identity is not None:
         # The command holds the mutation guard across lookup and this write.
         source_identity = source_capture.validate_identity(source_identity)
@@ -320,6 +332,8 @@ def add(
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
                 raw_protection=True,
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
+                expected_sha256=expected_sha256,
+                correction=correction,
             )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
@@ -339,6 +353,7 @@ def add(
             )
         artifact_suffix = Path(safe_name).suffix
         artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
+        source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
 
@@ -560,7 +575,9 @@ def add(
         adoption_receipt=adoption_receipt,
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
-        extra_lines=episode_lines or (),
+        extra_lines=(*(episode_lines or ()), *(
+            (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
+        )),
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
@@ -643,6 +660,13 @@ def add(
     if raw_protection:
         # Global index/log prose cannot carry the protected title or byte identity.
         writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
+    if correction_plan is not None:
+        writes[0].create_only = True
+        writes[0].expected_hash = MISSING_CONTENT_HASH
+        writes.append(correction_plan.receipt(
+            vault_root, new_ref=memory_refs.memory_ref(exomem_id),
+            new_path=source_path.relative_to(vault_root).as_posix(), timestamp=stamp_iso,
+        ))
 
     warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
@@ -672,11 +696,15 @@ def add(
         if domain_binding is not None and not taxonomy_plan.writes
         else ()
     )
+    if correction_plan is not None:
+        required_guards = (*required_guards, correction_plan.guards[0])
     try:
         def validate_bindings() -> None:
             taxonomy_plan.recheck_bindings(vault_root)
             if source_identity is not None:
                 source_capture.require_authority(vault_root)
+            if correction_plan is not None:
+                correction_plan.require_authority(vault_root)
 
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
@@ -693,6 +721,10 @@ def add(
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
                                _validate_prepared_bindings=validate_bindings)
     except source_capture.SourceCaptureError:
+        raise
+    except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError):
+        if correction_plan is not None:
+            raise ValueError("SOURCE_CORRECTION_STALE: correction inputs changed before commit; read the current Source and retry") from None
         raise
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
