@@ -87,6 +87,11 @@ class CollectionStoreError(RuntimeError):
         self.reason = message
 
 
+#: Remediation for an outcome that is not known yet: only the original identity replays it.
+PENDING_REMEDIATION = ("Do not change the payload or use a new identity. Retry only with the original "
+                       "replay identity; if none exists, reconcile the outcome before submitting again.")
+
+
 def busy(message: str):
     """The one shape of every COLLECTION_STORE_BUSY a caller sees: retryable, nothing committed."""
     from ..cli_ops import OpError

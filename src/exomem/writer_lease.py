@@ -1340,10 +1340,11 @@ def post_leaf_refusal(error: BaseException) -> BaseException:
     A filter over the result, such as a store read that misses its deadline, runs after the
     leaf; its own refusal must not read as "nothing committed", and the filter cannot tell
     whether the leaf committed, prepared or rejected. A retry with the same identity replays
-    the stored terminal. The inner code stays in the details. A fault without a public code
+    the stored terminal; without one, the caller reconciles first. The inner code stays in the details. A fault without a public code
     is returned unchanged.
     """
     from .cli_ops import public_refusal
+    from .collection_store.connection import PENDING_REMEDIATION
 
     refusal = public_refusal(error) if isinstance(error, Exception) else None
     if refusal is None:
@@ -1351,7 +1352,7 @@ def post_leaf_refusal(error: BaseException) -> BaseException:
     return OpError(
         "MUTATION_ACKNOWLEDGEMENT_PENDING",
         "the write returned, but a check of its result was refused; its outcome is not reported",
-        "Retry with the same mutation identity; do not submit a revised payload.",
+        PENDING_REMEDIATION,
         details={"status": "uncertain", "committed": None,
                  "post_leaf_refusal": str(refusal.get("code") or "OP_ERROR")},
     )

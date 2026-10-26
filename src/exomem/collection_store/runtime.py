@@ -1165,8 +1165,7 @@ class StoreServer:
             raise OpError(
                 "MUTATION_ACKNOWLEDGEMENT_PENDING",
                 "the accepted collection-store operation is still executing and may still commit",
-                "Do not change the payload or use a new identity. Retry only with the original "
-                "replay identity; if none exists, reconcile the outcome before submitting again.",
+                connection.PENDING_REMEDIATION,
                 details={"status": "uncertain", "committed": None},
             )
         if request.error is not None:
