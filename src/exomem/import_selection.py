@@ -28,6 +28,9 @@ _READ_FLAGS = (
 )
 # Windows marks a hidden file with an attribute, not a leading dot; the mask is 0 elsewhere.
 _HIDDEN_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0)
+# The reparse tag of a junction, fixed by the Windows headers. `stat` defines it on Windows only, and
+# the fallback below must work the same on any platform that reports a tag.
+_MOUNT_POINT_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
 
 
 class Reason(enum.StrEnum):
@@ -139,8 +142,14 @@ class _Rules:
 
 def _is_junction(path: str) -> bool:
     """A Windows junction: a folder link that `is_symlink` does not report and `O_NOFOLLOW` cannot refuse."""
-    # `os.path.isjunction` exists from Python 3.12; the project supports 3.11, where it is never one.
-    return bool(getattr(os.path, "isjunction", lambda _path: False)(path))
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        return bool(isjunction(path))
+    # Python 3.11 has no `os.path.isjunction`; on Windows it tests the same reparse tag that 3.12 does.
+    try:
+        return os.lstat(path).st_reparse_tag == _MOUNT_POINT_TAG
+    except (OSError, AttributeError):  # no tag on a platform that has no junctions
+        return False
 
 
 def _is_hidden(entry: os.DirEntry) -> bool:

@@ -48,6 +48,7 @@ class FakeCloud:
         self.declared: dict = {}
         self.refuse_registration = False
         self.fail_part_once: int | None = None
+        self.after_registration = lambda: None
 
     def _api(self, request):
         self.requests.append((request.method, request.url.path))
@@ -71,6 +72,7 @@ class FakeCloud:
             else:
                 self.declared = body
                 self.row["import_id"] = body["import_id"]
+                self.after_registration()
         return httpx2.Response(200, json={"import": self.row})
 
     def _storage(self, request):
@@ -258,6 +260,21 @@ def test_a_file_that_changes_while_it_is_archived_fails_without_a_torn_archive_a
     assert cloud.uploaded == {}
 
     assert asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))["observed_state"] == "done"
+
+
+@needs_age
+def test_a_same_size_save_between_the_scan_and_the_read_does_not_abandon_the_import(tmp_path):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "a.txt").write_text("before the save")
+    identity, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    cloud.after_registration = lambda: (folder / "a.txt").write_text("after the save!")
+
+    result = asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
+
+    assert result["observed_state"] == "done"
+    assert _members(identity, cloud.ciphertext) == {"a.txt": b"after the save!"}
 
 
 @needs_age

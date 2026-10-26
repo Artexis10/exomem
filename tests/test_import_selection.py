@@ -107,14 +107,29 @@ def test_an_unreadable_file_is_named_before_any_copy_is_tried(tmp_path):
     assert selection.tally()[Reason.UNREADABLE] == (1, 8)
 
 
-def test_a_folder_junction_is_skipped_and_never_entered(tmp_path, monkeypatch):
+class _MountPoint:
+    """The part of a Windows `lstat` result that names a junction."""
+
+    st_reparse_tag = 0xA0000003  # the Windows mount point tag that marks a junction
+
+
+@pytest.mark.parametrize("platform", ["os.path.isjunction", "Python 3.11 on Windows"])
+def test_a_folder_junction_is_skipped_and_never_entered(tmp_path, monkeypatch, platform):
     # A junction is a folder link that `is_symlink` does not report, and Linux cannot make one;
-    # the platform's own predicate is replaced so the walk sees the folder "linked" as a junction.
+    # the platform's own answers are replaced so the walk sees the folder "linked" as a junction.
     outside = tmp_path / "outside"
     _write(outside, {"secret.txt": "not part of the folder"})
     folder = tmp_path / "folder"
     _write(folder, {"a.txt": "kept", "linked/secret.txt": "stands in for the junction target"})
-    monkeypatch.setattr(os.path, "isjunction", lambda path: os.path.basename(path) == "linked", raising=False)
+    if platform == "os.path.isjunction":
+        if not hasattr(os.path, "isjunction"):
+            pytest.skip("os.path.isjunction needs Python 3.12")
+        monkeypatch.setattr(os.path, "isjunction", lambda path: os.path.basename(path) == "linked")
+    else:
+        # Python 3.11 has no isjunction; a Windows `lstat` carries the reparse tag instead.
+        monkeypatch.delattr(os.path, "isjunction", raising=False)
+        real_lstat = os.lstat
+        monkeypatch.setattr(os, "lstat", lambda path: _MountPoint if os.path.basename(path) == "linked" else real_lstat(path))
 
     selection = select(folder)
 

@@ -253,7 +253,8 @@ def _copy_file(fs, directory, root: Path, staged_root: Path, item: Kept) -> dict
         leaf = item.rel.rsplit("/", 1)[-1]
         published = held_fs.publish_bytes(fs, directory, leaf, held_fs.Chunks(open=stream.parts))
         if not published.ok:
-            return {"code": "STAGING_REFUSED", "detail": published.error.code}
+            # The vault gives the same refusal for the same name on every run, so a rerun cannot fix it.
+            return {"code": "STAGING_REFUSED", "detail": published.error.code, "final": True}
         after = os.fstat(descriptor)
         if stream.size != item.size or after.st_size != item.size or after.st_mtime_ns != before.st_mtime_ns:
             # The original changed while it was read, so the staged bytes may mix two versions.
@@ -262,7 +263,7 @@ def _copy_file(fs, directory, root: Path, staged_root: Path, item: Kept) -> dict
         try:
             staged = os.lstat(staged_root / item.rel)
         except OSError:
-            return {"code": "STAGING_REFUSED", "detail": "STAGED_FILE_MISSING"}
+            return {"code": "STAGED_FILE_MISSING"}
         # The staged file's own identity and change time let a resume tell this copy from a replaced one.
         return {"kind": "file", "path": item.rel, "size": item.size, "sha256": stream.digest.hexdigest(),
                 "mtime_ns": item.mtime_ns, "staged_ino": staged.st_ino, "staged_ctime_ns": staged.st_ctime_ns}
@@ -303,7 +304,7 @@ def _replay(records: list[dict]) -> dict[str, dict]:
     for record in records:
         if record.get("kind") == "file":
             verified[record["path"]] = record
-        elif record.get("kind") in ("invalid", "removed"):
+        elif record.get("kind") == "invalid" or record.get("kind") == "removed":
             verified.pop(record["path"], None)
     return verified
 
@@ -322,10 +323,12 @@ class _Run:
                      if _is_staged(self.staged_root, item, self.verified.get(item.rel))}
         self.pending = [item for item in selection.kept if item.rel not in self.done]
         self.needed = sum(item.size for item in self.pending)
+        # A rerun can copy a file in `failures` (it changed or could not be read); one in `refused` is final.
         self.failures: list[tuple[str, str]] = []
+        self.refused: list[tuple[str, str]] = []
 
     def _fail(self, rel: str, outcome: dict) -> None:
-        self.failures.append((rel, outcome["code"]))
+        (self.refused if outcome.get("final") else self.failures).append((rel, outcome["code"]))
         self.journal.add({"kind": "left_out", "path": rel, **outcome})
 
     def prune(self, filesystem) -> None:
@@ -368,7 +371,7 @@ class _Run:
                         directory = None
                     made = filesystem.parent(parent, create=True, access="mutate")
                     if not made.ok:
-                        self._fail(item.rel, {"code": "STAGING_REFUSED", "detail": made.error.code})
+                        self._fail(item.rel, {"code": "STAGING_REFUSED", "detail": made.error.code, "final": True})
                         open_parent = None
                         continue
                     directory, open_parent = made.require(), parent
@@ -410,7 +413,7 @@ class _Run:
             self.progress.tick(f"Verifying: {ordinal:,} of {len(self.selection.kept):,} files")
 
     def finish(self, journals: Path, include_hidden: bool) -> dict:
-        """Close the manifest: final when every file is staged, left open for a rerun when some failed."""
+        """Close the manifest: final when every file is staged or refused by the vault, open for a rerun otherwise."""
         kept = [item for item in self.selection.kept if item.rel in self.done]
         staged = {"files": len(kept), "bytes": sum(item.size for item in kept)}
         manifest = self.journal.path
@@ -419,12 +422,13 @@ class _Run:
             self.journal.close()
             manifest = journals / f"{self.claim.import_id}{_DONE_SUFFIX}"
             os.replace(self.journal.path, manifest)
-        for rel, code in self.failures[:_SHOWN_FAILURES]:
+        for rel, code in [*self.failures, *self.refused][:_SHOWN_FAILURES]:
             self.progress.say(f"Not copied: {rel} ({code}).")
         result = {
             "ok": not self.failures, "import_id": self.claim.import_id, "collection": self.root.name,
             "start_path": self.start_path, "include_hidden": include_hidden, "staged": staged,
-            "failed_while_copying": len(self.failures), **self.selection.summary(), "manifest": str(manifest),
+            "failed_while_copying": len(self.failures), "refused_by_vault": len(self.refused),
+            **self.selection.summary(), "manifest": str(manifest),
             "staged_folder": str(self.staged_root),
         }
         if self.failures:
@@ -436,8 +440,10 @@ def stage(folder: Path, vault: Path, *, include_hidden: bool = False, use_gitign
           progress: Progress | None = None, free_bytes=_free_bytes) -> dict:
     """Copy a folder into the vault's `_Imports/` and verify the copy; the original is never changed.
 
-    The result has `ok` false and the code `COPY_INCOMPLETE` when some files could not be copied. The import
-    then stays open, and the same command run again retries only those files under the same import id.
+    The result has `ok` false and the code `COPY_INCOMPLETE` when some files changed or could not be read while
+    copying. The import then stays open, and the same command run again retries only those files under the same
+    import id. A file that the vault refuses is final: it is left out with its code, counted in `refused_by_vault`,
+    and the import finishes without it.
     """
     from .adoption_run import IMPORT_STAGE_DIR
     from .cloud_import import DEFAULT_RESERVE_BYTES
@@ -507,7 +513,10 @@ def _closing_lines(result: dict) -> list[str]:
              "This is a second copy of the folder on this disk. No Exomem command discards it: "
              f"after adoption finishes, delete {Path(result['staged_folder']).parent} to free the space."]
     if result["ok"]:
-        return [*lines, f"Manifest: {result['manifest']}", f"Next: run {start}."]
+        refused = result["refused_by_vault"]
+        note = [f"{files_phrase(refused)} left out because the vault refused {'it' if refused == 1 else 'them'}: "
+                "the manifest gives each a code."] if refused else []
+        return [*lines, *note, f"Manifest: {result['manifest']}", f"Next: run {start}."]
     return [*lines, f"Manifest: {result['manifest']}",
             f"The import is not finished: {files_phrase(result['failed_while_copying'])} could not be copied. "
             f"Run the same command again to retry only those under import {result['import_id']}."]

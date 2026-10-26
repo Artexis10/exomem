@@ -195,6 +195,28 @@ def test_the_command_exits_with_an_error_and_names_the_rerun_when_a_file_could_n
     assert json.loads(capsys.readouterr().out)["import_id"] == result["import_id"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a backslash separates folders on Windows, so no such file name exists")
+def test_a_file_the_vault_refuses_is_left_out_with_its_code_and_the_import_still_finishes(tmp_path, monkeypatch, capsys):
+    vault = _vault(tmp_path)
+    folder = _folder(tmp_path, {"good.md": b"kept", "a\\b.md": b"a name the vault never accepts"})
+    monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
+
+    status = cli._dispatch_main(["import", str(folder), "--vault", str(vault)])
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    # A rerun would be refused the same way, so asking for one would never end.
+    assert (status, result["ok"], result["failed_while_copying"], result["refused_by_vault"]) == (0, True, 0, 1)
+    assert result["manifest"].endswith(".jsonl") and not result["manifest"].endswith(".partial.jsonl")
+    records = [json.loads(line) for line in Path(result["manifest"]).read_text(encoding="utf-8").splitlines()]
+    refused = [record for record in records if record["kind"] == "left_out" and record["code"] == "STAGING_REFUSED"]
+    assert [(record["path"], record["final"]) for record in refused] == [("a\\b.md", True)]
+    assert records[-1]["kind"] == "done"
+    assert _tree(vault / result["start_path"] / "Field Notes") == {"good.md": b"kept"}
+    assert "1 file left out because the vault refused it" in captured.err
+    assert captured.err.strip().splitlines()[-1].startswith("Next: run adoption_studio start")
+
+
 def test_resume_removes_staged_files_the_folder_no_longer_selects_and_records_each_removal(tmp_path):
     vault = _vault(tmp_path)
     files = {f"{name}.txt": name.encode() * 100 for name in ("a", "b", "c", "d")}
