@@ -395,7 +395,7 @@ def _authored_between(ctx: Context, page: Any, other: Any) -> bool:
     from . import epistemic_graph
 
     for source, target in ((page, other), (other, page)):
-        wanted = epistemic_graph._with_md(target.rel_path)
+        wanted = epistemic_graph._page_rel(target.rel_path)
         if any(path == wanted for _kind, path in ctx.authored(source)):
             return True
     return False
@@ -427,9 +427,9 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     ):
         if str(candidate.get("method") or "") not in LINK_METHODS:
             continue
-        if epistemic_graph._with_md(str(candidate.get("from") or rel_path)) != rel_path:
+        if epistemic_graph._page_rel(str(candidate.get("from") or rel_path)) != rel_path:
             continue
-        target_rel = epistemic_graph._with_md(str(candidate.get("to") or ""))
+        target_rel = epistemic_graph._page_rel(str(candidate.get("to") or ""))
         target = _governed(ctx, target_rel)
         if target is None:
             continue
@@ -462,8 +462,8 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
             }
         ]
         shared = (candidate.get("evidence") or {}).get("shared_source")
-        if isinstance(shared, str) and _sig(ctx, epistemic_graph._with_md(shared)):
-            shared_rel = epistemic_graph._with_md(shared)
+        if isinstance(shared, str) and _sig(ctx, epistemic_graph._page_rel(shared)):
+            shared_rel = epistemic_graph._page_rel(shared)
             # A Source is raw material: its title comes from the graph, unparsed.
             node = snapshot.execute(
                 "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
@@ -527,7 +527,7 @@ def _link_kwargs(
         "measures": {
             "relation_type": str(candidate.get("relation_type") or ""),
             "method": str(candidate.get("method") or ""),
-            "to": epistemic_graph._with_md(str(candidate.get("to") or "")),
+            "to": epistemic_graph._page_rel(str(candidate.get("to") or "")),
         },
         "identity": review_id,
         "ref": enriched["ref"],
