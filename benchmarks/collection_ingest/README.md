@@ -40,6 +40,14 @@ Profiles: `small` (60 notes, 15 attachments), `standard` (1,000 notes, 100 attac
 `heavy` (standard plus large filler binaries, `--heavy-bytes` sets the size, default 2 GiB).
 The same seed gives a byte-identical collection and key (`fixture_tree_sha256` in the key).
 
+`drive.py --include-rule` accepts a JSON selection rule and can be repeated.
+The driver applies exactly these rules in both journeys.
+For example, `--include-rule '{"path":"Collection","adopt_as":"note","note_type":"insight"}'`
+imports the collection's Markdown files as draft notes with a registered note type.
+Explicit rules replace the default selection and legacy folder probe. A refusal stops the journey instead of retrying without the rule.
+The log records the rules and every Knowledge Base page after each journey, including notes, to detect duplicates.
+The driver skips optional Markdown manifests for each run, so those snapshots measure item creation.
+
 The collection has 23 nested folders, about 10 percent Japanese notes (some with NFD file
 names), wikilinks in every written form (path, basename, alias, heading, front-matter
 alias), unresolvable and ambiguous targets, embeds, three tag styles, aliases, properties,

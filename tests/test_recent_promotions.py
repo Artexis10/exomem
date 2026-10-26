@@ -212,7 +212,7 @@ def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
     assert _count(vault) == 1
 
 
-def _record_after_loading(vault: Path, loaded, finish) -> None:
+def _record_after_loading(vault: Path, loaded, finish, ready, proceed) -> None:
     from exomem import review_state
     from exomem.governance.principal import library_scope
 
@@ -226,13 +226,19 @@ def _record_after_loading(vault: Path, loaded, finish) -> None:
 
     review_state.ReviewStateStore.load = paused_load
     with library_scope():
+        ready.set()
+        assert proceed.wait(60)
         assert promotions.record(vault, "entity", [{"path": "second.md"}], write="second")
 
 
-def _settle_from_another_process(vault: Path, promotion_id: str, started, finished) -> None:
+def _settle_from_another_process(
+    vault: Path, promotion_id: str, started, finished, ready, proceed,
+) -> None:
     from exomem.governance.principal import library_scope
 
     with library_scope():
+        ready.set()
+        assert proceed.wait(60)
         started.set()
         promotions.settle(vault, promotion_id, "settled by delivery")
         finished.set()
@@ -248,14 +254,23 @@ def test_another_process_record_cannot_erase_a_persisted_settlement(vault: Path)
     assert first is not None
     context = multiprocessing.get_context("spawn")
     loaded, finish, started, finished = (context.Event() for _ in range(4))
-    recorder = context.Process(target=_record_after_loading, args=(vault, loaded, finish))
-    settler = context.Process(
-        target=_settle_from_another_process, args=(vault, first, started, finished),
+    recorder_ready, settler_ready, record, settle = (context.Event() for _ in range(4))
+    recorder = context.Process(
+        target=_record_after_loading, args=(vault, loaded, finish, recorder_ready, record),
     )
-    recorder.start()
+    settler = context.Process(
+        target=_settle_from_another_process,
+        args=(vault, first, started, finished, settler_ready, settle),
+    )
     try:
-        assert loaded.wait(10)
+        recorder.start()
         settler.start()
+        # Finish process startup before the recorder's bounded critical pause.
+        assert recorder_ready.wait(10)
+        assert settler_ready.wait(10)
+        record.set()
+        assert loaded.wait(10)
+        settle.set()
         assert started.wait(10)
         # Reproduce the old overwrite if settlement can commit against the paused preimage.
         finished.wait(1)
@@ -269,6 +284,8 @@ def test_another_process_record_cannot_erase_a_persisted_settlement(vault: Path)
         assert state == "dismissed"
     finally:
         finish.set()
+        record.set()
+        settle.set()
         for process in (recorder, settler):
             if process.pid is not None:
                 process.join(10)

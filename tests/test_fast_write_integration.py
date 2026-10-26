@@ -18,7 +18,9 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -465,6 +467,224 @@ def test_flag_default_is_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shipped default stays off until live acceptance flips it."""
     monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
     assert writer_lease.fast_durable_ack_active() is False
+
+
+@pytest.mark.parametrize("flag", [None, "0"])
+def test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    """Saving operational progress must not turn a bounded import into a graph rebuild."""
+    from exomem import adoption_run, commands, deferred_index
+
+    if flag is None:
+        monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", flag)
+    started = commands.op_adoption_studio(vault, action="start", path="")
+    run = adoption_run.AdoptionRunStore(vault).load(started["run_id"])
+    deferred_index.mark_graph_full_rebuild(vault, generation=1)
+
+    def save_progress(root, action):
+        adoption_run.AdoptionRunStore(root).save(run)
+        return {"status": "committed", "warnings": []}
+
+    terminal = _manager(tmp_path).invoke(
+        SimpleNamespace(name="adoption_studio", leaf=save_progress, read_only=False),
+        (vault,), {"action": "apply"}, idempotency_key="checkpoint-graph-debt",
+    )
+    assert terminal["status"] == "committed"
+    assert (deferred_index.graph_full_rebuild_pending(vault) is not None) == (flag is None)
+
+
+def test_expired_acknowledgement_does_not_wait_for_status_io(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow status read after the deadline must not hold a committed reply."""
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    entered, release = threading.Event(), threading.Event()
+    checking = {"active": False}
+    acknowledge = writer_lease._acknowledge_derived_batches_timed
+    status = derived_receipts.component_status
+
+    def expired_acknowledgement(result, session, *, budget_deadline=None):
+        checking["active"] = True
+        try:
+            return acknowledge(result, session, budget_deadline=time.monotonic() - 1)
+        finally:
+            checking["active"] = False
+
+    def slow_status(*args, **kwargs):
+        if checking["active"]:
+            entered.set()
+            assert release.wait(8), "test did not release the status read"
+        return status(*args, **kwargs)
+
+    monkeypatch.setattr(writer_lease, "_acknowledge_derived_batches_timed", expired_acknowledgement)
+    monkeypatch.setattr(derived_receipts, "component_status", slow_status)
+    manager = _manager(tmp_path)
+    arguments = dict(rel_path="Knowledge Base/Notes/deadline.md", source=_compiled_page("Deadline", "deadlineprobe"))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_governed_write, manager, vault, **arguments, idempotency_key="expired-status")
+        try:
+            terminal = future.result(timeout=4)
+        finally:
+            release.set()
+    assert not entered.is_set()
+    assert terminal["status"] == "committed" and terminal["derived_sync"] == "pending"
+    assert "deadlineprobe" in (vault / arguments["rel_path"]).read_text()
+    assert arguments["rel_path"] in _keyword(vault, "deadlineprobe")
+    assert _governed_write(manager, vault, **arguments, idempotency_key="expired-status") == terminal
+    assert _drain(vault) > 0
+
+
+def test_own_note_continuations_leave_time_for_mandatory_custody(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaf-only pacing must not spend the time needed to publish committed custody."""
+    from exomem import adoption_run, commands, request_budget
+
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    folder = vault / "Collection"
+    folder.mkdir()
+    for index in range(6):
+        (folder / f"note-{index}.md").write_text(f"# Note {index}\n\nRetain observation {index}.\n")
+    run_id = commands.op_adoption_studio(vault, action="start", path="Collection")["run_id"]
+    commands.op_adoption_studio(vault, action="select", run_id=run_id, include=[
+        {"path": "Collection", "adopt_as": "note", "note_type": "insight"},
+    ])
+    plan_id = commands.op_adoption_studio(vault, action="plan", run_id=run_id)["plan"]["plan_id"]
+    clock = {"now": 1000.0, "charged": False}
+    fake_time = SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    create_note = adoption_run._create_note
+    handoff = writer_lease._handoff_derived_batches
+
+    def costly_note(*args, **kwargs):
+        result = create_note(*args, **kwargs)
+        clock["now"] += 8
+        return result
+
+    def costly_custody(session):
+        result = handoff(session)
+        if session.batches and not clock["charged"]:
+            clock["charged"] = True
+            clock["now"] += 20
+        return result
+
+    monkeypatch.setattr(adoption_run, "_create_note", costly_note)
+    monkeypatch.setattr(writer_lease, "_handoff_derived_batches", costly_custody)
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "adoption_studio")
+    leaf = command.leaf
+    results = []
+
+    def observed_leaf(*args, **kwargs):
+        result = leaf(*args, **kwargs)
+        results.append(result)
+        return result
+
+    command = replace(command, leaf=observed_leaf)
+    manager, continuation = _manager(tmp_path), None
+    for call in range(6):
+        began, clock["charged"] = clock["now"], False
+        arguments = {"action": "apply", "run_id": run_id, "plan_id": plan_id}
+        if continuation:
+            arguments["continuation"] = continuation
+        terminal = manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}")
+        assert clock["now"] - began <= request_budget.MCP_REQUEST_BUDGET_SECONDS
+        assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == terminal
+        continuation = results[-1].get("continuation")
+        if not continuation:
+            break
+    else:
+        pytest.fail("the bounded continuations did not complete the import")
+    outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
+    assert len(outcomes) == 6 and all(row["status"] == "applied" for row in outcomes.values())
+
+
+@pytest.mark.parametrize("flag", [None, "0"])
+def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    """A slow sidecar fan-out must not hold the default import reply."""
+    from exomem import adoption_run, commands, freshness, media_jobs, media_processing
+
+    if flag is None:
+        monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", flag)
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "documents")
+    original = vault / "Collection/custodyprobe.pdf"
+    original.parent.mkdir()
+    content = b"%PDF-1.4\n1 0 obj\n<< >>\nendobj\n%%EOF\n"
+    original.write_bytes(content)
+    (original.parent / "own-note.md").write_text("# Own note\n\nRetain this observation.\n")
+    started = commands.op_adoption_studio(vault, action="start", path="Collection")
+    run_id = started["run_id"]
+    commands.op_adoption_studio(
+        vault, action="select", run_id=run_id,
+        include=[{"path": "Collection", "adopt_as": "note", "note_type": "insight"}],
+    )
+    plan = commands.op_adoption_studio(vault, action="plan", run_id=run_id)["plan"]
+    freshness.seed(vault, "vault", [
+        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
+    ])
+    find_module.shared_resolver(vault)
+    command = next(cmd for cmd in commands.PRODUCT_COMMANDS if cmd.name == "adoption_studio")
+    manager = _manager(tmp_path)
+    arguments = {"action": "apply", "run_id": run_id, "plan_id": plan["plan_id"]}
+    entered = threading.Event()
+    release = threading.Event()
+    fanout = media_processing.post_commit_batch_fanout
+
+    def slow_fanout(*args, **kwargs):
+        entered.set()
+        assert release.wait(15), "test did not release the slow derived operation"
+        return fanout(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "post_commit_batch_fanout", slow_fanout)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            manager.invoke, command, (vault,), arguments,
+            idempotency_key="import-media-custody",
+        )
+        try:
+            if flag == "0":
+                assert entered.wait(8), "explicit rollback did not run the synchronous fan-out"
+                assert not future.done()
+                release.set()
+            terminal = future.result(timeout=8)
+        finally:
+            release.set()
+    assert terminal["status"] == "committed"
+    outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
+    assert outcomes["Collection/own-note.md"]["status"] == "applied"
+    outcome = outcomes["Collection/custodyprobe.pdf"]
+    artifact = vault / outcome["artifact_path"]
+    assert original.read_bytes() == artifact.read_bytes() == content
+    job = media_jobs.MediaJobStore(vault).get_by_binary(artifact)
+    assert job is not None and job.sidecar_path.is_file()
+    assert "pending" in job.sidecar_path.read_text(encoding="utf-8")
+    if flag is None:
+        assert not entered.is_set()
+        assert terminal["derived_sync"] == "pending"
+        snapshot = derived_receipts.snapshot_pending_visibility(vault, limit=64)
+        assert snapshot.outcome == "complete", snapshot.failure_code
+        assert any(
+            row.rel_path == outcome["target_path"] and row.state == "live"
+            for batch in snapshot.batches for row in batch.rows
+        )
+        assert outcome["target_path"] in _keyword(vault, "custodyprobe")
+        assert _drain(vault) > 0
+        assert derived_receipts.recoverable_batch_count(vault) == 0
+    else:
+        assert derived_receipts.recoverable_batch_count(vault) == 0
+    pages = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.md")}
+    assert manager.invoke(
+        command, (vault,), arguments, idempotency_key="import-media-custody"
+    ) == terminal
+    assert {path: path.read_bytes() for path in pages} == pages
+    assert media_jobs.MediaJobStore(vault).get_by_binary(artifact).id == job.id
 
 
 def test_flag_rollback_drains_outstanding_custody_before_old_behaviour(

@@ -16,6 +16,7 @@ A person with an existing collection of notes and documents should only need to 
 - **The backlog reaches the agent in bounded, grouped batches.** `unprocessed_source` joins the maintained due-state projection, and a write to a note refreshes the Sources it cites. The served block adds the outstanding count beside the visible count, so dismissing and snoozing never look like progress. Bootstrap's compact core reports per-category counts and one route to the next batch. The existing `review_memory` modes return each batch with titles, bounded excerpts, existing derivatives and recorded grouping metadata (import collection, collection folder, source kind, domain, capture date). The agent groups the batch by topic and acts through the existing governed writers. No new tool or input parameter is added.
 - **Collection reflection stays honest.** An `unreflected_observations` item still clears only through a declared collection reflection, never through a note.
 - **A local folder outside the vault imports through staging.** `exomem import <folder>` copies the folder into `_Imports/<import_id>/` with retained no-follow custody and a manifest, after a preflight that reports file count and bytes against the effective limits. Adoption then runs on the staged folder, as on Cloud. `adoption_studio start` refuses a path outside the vault with a code that names this route.
+- **Media import returns after durable custody.** `apply` queues extraction and uses the existing durable derived batches by default. Graph and index work can remain pending after the reply. An explicit `EXOMEM_FAST_DURABLE_ACK=0` restores synchronous fan-out.
 
 - **The Cloud CLI works with no setup and reports what it does.** `exomem cloud import` and `exomem cloud export` default to the production Cloud endpoints, so a user sets no environment variables; flags and the existing variables still override them. `exomem cloud import` reports the preflight count and bytes, then progress for each phase (archive and encryption, upload, server import), and every failure with its phase, reason and import id.
 
@@ -29,7 +30,7 @@ None.
 
 ### Modified Capabilities
 
-- `adoption-studio`: own-note selection rules, the plan and apply of draft notes, the outside-vault refusal and the local staging route.
+- `adoption-studio`: own-note selection rules, the plan and apply of draft notes, durable media custody, the outside-vault refusal and the local staging route.
 - `attention-queue`: the source-coverage predicate, `unprocessed_source` in the due-state projection, honest counts, and the bounded grouped work item.
 - `compiled-source-lineage`: `ingested_into` is a citation edge, not a completion claim.
 - `cloud-vault-import`: an added requirement for the CLI's default endpoints, preflight and phase progress. The capability's other requirements stay in the active `add-exomem-cloud-vault-import` change, which Cloud owns.

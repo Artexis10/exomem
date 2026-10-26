@@ -53,6 +53,7 @@ _ACTIVE: dict[str, DerivedDrain] = {}
 _PASS_OBSERVATION_LIMIT = 64
 _PASS_LOCK = threading.Lock()
 _PASS_OBSERVATIONS: dict[str, dict[str, float | int]] = {}
+_CUSTODY_CURSORS: dict[str, tuple[str, str]] = {}
 
 
 def _note_pass_observation(
@@ -104,6 +105,7 @@ def reset_pass_observations() -> None:
     """Drop every cell's last-pass observation. Durable custody is untouched."""
     with _PASS_LOCK:
         _PASS_OBSERVATIONS.clear()
+        _CUSTODY_CURSORS.clear()
 
 
 def _key(vault_root: Path) -> str:
@@ -235,12 +237,23 @@ def drain_once(
     now: float | None = None,
     owner: str | None = None,
 ) -> int:
-    """Claim and dispatch no more than ``limit`` exact component revisions."""
+    """Bound component dispatch and imported-custody handoff; return progress."""
     if limit <= 0:
         return 0
     started_at = time.time() if now is None else float(now)
     claim_owner = owner or f"derived-{secrets.token_hex(12)}"
     from . import index_sync
+
+    key = _key(vault_root)
+    with _PASS_LOCK:
+        cursor = _CUSTODY_CURSORS.get(key, ("", ""))
+    cursor, handed_on = derived_receipts.retire_imported_visibility(
+        vault_root, limit=int(limit), after=cursor, now=started_at,
+    )
+    with _PASS_LOCK:
+        if len(_CUSTODY_CURSORS) >= _PASS_OBSERVATION_LIMIT and key not in _CUSTODY_CURSORS:
+            _CUSTODY_CURSORS.pop(next(iter(_CUSTODY_CURSORS)))
+        _CUSTODY_CURSORS[key] = cursor
 
     derived_receipts.recover_prepared_batches(
         vault_root,
@@ -310,7 +323,7 @@ def drain_once(
         oldest_due_at=oldest_due_at,
         at=started_at,
     )
-    return len(completed_batches)
+    return len(completed_batches) + handed_on
 
 
 def _dispatch_claims(

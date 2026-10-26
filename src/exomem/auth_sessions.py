@@ -1479,6 +1479,13 @@ async def origin_session_active(who: Any) -> bool:
     client = who.client_binding
     if client is None:
         return False
+    from . import cloud_cell
+
+    if cloud_cell.is_cloud_issuer_family(who.issuer_family):
+        # A Cloud cell has no session store; the gateway proves the login on each request.
+        from . import cloud_origin
+
+        return cloud_origin.matches(who)
     from . import local_ingress, server_auth
 
     try:
