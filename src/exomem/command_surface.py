@@ -853,6 +853,7 @@ def bind_vault(
                 "idempotency_principal_scope": principal.audience_id,
             } if explicit_key is not None else {}
             t0 = time.perf_counter()
+            returned_from_invoke = False
             try:
                 call_spans.mark("command.leaf_start")
                 result = invoke_command(
@@ -863,6 +864,7 @@ def bind_vault(
                     **retry_options,
                     **kwargs,
                 )
+                returned_from_invoke = True
                 # Two spans that together are the leaf's `duration_ms`: the
                 # command itself, and the MCP-layer post-filter and scrub that
                 # run on its result. A slow call then says which side it was on.
@@ -941,6 +943,11 @@ def bind_vault(
                 refusal = cli_ops.public_refusal(error)
                 if refusal is None:
                     raise
+                if returned_from_invoke and not invocation_read_only:
+                    # The leaf returned before this second pass over its result refused.
+                    from .writer_lease import post_leaf_refusal
+
+                    refusal = cli_ops.public_refusal(post_leaf_refusal(error)) or refusal
                 _log_tool_failure(
                     tool=tool_name,
                     request_id=request_id,

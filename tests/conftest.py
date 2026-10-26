@@ -1140,6 +1140,19 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def obligations_only(vault: Path) -> Path:
+    """The fixture vault without its captured Sources.
+
+    The Sources there are an outstanding backlog (`unprocessed_source`), which counts
+    in the due-state projection. A module that counts dated obligations uses this
+    through `pytestmark`, so the backlog does not shift its totals.
+    """
+    shutil.rmtree(vault / "Knowledge Base" / "Sources")
+    find_module.clear_cache()
+    return vault
+
+
+@pytest.fixture
 def source_schema(vault: Path) -> schema_module.SourceSchema:
     return schema_module.load_source_schema(vault)
 

@@ -27,6 +27,7 @@ from . import (
     find_results,
     held_fs,
     markdown_regions,
+    note_types,
     reserved_paths,
     source_taxonomy,
 )
@@ -293,6 +294,10 @@ class Destinations:
         path = self.root / rel_path
         self._names(path.parent).add(path.name.casefold())
 
+    def taken(self, rel_path: str) -> bool:
+        path = self.root / rel_path
+        return path.name.casefold() in self._names(path.parent)
+
     def allocate(
         self, folder: Path, stem: str, *, artifact_suffix: str | None
     ) -> tuple[str, str | None]:
@@ -318,7 +323,8 @@ class Destinations:
 def _folder_for(root: Path, classification: Mapping[str, Any] | None,
                 taxonomy: source_taxonomy.SourceTaxonomy | None) -> Path | str:
     """Where this item's Source lives, or a refusal code when the registry no longer agrees."""
-    if not classification:
+    # A note rule alone leaves the Source copy unclassified: it files under Imported.
+    if not classification or not classification.get("source_kind"):
         return kb_root(root) / "Sources" / IMPORTED_FOLDER
     assert taxonomy is not None
     try:
@@ -507,6 +513,181 @@ def text_facts(original_path: str, text: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# own notes
+# --------------------------------------------------------------------------- #
+def _is_note_of(
+    root: Path, rel_path: str, *, collection: str, collection_path: str
+) -> bool:
+    """Whether `rel_path` is a compiled page that carries this collection path's identity."""
+    try:
+        frontmatter = _leading_frontmatter(root, root / rel_path)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return False
+    if frontmatter is None:
+        return False
+    return (
+        note_types.Basis(root).selects(frontmatter.get("type"), note_types.compiled)
+        and _text_field(frontmatter.get("import_collection")) == nfc(collection)
+        and _text_field(frontmatter.get("collection_path")) == collection_path
+    )
+
+
+class NoteIndex:
+    """The notes that earlier imports made, by import identity, read once per plan or apply call.
+
+    A note carries the `import_collection` and `collection_path` of its original wherever
+    the user has since moved it, so the index finds a moved note. The knowledge base is
+    walked on the first lookup: a call without an own-note item never reads the notes.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._paths: dict[tuple[str, str], str] | None = None
+
+    def _read(self) -> dict[tuple[str, str], str]:
+        from .find_corpus import walk_md
+
+        found: dict[tuple[str, str], str] = {}
+        kb = kb_root(self._root)
+        if not kb.is_dir():
+            return found
+        basis = note_types.Basis(self._root)
+        # A compiled page cannot be in Sources/: the mover refuses moves into it, and
+        # `read_import_index` already reads its pages for their own identities.
+        sources = kb / "Sources"
+        # Sorted, so the first of two pages that carry one identity is always the same page.
+        for page in sorted(walk_md(kb)):
+            if page.is_relative_to(sources):
+                continue
+            try:
+                frontmatter = _leading_frontmatter(self._root, page)
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                continue
+            if frontmatter is None:
+                continue
+            collection = _text_field(frontmatter.get("import_collection"))
+            collection_path = _text_field(frontmatter.get("collection_path"))
+            if collection is None or collection_path is None:
+                continue
+            if basis.selects(frontmatter.get("type"), note_types.compiled):
+                found.setdefault(
+                    (collection, collection_path), page.relative_to(self._root).as_posix()
+                )
+        return found
+
+    def find(self, *, collection: str, collection_path: str) -> str | None:
+        if self._paths is None:
+            self._paths = self._read()
+        return self._paths.get((nfc(collection), collection_path))
+
+
+def find_note(
+    root: Path,
+    notes: NoteIndex,
+    *,
+    collection: str,
+    collection_path: str,
+    frozen: str | None = None,
+) -> str | None:
+    """The note an earlier run created for this collection path, or None.
+
+    The frozen target is checked first: it holds a note committed after `notes` was
+    read, such as one whose commit raised. Otherwise the note is found by the import
+    identity it carries, wherever it now is.
+    """
+    if frozen and _is_note_of(root, frozen, collection=collection, collection_path=collection_path):
+        return frozen
+    return notes.find(collection=collection, collection_path=collection_path)
+
+
+def is_markdown(original_path: str) -> bool:
+    return original_path.lower().endswith(_MARKDOWN_SUFFIXES)
+
+
+def note_title(text: str, fallback: str) -> str:
+    """The note's title: the original's front-matter `title`, else the title its Source has."""
+    title = parse_frontmatter(text)[0].get("title")
+    if isinstance(title, str) and title.strip() and "\n" not in title:
+        return nfc(title.strip())
+    return fallback
+
+
+def plan_note(
+    root: Path,
+    item: Mapping[str, Any],
+    text: str,
+    rule: Mapping[str, Any],
+    *,
+    destinations: Destinations,
+    date_iso: str,
+) -> dict[str, Any] | dict[str, str]:
+    """The frozen note target and inputs of one own-note item, or a refusal `{code, reason}`.
+
+    The leaf names the folder and file under the plan's day; this only keeps two notes
+    of one plan apart.
+    """
+    from .note import NoteError, planned_destination
+    from .vault import InvalidSlugError
+
+    title = note_title(text, item["title"])
+    note: dict[str, Any] = {
+        "note_type": rule["note_type"],
+        "title": title,
+        "status": "draft",
+    }
+    for field in ("project", "domain"):
+        if rule.get(field):
+            note[field] = rule[field]
+    slug: str | None = None
+    attempt = 1
+    while True:
+        try:
+            target = planned_destination(
+                root, note_type=rule["note_type"], title=title, slug=slug,
+                project=rule.get("project"), domain=rule.get("domain"), date_iso=date_iso,
+            )
+        except (NoteError, InvalidSlugError, ValueError) as error:
+            return {"code": getattr(error, "code", "WRITE_REFUSED"),
+                    "reason": f"the note target is unavailable: {error}"}
+        if not destinations.taken(target):
+            break
+        attempt += 1
+        slug = slugify_with_truncation_check(f"{title} {attempt}")[0]
+    reason = access.writable_reason(root, target)
+    if reason is not None:
+        return {"code": "WRITE_REFUSED", "reason": reason}
+    destinations.reserve(target)
+    note["target_path"] = target
+    if slug is not None:
+        note["slug"] = slug
+    return note
+
+
+def note_extra_frontmatter(item: Mapping[str, Any], collection: str | None) -> dict[str, Any]:
+    """The fields the note carries beyond what the note leaf renders: aliases and import identity."""
+    extra: dict[str, Any] = {}
+    if item.get("aliases"):
+        extra["aliases"] = list(item["aliases"])
+    if collection is not None:
+        extra["import_collection"] = nfc(collection)
+        extra["collection_path"] = item["collection_path"]
+    return extra
+
+
+def note_frontmatter(item: Mapping[str, Any], collection: str | None) -> dict[str, Any]:
+    """The front matter the note will carry, as previewed in the plan."""
+    note = item["note"]
+    frontmatter: dict[str, Any] = {"type": note["note_type"], "title": note["title"]}
+    if note.get("project"):
+        frontmatter["project"] = note["project"]
+    frontmatter["status"] = note["status"]
+    frontmatter["sources"] = [wikilink_for(item["target_path"])]
+    frontmatter["tags"] = list(item.get("tags", []))
+    frontmatter.update(note_extra_frontmatter(item, collection))
+    return frontmatter
+
+
+# --------------------------------------------------------------------------- #
 # one item
 # --------------------------------------------------------------------------- #
 def plan_item(
@@ -521,6 +702,7 @@ def plan_item(
     date_iso: str,
     destinations: Destinations,
     index: Iterable[EarlierImport],
+    notes: NoteIndex,
     ceiling: int,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Facts, identity and a frozen destination for one original; or a refusal dict."""
@@ -544,6 +726,11 @@ def plan_item(
             tags=[], rejected_tags=[], aliases=[], rejected_aliases=[], _refs=[],
         )
 
+    # Only a Markdown original that read as text becomes a note: an image, a PDF or a
+    # non-UTF-8 file under a note rule stays a Source. A note needs a collection label
+    # to carry the identity the next run finds it by.
+    note_rule = (classification or {}).get("note")
+    owes_note = bool(note_rule) and text is not None and collection is not None and is_markdown(original_path)
     earlier = earlier_with_same_bytes(
         index, collection=collection, collection_path=item["collection_path"],
         original_path=original_path, sha256=item["original_sha256"],
@@ -554,6 +741,21 @@ def plan_item(
         item["target_ref"] = context_refs.source_ref(earlier.path)
         item["existing_ref"] = item["target_ref"]
         item["artifact_path"] = artifact_of(root, earlier.path)
+        if owes_note:
+            # The Source exists: the note may too (a re-run), or may be owed (a crash, or
+            # an earlier import that had no note rule).
+            existing = find_note(
+                root, notes, collection=collection, collection_path=item["collection_path"]
+            )
+            if existing is not None:
+                item["existing_note"] = existing
+            else:
+                planned_note = plan_note(
+                    root, item, text, note_rule, destinations=destinations, date_iso=date_iso
+                )
+                if "code" in planned_note:
+                    return {"path": original_path, **planned_note}
+                item["note"] = planned_note
         return item, text
     changed = latest_earlier_import(
         index, collection=collection, collection_path=item["collection_path"],
@@ -561,6 +763,14 @@ def plan_item(
     )
     if changed is not None:
         item["previous_import"] = context_refs.source_ref(changed.path)
+        if owes_note:
+            previous = find_note(
+                root, notes, collection=collection, collection_path=item["collection_path"]
+            )
+            if previous is not None:
+                # The original changed: the earlier note stays as it is, and only a new Source is made.
+                item["previous_note"] = previous
+                owes_note = False
 
     folder = _folder_for(root, classification, taxonomy)
     if isinstance(folder, str):
@@ -586,6 +796,13 @@ def plan_item(
     item["artifact_path"] = artifact
     if slug_warning:
         item["slug_warning"] = slug_warning
+    if owes_note:
+        planned_note = plan_note(
+            root, item, text, note_rule, destinations=destinations, date_iso=date_iso
+        )
+        if "code" in planned_note:
+            return {"path": original_path, **planned_note}
+        item["note"] = planned_note
     return item, text
 
 
@@ -694,6 +911,21 @@ def resolve_links(
                     link["fragment"] = ref["fragment"]
                 resolved.append(link)
         item["links"] = {"resolved": resolved, "unresolved": unresolved}
+    # A note's own links point at the notes of the items it links to, not at their Sources.
+    note_of = {
+        item["target_path"]: (item.get("note") or {}).get("target_path") or item["existing_note"]
+        for item in items
+        if item.get("note") or item.get("existing_note")
+    }
+    for item in items:
+        if item.get("note"):
+            item["note"]["links"] = {
+                "resolved": [
+                    {**link, "target_path": note_of.get(link["target_path"], link["target_path"])}
+                    for link in item["links"]["resolved"]
+                ],
+                "unresolved": item["links"]["unresolved"],
+            }
 
 
 # --------------------------------------------------------------------------- #
@@ -716,6 +948,8 @@ def item_frontmatter(item: Mapping[str, Any], collection: str | None) -> dict[st
     frontmatter["original_bytes"] = item["original_bytes"]
     if item.get("previous_import"):
         frontmatter["previous_import"] = item["previous_import"]
+    if item.get("previous_note"):
+        frontmatter["previous_note"] = context_refs.vault_ref(item["previous_note"])
     if item.get("aliases"):
         frontmatter["aliases"] = list(item["aliases"])
     frontmatter["tags"] = ["imported", *item.get("tags", [])]
@@ -749,16 +983,22 @@ __all__ = [
     "Destinations",
     "EarlierImport",
     "LinkResolver",
+    "NoteIndex",
     "item_digest",
     "artifact_of",
     "decode_text",
     "earlier_import_of",
     "earlier_with_same_bytes",
+    "find_note",
+    "is_markdown",
     "item_frontmatter",
     "latest_earlier_import",
     "normalize_aliases",
     "normalize_tags",
+    "note_extra_frontmatter",
+    "note_frontmatter",
     "plan_item",
+    "plan_note",
     "plan_total_bytes",
     "read_import_index",
     "resolve_links",

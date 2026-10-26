@@ -364,7 +364,8 @@ def test_an_existing_source_is_not_required_to_match_the_projection(
     index = (vault / KB / "Sources" / "index.md").read_text(encoding="utf-8")
     assert "Sources/Other/|Other]]" in index
 
-    hits = commands.op_ask_memory(vault, query="legacy fallback capture", limit=20)
+    response = commands.op_ask_memory(vault, query="legacy fallback capture", limit=20)
+    hits = response["hits"] if isinstance(response, dict) else response
     paths = [hit["path"] if isinstance(hit, dict) else hit.path for hit in hits]
     assert any(path.endswith("2026-01-05-legacy-fallback-capture.md") for path in paths)
 
@@ -554,7 +555,9 @@ def classified_corpus(
 
 
 def _recall(vault: Path, **kwargs: object) -> set[str]:
-    hits = commands.op_ask_memory(vault, query="", limit=30, **kwargs)  # type: ignore[arg-type]
+    response = commands.op_ask_memory(vault, query="", limit=30, **kwargs)  # type: ignore[arg-type]
+    # A vault with a Source backlog may answer in the envelope that carries its due-state block.
+    hits = response["hits"] if isinstance(response, dict) else response
     return {
         (hit["path"] if isinstance(hit, dict) else hit.path).rsplit("/", 1)[-1]
         for hit in hits

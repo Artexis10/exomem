@@ -644,7 +644,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.145.1" # x-release-please-version
+version = "0.146.0" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

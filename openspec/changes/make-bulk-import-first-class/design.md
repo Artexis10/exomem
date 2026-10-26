@@ -38,7 +38,7 @@ Alternative rejected: a per-file `adopt_as` override list as the only mechanism.
 
 ### D2. An own note is a draft note plus its lossless Source
 
-For an own-note item, `plan` previews two outputs: the Source copy, exactly as a `source` item, and a note target in the note type's home. The note body is the original note body after its front matter; its title, tags and aliases come from the same parsed front matter that the Source already carries. The note's `sources:` cites the Source copy. Links from one own note to another resolve to the planned note, not to the Source; links to non-note items resolve to their Sources, as today.
+For an own-note item, `plan` previews two outputs: the Source copy, exactly as a `source` item, and a note target in the note type's home. The note body is the original note body after its front matter, unchanged, followed by the generated `## Links` section that a Source carries (the import never rewrites a sentence of the original); its title, tags and aliases come from the same parsed front matter that the Source already carries. The note's `sources:` cites the Source copy. Links from one own note to another resolve to the planned note, not to the Source; links to non-note items resolve to their Sources, as today.
 
 The note's status is `draft`. Live creation needs a typed relation or a reviewed disposition (the semantic write contract refuses `active` with `RELATION_DISPOSITION_MISSING`), and an import has reviewed nothing. Recording `reviewed_none` for a thousand unread notes would be a false review. A draft is the honest state, and D4 keeps its Source visible as work.
 

@@ -178,11 +178,14 @@ def delete_file(
     fm: dict = {}
     fm_warn: str | None = None
     catalog_before_hash: str | None = None
+    # The page as it stood, so the Sources it cited are re-judged once it is gone.
+    prior_markdown: str | None = None
     if rel_path.lower().endswith(".md"):
         try:
             snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
             catalog_before_hash = hashlib.sha256(snapshot.data).hexdigest()
             text = snapshot.data.decode("utf-8")
+            prior_markdown = text
             fm, _, _ = parse_frontmatter(text)
             if fm.get("superseded_by") and not force_superseded:
                 raise DeleteFileError(
@@ -510,6 +513,13 @@ def delete_file(
     from .writer_lease import mark_active_mutation_committed
 
     mark_active_mutation_committed()
+
+    if prior_markdown is not None:
+        from . import due_state
+
+        due_state.refresh_after_writes(
+            vault_root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
+        )
 
     # Drop Markdown rows from the semantic index sidecars. A removed media
     # binary (detected via media_types) also enters the fan-out — it purges

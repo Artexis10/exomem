@@ -32,6 +32,12 @@ def extracted(content="Reusable method: stir twice.", refs=True):
     return f"## Procedure\n- id: extracted\n{links}\n{content}\n"
 
 
+def roles(root):
+    """The artifact-role advice served now. The Sources these tests write are a backlog of their own."""
+    categories = (due_state.served(root) or {}).get("categories", {})
+    return {name: count for name, count in categories.items() if name in FAMILIES}
+
+
 def report(root):
     return audit.audit(root, categories=FAMILIES)
 
@@ -146,7 +152,7 @@ def test_synthesis_visibility_and_aliases(tmp_path, monkeypatch):
     monkeypatch.setattr(
         egress, "release_walk_filter", lambda *a, **k: lambda path: path != source_b
     )
-    assert due_state.served(tmp_path) is None
+    assert not roles(tmp_path)
     assert not report(tmp_path).findings
 
 
@@ -163,11 +169,11 @@ def test_stale_source_generation_omits_advice_until_reconcile(tmp_path):
         ),
     )
     due_state.reconcile(tmp_path)
-    assert due_state.served(tmp_path)
+    assert roles(tmp_path)
     (tmp_path / source_b).write_text((tmp_path / source_b).read_text() + "\nChanged.")
-    assert due_state.served(tmp_path) is None
+    assert not roles(tmp_path)
     due_state.reconcile(tmp_path)
-    assert due_state.served(tmp_path)
+    assert roles(tmp_path)
 
 
 def test_epoch_overflow_never_enumerates_dependent_tail(tmp_path):
@@ -381,11 +387,11 @@ def test_visible_synthesis_support_need_not_copy_withheld_provenance(tmp_path, m
     )
     write(tmp_path, destination, DEST, "research-note")
     due_state.reconcile(tmp_path)
-    assert due_state.served(tmp_path)
+    assert roles(tmp_path)
     monkeypatch.setattr(
         egress, "release_walk_filter", lambda *a, **k: lambda path: "private" not in path
     )
-    assert due_state.served(tmp_path) is None
+    assert not roles(tmp_path)
 
 
 def test_private_candidates_do_not_consume_public_candidate_cap(tmp_path, monkeypatch):

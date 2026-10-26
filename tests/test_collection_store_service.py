@@ -11,6 +11,7 @@ state, as the release would.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import functools
 import json
@@ -1778,7 +1779,10 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
 
 
 def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypatch):
-    """Waiting for acceptance must not reset the caller's completion deadline."""
+    """Waiting for acceptance must not reset the caller's completion deadline.
+
+    A read that misses it changed nothing, so it refuses as retryable; the mutation twin above
+    keeps the uncertain code."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1806,10 +1810,13 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
         token = request_budget.set_current(request_budget.RequestBudget(
             seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.8, entry=entry))
         try:
-            with pytest.raises(OpError) as pending:
-                server.call(read)
+            with pytest.raises(OpError) as refused:
+                server.call(read, read_only=True)
             assert reading.is_set()
-            assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+            assert refused.value.code == "COLLECTION_STORE_BUSY"
+            assert refused.value.as_public_dict()["status"] == "retryable"
+            assert refused.value.as_public_dict()["committed"] is False
+            assert refused.value.details["store_thread"]["alive"] is True
             assert 0.75 <= time.monotonic() - entry < 1.15
         finally:
             request_budget.reset_current(token)
@@ -1818,6 +1825,74 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
             timer.join(2)
         occupied.result(timeout=5)
     assert titles(service.root, CID) == ["Canonical"]
+
+
+@contextmanager
+def held_handoff(service):
+    """The lease manager's store handoff, held open while a store borrower has not yet left: what an idle release does."""
+    manager, borrowed, leave = service.manager, threading.Event(), threading.Event()
+
+    def borrow():
+        with manager._collection_store_checkout():
+            borrowed.set()
+            assert leave.wait(10), "the test did not end the handoff"
+
+    borrower = threading.Thread(target=borrow)
+    borrower.start()
+    assert borrowed.wait(5)
+    handoff = threading.Thread(target=manager._release_collection_store, kwargs=dict(
+        token=manager._fencing_token, deadline=time.monotonic() + 10, release=False))
+    handoff.start()
+    try:
+        _until(lambda: manager._store_handoff)
+        yield leave
+    finally:
+        leave.set()
+        handoff.join(10)
+        borrower.join(10)
+
+
+def test_a_read_arriving_during_a_store_handoff_waits_for_it(service):
+    """Defect: every request that arrived while the lease manager drained the store for a handoff,
+    which an idle service does about once a minute, was refused as busy."""
+    with held_handoff(service) as leave:
+        threading.Timer(0.3, leave.set).start()
+        assert titles(service.root, CID) == ["Canonical"]
+
+
+def test_a_read_during_a_store_handoff_that_outlasts_the_mutation_timeout_is_refused_as_busy(service, monkeypatch):
+    monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+    with held_handoff(service):
+        entry = time.monotonic()
+        with pytest.raises(OpError) as busy:
+            titles(service.root, CID)
+        assert busy.value.code == "COLLECTION_STORE_BUSY" and busy.value.as_public_dict()["committed"] is False
+        assert time.monotonic() - entry < 1.5
+
+
+def test_a_clean_service_stop_hands_the_writer_lease_back_with_the_unmoved_head(service, monkeypatch):
+    """Defect: uvicorn re-raises the stop signal after a graceful shutdown, so the exit hook never ran
+    and the next process waited out the lease TTL. The lifespan end is the only stop this process sees."""
+    from exomem import server_runtime
+
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    root, client = service.root, service.manager.client
+    committed = store_meta(root)[schema.META_COMMIT_SEQ]
+    activation = server_runtime.LocalRuntimeActivation(root, fallback_seconds=60.0)
+
+    async def serve_then_stop():
+        async with activation.lifespan()(SimpleNamespace()):
+            assert client.status().holder == service.manager.config.replica_id
+
+    asyncio.run(serve_then_stop())
+
+    meta = store_meta(root)
+    published = json.loads(meta[schema.META_PUBLISHED_REPLICA_HEAD])
+    handed_back = client.status()
+    assert handed_back.holder is None
+    assert meta[schema.META_COMMIT_SEQ] == committed
+    assert str(published["commit_seq"]) == committed and schema.META_PENDING_REPLICA_PUBLICATION not in meta
+    assert handed_back.collection_store_head.commit_seq == int(committed)
 
 
 @pytest.mark.parametrize("alias_kind", [

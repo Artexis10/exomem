@@ -8,6 +8,7 @@ list_directory, etc.).
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import hashlib
@@ -17,6 +18,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -31,8 +33,18 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 import yaml
 from slugify import slugify as _slugify
 
-from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths, view_lag
+from . import (
+    call_ledger,
+    call_spans,
+    freshness,
+    held_fs,
+    privacy_log,
+    reserved_paths,
+    stack_sites,
+    view_lag,
+)
 from .kbdir import kb_dirname, kb_prefix
+from .log_events import log_event
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
@@ -364,6 +376,9 @@ _LOCK_NAMESPACES = frozenset(
 )
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+#: Who holds each in-process lock above, under ``_THREAD_LOCKS_GUARD``: thread label, acquire site,
+#: monotonic acquire time and phase (``flock_wait`` while it waits for other processes, then ``held``).
+_THREAD_HOLDERS: dict[str, dict[str, Any]] = {}
 _HELD_LOCKS = threading.local()
 
 
@@ -676,6 +691,8 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 class VaultLockError(ValueError):
     code: str
     reason: str
+    #: Diagnostics for logs; never part of the message and never shown to a client.
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
@@ -755,9 +772,17 @@ def _private_lock_directory() -> Path:
 
 
 class _InterprocessFileLock:
-    def __init__(self, path: Path, *, deadline: float):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        deadline: float,
+        on_timeout: Callable[[], dict[str, Any]] | None = None,
+    ):
         self.path = path
         self.deadline = deadline
+        #: Describes the lost wait for the raised timeout's ``details``.
+        self._on_timeout = on_timeout
         self._handle: BinaryIO | None = None
 
     def __enter__(self) -> _InterprocessFileLock:
@@ -783,7 +808,9 @@ class _InterprocessFileLock:
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0:
                     raise VaultLockTimeout(
-                        "VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock"
+                        "VAULT_LOCK_TIMEOUT",
+                        "timed out acquiring vault lock",
+                        self._on_timeout() if self._on_timeout is not None else {},
                     ) from error
                 time.sleep(min(0.01, remaining))
                 continue
@@ -800,6 +827,77 @@ class _InterprocessFileLock:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
         self._handle.close()
         self._handle = None
+
+
+#: Frames of the lock machinery itself; a lock's site is the nearest caller outside them.
+_LOCK_SITE_SKIP = frozenset((__name__, contextlib.__name__))
+
+
+def _flock_holder_path(lock_path: Path) -> Path:
+    return lock_path.with_name(f"{lock_path.name}.holder")
+
+
+def _publish_flock_holder(lock_path: Path, *, thread: str, site: str) -> None:
+    """Record the holder beside its lock for another process to read; a failed write loses only that."""
+    from .mutation_lock import _atomic_write_holder_metadata
+
+    holder = {"pid": os.getpid(), "thread": thread, "site": site, "acquired_at": time.time()}
+    with contextlib.suppress(OSError):
+        _atomic_write_holder_metadata(_flock_holder_path(lock_path), holder)
+
+
+def _clear_flock_holder(lock_path: Path) -> None:
+    from .mutation_lock import _clear_holder_metadata
+
+    with contextlib.suppress(OSError):
+        _clear_holder_metadata(_flock_holder_path(lock_path))
+
+
+def _read_flock_holder(lock_path: Path) -> dict[str, Any] | None:
+    """The holder another process published, or None. Never verified: a crash leaves its record."""
+    try:
+        value = json.loads(_flock_holder_path(lock_path).read_text(encoding="utf-8"))
+        pid, acquired_at = value["pid"], value["acquired_at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not (type(pid) is int and isinstance(acquired_at, (int, float))
+            and not isinstance(acquired_at, bool)):
+        return None
+    return {"scope": "other_process", "pid": pid,
+            "thread": stack_sites.log_label(value.get("thread")),
+            "site": stack_sites.log_label(value.get("site"), limit=96), "phase": "held",
+            "held_seconds": round(max(0.0, time.time() - acquired_at), 3), "verified": False}
+
+
+def _lock_timeout_details(
+    kind: Literal["mutex", "flock"],
+    *,
+    key: str,
+    namespace: str,
+    lock_path: Path | None,
+    wait_start: float,
+    wait_site: str,
+) -> dict[str, Any]:
+    """Name what a lost wait lost to, log it once, and return it for the raised timeout.
+
+    ``kind`` is the wait that ran out: ``mutex`` for another thread of this process, which this
+    process can verify, or ``flock`` for another process, which only its own record can name.
+    The two are all this function waits on, so code fixes them. No lock, digest or vault path
+    is recorded, and the details reach logs only."""
+    if kind == "mutex":
+        with _THREAD_LOCKS_GUARD:
+            record = dict(_THREAD_HOLDERS.get(key) or {})
+        holder = {"scope": "in_process", "pid": os.getpid(), "thread": record["thread"],
+                  "site": record["site"], "phase": record["phase"],
+                  "held_seconds": round(time.monotonic() - record["acquired"], 3),
+                  "verified": True} if record else None
+    else:
+        holder = _read_flock_holder(lock_path) if lock_path is not None else None
+    details = {"lock": kind, "namespace": namespace,
+               "waited_ms": round((time.monotonic() - wait_start) * 1000),
+               "wait_site": wait_site, "holder": holder}
+    log_event(log, logging.WARNING, "vault_lock_timeout", fields=details)
+    return details
 
 
 @contextmanager
@@ -826,18 +924,38 @@ def vault_creation_lock(
     key = f"{root}\0{namespace}"
     with _THREAD_LOCKS_GUARD:
         thread_lock = _THREAD_LOCKS.setdefault(key, threading.Lock())
-    deadline = time.monotonic() + float(timeout)
+    site = stack_sites.caller_site(sys._getframe(), skip_modules=_LOCK_SITE_SKIP)
+    thread_label = stack_sites.log_label(threading.current_thread().name)
+    wait_start = time.monotonic()
+    deadline = wait_start + float(timeout)
+    lock_path: Path | None = None
+
+    def lost(kind: Literal["mutex", "flock"]) -> dict[str, Any]:
+        return _lock_timeout_details(kind, key=key, namespace=namespace, lock_path=lock_path,
+                                     wait_start=wait_start, wait_site=site)
+
     remaining = max(0.0, deadline - time.monotonic())
     if not thread_lock.acquire(timeout=remaining):
-        raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock")
+        raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock", lost("mutex"))
+    with _THREAD_LOCKS_GUARD:
+        _THREAD_HOLDERS[key] = {"thread": thread_label, "site": site,
+                                "acquired": time.monotonic(), "phase": "flock_wait"}
     _HELD_LOCKS.keys = {key}
     _HELD_LOCKS.after_release = []
     try:
         lock_path = _private_lock_directory() / f"{digest}.lock"
-        with _InterprocessFileLock(lock_path, deadline=deadline):
-            yield lock_path
+        with _InterprocessFileLock(lock_path, deadline=deadline, on_timeout=lambda: lost("flock")):
+            _publish_flock_holder(lock_path, thread=thread_label, site=site)
+            with _THREAD_LOCKS_GUARD:
+                _THREAD_HOLDERS[key]["phase"] = "held"
+            try:
+                yield lock_path
+            finally:
+                _clear_flock_holder(lock_path)
     finally:
         _HELD_LOCKS.keys = set()
+        with _THREAD_LOCKS_GUARD:
+            _THREAD_HOLDERS.pop(key, None)
         thread_lock.release()
         _run_after_release(_HELD_LOCKS.__dict__.pop("after_release", []))
 

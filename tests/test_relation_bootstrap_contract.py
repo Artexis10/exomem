@@ -154,8 +154,9 @@ def test_compact_bootstrap_does_not_inline_unbounded_extension_definitions(
     assert len(json.dumps(core, ensure_ascii=False).encode("utf-8")) <= COMPACT_BYTE_CEILING
     encoded = json.dumps(reference, ensure_ascii=False).encode("utf-8")
     # Raised deliberately from 63,300 for the compact original-recovery tool default,
-    # then for the evaluated correction rule in the semantic-authoring reference.
-    assert len(encoded) <= 63_600
+    # then for the evaluated correction rule in the semantic-authoring reference, then for
+    # the backlog batch-loop sentence in the compact due-state handling.
+    assert len(encoded) <= 63_700
     assert "Synthetic reviewed meaning 199" not in encoded.decode("utf-8")
 
 

@@ -2,7 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: 18bc41852b079e428221255dd2a0180d1fb038870deda6bf18c5e0e8efa2016e
+  skill_contract: f7fbd77d0c0aafbcd827d75989e51f78e29b8e1e83b875dbe6b57187f4d87ac4
   version: "0.2.0"
 ---
 
@@ -42,7 +42,20 @@ identity after an uncertain commit.
 ## Workflow
 1. Start with `review_memory(mode="attention")` for the ranked review queue.
 2. Use `review_memory(mode="audit")` when the user asks for broader health checks or specific categories.
-3. For unprocessed sources, use `prepare_note` before writing a compiled note with `create_note`, passing those source paths as `sources:` so the source leaves the unprocessed queue.
+3. For unprocessed sources, work the backlog in batches of about ten:
+   1. Read a batch with `review_memory(mode="unprocessed-sources", limit=10)`. Each finding
+      carries the Source's title, an excerpt, its grouping fields (`import_collection`, the
+      collection folder, `source_kind`, `domain`, capture date) and each derivative with its state.
+   2. Group the batch by topic yourself; the server proposes no groups.
+   3. For each group, call `review_memory(mode="compilation", sources=[...])` for the scaffold
+      and an excerpt of each Source, then write the note with `create_note`, passing those source
+      paths as `sources:`.
+   4. A Source leaves the backlog only when a live note cites it. A draft note, an archived
+      note, or a note that does not list the Source in `sources:` does not complete it. Promote
+      an own-note draft through the usual writers when it is ready.
+   5. Check that the outstanding count fell, then read the next batch.
+   Dismissal is not completion: `triage_memory` lowers the visible count and never the
+   outstanding count.
 4. For relation debt, inspect `connect_memory(operation="suggest-relations")` or
    `suggest-links`; write accepted note edges under `## Relations`, never from
    semantic proximity alone.

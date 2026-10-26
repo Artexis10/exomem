@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1183,6 +1184,7 @@ def _render_note(
     bridge_review: str | None = None,
     summary: str | None = None,
     topics: list[str] | None = None,
+    verbatim_body: bool = False,
 ) -> str:
     lines = ["---"]
     lines.append(f"type: {note_type}")
@@ -1256,6 +1258,10 @@ def _render_note(
         lines.append("tags: []")
     lines.append("---")
     lines.append("")
+    if verbatim_body:
+        # The body exactly as given: the caller owns its heading, links and last newline.
+        lines.append(content)
+        return "\n".join(lines)
     lines.append(ensure_canonical_h1(content, title))
     lines.append("")
     return "\n".join(lines)
@@ -1529,6 +1535,50 @@ def _clean_tags(tags: list[str] | None) -> list[str]:
     return out
 
 
+def _frontmatter_lines(fields: Mapping[str, str | Sequence[str]]) -> str:
+    """Front-matter lines for a caller's extra fields: a scalar, or an inline list."""
+    lines = []
+    for key, value in fields.items():
+        if isinstance(value, str):
+            lines.append(f"{key}: {yaml_scalar(value)}")
+        else:
+            lines.append(f"{key}: [" + ", ".join(yaml_scalar(item) for item in value) + "]")
+    return "\n".join(lines)
+
+
+def planned_destination(
+    vault_root: Path,
+    *,
+    note_type: str,
+    title: str,
+    slug: str | None = None,
+    project: str | None = None,
+    domain: str | None = None,
+    date_iso: str | None = None,
+) -> str:
+    """The vault-relative path `note` would create for these inputs; nothing is written.
+
+    It is the same placement `note` uses, so a caller that must freeze a target before
+    it creates the page (an import plan) asks the leaf instead of computing a folder.
+    `date_iso` is the day a dated folder or name uses, today by default; a caller that
+    creates the note later passes the same day to `note` as `_path_date`.
+    """
+    root = Path(vault_root)
+    filename_slug, _warnings = resolve_filename_slug(title, slug, vault_root=root)
+    path = _resolve_path(
+        vault_root=root,
+        note_type=note_type,
+        project=project,
+        slug=filename_slug,
+        domain=domain,
+        medium=None,
+        started=None,
+        date_iso=date_iso or temporal.render_date(temporal.now()),
+        create_parents=False,
+    )
+    return canonical_vault_rel(root, path.relative_to(root).as_posix())
+
+
 def note(
     vault_root: Path,
     *,
@@ -1572,6 +1622,9 @@ def note(
     topics: str | list[str] | None = None,
     _return_prepared: bool = False,
     _supersedes_target: str | None = None,
+    _extra_frontmatter: Mapping[str, str | Sequence[str]] | None = None,
+    _verbatim_body: bool = False,
+    _path_date: str | None = None,
     _preflight_operation: str = "create",
     _predecessor_path: str | None = None,
     _predecessor_content_hash: str | None = None,
@@ -1703,7 +1756,9 @@ def note(
             domain=domain_binding.destination if domain_binding is not None else domain,
             medium=medium,
             started=started,
-            date_iso=render_date,
+            # An import plan froze its target under the plan's day (see `planned_destination`);
+            # only the path takes it, and the token keeps today's dates.
+            date_iso=_path_date or render_date,
             project_registry=key_plan.registry,
             create_parents=False,
         )
@@ -1742,7 +1797,12 @@ def note(
         vault_root=root,
         resolver=resolver,
     )
-    body_clean, body_warnings = normalize_body_wikilinks(content, root, resolver=resolver)
+    if _verbatim_body:
+        # An imported note keeps the original's body: no link is rewritten, no heading added.
+        # The rendered source, and so the draft hash, holds the body as given.
+        body_clean, body_warnings = content, []
+    else:
+        body_clean, body_warnings = normalize_body_wikilinks(content, root, resolver=resolver)
     tags_clean = _clean_tags(tags)
     tag_warnings = tag_variants.advise_authored(root, tags_clean)
     source = _render_note(
@@ -1774,6 +1834,7 @@ def note(
         bridge_review=bridge_review,
         summary=summary,
         topics=topics,
+        verbatim_body=_verbatim_body,
     )
     if _supersedes_target is not None:
         marker = f'supersedes: "[[{_supersedes_target}]]"'
@@ -1782,6 +1843,11 @@ def note(
             if boundary == -1:
                 raise NoteError("INVALID_NOTE", [], "rendered note frontmatter is invalid")
             source = source[:boundary] + "\n" + marker + source[boundary:]
+    if _extra_frontmatter:
+        boundary = source.find("\n---\n", 4)
+        if boundary == -1:
+            raise NoteError("INVALID_NOTE", [], "rendered note frontmatter is invalid")
+        source = source[:boundary] + "\n" + _frontmatter_lines(_extra_frontmatter) + source[boundary:]
     try:
         preflight = semantic_writes.preflight_creation(
             root,

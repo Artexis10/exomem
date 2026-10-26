@@ -1130,6 +1130,11 @@ class StoreServer:
         entry = time.monotonic()
         completion_deadline = acknowledgement_budget_deadline(entry)
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
+        # A store handoff, such as an idle release, refuses every checkout until it ends. Wait it out
+        # here, where this thread holds nothing: a waiter at the deep refusals could stall the handoff.
+        # The wait ends at the acceptance deadline, which the queue wait below shares.
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+            self.manager.await_store_admission(deadline)
         request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
             if not self._closed:
@@ -1143,61 +1148,52 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
-                    error = connection.busy(
+                    raise self._busy_refusal(
                         "the collection store did not take this request within the mutation timeout")
-                    try:
-                        try:
-                            error.details["store_thread"] = self._queue_refusal_state()
-                        except Exception:
-                            # Optional diagnostics must not replace the original queue refusal.
-                            pass
-                        raise error
-                    finally:
-                        # Do not retain the request through an exception/traceback cycle.
-                        del error
                 self._condition.wait(remaining)
         # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
         waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
                    else foreground_priority.outside_foreground)
         with waiting():
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
+        if not completed and read_only:
+            # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.
+            raise self._busy_refusal(
+                "the collection store did not finish this read within its completion deadline")
         if not completed:
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
             raise OpError(
                 "MUTATION_ACKNOWLEDGEMENT_PENDING",
                 "the accepted collection-store operation is still executing and may still commit",
-                "Do not change the payload or use a new identity. Retry only with the original "
-                "replay identity; if none exists, reconcile the outcome before submitting again.",
                 details={"status": "uncertain", "committed": None},
             )
         if request.error is not None:
             raise request.error
         return request.result
 
+    def _busy_refusal(self, message):
+        """The retryable refusal for a request this store thread did not serve in time."""
+        error = connection.busy(message)
+        try:
+            error.details["store_thread"] = self._queue_refusal_state()
+        except Exception:  # noqa: BLE001 - optional diagnostics must not replace the original refusal
+            pass
+        return error
+
     def _queue_refusal_state(self):
         """Observe the worker at refusal, without paths, source text or frame locals."""
         import sys
 
+        from ..stack_sites import package_frames
+
         state = {"alive": self.thread.is_alive(), "queued_requests": len(self._requests),
                  "stack_status": "unavailable", "frames": [], "frames_truncated": None}
-        frame = None
-        try:
-            frame = sys._current_frames().get(self.thread.ident)
-            if frame is None or not self.thread.is_alive():
-                return state
-            frames = []
-            # Bound the diagnostic walk; only shipped package symbols leave this process.
-            for _ in range(64):
-                if frame is None:
-                    break
-                module = frame.f_globals.get("__name__")
-                if isinstance(module, str) and module.startswith("exomem."):
-                    frames.append({"module": module, "function": frame.f_code.co_name,
-                                   "line": frame.f_lineno})
-                frame = frame.f_back
-            state.update(stack_status="captured", frames=frames, frames_truncated=frame is not None)
-        finally:
-            del frame
+        frame = sys._current_frames().get(self.thread.ident)
+        if frame is None or not self.thread.is_alive():
+            return state
+        # Bound the diagnostic walk; only shipped package symbols leave this process.
+        frames, truncated = package_frames(frame)
+        state.update(stack_status="captured", frames=frames, frames_truncated=truncated)
         return state
 
     def _stopping(self):

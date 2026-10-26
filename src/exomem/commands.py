@@ -1862,14 +1862,20 @@ def op_bootstrap(
                     "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "
                     "Keep mentions through compaction and renewal; receipts are not mentions. "
                     "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
-                    "Absent advice proves nothing; prefer silence."
+                    "Absent advice proves nothing; prefer silence. "
+                    "Backlog: review a batch of the largest category, group it by topic, "
+                    "write each group with the usual writers, check outstanding fell. "
+                    "Dismissal is not completion."
                     if profile == "compact"
                     else
                     "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
                     "Raise at most one due item per maintained client conversation in the user's language. "
                     "Remember any due mention through hooks, MCP, REST, continuation, compaction and OAuth renewal; "
                     "receipt is not a mention. Dismissed or snoozed fingerprints stay quiet until state changes. "
-                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals."
+                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals. "
+                    "To work a backlog, review a batch of its largest category, group the batch by topic, "
+                    "write each group through the usual writers and confirm that the outstanding count fell. "
+                    "A dismissal is not completion: it lowers the visible count only."
                 ),
                 "relevant_due_handling": (
                     "Read review_item_context(ref, expected_fingerprint); refresh on REVIEW_ITEM_CHANGED. "
@@ -2308,6 +2314,11 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
+        if "due_state" in core_payload:
+            # The summary is built after the surface filter, so its `next` route needs the same pass.
+            core_payload["due_state"] = _filter_bootstrap_payload(
+                core_payload["due_state"], active_descriptor
+            )
     # Compact sections and session carry the calling client's retained-ring advisory;
     # the core carries only a pointer. The bootstrap contract fixes the full-detail
     # profiles below; session already normalizes to compact.
@@ -3842,8 +3853,8 @@ def op_audit(
       Bare names resolve against filename stems AND frontmatter `title:`
       (so date-prefixed sources with a title match are not flagged).
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
-    - `unprocessed_source`: source with empty `ingested_into:` (no notes
-      have compiled from it yet)
+    - `unprocessed_source`: source that no live note compiles yet (no page
+      in its `ingested_into:` is live and cites it in its own `sources:`)
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
       original or remove the unsupported citation; audit never reconstructs it.
@@ -4252,7 +4263,10 @@ def op_propose_compilation(
 
     Returns:
         {suggested_note_type, suggested_title, suggested_sources,
-         suggested_connections, outline_markdown, warnings}.
+         suggested_connections, outline_markdown, source_excerpts, warnings}.
+        `source_excerpts` holds one bounded excerpt per source, with its
+        recorded import metadata, so the note can be written without a read
+        per source.
 
     Errors:
         INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).
@@ -8972,8 +8986,9 @@ def op_review_memory(
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
-    Attention reads; repairs use maintain_memory. Vocabulary path/query/family
-    submits a meaning question: requires write access, grants no page or vocabulary mutation authority.
+    Attention reads; repairs use maintain_memory. unprocessed-sources lists
+    Sources no live note cites; dismissal is not completion. Vocabulary
+    path/query/family submits a meaning question: requires write access, grants no page or vocabulary mutation authority.
 
     mode="audit", categories=["unresolved_source_citation"] finds citations
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
@@ -8993,17 +9008,16 @@ def op_review_memory(
         key: Provenance key filter.
         value: Provenance value filter.
         path: Provenance scan path; for evolution it selects the path route (`query`
-            unused; an unresolvable path raises); for vocabulary, the page the
-            question concerns.
+            unused); for vocabulary, the page the question concerns.
         state: open (default), all, snoozed or dismissed for attention/activation;
             vocabulary takes open or all.
         ref: `exomem://review/<id>` for item mode (upkeep refs revalidate one
             item) or `exomem://write-advisory-result/<id>` for
             write-advisory-result; for a vocabulary relation question, a current
             relation-queue candidate ref alongside its source path.
-        family: Vocabulary family for a meaning question; with `mode="vocabulary"`
-            requires `path` and `query`; an edge needs `relation-type/v1` and the
-            candidate `ref`. Creates only a review consideration.
+        family: Vocabulary family for a meaning question; an edge needs
+            `relation-type/v1` and the candidate `ref`. Creates only a review
+            consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
     """
@@ -9266,15 +9280,6 @@ def _refuse_pairless_stance(ref: str, action: str) -> None:
     )
 
 
-def _adoption_run_paths(result: Any) -> list[str]:
-    """Governed pages one Adoption Studio apply call just wrote, as that call reports them."""
-    if not isinstance(result, dict):
-        return []
-    applied = result.get("apply_result")
-    written = applied.get("written") if isinstance(applied, dict) else None
-    return list(dict.fromkeys(str(path) for path in written or []))
-
-
 def _adopted_paths(result: Any) -> list[str]:
     """Governed pages one adoption invocation just wrote, from its own outcomes.
 
@@ -9318,22 +9323,18 @@ def _audit_fix_paths(result: Any) -> list[str]:
 def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
     """Bring the due-state projection up to date for a batch's governed writes.
 
-    Bounded per page — one parse, four page-local predicates, one small JSON
-    replace — and best effort, exactly like the per-write delta it stands in
-    for. Without it a bulk adoption leaves the projection describing the vault
-    as it was before the batch, and the emission ledger's write count, which is
-    the denominator every "more automatic" claim is measured against, silently
-    under-reports the writes that actually happened.
+    Bounded per page — one parse, four page-local predicates — with one load and
+    one save of the projection for the whole batch, and best effort, exactly like
+    the per-write delta it stands in for. Without it a bulk adoption leaves the
+    projection describing the vault as it was before the batch, and the emission
+    ledger's write count, which is the denominator every "more automatic" claim is
+    measured against, silently under-reports the writes that actually happened.
     """
-    if not rel_paths:
-        return
     from . import due_state as due_state_module
 
-    for rel_path in rel_paths:
-        try:
-            due_state_module.apply_write_delta(vault_root, rel_path)
-        except Exception:  # noqa: BLE001 — a projection delta never breaks a write
-            log.debug("due-state delta failed for %s", rel_path, exc_info=True)
+    due_state_module.refresh_after_writes(
+        vault_root, [due_state_module.PageWrite(rel_path) for rel_path in rel_paths]
+    )
 
 
 def _carrying_due_state(vault_root: Path, result: Any) -> Any:
@@ -10246,11 +10247,12 @@ def op_adoption_studio(
     """Review and import an existing collection of notes, documents, images, audio and video in a resumable run.
 
     Never rewrite, move or delete originals. Status/work-item read; other actions
-    save run state or material. Plan previews exact imports; apply commits that plan or refuses.
+    save run state or material. Apply commits the previewed plan or refuses.
 
     start scans; select chooses files; plan previews; apply copies each file
-    into Sources; cancel closes pre-apply; finish proves recall and reports
-    coverage. Repeat plan or apply with a returned `continuation`. Then
+    into Sources, and drafts a note under an own-note rule; cancel closes
+    pre-apply; finish proves recall and reports coverage. Repeat plan or apply
+    with a returned `continuation`. Then
     work-item reads context, propose submits proposals, apply-proposal
     approves one. Details: references/operations.md.
 
@@ -10259,24 +10261,23 @@ def op_adoption_studio(
         run_id: From `start`; required except for `start` and run-listing `status`.
         path: For `start`, subtree to scan (default: vault root).
         include_hidden: For `start`, include hidden files.
-        initialize_kb: For `start`, bootstrap a missing Knowledge Base
-            (otherwise KB_NOT_INITIALIZED).
+        initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
-        include: For `select`, paths whose files are selected, or
-            {path, source_kind, domain} to file a folder under registered keys.
+        include: For `select`, paths whose files are selected, or {path,
+            source_kind?, domain?} to file a folder under registered keys, or
+            {path, adopt_as: note, note_type, project?, domain?} for a draft
+            note of each Markdown file.
         exclude: For `select`, paths to deselect.
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
-        plan_id: For `apply`, from `plan`/`status`; a mismatch or changed
-            selection refuses with PLAN_STALE.
+        plan_id: For `apply`, from `plan`/`status`.
         continuation: For `plan` and `apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
         sources: For `work-item`, source paths instead of the first imports.
         ref: For `apply-proposal`, the `exomem://review/adoption/<id>` ref.
-        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint;
-            a mismatch refuses.
+        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
     """
@@ -10319,7 +10320,6 @@ def op_adoption_studio(
                     retry_failed=retry_failed,
                     only_paths=only_paths,
                 )
-                _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
             return _carrying_batch_advisories(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)

@@ -39,6 +39,7 @@ from exomem import (
     reserved_paths,
     state_migration,
     state_paths,
+    vault,
     writer_lease,
 )
 from exomem import structured_collections as collections
@@ -709,6 +710,84 @@ def test_a_file_write_after_prepare_is_imported_at_apply(env, capsys):
         assert written["item_key"] in rows(root, CID)
     finally:
         service.stop()
+
+
+def live_write(root):
+    """A governed write beside a running migration: like every write, it rewrites the activity log."""
+    assert vault.write_log_entry(root, date_iso="2026-10-02", op="create",
+                                 rel_path_no_ext="Knowledge Base/Notes/Ping", body="a write beside the proof") is None
+
+
+def prove(root, scratch, *, record=None):
+    """Each pending collection's preflight row and the legacy events staged for it."""
+    scratch.mkdir()
+    _, pending, _ = preflight.candidates(root)
+    with connection.staging_store(scratch / "staging.sqlite") as staging:
+        rows = preflight.prove_into(root, pending, staging, scratch, preflight.import_context(), record=record)
+        events = staging.execute("SELECT collection_id,legacy_event_json FROM txns ORDER BY 1,2").fetchall()
+    return pending, rows, events
+
+
+def test_a_write_during_the_proof_does_not_fail_the_collections_after_it(env, tmp_path):
+    """Defect: every governed write rewrites the audit log, so one write beside a running proof
+    made the audit scan unusable and blocked every collection not yet proved."""
+    root = legacy_vault(env)
+    _, quiet, quiet_events = prove(root, tmp_path / "quiet")
+    writes = []
+    _, busy, busy_events = prove(root, tmp_path / "busy", record=lambda *_: writes or writes.append(live_write(root)))
+    assert len(writes) == 1 and len(busy) == len(MIGRATED)
+    assert {row["status"] for row in busy} == {"ready"}
+    assert [(row["path"], row["legacy_events"]) for row in busy] == [(row["path"], row["legacy_events"]) for row in quiet]
+    assert busy_events == quiet_events
+
+
+def test_a_collection_outrun_twice_is_blocked_by_the_change_and_the_rest_are_not(env, tmp_path, monkeypatch):
+    """Defect: a retry that hides a collection the writer keeps outrunning, or that lets its
+    block fail the collections after it."""
+    root = legacy_vault(env)
+    pending, _, _ = prove(root, tmp_path / "paths")
+    outrun = pending[1].path
+    imported = legacy_import.import_legacy_collection
+
+    def with_a_write(conn, captured, **kwargs):
+        if captured.manifest.path == outrun:
+            live_write(root)
+        return imported(conn, captured, **kwargs)
+
+    monkeypatch.setattr(legacy_import, "import_legacy_collection", with_a_write)
+    writes = []
+    _, rows, _ = prove(root, tmp_path / "busy", record=lambda *_: writes or writes.append(live_write(root)))
+    found = {row["path"]: row for row in rows}
+    assert found[outrun]["status"] == "blocked"
+    assert found[outrun]["blocker"]["code"] == "COLLECTION_LEGACY_IMPORT_SOURCE_CHANGED"
+    assert {path: row["status"] for path, row in found.items() if path != outrun} == {
+        path: "ready" for path in found if path != outrun}
+
+
+def test_prepare_beside_a_live_writer_stages_every_collection(env, capsys, monkeypatch):
+    """Defect: `collections migrate --prepare` failed on a vault whose service was writing, because
+    any write rewrote the audit log under the scan."""
+    root = legacy_vault(env)
+    imported = legacy_import.import_legacy_collection
+    outrun = []
+
+    def with_a_write(staging, captured, **kwargs):
+        # One write lands during each of the first two collections' first import.
+        if len(outrun) < 2 and captured.manifest.path not in outrun:
+            outrun.append(captured.manifest.path)
+            # The service is another thread of control than the migration holding its scope.
+            writer = threading.Thread(target=live_write, args=(root,))
+            writer.start()
+            writer.join(30)
+            assert not writer.is_alive()
+        return imported(staging, captured, **kwargs)
+
+    monkeypatch.setattr(legacy_import, "import_legacy_collection", with_a_write)
+    assert migrate(root, "prepare", operator=False) == 0
+    prepared = printed(capsys)
+    assert len(outrun) == 2
+    assert (prepared["verdict"], prepared["staging"]) == ("migratable", "retained")
+    assert {row["collection_id"] for row in prepared["collections"] if row["status"] == "ready"} == set(MIGRATED)
 
 
 @pytest.mark.parametrize("change", ["added", "removed", "identity", "audit"])

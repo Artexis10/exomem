@@ -125,7 +125,9 @@ def test_shared_projection_tracks_a_foreign_replacement_during_save(
     _persist(tmp_path, "first")
     due_state._load_shared(tmp_path)
     replacement = tmp_path / "foreign.json"
-    replacement.write_text('{"version":2,"categories":{},"marker":"foreign"}\n')
+    replacement.write_text(
+        f'{{"version":{due_state.SCHEMA_VERSION},"categories":{{}},"marker":"foreign"}}\n'
+    )
 
     def replace(operation):
         operation()
