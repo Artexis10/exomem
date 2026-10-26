@@ -85,6 +85,31 @@ Registry, in build order:
 
 **Generative instruments (R1, slice 2 onward).** A template is a versioned string with named, delimited data slots. Vault text may appear only inside a slot, escaped so it cannot close its delimiter. The instrument reads the logits of the label tokens at one fixed position and normalises them over the closed set. It never samples, and never returns or stores generated text. A generative instrument's identity also names its template and label-token map.
 
+**Input contract for the next instruments.** `mention.same_referent` compares two explicit mention contexts, with labels `same`, `different`, and `abstain`.
+`relation.applies` measures one proposed relation from source to target, with labels `fits`, `does_not_fit`, and `abstain`.
+Its third data slot holds the canonical relation key and definition from the active vocabulary registry.
+The instrument does not enumerate relation keys in code or choose a relation on the agent's behalf.
+Producers supply mention candidates and proposed relations; these instruments add no candidate-discovery mechanism.
+
+The new questions bind their input identities to named, ordered slots, extractor versions, and exact text hashes.
+Reversing relation endpoints or changing its definition creates a different reading identity.
+An unrelated registry edit changes no input identity.
+The existing unordered `pair.relation` identities remain unchanged.
+A new instrument identity includes its label-token map because that map determines the probability vector.
+Threshold-only changes remain outside the instrument identity.
+
+The existing projection holds one inference queue for all three questions.
+The worker selects a question before admitting its instrument, and scopes admission failures to that question.
+Missing instruct weights therefore leave the admitted NLI instrument available.
+Both generative templates reuse one artifact-backed runtime within the same disposable worker.
+The runtime maps quantized weights read-only on CPU; requests and results remain private to the worker's vault.
+The append-only ledger retains references, hashes, probabilities, and verdicts, without input text.
+The new JSON payload is versioned while existing reading rows remain readable and unchanged.
+
+A submit-to-ledger integration check establishes instrument availability.
+It does not establish that a downstream consumer improves recall or relation quality.
+Those claims require the consumer's own paired evaluation against source truth.
+
 ### D2. The reading record and the ledger
 
 The ledger is `<vault state dir>/sensing/readings.sqlite` (WAL). The dreamer's projection of it is a separate disposable file beside it, `sensing/projection.sqlite` (D6). It is resolved through the single state-root seam, and it is created only when sensing is on. Its tables:
@@ -323,12 +348,31 @@ None. Every fixture, twins included, passes at the exact pin. Twins that fail in
 
 ## Open items
 
-Recorded from the slice-1 review. Nothing here is built yet. Task 8.3 closed two further items: selection that counted withheld pages, and tombstoned pages that counted toward a partner's cap.
+Recorded from the slice-1 review. The status bound and three rebuild windows are corrected in the current repair batch. Task 8.3 closed two further items: selection that counted withheld pages, and tombstoned pages that counted toward a partner's cap.
 
 - **Guessable input hashes.** `text_sha256` and the `#unit-<sha256>` refs are unsalted hashes of the exact unit text. For a short unit, someone holding the ledger (or a served reading id) can confirm a guessed text. Revisit before the ledger leaves the machine in the task 9.3 export: salt per vault, or keep the hashes out of the exported family.
 - **Adopt-state wipes the ledger.** The operator's offline `--adopt-state vault` keeps the in-vault state copy and discards the external state root. The ledger ("durable", R3) lives only in the external root, so it goes too. Losing the ledger costs re-sensing, never correctness (D2). Handle it with the task 9.3 export and restore registration, which gives the ledger a portable-derived descriptor that adopt-state and restore carry over.
-- **A hub's served status has no size bound.** Without the per-page cap, `_View.edges` loads every served pair of a page, neutral ones included, and `_component` and `_chain` load whole edge lists. On the review's probe, a status took 24 ms at 1,000 partners and 67 ms at 10,000 pairs. Before sensing is on by default, or slice 3 surfaces status widely (task 8.6), do two things. First, filter neutral verdicts in the query rather than in the Python loop, and keep each partner's dropped count. Second, make any truncation count released edges only and report `evidence_complete: false`.
-- **Completeness keys on an incomplete `seen` map.** Seeding takes its watermark from the dreamer's `seen` map, and `_follow_pages` drops projected pages absent from it. Both assume `seen` is whole. During a dreamer reseed it is not. That happens after a dreamer schema bump, dreamer sidecar damage, or slice 5's ledger restore. The recheck's probes reproduced both cases. When both sidecars are recreated, seeding cleared on a one-page `seen` and then served a partial status as complete. When a reseed tick ended early, the sensed tick dropped a contradicting page and served the rest as complete. The fix has precedent: the counting families already stand down while the dreamer reseeds (`dreamer_families.py`). Pass the dreamer's reseeding state into the sensed tick. Keep pages that are absent from `seen` while it is set. Keep the view unavailable, and take the watermark only after the reseed finishes (task 8.7).
-- **A crash can leave a rebuilt projection unflagged.** `connect`'s corrupt-file branch runs in autocommit. A crash between writing the `schema` row and the `seeding` row leaves an empty schema-3 projection with no flag, and the next start serves partial views. Set `seeding` first, or wrap the branch in one transaction (task 8.7).
-- **A replaced ledger serves old verdicts until reprojection reaches them.** `_follow_ledger` reprojects 512 pairs per transaction. Pairs it has not reached still carry the active instrument key, so they are served as current. Each is still a valid judgement of the current texts by the active instrument, but its reading id no longer resolves in the ledger. Gate the view while a genesis-triggered reprojection is in progress (task 8.7).
+- **Status details are bounded.** Task 8.6 now limits each request to 512 distinct non-neutral pair details across anchors, components, and chains. SQL filters neutral details and retains per-partner stale counts. The budget counts released edges only. Truncation reports `evidence_complete: false`, including zero-count status. Partner summaries and live-signature checks still scale with released partners.
+- **Reseeding keeps the view unavailable.** Task 8.7 passes effective dreamer reseeding into the sensed tick after page processing. A reseed retains projected pages, restarts the watermark, and takes no watermark until it drains. Requests also inspect the live dreamer checkpoint and pending count before opening the view.
+- **Replacement initialization is atomic.** Task 8.7 writes the schema and seeding state in one transaction through one initialization path. Only SQLite corruption codes trigger replacement; lock, read-only, and I/O errors leave existing evidence untouched.
+- **Ledger replacement closes the view immediately.** Task 8.7 compares the live ledger genesis before serving status, including before the next tick. An unfinished reprojection cursor also keeps the view unavailable until every pair follows the ledger.
+- **Activation provenance is compact.** Existing activation status carries a line, counts, and completeness; `read_memory` carries the items and reading provenance. Full provenance on activation remains an existing implementation gap against D7. The tool text describes the current compact output.
 - **Only the genesis meta row is protected.** The append-only triggers guard `meta.genesis`, not `meta.schema_version`. A forged `schema_version` makes `connect` refuse the ledger, which fails closed: the worker names the refusal, and nothing is served from a ledger it cannot use. Revisit if `meta` gains a row whose forgery would fail open.
+
+### Repair-batch query probe (2026-10-26)
+
+A disposable SQLite copy held 10,000 hub pairs, including 5,000 neutral pairs.
+The probe used mixed endpoint order and measured edge-query materialization only.
+Live-signature checks returned true; these measurements do not describe full read latency.
+The source was `sensed_model.py` before this batch and its repaired `_View.edges` implementation.
+
+| Shape | Detail rows loaded | Wall time, one run | Detail query plan |
+|---|---:|---:|---|
+| Before | 10,000 | 54.8 ms | Single-endpoint indexes |
+| Bounded, before the partner index | 512 | 214.0 ms | Repeated single-endpoint scans |
+| Bounded, with the partner index | 512 | 50.2 ms | Both endpoints in `pairs_partner` |
+
+The composite index fixes the repeated hub scan introduced by per-partner loading.
+This is a query-shape check, not a measured latency gain or default-on admission.
+The repair batch leaves sensing off while task 8.4 lacks its family-disposition evaluation.
+The mention and relation applicability spike cannot replace that evaluation.

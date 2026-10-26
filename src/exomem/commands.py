@@ -6633,14 +6633,14 @@ def op_activate_context(
     trigger: Literal["user_turn", "task_refresh"] = "user_turn",
     initiator: str | None = None,
 ) -> dict:
-    """Recall bounded authorized context; abstain if uncertain.
+    """Recall authorized context; abstain if uncertain.
 
-    Reuse held policy/context; conversation supplies relevant thread/attachment excerpts.
-    origin=focus: agent cues, not human words;
-    focus cannot settle human ambiguity. Reads no attachments.
-    Clarify unknown subjects first. Keep source identity and scope.
-    Due items/refresh grant no writes.
-    Packets may carry maps; pull refs with read_memory.
+    Reuse held context; conversation supplies excerpts, not attachment reads.
+    focus is agent-authored, not human intent; clarify ambiguity.
+    Keep source identity/scope. Due/refresh grants no writes.
+    Pull map refs with read_memory.
+    Optional epistemic_status has counts/completeness; read_memory gives
+    items/reading provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -7486,13 +7486,13 @@ def op_read_memory(
     history_continuation: str | None = None,
     continuation: _OptionalViewContinuation = None,
 ) -> dict:
-    """Read a selected page, semantic unit or view.
+    """Read a page, semantic unit, or map.
 
-    unit_ref returns the current unit, parent citation/lifecycle and up to
-    2,400 context characters. Missing/stale/ambiguous/superseded refs report
-    status; never substituted. Without unit_ref, returns the page.
-    Also reads the paged views exomem://map, exomem://map/topic/<domain key>
-    and exomem://map/unfiled.
+    unit_ref: exact current unit, parent citation/lifecycle, up to 2,400 context chars.
+    Missing/stale/ambiguous/superseded is explicit; no substitution. Omit for page.
+    Maps: exomem://map, /topic/<domain key>, /unfiled.
+    Sensing on: epistemic_status gives released items/reading provenance;
+    incomplete counts are partial.
 
     Args:
         path: Vault-relative path or KB shorthand.

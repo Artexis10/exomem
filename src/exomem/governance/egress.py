@@ -3283,6 +3283,25 @@ def quick_page_visible(
     return decision.level >= RELEASE_FLOOR
 
 
+def _release_admission_identity(
+    root: Path, policy: Policy, who: RequestPrincipal, purpose: str | None,
+    grants_hash: str, tombstones: frozenset[str],
+) -> tuple | None:
+    """Name every non-page dependency of a publishable release verdict."""
+    # Sessions read time; writers and empty policies can read live collection ownership.
+    if (policy.empty or policy.blocked or not who.resolved
+            or who.authorization_session_id is not None
+            or who.verified_authorization_session is not None
+            or bound_writer(root) is not None):
+        return None
+    try:
+        boundary = connector_boundary.admission_identity(root, who)
+    except connector_boundary.BoundaryUnavailable:
+        return None
+    return ("release", str(root), policy.fingerprint, grants_hash, who.audience_id,
+            purpose, boundary, tombstones)
+
+
 def page_release_filter(
     vault_root: Path,
     *,
@@ -3304,7 +3323,7 @@ def page_release_filter(
     root = Path(vault_root)
     policy, _release_gate_active = gate_state(root)
     who = principal if principal is not None else effective_principal()
-    memo: dict[tuple, bool] = {}
+    memo: dict[tuple, Decision | None] = {}
     if _file_policy_empty(root, policy):
         tombstones = lifecycle.tombstoned_paths(root)
         if (not tombstones and pages is not None and not any(map(raw_protection.marked, pages))
@@ -3320,30 +3339,38 @@ def page_release_filter(
         return lambda _rel_path: False
     grants_hash = _grants_hash(policy)
     declared_purpose = _declared_purpose(root, who, purpose)
+    tombstones = lifecycle.tombstoned_paths(root)
 
-    def released(rel_path: str) -> bool:
+    def released(rel_path: str, publish: bool) -> tuple[bool, bool]:
         if not content_permits(root, rel_path, who):
-            return False
+            return False, publish and _page_local_path(root, rel_path, withheld=True)
         boundary_key = connector_boundary.cache_identity(root, who)
         key = (rel_path, boundary_key)
-        if key in memo:
-            return memo[key]
-        decision = None
-        if not lifecycle.is_tombstoned(root, rel_path):
-            decision = _decide_path(
-                root,
-                rel_path,
-                policy=policy,
-                principal=who, audience=who.audience_id,
-                purpose=declared_purpose,
-                grants_hash=grants_hash,
-                authorization_session=who.authorization_session_id,
-                authorization_context=who.verified_authorization_session,
-            )
-        memo[key] = decision is not None and decision.level >= RELEASE_FLOOR
-        return memo[key]
+        if key not in memo:
+            decision = None
+            if not lifecycle.is_tombstoned(root, rel_path):
+                decision = _decide_path(
+                    root,
+                    rel_path,
+                    policy=policy,
+                    principal=who, audience=who.audience_id,
+                    purpose=declared_purpose,
+                    grants_hash=grants_hash,
+                    authorization_session=who.authorization_session_id,
+                    authorization_context=who.verified_authorization_session,
+                )
+            memo[key] = decision
+        decision = memo[key]
+        allowed = decision is not None and decision.level >= RELEASE_FLOOR
+        return allowed, (publish and decision is not None and _decision_is_page_local(decision)
+                         and _page_local_path(root, rel_path, withheld=not allowed))
 
-    return released
+    return AdmittedPredicate(Admission(
+        lambda: _release_admission_identity(
+            root, policy, who, declared_purpose, grants_hash, tombstones,
+        ),
+        released,
+    ))
 
 
 #: What `classify_units` says about one would-be packet unit.
@@ -7313,20 +7340,9 @@ def release_walk_filter(
         )
 
     def identity() -> tuple | None:
-        # A session decides from live grants and time, a bound writer from its own
-        # operation, a blocked policy decides nothing, and without a policy the
-        # decision reads collection ownership, which is not the page: none has a
-        # stable identity.
-        if (policy.empty or fail_closed or who.authorization_session_id is not None
-                or who.verified_authorization_session is not None
-                or bound_writer(vault_root) is not None):
-            return None
-        try:
-            boundary = connector_boundary.admission_identity(vault_root, who)
-        except connector_boundary.BoundaryUnavailable:
-            return None
-        return ("release", str(vault_root), policy.fingerprint, grants_hash, who.audience_id,
-                declared_purpose, boundary, tombstones)
+        return _release_admission_identity(
+            vault_root, policy, who, declared_purpose, grants_hash, tombstones,
+        )
 
     keep = AdmittedPredicate(Admission(identity, judge))
 

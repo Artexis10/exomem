@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import sensing_fixture as sf
 
-from exomem import dreamer, freshness, sensed_model, sensing, sensing_ledger, sensor_worker
+from exomem import dreamer, dreamer_store, freshness, sensed_model, sensing, sensing_ledger, sensor_worker
 
 
 @pytest.fixture(autouse=True)
@@ -733,6 +733,166 @@ def test_a_replaced_ledger_is_reprojected(tmp_path: Path, monkeypatch) -> None:
     sf.settle(vault)
     assert {row[5] for row in sf.edges(vault)} == {"pending"}
     assert sensed_model.status_for(vault, sf.SEAL) is None
+
+
+def test_neutral_pairs_do_not_spend_the_status_detail_budget(tmp_path: Path, monkeypatch) -> None:
+    """A hub's neutral pairs cannot hide its later refinement or load unused detail."""
+    sf.enable(monkeypatch)
+    vault = sf.hub_vault(tmp_path, with_page=False)
+    sf.converge(vault, sf.StubInstrument(sf.HUB_REFINES))
+    monkeypatch.setattr(sensed_model, "REQUEST_EDGE_BOUND", 1)
+    conn = sqlite3.connect(sensed_model.projection_path(vault))
+    conn.execute("UPDATE pairs SET instrument_json='unused' WHERE verdict='neutral'")
+    conn.commit()
+    conn.close()
+    status = sensed_model.status_for(vault, sf.HUB)
+    assert status["line"] == "refined by 1 later note"
+    assert status["evidence_complete"] is True
+
+
+def test_a_stale_neutral_partner_still_reports_incomplete_evidence(tmp_path: Path, monkeypatch) -> None:
+    """Filtering neutral detail must retain the missing evidence of an edited partner."""
+    sf.enable(monkeypatch)
+    vault = sf.hub_vault(tmp_path, with_page=False)
+    sf.converge(vault, sf.StubInstrument())
+    path = vault / sf.LATER
+    path.write_text(path.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+    freshness.clear()
+    assert sensed_model.status_for(vault, sf.HUB) == {
+        "refined_by_later": 0, "open_contradictions": 0, "evidence_complete": False,
+    }
+    conn, view = sensed_model._open_view(vault)
+    assert view.dropped(sf.HUB) == 120
+    conn.close()
+
+
+def test_chain_and_component_traversal_share_the_status_budget(tmp_path: Path, monkeypatch) -> None:
+    """A traversal that cannot read every released edge cannot certify completeness."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    table = sf.default_table() | {(sf.INLET_TEXT, sf.WINTER_TEXT): "contradicts"}
+    fx.write(vault, sf.INLET, sf.note("Inlet", "2026-05-03", sf.INLET_TEXT,
+                                    links="[[Notes/Insights/seal-wear-winter]]"))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    sf.converge(vault, sf.StubInstrument(table))
+    assert sensed_model.status_for(vault, sf.SEAL)["evidence_complete"] is True
+    monkeypatch.setattr(sensed_model, "REQUEST_EDGE_BOUND", 2)
+    status = sensed_model.status_for(vault, sf.SEAL)
+    assert status["line"] == "refined by 1 later note; 1 open contradiction"
+    assert status["evidence_complete"] is False
+
+
+@pytest.mark.parametrize("wipe_projection", [False, True])
+def test_a_dreamer_reseed_hides_status_until_seen_is_whole(
+    tmp_path: Path, monkeypatch, wipe_projection: bool,
+) -> None:
+    """A partial dreamer checkpoint cannot erase pages or complete a fresh projection."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    whole = sensed_model.status_for(vault, sf.SEAL)
+    dreamer_store.DreamerStore(vault).wipe()
+    if wipe_projection:
+        sensed_model.ProjectionStore(vault).wipe()
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+    dreamer.run_once(vault, budget=dreamer.Budget(pages=1, cpu=120.0, wall=120.0))
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+    conn = sensed_model.open_readonly(vault)
+    assert sensed_model._get_meta(conn, "seeding") == "start"
+    if not wipe_projection:
+        assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 4
+    conn.close()
+    sf.settle(vault)
+    assert sensed_model.status_for(vault, sf.SEAL) == whole
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    store.set_meta(conn, "reseeding", True)
+    store.pending_add(conn, [sf.SEAL])
+    conn.close()
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+    conn = store.connect()
+    store.pending_remove(conn, sf.SEAL)
+    conn.close()
+    assert sensed_model.status_for(vault, sf.SEAL) == whole
+
+
+def test_ledger_replacement_hides_unresolved_readings_before_and_during_reprojection(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A replacement ledger must not expose old reading ids between projection chunks."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    path = sensing_ledger.ledger_path(vault)
+    for suffix in ("", "-wal", "-shm"):
+        path.with_name(path.name + suffix).unlink(missing_ok=True)
+    sensing_ledger.Ledger(vault).connect().close()
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+    monkeypatch.setattr(sensed_model, "INGEST_PER_TICK", 1)
+    report = sensed_model.TickReport()
+    conn = dreamer_store.open_readonly(vault)
+    seen = dreamer_store.DreamerStore.seen_map(conn)
+    conn.close()
+    sensed_model.run_tick(vault, seen=seen, report=report,
+                          halt=lambda: "cpu" if report.reprojected else None)
+    assert report.reprojected == 1
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    assert sensed_model.status_for(vault, sf.SEAL)["evidence_complete"] is True
+
+
+def test_an_interrupted_corrupt_projection_rebuild_cannot_publish_its_schema(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A failed rebuild must not leave a schema-ready file without its seeding flag."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    whole = sensed_model.status_for(vault, sf.SEAL)
+    store = sensed_model.ProjectionStore(vault)
+    store.wipe()
+    store.path.write_bytes(b"damaged database")
+    set_meta = sensed_model._set_meta
+
+    def fail_before_seeding(conn, key, value):
+        if key == "seeding":
+            raise sqlite3.OperationalError("interrupted initialization")
+        set_meta(conn, key, value)
+
+    monkeypatch.setattr(sensed_model, "_set_meta", fail_before_seeding)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted initialization"):
+        store.connect()
+    conn = sqlite3.connect(store.path)
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name='meta'").fetchone() is None
+    conn.close()
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+    monkeypatch.setattr(sensed_model, "_set_meta", set_meta)
+    sf.settle(vault)
+    assert sensed_model.status_for(vault, sf.SEAL) == whole
+
+
+def test_a_busy_projection_is_preserved_for_the_next_tick(tmp_path: Path, monkeypatch) -> None:
+    """A transient writer lock must not turn a complete projection into an empty rebuild."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    whole = sensed_model.status_for(vault, sf.SEAL)
+    store = sensed_model.ProjectionStore(vault)
+    blocker = sqlite3.connect(store.path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    connect = sqlite3.connect
+
+    def non_waiting(*args, **kwargs):
+        return connect(*args, **(kwargs | {"timeout": 0}))
+
+    monkeypatch.setattr(sqlite3, "connect", non_waiting)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            store.connect()
+    finally:
+        blocker.close()
+    assert sensed_model.status_for(vault, sf.SEAL) == whole
 
 
 @pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX modes")
