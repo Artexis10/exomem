@@ -58,6 +58,8 @@ A default-deny network policy SHALL:
 - grant the runtime pod no egress unless explicitly selected for Cloud artifact transport, in which case admit only the designated internal artifact-broker namespace/pod peer on TCP 8767, with no DNS or direct public egress;
 - limit backup and restore pods to object-storage egress.
 
+*Amended 2026-10-26 by `add-cloud-media-store`:* a runtime selected for the media store SHALL also be admitted to the media edge on its ClusterIP and port, with no DNS, and that cell's export and restore Jobs SHALL reach the edge on the same terms. Every other destination of such a runtime, apart from the artifact broker where selected, stays refused.
+
 No request field, path or header SHALL select a cell. An admission policy SHALL confine cellctl's own writes to cell namespaces, restricted namespaces and digest-pinned images from the configured repository. It SHALL admit a cell volume claim only on a configured cell storage class, a clone claim only when its source is a snapshot of the same cell's own volume, and cellctl's delete of a cell's volume claim only when the bound volume's reclaim policy is Retain. cellctl's only write to a persistent volume SHALL be setting its reclaim policy to Retain, and only on a volume whose claim is in a cell namespace.
 
 #### Scenario: Another workload attempts direct access
