@@ -4252,7 +4252,10 @@ def op_propose_compilation(
 
     Returns:
         {suggested_note_type, suggested_title, suggested_sources,
-         suggested_connections, outline_markdown, warnings}.
+         suggested_connections, outline_markdown, source_excerpts, warnings}.
+        `source_excerpts` holds one bounded excerpt per source, with its
+        recorded import metadata, so the note can be written without a read
+        per source.
 
     Errors:
         INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).

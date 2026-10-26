@@ -19,8 +19,9 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware
+from . import corpus_aware, source_coverage
 from . import find as find_module
+from .governance import egress
 from .vault import normalize_wikilink
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ def propose_compilation(
 
     resolver = find_module.shared_resolver(vault_root)
     resolved: list[str] = []          # canonical "Knowledge Base/..." (no .md)
+    pages: list[find_module.ParsedPage] = []
     source_types: list[str] = []
     titles: list[str] = []
     body_parts: list[str] = []
@@ -60,6 +62,7 @@ def propose_compilation(
             warnings.append(f"source not found, skipped: {s}")
             continue
         resolved.append(canonical)
+        pages.append(page)
         st = page.frontmatter.get("source_type")
         if isinstance(st, str):
             source_types.append(st)
@@ -93,8 +96,48 @@ def propose_compilation(
         "suggested_sources": resolved,
         "suggested_connections": connections,
         "outline_markdown": _render_outline(note_type, title, connections),
+        "source_excerpts": _source_excerpts(vault_root, resolved, pages, warnings),
         "warnings": warnings,
     }
+
+
+def _source_excerpts(
+    vault_root: Path,
+    resolved: list[str],
+    pages: list[find_module.ParsedPage],
+    warnings: list[str],
+) -> list[dict]:
+    """The opening text and recorded metadata of each Source, so the note needs no read per Source.
+
+    The excerpts share `SCAFFOLD_EXCERPT_CHARS`. Room for `SCAFFOLD_EXCERPT_CHARS //
+    MIN_EXCERPT_CHARS` excerpts is the most the bound can fund, so the Sources after
+    them keep their metadata without an excerpt. Each funded Source gets an equal
+    share of what is left, capped at one finding's excerpt. A page the caller may
+    not release is left out, as it is from every other derived structure.
+    """
+    keep = egress.restricted_release_filter(vault_root)
+    released = [
+        (canonical, page)
+        for canonical, page in zip(resolved, pages, strict=True)
+        if keep is None or keep(page.rel_path)
+    ]
+    bound = source_coverage.SCAFFOLD_EXCERPT_CHARS
+    funded = min(len(released), bound // source_coverage.MIN_EXCERPT_CHARS)
+    remaining = bound
+    out: list[dict] = []
+    for index, (canonical, page) in enumerate(released):
+        share = None
+        if index < funded:
+            share = min(source_coverage.EXCERPT_CHARS, remaining // (funded - index))
+        described = source_coverage.describe(vault_root, page, excerpt_chars=share)
+        remaining -= len(described.get("excerpt", ""))
+        out.append({"path": canonical, **described})
+    if funded < len(released):
+        warnings.append(
+            f"excerpt omitted for {len(released) - funded} source(s): the scaffold's total "
+            f"excerpt bound is {bound} characters; compile fewer sources at once"
+        )
+    return out
 
 
 def _suggest_title(titles: list[str]) -> str:

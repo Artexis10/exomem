@@ -41,6 +41,10 @@ DERIVATIVES_LISTED = 5
 TITLE_CHARS = 200
 EXCERPT_CHARS = 400
 FIELD_CHARS = 200
+#: The excerpts of one compilation scaffold share this many characters.
+SCAFFOLD_EXCERPT_CHARS = 6000
+#: An excerpt shorter than this says too little to group by, so the scaffold omits it.
+MIN_EXCERPT_CHARS = 60
 #: Raw characters read before whitespace collapses, so one excerpt never walks a whole body.
 _SCAN_CHARS = 8 * EXCERPT_CHARS
 
@@ -172,31 +176,61 @@ def _text(value: object) -> str | None:
     return _clip(value.strip(), FIELD_CHARS) if isinstance(value, str) and value.strip() else None
 
 
-def excerpt(root: Path, page: ParsedPage, limit: int = EXCERPT_CHARS) -> str:
-    """The opening prose of a Source, as the current caller may read it, within `limit` characters.
+#: The heading that opens the captured text on a Source page. Both Source writers
+#: (capture and import) emit it, so it is part of the page shape, not a guess.
+_CAPTURE_HEADING = "## Capture"
+#: Fence lines wrap the original text of an imported Source.
+_FENCES = ("```", "~~~")
 
-    The page's own heading is the title the finding already carries, so the excerpt
-    starts after it. Carrier spans are withheld the way every other door that serves
-    page prose to a caller withholds them.
+
+def _captured_text(body: str) -> str:
+    """The first `_SCAN_CHARS` of a Source's captured text, after its `## Capture` heading.
+
+    The lines above the heading say where the page came from (a copy notice, the
+    original path and hash), which tells an agent nothing about what the Source says.
+    Without the heading the body's own opening stands in, minus the page title.
+    A search for the heading, not a split of the body: a Source can run to megabytes.
+    """
+    at = body.find(f"\n{_CAPTURE_HEADING}")
+    while at != -1:
+        end = at + 1 + len(_CAPTURE_HEADING)
+        if body[end : end + 1] in ("", "\n", "\r", " ", "\t"):
+            window = body[end : end + _SCAN_CHARS]
+            break
+        at = body.find(f"\n{_CAPTURE_HEADING}", end)
+    else:
+        window = body[:_SCAN_CHARS]
+        if window.startswith("# "):
+            window = window.partition("\n")[2]
+    return "\n".join(
+        line for line in window.splitlines() if not line.lstrip().startswith(_FENCES)
+    )
+
+
+def excerpt(root: Path, page: ParsedPage, limit: int = EXCERPT_CHARS) -> str:
+    """The opening of a Source's captured text, as the current caller may read it, within `limit`.
+
+    Carrier spans are withheld the way every other door that serves page prose to a
+    caller withholds them.
     """
     from .governance import egress
 
-    prose = egress.prose_for_caller(root, page.body[:_SCAN_CHARS], owner_path=page.rel_path)
-    lines = prose.strip().splitlines()
-    if lines and lines[0].startswith("# "):
-        lines = lines[1:]
-    return _clip(" ".join(" ".join(lines).split()), limit)
+    prose = egress.prose_for_caller(root, _captured_text(page.body), owner_path=page.rel_path)
+    return _clip(" ".join(prose.split()), limit)
 
 
-def context(root: Path, page: ParsedPage, coverage: Coverage) -> dict[str, Any]:
-    """What an agent needs to group and act on a Source finding, each field only when recorded.
+def describe(
+    root: Path, page: ParsedPage, *, excerpt_chars: int | None = EXCERPT_CHARS
+) -> dict[str, Any]:
+    """What an agent needs to group a Source: title, opening excerpt and recorded metadata.
 
-    The server does not group: it reports the metadata the import recorded and the
-    derivative states, and the agent decides which Sources belong in one note.
+    Each metadata field appears only when the import recorded it, and the excerpt
+    only when `excerpt_chars` is set. The server does not group: the agent decides
+    which Sources belong in one note.
     """
     frontmatter: Mapping[str, Any] = page.frontmatter
     out: dict[str, Any] = {"title": _clip(page.title, TITLE_CHARS)}
-    opening = excerpt(root, page)
+    opening = excerpt(root, page, excerpt_chars) if excerpt_chars else ""
     if opening:
         out["excerpt"] = opening
     collection_path = _text(frontmatter.get("collection_path"))
@@ -210,6 +244,12 @@ def context(root: Path, page: ParsedPage, coverage: Coverage) -> dict[str, Any]:
     ):
         if value is not None:
             out[key] = value
+    return out
+
+
+def context(root: Path, page: ParsedPage, coverage: Coverage) -> dict[str, Any]:
+    """`describe` plus the derivatives that fail to compile the Source, for a finding."""
+    out = describe(root, page)
     failing = coverage.failing
     if failing:
         out["derivatives"] = [item.public() for item in failing[:DERIVATIVES_LISTED]]
