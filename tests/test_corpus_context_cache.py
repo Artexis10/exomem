@@ -1394,11 +1394,11 @@ def _meeting_vault(
     _withhold_note_types(vault)
 
 
-def _compiled_finding(vault: Path) -> str | None:
-    finding = semantic_contract.compiled_structure_finding(
+def _compiled_destination(vault: Path) -> str | None:
+    destination = semantic_contract.canonical_compiled_destination(
         semantic_contract.build_corpus_context(vault).pages[_MEETING_REL]
     )
-    return finding.code if finding is not None else None
+    return destination.key if destination is not None else None
 
 
 def test_a_warm_unbound_view_never_inherits_the_owners_note_types(vault: Path) -> None:
@@ -1418,16 +1418,17 @@ def test_a_warm_unbound_view_never_inherits_the_owners_note_types(vault: Path) -
         },
     )
     semantic_contract.reset_corpus_context_cache()
-    unbound_alone = _compiled_finding(vault)
+    unbound_alone = _compiled_destination(vault)
     semantic_contract.reset_corpus_context_cache()
     with library_scope():
-        owner_alone = _compiled_finding(vault)
-    assert owner_alone != unbound_alone
+        owner_alone = _compiled_destination(vault)
+    assert owner_alone == "meeting-note"
+    assert unbound_alone is None
 
     semantic_contract.reset_corpus_context_cache()
     with library_scope():
-        _compiled_finding(vault)
-    assert _compiled_finding(vault) == unbound_alone
+        _compiled_destination(vault)
+    assert _compiled_destination(vault) == unbound_alone
 
 
 def test_an_owner_with_an_invalid_overlay_refuses_after_an_unbound_call(vault: Path) -> None:

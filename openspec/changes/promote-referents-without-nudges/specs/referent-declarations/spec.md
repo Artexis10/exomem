@@ -69,13 +69,13 @@ A pending declaration SHALL appear in `recent_promotions` until it completes or 
 
 ### Requirement: A declared relation writes one typed edge
 
-Each declared relation SHALL resolve its predicate by key, alias or label, and SHALL write one typed edge after both endpoints exist, through a typed connection or `add-relation`.
+Each declared relation SHALL resolve its predicate by key, alias or label, and SHALL write one typed edge after both endpoints exist, through `create-entity` `relations` or an authored `## Relations` bullet.
 An unregistered or deprecated predicate SHALL write no edge and SHALL return the registry findings and the propose route.
 
 #### Scenario: An ownership edge reaches the owner's page
 
 - **WHEN** a declaration creates a vessel entity and carries `{predicate: owns, subject: <person ref>}`
-- **THEN** the person's page gains one `owns` bullet to the new entity through `add-relation`
+- **THEN** the person's page gains one `owns` bullet to the new entity through an authored `## Relations` bullet
 
 ### Requirement: A retried write replays its referent outcomes
 

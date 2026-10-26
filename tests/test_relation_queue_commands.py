@@ -193,6 +193,44 @@ def test_accept_writes_bullet_byte_identical_to_studio_path(
     ).read_bytes()
 
 
+def test_accepting_an_alias_writes_the_bare_label_and_the_edge_resolves_to_its_key(
+    tmp_path: Path,
+) -> None:
+    schema = tmp_path / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
+    schema.parent.mkdir(parents=True)
+    schema.write_text(
+        "schema_version: 1\nextensions:\n  vault.has_pet:\n    parent: relates_to\n"
+        "    description: A person keeps an animal.\n    aliases: [has_pet]\n",
+        encoding="utf-8",
+    )
+    _seed(tmp_path)
+    item = _first_item(tmp_path)
+
+    out = relation_queue.accept(
+        tmp_path,
+        ref=item["ref"],
+        expected_hash=_group_hash(tmp_path, "acorn.md"),
+        why="Accepted reviewed relation",
+        expected_fingerprint=item["fingerprint"],
+        requested_relation="has_pet",
+        edit_memory=commands.op_edit_memory,
+    )
+
+    text = (tmp_path / "Knowledge Base/Notes/Insights/acorn.md").read_text(encoding="utf-8")
+    assert "- has_pet [[Knowledge Base/Notes/Insights/birch]]" in text
+    assert "vault.has_pet" not in text
+    assert out["relation_type"] == "vault.has_pet"
+    assert out["relation_label"] == "has_pet (a kind of relates_to)"
+    find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    edges = commands.op_graph_context(
+        tmp_path, path="Knowledge Base/Notes/Insights/acorn.md", relation_types=["vault.has_pet"]
+    )["edges"]
+    assert [(edge["relation_type"], edge["relation_label"]) for edge in edges] == [
+        ("vault.has_pet", "has_pet (a kind of relates_to)")
+    ]
+
+
 def test_accept_fingerprint_mismatch_refuses_and_writes_nothing(tmp_path: Path) -> None:
     _seed(tmp_path)
     acorn = tmp_path / "Knowledge Base/Notes/Insights/acorn.md"

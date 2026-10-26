@@ -102,6 +102,7 @@ from . import (
     access,
     capabilities,
     contradiction_stance,
+    homes,
     indexes,
     lifecycle_statuses,
     logging_config,
@@ -135,6 +136,9 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 
+RELATION_GENERIC_SHARE_CATEGORY = "relation_generic_share"
+
+# These category names select implemented audit checks, not vault vocabulary.
 ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink",
     "forward_reference",
@@ -152,6 +156,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "corpus_contradictions",
     "relation_debt",
+    RELATION_GENERIC_SHARE_CATEGORY,
     "governance_receipts",
     "bridge_review",
     "duplicated_sidecar",
@@ -527,7 +532,8 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    pages = [] if selected <= _SEMANTIC_AUDIT_CATEGORIES else _parse_all(kb, vault_root)
+    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
+    pages = [] if selected <= projection_checks else _parse_all(kb, vault_root)
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
@@ -629,6 +635,12 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
+    if RELATION_GENERIC_SHARE_CATEGORY in selected:
+        from . import relation_census
+
+        review_findings, coverage = relation_census.generic_share_review(vault_root)
+        findings.extend(review_findings)
+        metadata.setdefault("coverage", {})[RELATION_GENERIC_SHARE_CATEGORY] = coverage
     if "missing_sources" in selected:
         findings.extend(_check_missing_sources(vault_root, pages, status_basis=status_basis))
     if "derivation_double_counting" in selected:
@@ -2752,7 +2764,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
 
     # Actual counts.
     sources = indexes._count_sources(kb / "Sources")
-    notes = indexes._count_notes(kb / "Notes")
+    notes = indexes._count_notes(kb / "Notes", home_set=homes.load(vault_root))
     entities = indexes._count_entities(kb / "Entities")
     actual: dict[str, int] = {
         "sources": sum(sources.values()),
@@ -6267,23 +6279,19 @@ def _contradiction_w_dormancy() -> float:
         return 0.5
 
 
-def _contradiction_family(rel_path: str) -> str | None:
-    """Return the `Notes/Research/<X>` family segment of a KB path, else None.
+def _contradiction_family(frontmatter: Mapping[str, Any]) -> str | None:
+    """Return the page's `project` key as its contradiction family, else None.
 
-    The architecture-cluster noise is same-family adjacency: many
-    `Notes/Research/<X>/*-architecture` pairs that are expected to sit close. Two
-    notes are 'same-family' when they share the `<X>` subfolder directly under
-    `Notes/Research/`. Returns `"Notes/Research/<X>"` for such a path (after the
-    leading `Knowledge Base/` is stripped) and None for anything outside that
-    tree (or directly in it with no `<X>` subfolder).
+    The architecture-cluster noise is same-family adjacency: many pages about one
+    project that are expected to sit close. Two notes are 'same-family' when they
+    carry the same `project` key, wherever they are filed. The key, not the folder,
+    decides: a home or a type folder can hold several projects, and a project's
+    notes can live in several folders. A page with no `project` has no family.
     """
-    stripped = rel_path.removeprefix(kb_prefix()).lstrip("/")
-    parts = stripped.split("/")
-    # parts = ["Notes", "Research", "<X>", ..., "file.md"] → need an <X> dir
-    # before the filename, so at least 4 components.
-    if len(parts) >= 4 and parts[0] == "Notes" and parts[1] == "Research":
-        return "/".join(parts[:3])
-    return None
+    project = frontmatter.get("project")
+    if not isinstance(project, str) or not project.strip():
+        return None
+    return project.strip().casefold()
 
 
 def _pair_dormancy(
@@ -7194,9 +7202,10 @@ def _proximity_contradictions(
 
     scored: list[tuple[bool, float, str, str, float, float]] = []
     for (a, b), cos in pair_cos.items():
-        same_family = _contradiction_family(a) is not None and _contradiction_family(
-            a
-        ) == _contradiction_family(b)
+        family = _contradiction_family(eligible[a].frontmatter)
+        same_family = family is not None and family == _contradiction_family(
+            eligible[b].frontmatter
+        )
         dormancy = _pair_dormancy(a, b, events_map, d)
         priority = cos + w_dormancy * dormancy
         scored.append((same_family, priority, a, b, cos, dormancy))

@@ -100,6 +100,7 @@ def delete_file(
     today: dt.date | None = None,
     now: dt.datetime | None = None,
     validate_only: bool = False,
+    expected_hash: str | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
     if not confirm:
         raise DeleteFileError(
@@ -362,6 +363,8 @@ def delete_file(
             raise DeleteFileError(
                 "DELETE_FAILED", "delete source changed during canonical validation"
             ) from error
+        if expected_hash is not None and source_hash != expected_hash:
+            raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
         return DeleteFileValidation(
             DeleteFileResult(
                 path=rel_path,
@@ -447,6 +450,14 @@ def delete_file(
             reason="the staged trash transition could not be restored",
         ) from error
     lifecycle_operation = transition.operation
+
+    # A preview of one object cannot authorize deleting a replacement; rename rechecks this manifest.
+    if expected_hash is not None and not any(
+        item.source_path == rel_path and item.content_hash == expected_hash
+        for item in lifecycle_operation.manifest
+    ):
+        transition.abort()
+        raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
 
     # A removed CLIP-relevant media binary (image/video — the only kinds with
     # derived-index residue: CLIP rows, and for a video, scene-frame children)

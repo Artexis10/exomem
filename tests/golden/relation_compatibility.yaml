@@ -7,6 +7,7 @@ parser:
 graph_context_default_profile: all
 relations:
   about_entity: {direction: directed, origins: [semantic_relation]}
+  affiliated_with: {direction: directed, origins: [semantic_relation]}
   answers: {direction: directed, origins: [semantic_relation]}
   blocks: {direction: directed, origins: [semantic_relation]}
   caused_by: {direction: directed, inverse: causes, origins: [semantic_relation]}
@@ -20,6 +21,7 @@ relations:
   evidenced_by: {direction: directed, origins: [frontmatter, semantic_relation]}
   extends: {direction: directed, origins: [semantic_relation]}
   implements: {direction: directed, origins: [semantic_relation]}
+  kin_of: {direction: symmetric, origins: [semantic_relation]}
   links_to: {direction: directed, origins: [frontmatter, semantic_relation, wikilink]}
   located_at: {direction: directed, origins: [semantic_relation]}
   member_of: {direction: directed, origins: [semantic_relation]}
@@ -32,7 +34,7 @@ relations:
   produces: {direction: directed, origins: [semantic_relation]}
   raises_question: {direction: directed, origins: [semantic_relation]}
   refines: {direction: directed, origins: [semantic_relation]}
-  relates_to: {direction: symmetric, origins: [semantic_relation]}
+  relates_to: {direction: symmetric, generic: true, origins: [semantic_relation]}
   resolves: {direction: directed, origins: [semantic_relation]}
   supersedes: {direction: directed, origins: [frontmatter, semantic_relation]}
   supplies: {direction: directed, origins: [semantic_relation]}

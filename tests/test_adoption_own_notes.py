@@ -367,3 +367,22 @@ def test_a_call_stops_between_notes_when_the_next_would_not_fit_and_the_continua
     assert last["phase"] == "applied"
     assert len(_notes(vault)) == 3
     assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 3
+
+
+def test_own_note_adoption_uses_the_project_home_in_its_frozen_plan(tmp_path: Path) -> None:
+    from test_vault_homes import _save
+
+    vault = _vault(tmp_path, {"Coll/Journal/rig.md": "# Imported rigs\n\nA retained result.\n"})
+    _save(vault, {"rigs": {"label": "Rigs", "attributes": {
+        "folder": "Notes/Rigs", "projects": ["atlas"],
+    }}})
+    rule = {**JOURNAL_RULE, "note_type": "research-note", "project": "atlas"}
+    run_id, planned = _import(vault, path="Coll", include=[rule])
+    target = planned["plan"]["items"][0]["note"]["target_path"]
+    assert target.startswith("Knowledge Base/Notes/Rigs/")
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert applied["phase"] == "applied"
+    assert applied["outcomes"]["Coll/Journal/rig.md"]["note"]["target_path"] == target
+    assert _page(vault, target)[0]["status"] == "draft"

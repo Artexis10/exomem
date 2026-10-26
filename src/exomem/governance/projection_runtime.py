@@ -1730,6 +1730,9 @@ def _find_projected_hits_pinned(
     graph_hops: set[str] = set()
     graph_provenance: dict[str, GraphProvenance] = {}
     if graph:
+        from .. import relation_registry
+
+        core_relations = relation_registry.core_registry()
         if not has_selected_l6:
             lane_hits["graph"] = ()
         elif runtime.graph_index is None:
@@ -1774,6 +1777,13 @@ def _find_projected_hits_pinned(
                             first_seen[target] = position
                             graph_provenance[target] = GraphProvenance(
                                 relation_type=edge.relation_type,
+                                # Stored projections carry no admitted extension-label evidence.
+                                relation_label=(
+                                    relation_registry.display_label(
+                                        core_relations, edge.relation_type,
+                                    )
+                                    if edge.relation_type in core_relations.core else None
+                                ),
                                 direction="outbound",
                                 seed=seed,
                             )
