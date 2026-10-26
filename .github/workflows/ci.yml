@@ -4,170 +4,68 @@ name: CI
   workflow_dispatch: null
 permissions:
   contents: read
+env:
+  EXOMEM_TEST_OLDER_READER_VERSION: 0.106.0
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: 0.127.5
+  EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 jobs:
-  recall-worker-preflight:
+  canonical-paired-report:
+    name: recall latency paired (keyword)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      UV_PYTHON: /usr/bin/python3
-      UV_PYTHON_DOWNLOADS: never
     steps:
+    - name: Record paired workload start
+      run: date +%s > "$RUNNER_TEMP/recall-latency-job-start"
     - uses: actions/checkout@v4
       with:
-        ref: d4eb25fb2c7c425c50cb48406d351d04169e1b90
         fetch-depth: 0
-    - uses: astral-sh/setup-uv@v5
+        ref: 106649bfb1f46e8ec0b5cb47e41f3c47225a2d26
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
       with:
-        version: 0.11.28
         enable-cache: true
-    - name: Resolve the encoder digest
-      id: encoder
+    - name: Resolve the served encoder digest
+      id: recall-encoder
+      env:
+        UV_PYTHON: /usr/bin/python3
+        UV_PYTHON_DOWNLOADS: never
       run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py
         --encoder-cache-key >> "$GITHUB_OUTPUT"
-    - uses: actions/cache@v4
+    - name: Cache the served encoder by digest
+      uses: actions/cache@v4
       with:
         path: ~/.cache/huggingface
-        key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
-    - name: Verify both principals through the real bound command
-      shell: bash
-      run: "EXOMEM_DISABLE_EMBEDDINGS=1 KB_MCP_DISABLE_EMBEDDINGS=1 KB_MCP_DISABLE_MEDIA_EXTRACTION=1\
-        \ uv run --frozen --group recall-benchmark python -m pytest -q -o timeout=180\
-        \ tests/test_recall_latency_gate.py tests/test_recall_timing.py tests/test_request_latency_contract.py\
-        \ --junitxml=recall-bound-scoped.xml\nuv run --frozen --group recall-benchmark\
-        \ python - <<'PY'\nimport ast\nimport hashlib\nimport json\nimport os\nimport\
-        \ subprocess\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nscript\
-        \ = Path.cwd() / \"scripts\" / \"recall_latency_gate.py\"\noriginal = script.read_text()\n\
-        helper = r'''\nfrom contextlib import contextmanager\nimport hashlib\nimport\
-        \ inspect\n\n_proof_prepare_original = _prepare_worker\n_proof_sample_original\
-        \ = _worker_sample\n_proof_preparation = {}\n\ndef _proof_prepare(root, startup):\n\
-        \    from exomem import due_state\n    reconcile = due_state.reconcile\n \
-        \   observations = []\n    def observed_reconcile(vault_root, *args, **kwargs):\n\
-        \        before_missing = due_state.load(vault_root) is None\n        result\
-        \ = reconcile(vault_root, *args, **kwargs)\n        observations.append({\"\
-        before_missing\": before_missing,\n                             \"persisted_usable\"\
-        : due_state.load(vault_root) is not None})\n        return result\n    due_state.reconcile\
-        \ = observed_reconcile\n    try:\n        environment = _proof_prepare_original(root,\
-        \ startup)\n    finally:\n        due_state.reconcile = reconcile\n    _proof_preparation.update({\"\
-        reconciliations\": observations,\n                               \"persisted_usable\"\
-        : due_state.load(root) is not None})\n    environment[\"advisory_preparation\"\
-        ] = dict(_proof_preparation)\n    return environment\n\ndef _proof_sample(ask_memory,\
-        \ request):\n    import recall_latency_adapter as adapter\n    from exomem\
-        \ import command_surface, due_state\n    from exomem.collection_store import\
-        \ ownership\n    from exomem.governance import egress, principal\n\n    observed\
-        \ = {\"postfilter_callers\": [], \"ownership_finish_calls\": 0,\n        \
-        \        \"admission_calls\": 0, \"all_admissions_owned\": True, \"success_log_calls\"\
-        : 0,\n                \"parent_conflicts\": [], \"timing_suppressed\": None}\n\
-        \    postfilter, finish = egress.postfilter, ownership.ReadScope.finish\n\
-        \    decide = egress._decide_path\n    log_success, instrument = command_surface._log_tool_success,\
-        \ adapter.instrument\n    timed_hits = []\n    def observed_filter(*args,\
-        \ **kwargs):\n        frame = inspect.currentframe().f_back\n        observed[\"\
-        postfilter_callers\"].append({\n            \"module\": frame.f_globals.get(\"\
-        __name__\"), \"function\": frame.f_code.co_name,\n            \"ownership_active\"\
-        : ownership._READ.get() is not None})\n        del frame\n        return postfilter(*args,\
-        \ **kwargs)\n    def observed_finish(scope):\n        observed[\"ownership_finish_calls\"\
-        ] += 1\n        return finish(scope)\n    def observed_decide(*args, **kwargs):\n\
-        \        if adapter._CLOCK.CURRENT.get() is not None:\n            observed[\"\
-        admission_calls\"] += 1\n            observed[\"all_admissions_owned\"] &=\
-        \ ownership._READ.get() is not None\n        return decide(*args, **kwargs)\n\
-        \    def observed_log(*args, **kwargs):\n        observed[\"success_log_calls\"\
-        ] += 1\n        return log_success(*args, **kwargs)\n    @contextmanager\n\
-        \    def observed_instrument():\n        with instrument() as value:\n   \
-        \         yield value\n        observed[\"parent_conflicts\"] = [collector.parent_conflicts()\
-        \ for collector in value[1]]\n    def observed_ask(**kwargs):\n        result\
-        \ = ask_memory(**kwargs)\n        observed[\"timing_suppressed\"] = not isinstance(result,\
-        \ dict) or \"timings\" not in result\n        timed_hits.extend(result.get(\"\
-        hits\", []) if isinstance(result, dict) else result)\n        return result\n\
-        \n    # These fixed application boundaries observe the existing command, not\
-        \ user text.\n    egress.postfilter = observed_filter\n    egress._decide_path\
-        \ = observed_decide\n    ownership.ReadScope.finish = observed_finish\n  \
-        \  command_surface._log_tool_success = observed_log\n    adapter.instrument\
-        \ = observed_instrument\n    try:\n        result = _proof_sample_original(observed_ask,\
-        \ request)\n    finally:\n        egress.postfilter = postfilter\n       \
-        \ egress._decide_path = decide\n        ownership.ReadScope.finish = finish\n\
-        \        command_surface._log_tool_success = log_success\n        adapter.instrument\
-        \ = instrument\n\n    # Compare the same real bound command outside its diagnostic\
-        \ timer/collector.\n    caller = (principal.owner_principal(surface=\"library\"\
-        ) if request[\"principal\"] == \"owner\"\n              else principal.RequestPrincipal(audience_id=\"\
-        benchmark-admitted\", surface=\"mcp\"))\n    adapter.clear_results()\n   \
-        \ with principal.request_scope(caller), principal.invocation_scope():\n  \
-        \      untimed = ask_memory(query=request[\"query\"], include_timings=False,\n\
-        \                            limit=DEFAULT_LIMIT, rerank=False, **request[\"\
-        arguments\"])\n    stable = lambda value: hashlib.sha256(json.dumps(value,\
-        \ sort_keys=True).encode()).hexdigest()\n    untimed_hits = untimed.get(\"\
-        hits\", []) if isinstance(untimed, dict) else untimed\n    observed[\"hits_equal_untimed\"\
-        ] = stable(timed_hits) == stable(untimed_hits)\n    observed[\"hit_count\"\
-        ] = len(timed_hits)\n    observed[\"preparation\"] = dict(_proof_preparation)\n\
-        \    result[\"boundary_proof\"] = observed\n    return result\n\n_prepare_worker\
-        \ = _proof_prepare\n_worker_sample = _proof_sample\n'''\ntree = ast.parse(original,\
-        \ filename=str(script))\nassert isinstance(tree.body[-1], ast.If)\ntree.body[-1:-1]\
-        \ = ast.parse(helper).body\nwrapper = \"_proof_source = \" + repr(original)\
-        \ + \"\\n_proof_helper = \" + repr(helper) + \"\\n\"\nwrapper += \"import\
-        \ ast\\n_proof_tree = ast.parse(_proof_source, filename=__file__)\\n\"\nwrapper\
-        \ += \"_proof_tree.body[-1:-1] = ast.parse(_proof_helper).body\\n\"\nwrapper\
-        \ += \"exec(compile(ast.fix_missing_locations(_proof_tree), __file__, 'exec'),\
-        \ globals())\\n\"\nscript.write_text(wrapper)\nsys.path.insert(0, str(Path.cwd()\
-        \ / \"scripts\"))\nimport recall_latency_gate as gate\n\nreport = {\"state\"\
-        : \"failed\", \"mode\": \"bound-reference-proof\",\n          \"timings\"\
-        : \"observed diagnostic only; not a qualifying paired comparison\",\n    \
-        \      \"source\": subprocess.check_output([\"git\", \"rev-parse\", \"HEAD\"\
-        ], text=True).strip(),\n          \"instrument_sha256\": hashlib.sha256(original.encode()).hexdigest(),\n\
-        \          \"overlay_sha256\": hashlib.sha256(wrapper.encode()).hexdigest()}\n\
-        worker = None\ntry:\n    profile = json.loads((gate.BENCHMARK / \"profile.json\"\
-        ).read_text())\n    cases, _ = gate.reference_cases(profile)\n    cpus = sorted(os.sched_getaffinity(0))[:gate.REFERENCE[\"\
-        reference_cpus\"]]\n    if len(cpus) != gate.REFERENCE[\"reference_cpus\"\
-        ]:\n        raise gate.MeasurementRefused(\"two-cpu-reference-unavailable\"\
-        )\n    selected = {case[\"series\"]: case for case in reversed(cases)}\n \
-        \   with tempfile.TemporaryDirectory(prefix=\"recall-bound-reference-\") as\
-        \ directory:\n        scratch = Path(directory)\n        try:\n          \
-        \  worker = gate._Worker(gate.ROOT, scratch / \"vault\", scratch / \"head\"\
-        , cpus, profile)\n            report[\"environment\"] = worker.environment\n\
-        \            report[\"samples\"] = []\n            # The real gate discards\
-        \ one warm-up call per principal and series.\n            for principal_name\
-        \ in (\"owner\", \"admitted\"):\n                for case in selected.values():\n\
-        \                    worker.exchange({**case, \"principal\": principal_name,\
-        \ \"rows\": gate.REFERENCE[\"stage_rows\"]})\n            for principal_name\
-        \ in (\"owner\", \"admitted\"):\n                for series in sorted(selected):\n\
-        \                    case = selected[series]\n                    for ordinal\
-        \ in range(2):\n                        request = {**case, \"principal\":\
-        \ principal_name, \"rows\": gate.REFERENCE[\"stage_rows\"]}\n            \
-        \            result = worker.exchange(request)\n                        report[\"\
-        samples\"].append({\"principal\": principal_name, \"series\": series,\n  \
-        \                                                \"ordinal\": ordinal, **result})\n\
-        \            failures = []\n            for sample in report[\"samples\"]:\n\
-        \                proof = sample[\"boundary_proof\"]\n                callers\
-        \ = {row[\"module\"] for row in proof[\"postfilter_callers\"]}\n         \
-        \       if sample[\"state\"] != \"ok\":\n                    failures.append(\"\
-        sample-not-ok\")\n                if not {\"exomem.writer_lease\", \"exomem.command_surface\"\
-        } <= callers:\n                    failures.append(\"terminal-pass-missing\"\
-        )\n                if not all(row[\"ownership_active\"] for row in proof[\"\
-        postfilter_callers\"]):\n                    failures.append(\"terminal-ownership-missing\"\
-        )\n                if proof[\"ownership_finish_calls\"] < 2 or proof[\"success_log_calls\"\
-        ] != 1:\n                    failures.append(\"completion-boundary-missing\"\
-        )\n                if not proof[\"admission_calls\"] or not proof[\"all_admissions_owned\"\
-        ]:\n                    failures.append(\"body-ownership-missing\")\n    \
-        \            if not proof[\"hits_equal_untimed\"] or not proof[\"hit_count\"\
-        ]:\n                    failures.append(\"result-identity-lost\")\n      \
-        \          if proof[\"timing_suppressed\"] != (sample[\"principal\"] == \"\
-        admitted\"):\n                    failures.append(\"public-timing-suppression-changed\"\
-        )\n                if not proof[\"parent_conflicts\"] or any(proof[\"parent_conflicts\"\
-        ]):\n                    failures.append(\"collector-parent-conflict\")\n\
-        \                if not proof[\"preparation\"][\"persisted_usable\"]:\n  \
-        \                  failures.append(\"advisory-preparation-missing\")\n   \
-        \             if sample[\"series\"] == \"unit\" and not sample[\"stages\"\
-        ][\"governed-stage-semantic_units\"][\"ms\"]:\n                    failures.append(\"\
-        unit-stage-missing\")\n            report[\"failures\"] = sorted(set(failures))\n\
-        \            report[\"state\"] = \"failed\" if failures else \"observed\"\n\
-        \        finally:\n            if worker is not None:\n                worker.close()\n\
-        except Exception as error:\n    report[\"reason\"] = error.code if isinstance(error,\
-        \ gate.MeasurementRefused) else type(error).__name__\n    report[\"phase\"\
-        ] = getattr(error, \"phase\", None)\nfinally:\n    Path(\"recall-bound-reference-proof.json\"\
-        ).write_text(json.dumps(report, indent=2, sort_keys=True) + \"\\n\")\nraise\
-        \ SystemExit(report[\"state\"] == \"failed\")\n\nPY\n"
-    - uses: actions/upload-artifact@v4
+        key: recall-encoder-${{ runner.os }}-${{ steps.recall-encoder.outputs.digest
+          }}
+    - name: Verify the latency instrument
+      env:
+        UV_PYTHON: /usr/bin/python3
+        UV_PYTHON_DOWNLOADS: never
+      run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py
+        tests/test_recall_timing.py -q
+    - name: Compare governed recall with the latest release
+      timeout-minutes: 40
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SERIES: keyword
+        UV_PYTHON: /usr/bin/python3
+        UV_PYTHON_DOWNLOADS: never
+      run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py
+        --paired --series "$SERIES" --output "recall-latency-paired-$SERIES.json"
+    - name: Record elapsed paired workload
       if: always()
+      env:
+        JOB_TIMEOUT_MINUTES: 45
+      run: python3 -c 'import json,os,pathlib,time; start=int((pathlib.Path(os.environ["RUNNER_TEMP"])/"recall-latency-job-start").read_text());
+        pathlib.Path("recall-latency-job-elapsed.json").write_text(json.dumps({"boundary":"first-step-to-pre-upload-timer","elapsed_seconds":time.time()-start,"job_budget_seconds":60*int(os.environ["JOB_TIMEOUT_MINUTES"])}))'
+    - name: Upload paired recall evidence
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-        name: recall-bound-reference-proof
-        path: 'recall-bound-reference-proof.json
+        name: recall-latency-paired-keyword
+        path: 'recall-latency-paired-keyword.json
 
-          recall-bound-scoped.xml'
+          recall-latency-job-elapsed.json
+
+          '
         if-no-files-found: warn
