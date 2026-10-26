@@ -1,5 +1,10 @@
 ## 1. Per-cell key hierarchy
 
+Batch A implements the code and disposable-sandbox portion of this group.
+The task boxes remain open until their stated live evidence and delivery evidence exist.
+The real CSI drill, fleet migration, node-policy observations and live canary inspection remain operator-run evidence.
+The media producer and tenant-lock crash recovery remain deferred to their owning implementation groups.
+
 - [ ] 1.1 Early check: on a disposable cluster with the pinned hcloud CSI driver, a StorageClass that names a per-namespace node-publish Secret through the provisioner's templates creates, mounts and remounts an encrypted volume. Record the LUKS version that the driver formats. Evidence: the drill output and `cryptsetup luksDump` header version, recorded in design D1.
 - [ ] 1.2 Mint a cell root key per cell in cellctl. Wrap it under the platform master key, with the cell ID, purpose and version as additional data. Derive or wrap the volume passphrase, the restic password and, once `add-cloud-media-store` lands, the media key bundle under it. Evidence: unit tests show that two cells' keys differ, that a wrong cell ID fails to unwrap, and that no content key is wrapped directly by the master key.
 - [ ] 1.3 Render each new cell's volume Secret in its own namespace, and point the cell StorageClass at it. Evidence: a rehearsal cell's volume opens with its own passphrase and not with the shared one.

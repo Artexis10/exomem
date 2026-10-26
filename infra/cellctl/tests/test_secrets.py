@@ -10,6 +10,7 @@ from cryptography.exceptions import InvalidTag
 from cellctl.secrets import (
     bearer_matches,
     derive_cell_bearer,
+    derive_volume_passphrase,
     generate_backup_data_key,
     unwrap_secret,
     wrap_secret,
@@ -59,6 +60,14 @@ def test_backup_data_key_is_32_random_bytes_each_time() -> None:
     assert len(a) == 32
     assert len(b) == 32
     assert a != b
+
+
+def test_volume_child_is_bound_to_cell_and_protocol_version() -> None:
+    root = os.urandom(32)
+    first = derive_volume_passphrase(root, cell_id="aaaaaaaaaaaaaaaa")
+    assert first != derive_volume_passphrase(root, cell_id="bbbbbbbbbbbbbbbb")
+    assert first != derive_volume_passphrase(root, cell_id="aaaaaaaaaaaaaaaa", key_version=2)
+    assert len(first) == 64
 
 
 _AAD = dict(cell_id="aaaaaaaaaaaaaaaa", column="backup_key_wrapped", key_version=1)

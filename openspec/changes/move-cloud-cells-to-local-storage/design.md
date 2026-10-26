@@ -35,7 +35,7 @@ Production is one Hetzner Cloud cx33. It runs the single embedded-etcd k3s serve
 **Non-Goals**
 
 - Changing the restic repository layout, the per-cell key model, tenant authentication or the control database.
-- Per-tenant encryption keys.
+- Implementing the per-volume encryption integration in this storage change; the privacy programme owns that prerequisite.
 - Replicated block storage (Longhorn, DRBD, Ceph). Cross-node replication would cost more than the tenants it protects at this scale, and it turns a disk-loss problem into a distributed-systems problem.
 - Choosing or buying hardware.
 
@@ -65,7 +65,9 @@ Rejected alternatives:
 ### D2. Encryption at the node: LUKS on md RAID1, Clevis/Tang unlock, escrowed keys
 
 - **Layout:** the two NVMe disks form an md RAID1. LUKS sits on top and holds the `cells` volume group.
-- **Posture:** this matches today's, where every Cloud Volume uses the same LUKS secret and tenants are separated by namespace and volume, not by key. Per-volume LUKS has no off-the-shelf LVM provisioner, and per-tenant keys are a non-goal.
+- **Cutover prerequisite:** node encryption alone does not meet the per-cell custody contract. Every local cell volume must first gain LUKS2 under its cell-derived passphrase.
+- **Integration ownership:** the privacy programme owns the integration around maintained `cryptsetup` and Linux dm-crypt. TopoLVM does not supply this layer. Its lifecycle, snapshots, resize and restore need integration evidence before cutover. Batch A prepares no bespoke CSI driver.
+- **Current status:** the controller reports local storage as unsupported for per-cell key custody. Capacity and import admission retain their separate contracts.
 - **Unlock:** unattended through Clevis against a Tang server on the control-plane node, reached over the private link.
   - A pulled disk, or one the provider swaps out, stays unreadable on its own.
   - Unlock depends on the control plane, which costs nothing: cells cannot serve without the control plane anyway.

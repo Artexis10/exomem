@@ -98,7 +98,7 @@ def test_import_job_keeps_cell_confinement_and_limits_ciphertext_url_to_import(p
     assert container["securityContext"]["allowPrivilegeEscalation"] is False
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     command = container["command"]
-    assert command[:3] == ["exomem", "cell-import", "discard" if phase == "cleanup" else phase]
+    assert command[-len(command[command.index("exomem"):]):][:3] == ["exomem", "cell-import", "discard" if phase == "cleanup" else phase]
     assert command[command.index("--import-id") + 1] == item.import_id
     if phase == "import":
         assert command[command.index("--url") + 1] == url
@@ -199,7 +199,8 @@ def test_cell_init_init_container_is_present_and_uses_the_same_image() -> None:
     assert init["image"] == image
     # D3: "exomem cell-init --vault /data/vault --json" is the exact
     # contract command, matching lane A's real entrypoint.
-    assert init["command"] == ["exomem", "cell-init"]
+    assert init["command"][-2:] == ["exomem", "cell-init"]
+    assert "ulimit -c 0" in init["command"][2]
     assert init["args"] == ["--vault", "/data/vault", "--json"]
 
 

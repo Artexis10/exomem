@@ -86,6 +86,21 @@ class FakeClusterGateway:
     def delete_namespace(self, name: str) -> None:
         self.deleted_namespaces.add(name)
 
+    def delete_secret(self, namespace: str, name: str, *, cell_id: str) -> bool:
+        observation = self.observations.get(cell_id, ClusterObservation())
+        if namespace != namespace_name(cell_id) or (observation.namespace_exists
+                and observation.namespace_cell_label != cell_id):
+            return False
+        self.applied.pop((namespace, "Secret", name), None)
+        self.events.append(("delete_secret", namespace, name))
+        return True
+
+    def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool:
+        removed = self.delete_secret(namespace, "cell-credentials", cell_id=cell_id)
+        if removed:
+            self.events.append(("delete_cell_secrets", namespace))
+        return removed
+
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
 
@@ -3163,3 +3178,158 @@ async def test_selected_cutover_reads_inventory_after_prior_admission_and_promot
         await controller.close()
         await admission.close()
         await owner.close()
+
+
+async def test_provider_outage_cannot_preserve_live_content_keys_or_claim_legacy_expiry(cell_db, monkeypatch):
+    """Deletion retires DB and Secret children before an unreachable provider can strand them."""
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "delete-provider-outage")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    cluster, b2 = FakeClusterGateway(), FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    try:
+        await _converged_cell(connection, cluster, b2, now)
+        before = (await db.select_all_rows(connection))[0]
+        assert before.cell_root_key_wrapped is not None
+        await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
+        cluster.admission_confined = False
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+            _secrets_config(), _cluster_config(), now=now)
+        retired = (await db.select_all_rows(connection))[0]
+        assert retired.cell_root_key_wrapped is retired.backup_key_wrapped is None
+        assert retired.last_live_key_destroyed_at is None
+        assert any(key[1] == "Secret" for key in cluster.applied)
+        cluster.admission_confined = True
+        def unavailable(*_args):
+            raise OSError("offline")
+        monkeypatch.setattr(b2, "list_object_versions", unavailable)
+        for step in range(2):
+            await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+                _secrets_config(), _cluster_config(), now=now + timedelta(seconds=step))
+            current = (await db.select_all_rows(connection))[0]
+            assert current.cell_root_key_wrapped is current.backup_key_wrapped is None
+            assert current.content_keys_retired_at == now
+            assert current.b2_key_wrapped is not None
+            assert current.keys_expire_at is current.last_live_key_destroyed_at is None
+            assert not any(key[1] == "Secret" for key in cluster.applied)
+            cluster.observations["aaaaaaaaaaaaaaaa"] = ClusterObservation()
+    finally:
+        await app.close()
+        await connection.close()
+
+
+async def test_retention_clock_waits_for_workload_drain_and_records_deployed_source_windows(cell_db):
+    """Secret retirement alone cannot start retention while a workload can still hold the child key."""
+    import json
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "retention-window")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    sources = tuple({"kind": kind, "source": f"deployed-{kind}", "retention_seconds": seconds,
+                     "observed_at": now.isoformat()} for kind, seconds in (
+                         ("control_database", 17), ("cluster_datastore", 19), ("object_versions", 23)))
+    config = dataclasses.replace(_cluster_config(), key_retention_sources=sources)
+    try:
+        await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
+            {"volume": "per-cell-key", "retained_old_volume": None})})
+        await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
+        cluster.observations[cell_id] = _served(pod_terminating=True, pod_uses_volume=True)
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=now)
+        row = (await db.select_all_rows(connection))[0]
+        assert row.last_live_key_destroyed_at is row.keys_expire_at is None
+        cluster.observations[cell_id] = ClusterObservation()
+        drained_at = now + timedelta(seconds=30)
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=drained_at)
+        row = (await db.select_all_rows(connection))[0]
+        assert row.last_live_key_destroyed_at == drained_at
+        assert row.keys_expire_at == drained_at + timedelta(seconds=23)
+        assert json.loads(row.key_retention_sources) == list(sources)
+    finally:
+        await app.close()
+        await connection.close()
+
+
+async def test_key_retirement_does_not_delete_a_conflicting_namespaces_child_secret(cell_db):
+    """A database deletion must not erase credentials from a namespace that belongs to another cell."""
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "conflicting-namespace", desired_state="deleted")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    secret_key = (namespace_name(cell_id), "Secret", "cell-credentials")
+    cluster.applied[secret_key] = {"foreign": True}
+    cluster.observations[cell_id] = _served(namespace_cell_label="bbbbbbbbbbbbbbbb")
+    try:
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), _cluster_config())
+        assert secret_key in cluster.applied
+        assert (await db.select_all_rows(connection))[0].cell_root_key_wrapped is None
+    finally:
+        await connection.close()
+
+
+@pytest.mark.parametrize("invalid", [
+    {"observed_at": "unobserved"}, {"observed_at": "2026-01-01T00:00:00"},
+    {"observed_at": "2026-01-02T00:00:00+00:00"}, {"observed_at": None},
+    {"source": " "}, {"source": 7}, {"retention_seconds": True},
+    {"retention_seconds": -1}, {"retention_seconds": 10**30},
+])
+def test_invalid_retention_evidence_never_establishes_finite_expiry(invalid):
+    """Malformed observation, source, window or arithmetic remains unknown instead of claiming destruction."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    sources = [{"kind": kind, "source": "deployed policy", "retention_seconds": 0,
+                "observed_at": now.isoformat()} for kind in (
+                    "control_database", "cluster_datastore", "object_versions")]
+    sources[0].update(invalid)
+    assert reconcile._retention_expiry(sources, now) is None
+
+
+async def test_malformed_retention_is_retained_as_unknown_without_stopping_deletion(cell_db):
+    import json
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "unknown-retention", desired_state="deleted")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    sources = tuple({"kind": kind, "source": "policy", "retention_seconds": 0,
+                     "observed_at": "unobserved"} for kind in (
+                         "control_database", "cluster_datastore", "object_versions"))
+    try:
+        await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
+            {"volume": "per-cell-key", "retained_volumes": []})})
+        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+            _secrets_config(), dataclasses.replace(_cluster_config(), key_retention_sources=sources),
+            now=datetime(2026, 1, 1, tzinfo=UTC))
+        row = (await db.select_all_rows(connection))[0]
+        assert row.observed_state == "deleted" and row.keys_expire_at is None
+        assert json.loads(row.key_retention_sources) == list(sources)
+    finally:
+        await connection.close()
+
+
+@pytest.mark.parametrize("raw", ["[NaN]", "[1e999]"], ids=["nonfinite-constant", "numeric-overflow"])
+async def test_nonfinite_retention_input_preserves_raw_evidence_and_completes_deletion(cell_db, monkeypatch, raw):
+    import json
+
+    from cellctl import main
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "raw-retention", desired_state="deleted")
+    monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
+    monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_KEY_RETENTION_SOURCES", raw)
+    config = main.build_cluster_config()
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
+            {"volume": "per-cell-key", "retained_volumes": []})})
+        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
+        row = (await db.select_all_rows(connection))[0]
+        assert row.observed_state == "deleted" and row.keys_expire_at is None
+        assert json.loads(row.key_retention_sources) == [raw]
+    finally:
+        await connection.close()

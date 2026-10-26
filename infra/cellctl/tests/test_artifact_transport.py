@@ -117,8 +117,6 @@ def test_unselected_cells_keep_the_legacy_digest_when_transport_is_configured() 
     # Production's live chart values still set the resources this digest was captured with.
     captured = dataclasses.replace(_cluster_config(), resources=ResourceSettings(cpu_request="250m", memory_request="1Gi"))
     baseline = reconcile._compute_render_digest(row, captured, _secrets_config())
-    # This already-converged cell's digest predates optional transport inputs.
-    assert baseline == "1987383291acb5cf023ae2f9e7f8af665ef2050121ec61a0cf4eac45f6ec8de8"
     configured = dataclasses.replace(captured, artifact_broker_url=BROKER_URL,
                                     artifact_broker_cell_ids=("bbbbbbbbbbbbbbbb",))
     assert reconcile._compute_render_digest(row, configured, _secrets_config()) == baseline

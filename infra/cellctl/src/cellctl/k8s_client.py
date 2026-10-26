@@ -54,6 +54,7 @@ from .manifests import (
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
     hold_job_name,
+    namespace_name,
 )
 from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
 from .storage.topolvm import LocalVolumeState, LogicalVolume
@@ -178,6 +179,31 @@ class ClusterClient:
     def run_job(self, manifest: dict) -> None:
         self.apply(manifest)
 
+    def delete_secret(self, namespace: str, name: str, *, cell_id: str) -> bool:
+        """Mutate a Secret only after the namespace API proves its expected cell ownership."""
+        if namespace != namespace_name(cell_id):
+            return False
+        try:
+            owner = self._core.read_namespace(namespace)
+        except ApiException as error:
+            if error.status == 404:
+                return True
+            raise
+        metadata = getattr(owner, "metadata", None)
+        if (metadata is None or getattr(metadata, "name", None) != namespace
+                or (getattr(metadata, "labels", None) or {}).get(CELL_LABEL) != cell_id):
+            return False
+        try:
+            self._core.delete_namespaced_secret(name, namespace)
+        except ApiException as error:
+            if error.status != 404:
+                raise
+        return True
+
+    def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool:
+        """Retire the cell's children without waiting for namespace or provider cleanup."""
+        return self.delete_secret(namespace, "cell-credentials", cell_id=cell_id)
+
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
         """D3: an hourly hold's clone claim and snapshot. Already gone is done."""
 
@@ -259,11 +285,11 @@ class ClusterClient:
             result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods))
         return result
 
-    def observe_export_job(self, namespace: str, export_id: str):
+    def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False):
         """C6: the export's one Job, its pods and its termination report."""
         from .exports import ExportJob, job_name
 
-        name = job_name(export_id)
+        name = job_name(export_id, verify=verify)
         job = self._get_job(namespace, name)
         pods = self._core.list_namespaced_pod(namespace, label_selector=f"batch.kubernetes.io/job-name={name}").items
         # Terminating pods still hold the volume until Kubernetes removes them.
@@ -293,7 +319,15 @@ class ClusterClient:
             # The controller removes terminal Jobs; retain the private-safe reason before it does.
             logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None
-        return ExportJob(job is not None, active, succeeded, failed, report, bool(pods), finished_at)
+        predecessor = None
+        if verify:
+            # The packing Job's Pod must release its volume before verification can finish the hold.
+            predecessor_name = job_name(export_id)
+            predecessor = self._get_job(namespace, predecessor_name)
+            pods += self._core.list_namespaced_pod(namespace,
+                label_selector=f"batch.kubernetes.io/job-name={predecessor_name}").items
+        return ExportJob(job is not None or predecessor is not None, active, succeeded, failed, report,
+                         bool(pods), finished_at)
 
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
@@ -580,6 +614,8 @@ class ClusterClient:
             pv_node_absent=pv_node is not None and node_presence is not None and pv_node not in node_presence[0],
             namespace_volume_lost=namespace_volume_lost,
             namespace_move_volume=namespace_move_volume,
+            namespace_move_storage_class=namespace_annotations.get("exomem.io/move-storage-class"),
+            namespace_move_accepted_volume=namespace_annotations.get("exomem.io/move-accepted-volume"),
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,
