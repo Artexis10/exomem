@@ -40,7 +40,7 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
 )
 from .server_rest import register_rest_facade
 from .server_runtime import LocalRuntimeActivation, initialize_runtime
-from .server_transfer import register_transfer_routes
+from .server_transfer import register_cloud_upload_route, register_transfer_routes
 from .server_transport import PrimeMcpSSEMiddleware
 
 log = logging.getLogger(__name__)
@@ -721,11 +721,20 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     )
     mcp.add_middleware(RefusalFloorMiddleware())
 
+    upload_bridge = False
     if cloud:
         # Only MCP (`/mcp`), `/health` and `/health/ready` are registered
-        # (D1.5): REST (`/api/*`), `/upload`, `/download` and the OAuth
-        # metadata routes are never registered on a cloud cell.
+        # (D1.5): REST (`/api/*`), `/download`, the personal `/upload` and the
+        # OAuth metadata routes are never registered on a cloud cell. A cell
+        # configured for gateway upload handoffs adds only the private ticket
+        # receiver (bridge-cloud-agent-uploads).
         register_health_routes(mcp, on_liveness=runtime_activation.start)
+        from . import cloud_origin
+
+        cloud_origin.validate_configuration()
+        upload_bridge = cloud_origin.enabled()
+        if upload_bridge:
+            register_cloud_upload_route(mcp, vault_root=runtime.vault_root, cell_bearer=auth)
     else:
         register_asset_routes(
             mcp,
@@ -797,7 +806,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     # the Cloud-only control-plane commands; registration below never sees the
     # exclusions, and no other surface sees the Cloud-only commands.
     product_commands = commands_module.product_commands_for(
-        "mcp", expose_tier2=expose_tier2, cloud=cloud
+        "mcp", expose_tier2=expose_tier2, cloud=cloud, upload_bridge=upload_bridge
     )
     tool_shape = _tool_shape_from_environment()
     mcp.add_middleware(PublicCommandNameMiddleware(product_commands, shape=tool_shape))
@@ -846,7 +855,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
                 f"The active surface withholds `{exclusion.command}`. {exclusion.reason} "
                 f"Lifted when {exclusion.lifted_when}.",
             )
-            for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values()
+            for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
     for cmd in product_commands:
@@ -1192,7 +1201,8 @@ def http_middleware(mcp: FastMCP, *, worker_socket: Path | None = None) -> list:
     (design.md Decision 1). A supervisor-owned worker with no auth provider
     also gets the local-ingress gate here; with the OAuth proxy the gate is
     already in the proxy's own middleware, ahead of authentication, and a
-    cell's verifier never arms it.
+    cell's verifier never arms it. A Cloud cell also binds each request's
+    gateway-signed login origin, innermost, for the upload handoff.
     """
     middleware = [
         ASGIMiddleware(EdgeIngressMiddleware),
@@ -1203,6 +1213,10 @@ def http_middleware(mcp: FastMCP, *, worker_socket: Path | None = None) -> list:
         from .local_ingress import LocalIngressMiddleware
 
         middleware.insert(0, ASGIMiddleware(LocalIngressMiddleware))
+    if cloud_cell.cloud_mode_enabled():
+        from .cloud_origin import CloudOriginMiddleware
+
+        middleware.append(ASGIMiddleware(CloudOriginMiddleware))
     return middleware
 
 

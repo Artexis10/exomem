@@ -37,6 +37,16 @@ GATEWAY_CONTEXT_HEADER = "x-exomem-client-context"
 GATEWAY_APP_ID_HEADER = "x-exomem-app-id"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
+_ISSUER_FAMILY_PREFIX = "cloud-cell:"
+
+
+def issuer_family(cell_id: str) -> str:
+    """The principal issuer family of an operation authenticated by this cell's bearer."""
+    return _ISSUER_FAMILY_PREFIX + cell_id
+
+
+def is_cloud_issuer_family(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(_ISSUER_FAMILY_PREFIX)
 
 
 def canonical_app_id(value: object) -> str | None:

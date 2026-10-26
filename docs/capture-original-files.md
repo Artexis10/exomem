@@ -29,8 +29,17 @@ It never describes the rendered Source page.
 
 Standalone stdio has no verified HTTP session and cannot issue upload handoffs.
 Connect through personal HTTP MCP or supply a supported client file handle.
-Cloud upload handoffs require a gateway bridge; the existing transfer exclusion remains until that bridge is verified.
 These clients can still capture an original through a supported client file handle.
+
+## Exomem Cloud
+
+A Cloud cell configured for gateway upload handoffs uses the same steps and descriptor fields.
+Its token starts with `exomem-cloud-upload:v1:`, and its `upload_url` is the Cloud gateway's `/upload` endpoint.
+The gateway checks that the issuing login is still current before it reads any bytes.
+Only that login can capture the held file. Treat the token as private, as on a personal server.
+
+On a cell without this configuration, `transfer_artifact` is not offered. Use a supported client file handle instead.
+On Cloud, `transfer_artifact` prepares held uploads only. It does not issue download links.
 
 ## Correct an earlier Source
 

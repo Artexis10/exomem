@@ -8648,6 +8648,11 @@ def op_transfer_artifact(
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled() and not hold:
+        # A Cloud cell has only the gateway's held-upload receiver: no download or credential upload route.
+        raise ValueError("INVALID_MODE: an Exomem Cloud cell supports only hold=true uploads")
     if hold:
         if operation != "upload" or artifact is not None or expected_sha256 is None:
             raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
@@ -13887,6 +13892,8 @@ class SurfaceExclusion:
     command: str
     reason: str
     lifted_when: str
+    #: A cell configured for gateway upload handoffs serves the command.
+    lifted_by_upload_bridge: bool = False
 
 
 CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
@@ -13896,14 +13903,14 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="transfer_artifact",
                 reason=(
-                    "An Exomem Cloud cell has no browser transfer or "
-                    "gateway-mediated upload flow to bridge this leaf into; "
-                    "direct browser transfers are out of scope for Exomem Cloud "
-                    "(design Non-Goals)."
+                    "This Exomem Cloud cell is not configured for the gateway's "
+                    "upload handoff, and direct browser transfers are out of "
+                    "scope for Exomem Cloud (design Non-Goals)."
                 ),
                 lifted_when=(
-                    "a live artifact-upload bridge is added for running Cloud cells"
+                    "the cell is configured for gateway upload handoffs"
                 ),
+                lifted_by_upload_bridge=True,
             ),
             SurfaceExclusion(
                 command="read_media",
@@ -13923,22 +13930,35 @@ def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, .
     return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
 
 
+def cloud_surface_exclusions(*, upload_bridge: bool = False) -> tuple[SurfaceExclusion, ...]:
+    """The exclusions in force on a cell, with or without gateway upload handoffs."""
+    return tuple(
+        exclusion
+        for exclusion in CLOUD_SURFACE_EXCLUSIONS.values()
+        if not (upload_bridge and exclusion.lifted_by_upload_bridge)
+    )
+
+
 def product_commands_for(
-    surface: str, *, expose_tier2: bool = True, cloud: bool = False
+    surface: str, *, expose_tier2: bool = True, cloud: bool = False, upload_bridge: bool = False
 ) -> tuple[Command, ...]:
     """Product commands exposed on a public surface, honoring tier-2 opt-out.
 
     `cloud=True` is the one definition of the Cloud cell surface: the product
-    surface minus `CLOUD_SURFACE_EXCLUSIONS`, plus the Cloud-only commands that
+    surface minus the exclusions in force, plus the Cloud-only commands that
     the gateway serves from the control plane. Every other surface omits those.
     """
+    excluded = (
+        {exclusion.command for exclusion in cloud_surface_exclusions(upload_bridge=upload_bridge)}
+        if cloud else set()
+    )
     return tuple(
         c
         for c in PRODUCT_COMMANDS
         if surface in c.surfaces
         and (expose_tier2 or c.tier == 1)
         and (cloud or not c.cloud_only)
-        and not (cloud and c.name in CLOUD_SURFACE_EXCLUSIONS)
+        and c.name not in excluded
     )
 
 
