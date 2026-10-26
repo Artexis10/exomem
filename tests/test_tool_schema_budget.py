@@ -24,9 +24,7 @@ from test_mcp_schema_fidelity import _build_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The 0.146.1 fixture measures 158,399 ordinary and 159,969 Cloud tool-object bytes
-# in the checks below, excluding array/RPC framing. The preview schema and current
-# registry operations are included. The historical 0.144.3 grouped sum was 95,235.
+# Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
 # No token or quality gain is claimed. Each changed ceiling rounds up to 50 bytes.
 # The separate bootstrap core budget stays unchanged.
 TOTAL_BUDGET = 159_600

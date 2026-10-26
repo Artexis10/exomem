@@ -673,6 +673,41 @@ def test_the_tool_search_setting_is_part_of_the_session_inputs_so_a_resumed_run_
     assert digest("false") != digest("auto")
 
 
+def test_a_tool_selection_session_executes_from_its_seed_and_records_end_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval import session
+
+    case = _dev_case("records-range-total")
+    layout = Layout(tmp_path / "run")
+    seeded = layout.run / "seeded" / case.case_id / "vault"
+    seed_vault(seeded, case.seed_steps())
+    before = read_end_state(seeded)
+    spec = ex.arm_spec("grouped", ())
+    init = {"type": "system", "subtype": "init", "apiKeySource": "none",
+            "model": "m", "claude_code_version": "v", "tools": [],
+            "mcp_servers": [{"name": "exomem", "status": "connected"}]}
+    client = '''
+import json, sys
+sys.stdin.readline()
+print(sys.argv[1], flush=True)
+print(json.dumps({"type": "result", "subtype": "success", "result": "received"}), flush=True)
+'''
+    inputs = SessionInputs(
+        planned=PlannedSession("session-1", case.case_id, "grouped", 1, 0),
+        tree=ex.SURFACE_TREE, argv=(sys.executable, "-c", client, json.dumps(init)),
+        env={"PATH": os.defpath}, cwd=layout.slot / "cwd", turns=(case.prompt,), scored_turn=0,
+        files={"instructions.md": ex.client_instructions()}, state_digests={},
+    )
+    monkeypatch.setattr(session, "_USER_STATE_ROOT", tmp_path / "user-state")
+    executor = ex.ToolSelectionExecutor(layout, {"grouped": spec}, "m", "v", {},
+                                       cases={case.case_id: case}, turn_timeout=5)
+
+    result = executor(inputs, tmp_path / "attempt")
+
+    assert result.outcome == "ok" and result.answer == "received"
+    assert result.facts["end_state_before"] == result.facts["end_state_after"] == before
+    assert not layout.slot.exists()
+
+
 def _probe(**schemas: str) -> dict:
     return {"tools": sorted(schemas), "hashes": {"per_tool": {"initialize": schemas}}}
 

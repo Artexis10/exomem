@@ -377,7 +377,7 @@ class ToolSelectionExecutor(ClaudeSessionExecutor):
             self._prepare_slot(slot, case)
             before = snapshot_slot(slot, inputs.env, attempt_dir / "before-readiness.json")
             try:
-                result = self._execute(inputs, attempt_dir, slot)
+                result = self.execute_prepared(inputs, attempt_dir, slot)
             finally:
                 _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
             after = snapshot_slot(slot, inputs.env, attempt_dir / "after-stop.json")

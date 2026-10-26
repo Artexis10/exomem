@@ -651,7 +651,8 @@ def run_once(
 
                 sensed = sensed_model.TickReport()
                 sensed_model.run_tick(
-                    vault_root, seen=store.seen_map(conn), halt=halt, now=clock.time(), report=sensed
+                    vault_root, seen=store.seen_map(conn), halt=halt, now=clock.time(), report=sensed,
+                    reseeding=bool(store.get_meta(conn, "reseeding")) and store.pending_count(conn) > 0,
                 )
             now = clock.time()
             delivered = _record_deliveries(store, conn)

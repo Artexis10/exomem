@@ -45,7 +45,7 @@ registry; use paginated inspection before concluding that a key is absent.
 
 ## Propose and save
 
-1. Pass the delta as `proposal` to `read_schema(operation={'kind': 'propose', 'subject': ..., 'proposal': ...})` to inspect validation and collisions.
+1. Pass the delta as `proposal` to `read_schema(operation={'kind': 'preview', 'subject': ..., 'proposal': ...})` to inspect validation and collisions.
 2. Review `valid`, findings, collisions, inherited attributes, and near-duplicates to choose a supported delta.
 3. Call `change_schema(operation={'kind': 'save', 'subject': ..., 'proposal': ..., 'expected_hash': ..., 'why': ...})` to request the governed save.
 4. Inspect `saved`, `state`, and `vocabulary_receipt` to report the actual result and its revert route.
