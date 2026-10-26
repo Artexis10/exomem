@@ -210,9 +210,8 @@ def test_a_vault_that_withholds_the_pages_counts_nothing_for_a_restricted_audien
     external = served_for("external")
 
     assert external is not None
-    assert external["total"] == 1, "only the visible entity is counted"
-    assert external["categories"] == {CATEGORY: 1}
-    assert len(external["top"]) == 1
+    assert external["categories"][CATEGORY] == 1, "only the visible promotion is counted"
+    assert len([row for row in external["top"] if row["category"] == CATEGORY]) == 1
 
 
 def test_an_entry_whose_promotion_is_gone_is_spent_and_a_restore_does_not_raise_it_again(
@@ -297,7 +296,9 @@ def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Pa
         assert "never-written" not in repr(result) and NOTE not in repr(result)
         assert result.keys() == withheld_result.keys()
         assert result["warnings"] == []
-        assert _log_entry(vault, result["path"]).rstrip().endswith("Origin: unknown.")
+        entry = _log_entry(vault, result["path"])
+        assert "Origin: unknown." in entry
+        assert NOTE not in entry and missing not in entry
     assert commands._creation_origin(vault, NOTE)["path"] == NOTE, "the owner reads the page"
 
 

@@ -136,6 +136,9 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 
+RELATION_GENERIC_SHARE_CATEGORY = "relation_generic_share"
+
+# These category names select implemented audit checks, not vault vocabulary.
 ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink",
     "forward_reference",
@@ -153,6 +156,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "corpus_contradictions",
     "relation_debt",
+    RELATION_GENERIC_SHARE_CATEGORY,
     "governance_receipts",
     "bridge_review",
     "duplicated_sidecar",
@@ -528,7 +532,8 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    pages = [] if selected <= _SEMANTIC_AUDIT_CATEGORIES else _parse_all(kb, vault_root)
+    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
+    pages = [] if selected <= projection_checks else _parse_all(kb, vault_root)
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
@@ -630,6 +635,12 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
+    if RELATION_GENERIC_SHARE_CATEGORY in selected:
+        from . import relation_census
+
+        review_findings, coverage = relation_census.generic_share_review(vault_root)
+        findings.extend(review_findings)
+        metadata.setdefault("coverage", {})[RELATION_GENERIC_SHARE_CATEGORY] = coverage
     if "missing_sources" in selected:
         findings.extend(_check_missing_sources(vault_root, pages, status_basis=status_basis))
     if "derivation_double_counting" in selected:

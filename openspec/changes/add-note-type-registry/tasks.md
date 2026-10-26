@@ -22,13 +22,15 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 
 ## 2A. Homes and shared type folders (organisation PR A)
 
-- [ ] 2A.1 Add the `homes` registry adapter, empty pack and `RegistrySpec`, with folder validation through `compiled_route_exempt` and one home per topic or project key. Check: save, history and restore through `schema_memory(subject="homes")`; a reserved segment and a duplicate key refuse.
-- [ ] 2A.2 Let a type folder accept any compiled type and a compiled type sit anywhere under Notes; reword the two findings. Check: an insight in `Notes/Research/<Project>` is accepted; an untyped page in `Notes/Insights` refuses; a compiled page outside Notes refuses.
-- [ ] 2A.3 Replace the per-type branches of `note._resolve_path` with the placement order, keeping partitions and stems for the type default, and keep a superseding page in its predecessor's folder. Check: a topic home receives an insight and a failure; with no homes, every destination is unchanged.
+- [x] 2A.1 Add the `homes` registry adapter, empty pack and `RegistrySpec`, with folder validation through `compiled_route_exempt` and one home per topic or project key. Check: save, history and restore through `schema_memory(subject="homes")`; a reserved segment and a duplicate key refuse.
+- [x] 2A.2 Let a type folder accept any compiled type and a compiled type sit anywhere under Notes; reword the two findings. Check: an insight in `Notes/Research/<Project>` is accepted; an untyped page in `Notes/Insights` refuses; a compiled page outside Notes refuses.
+- [x] 2A.3 Replace the per-type branches of `note._resolve_path` with the placement order, keeping partitions and stems for the type default, and keep a superseding page in its predecessor's folder. Check: a topic home receives an insight and a failure; with no homes, every destination is unchanged.
 - [ ] 2A.4 Refuse a home whose governance or vocabulary-instance scope differs from the type default's (`HOME_CHANGES_SCOPE`), then run `page_scope` on the final path. Check: the refusal writes nothing.
-- [ ] 2A.5 Report `placement` in the creation draft, with the folder, the basis and the home-making call; route a near-miss topic with a home through the vocabulary decision.
-- [ ] 2A.6 Count notes by top-level Notes folder with registry labels and give homes index sections; make the research-folder contradiction demotion a project-key rule. Check: a home's pages appear in `Notes/index.md` and in `index_drift`.
-- [ ] 2A.7 Update the authoring contract's role rule and homes text, bump the contract version once, and regenerate the scaffold, plugin and Cloud copies through their producers. Hosted v1 to v4 were retired in #1691, so no frozen carrier remains to verify.
+- [x] 2A.5 Report `placement` in the creation draft, with the folder, the basis and the home-making call; route a near-miss topic with a home through the vocabulary decision.
+- [x] 2A.6 Count notes by top-level Notes folder with registry labels and give homes index sections; make the research-folder contradiction demotion a project-key rule. Check: a home's pages appear in `Notes/index.md` and in `index_drift`.
+- [x] 2A.7 Update the authoring contract's role rule and homes text, bump the contract version once, and regenerate the scaffold, plugin and Cloud copies through their producers. Hosted v1 to v4 were retired in #1691, so no frozen carrier remains to verify.
+
+Evidence: PR A implements these tasks in the homes and placement commits; `tests/test_vault_homes.py` passes in the combined integration scope. Carrier checks and the privacy scan pass. The scope-boundary task remains open for independent review; delivery evidence belongs on PR A.
 
 ## 2. S4b: write side and promotion
 

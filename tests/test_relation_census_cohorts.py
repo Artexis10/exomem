@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    audit,
     command_surface,
     commands,
     epistemic_graph,
@@ -93,6 +94,19 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     assert cohort["coverage"]["status"] == "partial"
     assert cohort["review"]["gate"] is False
     assert cohort["review"]["needed"] is True
+    reviewed = commands.op_review_memory(
+        vault, mode="audit", categories=[audit.RELATION_GENERIC_SHARE_CATEGORY], detail="full"
+    )
+    assert len(reviewed["findings"]) == 1
+    assert reviewed["findings"][0]["severity"] == "info"
+    assert reviewed["findings"][0]["meta"]["measurement"]["numerator"] == 1
+    config = vault.parent / "review-target.json"
+    config.write_text(json.dumps({"relation_census": {"entity_generic_review_share": 1}}))
+    with monkeypatch.context() as changed_target:
+        changed_target.setenv("EXOMEM_CONFIG_PATH", str(config))
+        assert commands.op_review_memory(
+            vault, mode="audit", categories=[audit.RELATION_GENERIC_SHARE_CATEGORY], detail="full"
+        )["findings"] == []
 
     monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1")
     monkeypatch.setattr(vault_module, "LOG_ROTATE_KEEP_ENTRIES", 1)

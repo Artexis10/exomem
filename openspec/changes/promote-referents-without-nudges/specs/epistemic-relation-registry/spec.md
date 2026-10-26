@@ -76,3 +76,9 @@ Note-to-note edges SHALL have no target, and the census SHALL NOT refuse a write
 
 - **WHEN** retained history lacks the structured data required by a metric
 - **THEN** that metric reports partial or unavailable coverage with its source instead of a measured zero
+
+#### Scenario: The configured target creates an audit review item
+
+- **WHEN** the recorded generic share for edges that touch an entity exceeds the configured target
+- **THEN** the `relation_generic_share` audit check returns an informational review item with the measurement, window, source and coverage
+- **AND** raising the target above that share removes the item without changing any write permission

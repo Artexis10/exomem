@@ -404,12 +404,10 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "is refused."
         ),
         "placement_rule": (
-            "The listed folders are defaults. `create_note` files a research note in the home "
-            "that serves its `project`, and any other compiled note in the home that serves "
-            "the first of its `topics` that has one. "
-            '`schema_memory(subject="homes", operation="inspect")` lists the homes. The '
-            "draft's `placement` names the folder, its basis and the call that makes a topic "
-            "a home."
+            "Folders are defaults. `create_note` files research notes in their `project` home. "
+            "Other compiled notes use the first `topics` entry with a home. "
+            '`schema_memory(subject="homes", operation="inspect")` lists homes. The '
+            "draft's `placement` gives the folder, basis and call to make a topic a home."
         ),
         "lifecycle_rule": (
             "Check live creates, replacements and transitions to live; "

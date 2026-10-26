@@ -115,9 +115,9 @@ Otherwise it stays specified here and unbuilt, and its requirements leave the sp
 | `connect_memory` | 4,470 | 4,475 | No additive operation or connections union |
 | `edit_note` | 6,906 | 6,950 | No removal operation |
 | `maintain_memory` | 3,729 | 3,734 | One `revert` enum value |
-| `schema_memory` | 4,178 | 4,200 | Description includes the registry `remove` verb |
+| `schema_memory` | 4,185 | 4,200 | Description includes the registry `remove` verb |
 
-The measured full surface is 102,339 bytes under a 103,089-byte ceiling.
+The measured full surface is 102,358 bytes under a 103,089-byte ceiling.
 The `revert` enum adds nine bytes; its per-tool and total raises have reasons beside their source ceilings.
 Rerun the measurement after integration changes the wire objects.
 

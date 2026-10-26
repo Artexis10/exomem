@@ -306,7 +306,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
     window = {"days": days, "from": start.isoformat(), "to": now.isoformat(), "clock": "server_utc"}
     source = "atomic_operation_log_v1:live_and_rotation_archives"
     log = vault.read_operation_log(vault_root)
-    events: dict[str, dict[str, Any]] = {}
+    timed_events: dict[str, tuple[dt.datetime, dict[str, Any]]] = {}
     observed = 0
     unknown_time = 0
     uninstrumented = 0
@@ -360,13 +360,13 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
             if start <= timestamp <= now:
                 uninstrumented += 1
             continue
-        previous = events.get(data["operation_id"])
-        if previous is None or timestamp < instant(previous["server_at"]):
-            events[data["operation_id"]] = data
+        previous = timed_events.get(data["operation_id"])
+        if previous is None or timestamp < previous[0]:
+            timed_events[data["operation_id"]] = (timestamp, data)
     events = {
         identity: event
-        for identity, event in events.items()
-        if start <= instant(event["server_at"]) <= now
+        for identity, (timestamp, event) in timed_events.items()
+        if start <= timestamp <= now
     }
     coverage = {
         "status": "partial" if events else "unavailable",
@@ -530,6 +530,45 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
             "note_to_note_target": None,
         },
     }
+
+
+def generic_share_review(vault_root: Path) -> tuple[list[audit.AuditFinding], dict[str, Any]]:
+    """Expose the census's configured review signal through the existing audit surface."""
+    result = census(vault_root)
+    if not result["available"]:
+        return [], {"status": "unavailable", "reason": result["reason"]}
+    cohort = result["new_edges"]
+    coverage = cohort["coverage"]
+    review = cohort["review"]
+    if review["needed"] is not True:
+        return [], coverage
+    measurement = review["entity_touching_generic_share"]
+    numerator, denominator = measurement["numerator"], measurement["denominator"]
+    target, days = review["target"], cohort["window"]["days"]
+    # Clock movement alone must not re-raise a dismissed signal with unchanged evidence.
+    signal = [numerator, denominator, target, days, coverage]
+    finding = audit.AuditFinding(
+        category=audit.RELATION_GENERIC_SHARE_CATEGORY,
+        severity="info",
+        path=f"{kb_prefix()}index.md",
+        detail=(
+            f"Recorded edges that touch an entity: {numerator}/{denominator} generic "
+            f"over {days} days; review target {target * 100:g}%. Coverage: {coverage['status']}."
+        ),
+        proposed_fix=(
+            "Review the recorded choices through schema_memory(subject='relations', "
+            "operation='census'). Use a specific predicate when the evidence supports it; "
+            "keep an honest generic choice with its reason. This signal never blocks a write."
+        ),
+        meta={
+            "signal_version": hashlib.sha256(
+                json.dumps(signal, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16],
+            "measurement": measurement,
+            "target": target,
+        },
+    )
+    return [finding], coverage
 
 
 class ServiceKeyRefused(Exception):

@@ -81,9 +81,11 @@ Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.
 
 ## S11. Registry tolerance, shadowing and bare names (organisation PR A)
 
-- [ ] 11.1 Make page validation honour each registry finding's severity, and report an unknown field in a saved overlay as a warning, so that a later overlay field cannot block every page after a rollback. Check: a saved overlay with an unknown field leaves page writes working.
-- [ ] 11.2 Keep a saved extension alias bound to its extension when a newer core key has the same label: a `core_shadowed` warning, the explicit `core.<key>` spelling for the core meaning, and grandfathering by the saved alias. Ship it in the same release as, or before, any new core relation key. Check: a shadowed alias keeps its meaning across a core upgrade.
-- [ ] 11.3 Write the bare label on queue acceptance when it resolves to one entry in the page's admitted instance, and resolve labels through the caller's or page's admitted instance in `resolve-relation`, the queue, the bootstrap vocabulary section and curation identity. Curation accepts `aliases` and `registry_scope` for entity creation. Check: a private-instance label resolves and binds; a public caller never sees it.
+- [x] 11.1 Make page validation honour each registry finding's severity, and report an unknown field in a saved overlay as a warning, so that a later overlay field cannot block every page after a rollback. Check: a saved overlay with an unknown field leaves page writes working.
+- [x] 11.2 Keep a saved extension alias bound to its extension when a newer core key has the same label: a `core_shadowed` warning, the explicit `core.<key>` spelling for the core meaning, and grandfathering by the saved alias. Ship it in the same release as, or before, any new core relation key. Check: a shadowed alias keeps its meaning across a core upgrade.
+- [x] 11.3 Write the bare label on queue acceptance when it resolves to one entry in the page's admitted instance, and resolve labels through the caller's or page's admitted instance in `resolve-relation`, the queue, the bootstrap vocabulary section and curation identity. Curation accepts `aliases` and `registry_scope` for entity creation. Check: a private-instance label resolves and binds; a public caller never sees it.
+
+Evidence: PR A supplies registry tolerance, shadowing, admitted-instance resolution and bare labels. The tolerance, private-instance, display-label and queue suites pass; independent review and delivery evidence remain on PR A.
 
 ## S12. Vocabulary at authoring time (organisation PR B)
 

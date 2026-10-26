@@ -8133,6 +8133,7 @@ def prepend_log_entry(
     rel_path_no_ext: str,
     body: str,
     provenance: Mapping[str, Any] | None = None,
+    machine_generated: bool = False,
 ) -> str:
     """Insert a `## [date] <op> | <rel>` block after the log's `---` separator.
 
@@ -8145,9 +8146,11 @@ def prepend_log_entry(
     if title.startswith(kb_prefix()):
         title = title[len(kb_prefix()) :]
     newline = document_newline(log_text)
-    # Quote caller prose so it cannot mint activity sections or provenance fences.
-    quoted_body = "\n".join("> " + line for line in escape_wikilinks_for_log(body).splitlines())
-    new_entry = f"## [{date_iso}] {op} | {title}\n\n{quoted_body}\n"
+    rendered_body = escape_wikilinks_for_log(body)
+    # Only server-serialized audit events opt out; caller prose cannot mint log structure.
+    if not machine_generated:
+        rendered_body = "\n".join("> " + line for line in rendered_body.splitlines())
+    new_entry = f"## [{date_iso}] {op} | {title}\n\n{rendered_body}\n"
     if provenance is not None:
         # The fixed fence token versions the operation-log protocol, not vocabulary.
         encoded = json.dumps(provenance, ensure_ascii=False, sort_keys=True).replace("`", "\\u0060")
@@ -8272,6 +8275,7 @@ def plan_log_writes(
     body: str,
     operation_token: str,
     provenance: Mapping[str, Any] | None = None,
+    machine_generated: bool = False,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
     log_file = kb_root(vault_root) / "log.md"
@@ -8294,6 +8298,7 @@ def plan_log_writes(
         rel_path_no_ext=rel_path_no_ext,
         body=body,
         provenance=provenance,
+        machine_generated=machine_generated,
     )
     return _plan_log_content(
         vault_root,
@@ -8360,6 +8365,7 @@ def plan_log_writes_many(
     rel_path_no_ext: str,
     bodies: Iterable[str],
     operation_token: str,
+    machine_generated: bool = False,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per body, oldest first.
 
@@ -8378,6 +8384,7 @@ def plan_log_writes_many(
             op=op,
             rel_path_no_ext=rel_path_no_ext,
             body=body,
+            machine_generated=machine_generated,
         )
     return _plan_log_content(
         vault_root,

@@ -34,15 +34,17 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 
 ## 2. Typed-edge leaves and relation data (D3)
 
-- [ ] 2.1 Add `generic` and `endpoints` to the relation adapter and the core pack, with findings for an unknown family, an extension side outside its parent's, and other than one active generic relation. Check: save and history round trips with both fields, endpoint inheritance, a narrower and a wider extension, and parity of every existing key.
-- [ ] 2.2 Add a symmetric kinship relation and an affiliation relation to the core pack with families and endpoints (R2). Check: the parity test lists both; a vault extension can parent on each.
+- [x] 2.1 Add the `generic` marker to the relation adapter and core pack, with exactly one active generic relation. Check: registry round trips and existing-key parity pass. Endpoint grammar and inheritance remain task 2.10.
+- [x] 2.2 Add a symmetric kinship relation and an affiliation relation to the core pack with families (R2); their endpoint declarations follow in task 2.10. Check: the parity test lists both; a vault extension can parent on each.
 - [ ] 2.3 Replace the `relates_to` key comparisons on the touched paths (`mutation_terminal.py:1402`, `vocabulary_signals.py:71`, `relation_census.py:60`, `link.py:391`) with the `generic` attribute. Check: the semgrep C6 gate passes; the advisory, signal and census tests pass unchanged; the PR lists the remaining literals as C4 debt.
 - [x] 2.4 Superseded: typed edges on `create-entity` shipped as the separate `relations=[{kind,target}]` parameter (#2058 `fd3dea0ec`, #2062 `c331e47c4`). No `connections` item union is added, and a plain string connection keeps the generic relation.
 - [x] 2.5 Dropped by the 2026-10-26 amendment: no additive edge operation on `connect_memory`. Agents author typed edges through `relations` items and `## Relations` bullets.
-- [ ] 2.6 Add edge removal as an internal curation step only, keyed by subject page, predicate and target, with no hash and no tool operation. Check: it removes exactly that triple's bullets; a repeat reports `absent`; an unrelated concurrent edit to the page survives; a withheld subject refuses like a missing one; no tool's `destructiveHint` changes.
+- [x] 2.6 Add edge removal as an internal curation step only, keyed by subject page, predicate and target, with no hash and no tool operation. Check: it removes exactly that triple's bullets; a repeat reports `absent`; an unrelated concurrent edit to the page survives; a withheld subject refuses like a missing one; no tool's `destructiveHint` changes.
 - [ ] 2.7 Add post-commit `specific_options` and in-place replacement routes for note-to-note generic edges. Check: accepting an option leaves one edge; a predicate without fitting endpoints is absent; at most four options appear; dismissal suppresses the offer; note-to-note generic edges remain writable and receive the typed-edge warning.
 - [ ] 2.8 Refuse before commit a newly added generic edge that touches an entity when an active non-generic relation fits both endpoints (`GENERIC_RELATION_NEEDS_REASON`), with at most 4 options and a ready retry hash; keep generic in one retry through `relation_disposition="generic"` and `relation_review_reason`, or a `reason` on a `relations` item. Exempt pending and draft pages, bulk operation classes, frozen surfaces and edges carried from a predecessor. Check: each exemption never fires; a withheld target refuses like an absent one; one retry commits.
 - [ ] 2.9 Stop the product's generators defaulting to the generic relation: queue acceptance requires `requested_relation` when specific options exist, and compile proposals and question-pair suggestions carry options instead of a default. Check: no generator writes the generic relation where a fitting specific option exists without the agent choosing it.
+
+- [ ] 2.10 Add `endpoints` with the approved typed grammar, inheritance and narrowing checks, including kinship and affiliation declarations. Check: save/history round trips, inherited endpoints, narrower and wider extensions, and key parity. This is PR B work.
 
 ## 3. Receipt block (D1A)
 
@@ -70,7 +72,7 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 
 ## 7. Labels (D6)
 
-- [ ] 7.1 Add the relation `label`, `relation_registry.display_label`, and `relation_label` from every producer named in D6. Check: one test per producer through its public door asserts the label of a core relation, of an extension (`<label> (a kind of <parent label>)`) and of a shared label with its namespace; schema-fidelity tests show every existing key field unchanged.
+- [x] 7.1 Add the relation `label`, `relation_registry.display_label`, and `relation_label` from every producer named in D6. Check: one test per producer through its public door asserts the label of a core relation, of an extension (`<label> (a kind of <parent label>)`) and of a shared label with its namespace; schema-fidelity tests show every existing key field unchanged.
 - [ ] 7.2 Show `relation_label` in Studio (`app.v5.js`) in its own PR under the frontend procedure. Check: Chrome DevTools inspection of the graph and relation-queue views before and after; accept payloads still send the key.
 
 ## 8. Typed activation (D4, conditional on the D8 development rounds and its trigger)
