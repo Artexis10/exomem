@@ -188,7 +188,9 @@ def test_the_command_exits_with_an_error_and_names_the_rerun_when_a_file_could_n
     result = json.loads(captured.out)
     assert (status, result["ok"], result["code"]) == (1, False, "COPY_INCOMPLETE")
     assert "Run the same command again" in captured.err and result["import_id"] in captured.err
+    # The path to adopt what is staged so far is printed, but not as the next step of a finished import.
     assert "Next: run adoption_studio start" not in captured.err
+    assert f'adoption_studio start with path "{result["start_path"]}"' in captured.err
 
     monkeypatch.setattr(local_import.import_selection, "select", scan)
     assert cli._dispatch_main(["import", str(folder), "--vault", str(vault)]) == 0

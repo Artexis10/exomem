@@ -101,13 +101,17 @@ class Selection:
         if tally:
             lines.append("Left behind (each entry counts under the first reason that applies):")
             for reason, (files, size) in tally.items():
-                lines.append(f"  {reason.value}: {files_phrase(files)}, {human_bytes(size)}")
+                line = f"  {reason.value}: {files_phrase(files)}, {human_bytes(size)}"
+                if reason is Reason.HIDDEN:
+                    line += " (pass --include-hidden to take them)"
+                elif reason is Reason.GITIGNORE:
+                    line += " (pass --no-gitignore to take them)"
+                lines.append(line)
                 if reason in (Reason.SYMLINK, Reason.SPECIAL, Reason.UNREADABLE):
                     paths = [item.rel for item in self.skipped if item.reason is reason]
                     shown = ", ".join(paths[:_SAMPLE_PATHS])
                     more = f" and {len(paths) - _SAMPLE_PATHS} more" if len(paths) > _SAMPLE_PATHS else ""
                     lines.append(f"    {shown}{more}")
-            lines.append("  To take them, pass --include-hidden or --no-gitignore.")
         lines.extend(self.notes)
         return lines
 

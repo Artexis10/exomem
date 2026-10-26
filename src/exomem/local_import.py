@@ -527,7 +527,8 @@ def _closing_lines(result: dict) -> list[str]:
         return [*lines, *note, f"Manifest: {result['manifest']}", f"Next: run {start}."]
     return [*lines, f"Manifest: {result['manifest']}",
             f"The import is not finished: {files_phrase(result['failed_while_copying'])} could not be copied. "
-            f"Run the same command again to retry only those under import {result['import_id']}."]
+            f"Run the same command again to retry only those under import {result['import_id']}.",
+            f"To adopt what is staged so far first, run {start}."]
 
 
 def main(argv=None) -> int:

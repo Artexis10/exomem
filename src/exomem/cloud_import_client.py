@@ -24,7 +24,7 @@ from platformdirs import user_state_dir
 from . import cloud_import_envelope, import_selection
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
-from .cloud_import import DEFAULT_RESERVE_BYTES
+from .cloud_import import ARCHIVE_TOO_LARGE, DEFAULT_MAX_MEMBERS, DEFAULT_RESERVE_BYTES
 from .cloud_import_job import _private_json
 
 # The production Cloud endpoints, defined here once for `exomem cloud import` and `exomem cloud export`.
@@ -65,6 +65,12 @@ class CloudImportError(Exception):
         self.import_id = import_id
         # False when a rerun cannot continue this import; the message then says what a rerun does instead.
         self.resume = resume
+
+
+# Home's Cancel reaches every cell; the `import_cancel` action may not reach an older one, so both are named.
+_HOME_IMPORT_STATUS = "Home (Import status\u2026)"
+_STOP_ON_CLOUD = (f"press Cancel in {_HOME_IMPORT_STATUS}, or ask your assistant to call transfer_memory "
+                  "with action import_cancel and that import id")
 
 
 class _SourceChanged(Exception):
@@ -163,6 +169,12 @@ def _inventory(source: Path, envelope, *, include_hidden: bool, use_gitignore: b
     for rel, _ in members:
         parts = rel.split("/")[:-1]
         folders.update("/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+    entries = len(members) + len(folders)
+    if entries > DEFAULT_MAX_MEMBERS:
+        raise CloudImportError(
+            PREFLIGHT, ARCHIVE_TOO_LARGE,
+            f"the archive would hold {entries:,} entries (files and folders) and Cloud accepts at most "
+            f"{DEFAULT_MAX_MEMBERS:,}; import subfolders one at a time")
     return _Plan("adopt", len(members), sum(size for _, size in members), _expected_ciphertext(members, folders), selection)
 
 
@@ -281,7 +293,7 @@ def _abandoned(record: Path, ciphertext: Path, import_id: str, code: str, why: s
     return CloudImportError(
         ARCHIVE, code,
         f"{why}. The checkpoint is removed, and a new run starts a new import. Cloud import {import_id} may still "
-        "be open; to stop it, ask your assistant to call transfer_memory with action import_cancel and that import id",
+        f"be open; to stop it, {_STOP_ON_CLOUD}",
         import_id, resume=False)
 
 
@@ -289,6 +301,12 @@ def _coded(where: _Where, error: Exception) -> CloudImportError:
     """The content-free failure for an exception; a provider message can hold a signed URL."""
     if isinstance(error, httpx2.HTTPStatusError):
         code, message = server_code(error.response), "the Cloud API or storage refused the request"
+        # IMPORT_CONFLICT is Cloud's documented refusal while another import is open. Every rerun is refused the
+        # same way until that import ends, so the failure must not say to resume.
+        if where.phase == REGISTER and code == "IMPORT_CONFLICT":
+            return CloudImportError(
+                REGISTER, code, f"another import is open; cancel it in {_HOME_IMPORT_STATUS} or wait for it to "
+                "expire, then run the command again", where.import_id, resume=False)
     elif isinstance(error, httpx2.TransportError):
         code, message = "NETWORK_ERROR", "the connection to Cloud or storage failed"
     elif isinstance(error, TimeoutError):
@@ -493,8 +511,7 @@ def _report_failure(error: CloudImportError, checkpoint: Path, progress: Progres
         return None
     size = held.stat().st_size
     progress.say(f"The encrypted copy ({human_bytes(size)}) stays in {checkpoint}. It duplicates your data on this "
-                 "disk until the import finishes. To discard it, delete that folder, and ask your assistant to "
-                 "stop the import on Cloud with transfer_memory and action import_cancel.")
+                 f"disk until the import finishes. To discard it, delete that folder. To stop the import on Cloud, {_STOP_ON_CLOUD}.")
     return size
 
 

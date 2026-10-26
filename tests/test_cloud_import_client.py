@@ -47,6 +47,7 @@ class FakeCloud:
         self.requests: list[tuple[str, str]] = []
         self.declared: dict = {}
         self.refuse_registration = False
+        self.registration_refusal = (503, "STORE_UNAVAILABLE")
         self.fail_part_once: int | None = None
         self.after_registration = lambda: None
 
@@ -68,7 +69,8 @@ class FakeCloud:
                 assert body["part_etags"] == [{"part_number": n, "etag": f'"part-{n}"'} for n in sorted(self.uploaded)]
                 self.row.update(requested_state="uploaded", observed_state="done")
             elif self.refuse_registration:
-                return httpx2.Response(503, json={"error": {"code": "STORE_UNAVAILABLE"}})
+                status, code = self.registration_refusal
+                return httpx2.Response(status, json={"error": {"code": code}})
             else:
                 self.declared = body
                 self.row["import_id"] = body["import_id"]
@@ -153,6 +155,9 @@ def test_folder_import_skips_links_hidden_and_ignored_files_and_reports_them(tmp
     assert (cloud.declared["declared_files"], cloud.declared["declared_bytes"]) == (2, len(b"kept") + len(b"kept too"))
     report = "\n".join(lines)
     assert "symlink: 2 files" in report and "hidden: 2 files" in report and "gitignore: 1 file," in report
+    # Only the hidden line offers the flag that takes hidden entries; a link cannot be taken.
+    (hint,) = [line for line in lines if "--include-hidden" in line]
+    assert hint.lstrip().startswith("hidden:")
     # The encrypted copy is named as duplicate storage while it exists, and as removed at the end.
     assert "duplicates your data" in report and "Removed the encrypted copy" in report
 
@@ -168,6 +173,46 @@ def test_a_folder_with_nothing_left_to_import_is_refused_before_anything_is_sent
 
     assert (refused.value.phase, refused.value.code) == ("preflight", "NOTHING_TO_IMPORT")
     assert cloud.requests == []
+
+
+def test_a_folder_with_more_entries_than_the_cell_accepts_is_refused_before_encrypting(tmp_path, monkeypatch):
+    folder = tmp_path / "notes"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "sub" / "a.txt").write_text("one")
+    (folder / "sub" / "b.txt").write_text("two")
+    # Two files and the folder that holds them are three archive entries.
+    monkeypatch.setattr(cloud_import_client, "DEFAULT_MAX_MEMBERS", 2)
+    cloud = FakeCloud("age1unused")
+
+    with pytest.raises(CloudImportError) as refused:
+        asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
+
+    assert (refused.value.phase, refused.value.code) == ("preflight", "ARCHIVE_TOO_LARGE")
+    assert "3 entries" in refused.value.message and "at most 2" in refused.value.message
+    assert cloud.requests == [] and not (tmp_path / "checkpoint/archive.age").exists()
+
+
+@needs_age
+def test_a_registration_refused_for_an_open_import_says_to_cancel_or_wait_and_the_rerun_then_registers(tmp_path):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "a.txt").write_text("kept")
+    _, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    cloud.refuse_registration = True
+    cloud.registration_refusal = (409, "IMPORT_CONFLICT")
+
+    with pytest.raises(CloudImportError) as refused:
+        asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
+
+    # The cell allows one open import, so "run the same command again to resume" would only meet the same refusal.
+    assert (refused.value.phase, refused.value.code, refused.value.resume) == ("register", "IMPORT_CONFLICT", False)
+    assert "another import is open" in refused.value.message and "cancel it in Home" in refused.value.message
+
+    cloud.refuse_registration = False
+    done = asyncio.run(cloud.run(folder, tmp_path / "checkpoint"))
+
+    assert done["observed_state"] == "done" and done["import_id"] == refused.value.import_id
 
 
 def test_missing_age_is_refused_before_anything_is_sent(tmp_path, monkeypatch):
@@ -224,7 +269,8 @@ def test_restart_with_a_changed_source_drops_the_checkpoint_and_the_rerun_starts
     # The failure cannot resume, so it must not say "resume": it says what a rerun does, and how to stop the old import.
     assert (second.value.phase, second.value.code, second.value.resume) == ("archive", "SOURCE_CHANGED", False)
     assert second.value.import_id == first.value.import_id
-    assert "import_cancel" in second.value.message and "starts a new import" in second.value.message
+    assert "import_cancel" in second.value.message and "Cancel in Home" in second.value.message
+    assert "starts a new import" in second.value.message
     assert not (tmp_path / "checkpoint/checkpoint.json").exists()
     assert not (tmp_path / "checkpoint/archive.age").exists()
 
@@ -355,7 +401,7 @@ def test_failed_import_reports_phase_code_import_id_and_the_copy_it_still_holds(
     assert (report["ok"], report["phase"], report["code"], report["import_id"], report["ciphertext_bytes"]) == (
         False, "upload", "NETWORK_ERROR", import_id, 123)
     # The human report names the route that discards the second copy.
-    assert "import_cancel" in captured.err and str(checkpoint) in captured.err
+    assert "import_cancel" in captured.err and "Cancel in Home" in captured.err and str(checkpoint) in captured.err
 
 
 def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfig:
