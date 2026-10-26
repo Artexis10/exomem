@@ -359,9 +359,9 @@ async def run_mcp_canary(
         contract = LatencyContract.model_validate_json(contract_bytes)
         bars = [contract.bar(case.bar_id) for case in cases]
         for case, bar in zip(cases, bars, strict=True):
-            # MCP and '*' are the contract protocol's surface and fallback tokens.
-            if bar.surface != "mcp" or (
-                case.tool not in bar.operations and "*" not in bar.operations
+            # MCP is the contract protocol's surface token; the contract owns coverage.
+            if bar.surface != "mcp" or not bar.covers(
+                case.tool, latency_watch.deep_flag(case.arguments)
             ):
                 raise ValueError("case bar does not cover its MCP operation")
         # Availability needs one actual call; acceptance uses the contract's series.
@@ -455,6 +455,7 @@ async def run_mcp_canary(
                                 outcome=outcome,
                                 source="mcp-canary",
                                 contract=contract,
+                                trusted_tool=True,
                             )
                         )
                     elif failure is None:

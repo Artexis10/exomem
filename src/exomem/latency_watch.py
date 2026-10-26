@@ -150,9 +150,12 @@ def make_sample(
     correlated: bool = False,
     excluded: bool = False,
     contract: LatencyContract | None = None,
+    trusted_tool: bool = False,
 ) -> Sample:
     # Registry names are trusted metadata; an unknown request name can contain content.
-    tool = tool if tool in _registered_operations() else "unknown-operation"
+    # The canary sets `trusted_tool`: its case loader admits only a closed set of tool tokens.
+    if not trusted_tool and tool not in _registered_operations():
+        tool = "unknown-operation"
     if bar_id is None:
         try:
             bar = (contract or load_contract()).observation_bar(surface=surface or "mcp", tool=tool, deep=deep)
@@ -254,8 +257,7 @@ def summarize(
             and sample.profile == bar.profile
             and sample.population == bar.population
             and sample.reference == bar.reference
-            and sample.deep == bar.deep
-            and (sample.tool in bar.operations or "*" in bar.operations)
+            and bar.covers(sample.tool, sample.deep)
         )
         ceiling = bar.threshold_ms if bar else None
         percentile = _percentile(values, bar.percentile) if values and bar else None

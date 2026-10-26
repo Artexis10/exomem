@@ -131,6 +131,20 @@ def test_the_packaged_contract_keeps_owners_and_strict_comparisons() -> None:
     assert all(bar.requirement and bar.provenance for bar in contract.bars)
 
 
+def test_a_selected_observation_bar_always_covers_the_sample_it_labels() -> None:
+    from exomem.request_latency_contract import load_contract
+
+    contract = load_contract()
+    for surface in ("mcp", "rest", "activation"):
+        for tool in ("ask_memory", "find", "read_memory", "activate_context"):
+            for deep in (False, True):
+                bar = contract.observation_bar(surface=surface, tool=tool, deep=deep)
+                assert bar is None or bar.covers(tool, deep)
+    # A deep call to a tool with no deep bar has no bar, not a fallback it cannot match.
+    assert contract.observation_bar(surface="mcp", tool="read_memory", deep=True) is None
+    assert contract.observation_bar(surface="mcp", tool="ask_memory", deep=True).id == "watch-deep"
+
+
 def test_unknown_operation_names_do_not_become_evidence_content() -> None:
     sample = latency_watch.make_sample(
         at=NOW,

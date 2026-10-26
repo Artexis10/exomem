@@ -172,7 +172,7 @@ def test_mcp_collection_mutations_and_malformed_operations_fail_before_connectio
     assert report["initialization_ms"] is None
 
 
-def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
+def test_mcp_deep_recall_is_measured_against_the_deep_population(tmp_path):
     from fastmcp import FastMCP
 
     server = FastMCP("test")
@@ -182,15 +182,55 @@ def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
         assert deep
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
-    case = _canary_case()
+    case = {**_canary_case(), "bar_id": "watch-deep"}
     case["arguments"]["deep"] = True
     report = _run_canary(tmp_path, server, [case])
     assert report["availability"] == "passed"
-    assert report["verdict"] == "incomplete"
     [row] = report["cases"][0]["latency"]
-    assert row["deep"] is True
-    assert row["verdict"] == "unavailable"
-    assert row["breach"] is False
+    assert (row["bar_id"], row["deep"], row["verdict"]) == (
+        "watch-deep",
+        True,
+        "observed-within-bar",
+    )
+
+
+def test_mcp_typed_tools_get_a_latency_verdict_under_an_explicit_bar(tmp_path):
+    from fastmcp import FastMCP
+
+    tools = ["search_memory", "recall_context", "read_records", "read_plans"]
+    server = FastMCP("test")
+    cases = []
+    for tool in tools:
+        if tool in ("read_records", "read_plans"):
+            arguments = {"operation": {"kind": "inspect", "collection": "example"}}
+
+            @server.tool(name=tool)
+            def collection_read(operation: dict) -> dict:
+                return {"ok": True, "hits": [{"ref": "private-reference", "text": "material"}]}
+
+        else:
+            arguments = {"query": "private-question"}
+
+            @server.tool(name=tool)
+            def recall(query: str) -> dict:
+                return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
+
+        cases.append(
+            {**_canary_case(), "id": f"case-{tool}", "tool": tool, "arguments": arguments,
+             "bar_id": "typed-tools"}
+        )
+    contract = load_contract().model_dump(mode="json")
+    base = next(bar for bar in contract["bars"] if bar["id"] == "programme-public-warm")
+    contract["bars"].append({**base, "id": "typed-tools", "operations": tools})
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(contract))
+    report = _run_canary(tmp_path, server, cases, contract_file=path)
+    assert [
+        (series["tool"], row["tool"], row["bar_id"], row["verdict"])
+        for series in report["cases"]
+        for row in series["latency"]
+    ] == [(tool, tool, "typed-tools", "observed-within-bar") for tool in tools]
+    assert report["verdict"] == "passed"
 
 
 @pytest.mark.parametrize("enveloped", [True, False])
@@ -846,7 +886,10 @@ def test_mcp_case_bars_keep_their_thresholds_and_minimums(tmp_path, samples):
     assert report["coverage"] == ("complete" if samples is None else "incomplete")
 
 
-@pytest.mark.parametrize("damage", ["unknown", "wrong-surface", "wrong-operation"])
+@pytest.mark.parametrize(
+    "damage",
+    ["unknown", "wrong-surface", "wrong-operation", "deep-case-ordinary-bar", "ordinary-case-deep-bar"],
+)
 def test_mcp_invalid_case_bar_cannot_fall_back_or_connect(tmp_path, damage):
     class NoConnection:
         async def __aenter__(self):
@@ -859,11 +902,15 @@ def test_mcp_invalid_case_bar_cannot_fall_back_or_connect(tmp_path, damage):
         selected["surface"] = "cli"
     elif damage == "wrong-operation":
         selected["operations"] = ["read_memory"]
+    elif damage == "ordinary-case-deep-bar":
+        selected["deep"] = True
     if damage != "unknown":
         contract["bars"].append(selected)
     contract_path = tmp_path / "contract.json"
     contract_path.write_text(json.dumps(contract))
     case = {**_canary_case(), "id": "case-02", "bar_id": selected["id"]}
+    if damage == "deep-case-ordinary-bar":
+        case["arguments"] = {**case["arguments"], "deep": True}
     cases_path = tmp_path / "cases.json"
     cases_path.write_text(json.dumps([_canary_case(), case]))
     report = asyncio.run(
