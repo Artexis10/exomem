@@ -33,6 +33,8 @@ class Usage:
     counts: Mapping[str, int] = field(default_factory=dict)
     reason: str | None = None
     source: str = ""
+    #: `(key, limit) -> pages`: the pages behind a count, where the projection names them.
+    holders: Callable[[str, int], tuple[str, ...]] | None = None
 
     def count(self, key: str) -> int | None:
         return self.counts.get(key, 0) if self.available else None
@@ -69,6 +71,25 @@ def _graph_rows(vault_root: Path, sql: str) -> list[tuple[Any, ...]] | str:
         connection.close()
 
 
+def _holders(
+    vault_root: Path, sql: str, resolve: Callable[[str], str | None]
+) -> Callable[[str, int], tuple[str, ...]]:
+    """A reader of the pages behind one key's count, from `(value, path)` rows."""
+
+    def read(key: str, limit: int) -> tuple[str, ...]:
+        rows = _graph_rows(vault_root, sql)
+        if isinstance(rows, str):
+            return ()
+        pages = {
+            str(path)
+            for value, path in rows
+            if isinstance(value, str) and value and resolve(value) == key
+        }
+        return tuple(sorted(pages))[:limit]
+
+    return read
+
+
 def _canonical_counts(
     rows: list[tuple[Any, ...]], snapshot: Snapshot, resolve: Callable[[str], str | None]
 ) -> Mapping[str, int]:
@@ -94,18 +115,21 @@ def entity_types(vault_root: Path, snapshot: Snapshot) -> Usage:
 
     def read() -> Usage:
         # Stored rows hold the authored label; this snapshot resolves it.
-        rows = _graph_rows(
-            vault_root,
-            "SELECT json_extract(metadata, '$.entity_type_raw'), COUNT(*) FROM graph_nodes "
-            "WHERE kind = 'file' AND page_type = 'entity' GROUP BY 1",
-        )
+        value = "json_extract(metadata, '$.entity_type_raw')"
+        source = "FROM graph_nodes WHERE kind = 'file' AND page_type = 'entity'"
+        rows = _graph_rows(vault_root, f"SELECT {value}, COUNT(*) {source} GROUP BY 1")
         if isinstance(rows, str):
             return _unavailable(rows, "graph entity pages")
         resolve = snapshot.typed.resolve
+
+        def canonical(label: str) -> str | None:
+            return getattr(resolve(label), "id", None)
+
         return Usage(
             True,
-            _canonical_counts(rows, snapshot, lambda value: getattr(resolve(value), "id", None)),
+            _canonical_counts(rows, snapshot, canonical),
             source="graph entity pages",
+            holders=_holders(vault_root, f"SELECT {value}, path {source}", canonical),
         )
 
     return _guarded(vault_root, "graph entity pages", read)
@@ -115,15 +139,19 @@ def note_types(vault_root: Path, snapshot: Snapshot) -> Usage:
     """Pages per registered note type, from the graph's file nodes."""
 
     def read() -> Usage:
-        rows = _graph_rows(
-            vault_root,
-            "SELECT page_type, COUNT(*) FROM graph_nodes "
-            "WHERE kind = 'file' AND page_type IS NOT NULL GROUP BY 1",
-        )
+        source = "FROM graph_nodes WHERE kind = 'file' AND page_type IS NOT NULL"
+        rows = _graph_rows(vault_root, f"SELECT page_type, COUNT(*) {source} GROUP BY 1")
         if isinstance(rows, str):
             return _unavailable(rows, "graph file pages")
+
+        def canonical(label: str) -> str | None:
+            return label
+
         return Usage(
-            True, _canonical_counts(rows, snapshot, lambda value: value), source="graph file pages"
+            True,
+            _canonical_counts(rows, snapshot, canonical),
+            source="graph file pages",
+            holders=_holders(vault_root, f"SELECT page_type, path {source}", canonical),
         )
 
     return _guarded(vault_root, "graph file pages", read)
@@ -138,19 +166,25 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
         origins = ", ".join(f"'{origin}'" for origin in _AUTHORED_EDGE_ORIGINS)
         # Stored rows type only core meanings; a candidate row counts under the
         # key its authored label names in this snapshot, like category labels.
-        rows = _graph_rows(
-            vault_root,
-            "SELECT COALESCE(relation_type, raw_relation), COUNT(*) FROM graph_edges "
+        value = "COALESCE(relation_type, raw_relation)"
+        source = (
+            "FROM graph_edges "
             f"WHERE (relation_type IS NOT NULL OR registry_status = '{CANDIDATE_STATUS}') "
-            f"AND origin IN ({origins}) GROUP BY 1",
+            f"AND origin IN ({origins})"
         )
+        rows = _graph_rows(vault_root, f"SELECT {value}, COUNT(*) {source} GROUP BY 1")
         if isinstance(rows, str):
             return _unavailable(rows, "graph authored edges")
         resolve = snapshot.typed.resolve
+
+        def canonical(label: str) -> str | None:
+            return resolve(label).canonical
+
         return Usage(
             True,
-            _canonical_counts(rows, snapshot, lambda value: resolve(value).canonical),
+            _canonical_counts(rows, snapshot, canonical),
             source="graph authored edges",
+            holders=_holders(vault_root, f"SELECT {value}, source_path {source}", canonical),
         )
 
     return _guarded(vault_root, "graph authored edges", read)
@@ -160,19 +194,19 @@ def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
     """Semantic units per category, from the graph's unit nodes."""
 
     def read() -> Usage:
-        rows = _graph_rows(
-            vault_root,
-            "SELECT unit_category, COUNT(*) FROM graph_nodes "
-            "WHERE unit_category IS NOT NULL GROUP BY 1",
-        )
+        source = "FROM graph_nodes WHERE unit_category IS NOT NULL"
+        rows = _graph_rows(vault_root, f"SELECT unit_category, COUNT(*) {source} GROUP BY 1")
         if isinstance(rows, str):
             return _unavailable(rows, "graph semantic units")
 
-        def resolve(value: str) -> str | None:
-            return snapshot.typed.resolve_category(value).resolved
+        def canonical(label: str) -> str | None:
+            return snapshot.typed.resolve_category(label).resolved
 
         return Usage(
-            True, _canonical_counts(rows, snapshot, resolve), source="graph semantic units"
+            True,
+            _canonical_counts(rows, snapshot, canonical),
+            source="graph semantic units",
+            holders=_holders(vault_root, f"SELECT unit_category, path {source}", canonical),
         )
 
     return _guarded(vault_root, "graph semantic units", read)

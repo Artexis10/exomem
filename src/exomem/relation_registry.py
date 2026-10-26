@@ -689,8 +689,13 @@ def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> Non
 
 
 def _semantic_continuity_findings(
-    before: RelationRegistry, after: RelationRegistry
+    before: RelationRegistry, after: RelationRegistry, removed: Container[str] = ()
 ) -> list[dict[str, str]]:
+    """What a save changed that a registered definition forbids.
+
+    `removed` names keys a `remove` delta took out after counting that nothing
+    uses them: undoing a promotion is the one hard delete the definition allows.
+    """
     findings: list[dict[str, str]] = []
     fields = (
         "parent",
@@ -706,6 +711,8 @@ def _semantic_continuity_findings(
     )
     for key, old in before.extensions.items():
         new = after.extensions.get(key)
+        if new is None and key in removed:
+            continue
         if new is None:
             findings.append(
                 _finding(
@@ -1474,6 +1481,9 @@ class _Adapter:
             row["replaced_by"] = entry.replaced_by
         extensions[key] = row
 
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document["extensions"].pop(key, None)
+
     def render(self, document: Mapping[str, Any]) -> str:
         return yaml.safe_dump(dict(document), sort_keys=False, allow_unicode=True)
 
@@ -1487,9 +1497,12 @@ class _Adapter:
         return key
 
     def continuity(
-        self, before: RelationRegistry, after: RelationRegistry
+        self,
+        before: RelationRegistry,
+        after: RelationRegistry,
+        removed: Container[str] = (),
     ) -> list[dict[str, str]]:
-        return _semantic_continuity_findings(before, after)
+        return _semantic_continuity_findings(before, after, removed)
 
 
 def _usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:

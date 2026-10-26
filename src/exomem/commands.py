@@ -107,6 +107,7 @@ from . import operation_entries
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
+from . import promotions as promotions_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import readiness as readiness_module
@@ -4989,6 +4990,29 @@ def _replacement_review_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
+    """The origin a creation records for its `ref`; None when none was given.
+
+    A ref the caller cannot read, withheld or missing, is an origin of unknown
+    path, and never refuses the creation: both leave the same bytes.
+    """
+    if not ref:
+        return None
+    path: str | None = None
+    try:
+        resolved = _resolve_memory_identifier(vault_root, ref)
+        if (Path(vault_root) / resolved).is_file() and promotions_module.page_visible(
+            vault_root, resolved
+        ):
+            path = resolved
+    except Exception:  # noqa: BLE001 - what cannot be read is an unknown origin, whatever the cause
+        path = None
+    from .writer_lease import active_mutation_request_id
+
+    operation_id = active_mutation_request_id() if path else None
+    return {"path": path, "operation_id": operation_id}
+
+
 def op_link(
     vault_root: Path,
     entity_type: EntityTypeId,
@@ -5013,6 +5037,7 @@ def op_link(
     aliases: list[str] | None = None,
     registry_scope: str | None = None,
     relations: list[dict] | None = None,
+    ref: str | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -5060,6 +5085,7 @@ def op_link(
             a turn in that script reaches it. At most 8, one line and 64
             characters each; one any other page already answers to refuses.
         registry_scope: Public instance token or canonical private Scope ID; grants no authority.
+        ref: The page or write that led to this entity, kept in the log entry.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -5099,6 +5125,7 @@ def op_link(
             aliases=aliases,
             registry_scope=registry_scope,
             relations=relations,
+            origin=_creation_origin(vault_root, ref),
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -9114,6 +9141,10 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         from . import upkeep as upkeep_module
 
+        if promotions_module.is_promotion_ref(ref):
+            from . import promotion_revert as promotion_revert_module
+
+            return promotion_revert_module.item(vault_root, ref)
         if upkeep_module.is_upkeep_ref(ref):
             # Before the attention scan: an upkeep item revalidates from its
             # own pages and never runs the whole-vault union.
@@ -9225,6 +9256,24 @@ def op_review_item_context(
         raise ValueError("INVALID_REVIEW_CONTEXT_ARGUMENTS: continuation requires a vocabulary ref")
     from . import upkeep as upkeep_module
 
+    if promotions_module.is_promotion_ref(ref):
+        from . import promotion_revert as promotion_revert_module
+
+        if (
+            max_body_chars != 4000
+            or max_related_pages != 8
+            or max_graph_nodes != 30
+            or max_graph_edges != 60
+            or max_history != 10
+            or max_evolution_versions != 10
+        ):
+            raise ValueError(
+                "INVALID_PROMOTION_CONTEXT_ARGUMENTS: a recent promotion's context accepts "
+                "only expected_fingerprint"
+            )
+        return promotion_revert_module.context(
+            vault_root, ref, expected_fingerprint=expected_fingerprint
+        )
     if upkeep_module.is_upkeep_ref(ref):
         if (
             max_graph_nodes != 30
@@ -9730,6 +9779,16 @@ def op_triage_memory(
         )
     from . import upkeep as upkeep_module
 
+    if promotions_module.is_promotion_ref(ref):
+        _refuse_pairless_stance(ref, action)
+        return promotions_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if upkeep_module.is_upkeep_ref(ref):
         _refuse_pairless_stance(ref, action)
         return upkeep_module.triage(
@@ -10145,6 +10204,7 @@ def op_connect_memory(
             aliases=aliases,
             registry_scope=registry_scope,
             relations=relations,
+            ref=ref,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -10468,6 +10528,7 @@ def op_maintain_memory(
         "resume",
         "propose-compensation",
         "apply-compensation",
+        "revert",
     ]
     | None = None,
     run_id: str | None = None,
@@ -10577,6 +10638,7 @@ def op_maintain_memory(
                 "expected_plan_fingerprint",
                 "why",
             },
+            "revert": {"review_ref", "expected_plan_fingerprint", "why"},
         }
         allowed = allowed_by_action[curation_action]
         if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -10597,6 +10659,7 @@ def op_maintain_memory(
                 "expected_plan_fingerprint",
                 "why",
             },
+            "revert": {"review_ref", "expected_plan_fingerprint", "why"},
         }
         if any(supplied[name] is None for name in required_by_action[curation_action]):
             raise ValueError(
@@ -10636,6 +10699,16 @@ def op_maintain_memory(
             if curation_action == "propose-compensation":
                 assert run_id is not None
                 return curation_module.propose_compensation(vault_root, run_id=run_id)
+            if curation_action == "revert":
+                assert None not in (review_ref, expected_plan_fingerprint, why)
+                from . import promotion_revert as promotion_revert_module
+
+                return promotion_revert_module.revert(
+                    vault_root,
+                    review_ref=review_ref,
+                    expected_plan_fingerprint=expected_plan_fingerprint,
+                    why=why,
+                )
             assert curation_action == "apply-compensation"
             assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
             return curation_module.apply_compensation(
@@ -10861,8 +10934,8 @@ def op_schema_memory(
 
     Contracts describe recurring fields, units and relations. Inference reads unless
     save=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary
-    and usage; propose previews a delta; save applies upsert, alias or deprecate
-    with expected_hash and why; history lists kept versions; restore reverts one
+    and usage; propose previews a delta; save applies upsert, alias, deprecate or
+    remove with expected_hash and why; history lists kept versions; restore reverts one
     without rewriting pages.
     Operations: references/operation-routing.md.
 

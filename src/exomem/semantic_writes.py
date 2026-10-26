@@ -30,6 +30,7 @@ from . import (
     metrics,
     note_types,
     origin_bindings,
+    promotions,
     provenance,
     relation_registry,
     relation_review,
@@ -2915,6 +2916,11 @@ def commit_existing(
             timings=timings,
             status_basis=status_basis,
         )
+    if not preflight.committed_replay:
+        promotions.record_page_write(
+            vault_root, preflight.path,
+            before_source=preflight.before_source, after_source=preflight.after_source,
+        )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
@@ -4582,8 +4588,13 @@ def commit_creation(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    promotion_origin: Mapping[str, Any] | None = None,
 ) -> CreationCommit:
-    """Commit a page creation, then attach advisory structural feedback."""
+    """Commit a page creation, then attach advisory structural feedback.
+
+    `promotion_origin` names the readable page whose content led to this
+    creation; the recent-promotions entry keeps it (see `promotions.py`).
+    """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     committed = _commit_creation(
         vault_root,
@@ -4598,6 +4609,12 @@ def commit_creation(
         predecessor_content_hash=predecessor_content_hash,
         status_basis=status_basis,
     )
+    if predecessor_path is None:
+        # A successor page is a new version of an entity, not a new entity.
+        promotions.record_page_write(
+            vault_root, preflight.destination, before_source=None, after_source=preflight.source,
+            origin=promotion_origin,
+        )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)

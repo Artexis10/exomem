@@ -1113,6 +1113,9 @@ class _Adapter:
             row["requires_url"] = True
         document[self.section][key] = row
 
+    def remove(self, document: dict[str, Any], key: str) -> None:
+        document[self.section].pop(key, None)
+
     def render(self, document: Mapping[str, Any]) -> str:
         header = "".join(
             line + "\n" for line in _BOOTSTRAP_HEADER.splitlines() if line.startswith("#")

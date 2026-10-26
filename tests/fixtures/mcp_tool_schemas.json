@@ -2512,7 +2512,8 @@
             "apply",
             "resume",
             "propose-compensation",
-            "apply-compensation"
+            "apply-compensation",
+            "revert"
           ],
           "type": "string",
           "description": "Curation step when mode is curation."
@@ -3926,7 +3927,7 @@
     }
   },
   "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations. Inference reads unless\nsave=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
+    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations. Inference reads unless\nsave=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias, deprecate or\nremove with expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

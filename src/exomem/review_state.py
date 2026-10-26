@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -244,6 +244,7 @@ def registered_families() -> frozenset[str]:
     from . import attention as attention_module
     from . import corpus_aware as corpus_aware_module
     from . import dreamer_families
+    from . import promotions as promotions_module
     from . import working_set_learning as working_set_learning_module
     from .vocabulary_notifications import REVIEW_FAMILIES
 
@@ -254,6 +255,7 @@ def registered_families() -> frozenset[str]:
             *working_set_learning_module._ADVISORY_KINDS,
             *REVIEW_FAMILIES.values(),
             *dreamer_families.family_names(),
+            promotions_module.FAMILY,
         }
     )
 
@@ -708,6 +710,20 @@ class ReviewStateStore:
             "decision": decision,
         }
 
+    def edit_promotions(self, edit: Callable[[dict[str, Any]], Any]) -> Any:
+        """Run `edit` on the promotions ledger under the store lock and publish the result.
+
+        The ledger is one section of this file, so a ledger write rewrites the
+        whole file exactly as a decision write does and carries the same
+        cross-process caveat (`record_surfaced`).  `edit` must not call back
+        into the store.
+        """
+        with _LOCK:
+            payload = self.load()
+            result = edit(payload["promotions"])
+            self._write(payload, vocabulary_refs=(), vocabulary_families=())
+        return result
+
     # ------------------------------------------------------------------
     # dispositions
     # ------------------------------------------------------------------
@@ -944,6 +960,9 @@ def empty_state() -> dict[str, Any]:
         "adaptation_resets": {},
         "surfaced": {},
         "stats": {},
+        # The recent-promotions ledger (`promotions.py`): source facts, not
+        # decisions, kept beside the decisions that settle them.
+        "promotions": {},
         "vocabulary": {"items": {}, "decisions": {}, "notifications": {}},
     }
 
@@ -969,7 +988,7 @@ def _migrated(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("REVIEW_STATE_INVALID: vocabulary sections must be objects")
     if "recoveries" in vocabulary and not isinstance(vocabulary["recoveries"], dict):
         raise ValueError("REVIEW_STATE_INVALID: vocabulary recovery must be an object")
-    for section in ("dispositions", "adaptation_resets", "surfaced", "stats"):
+    for section in ("dispositions", "adaptation_resets", "surfaced", "stats", "promotions"):
         if not isinstance(payload.get(section), dict):
             payload[section] = {}
     if payload.get("version") == SCHEMA_VERSION:

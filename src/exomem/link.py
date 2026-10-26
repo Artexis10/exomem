@@ -15,8 +15,10 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import (
     entity_candidates,
@@ -24,6 +26,7 @@ from . import (
     markdown_relations,
     memory_refs,
     origin_bindings,
+    promotions,
     provenance,
     semantic_writes,
     tag_variants,
@@ -623,6 +626,7 @@ def _log_entry_body(
     project: str | None,
     decision_status: str | None,
     tags: list[str],
+    origin: Mapping[str, Any] | None = None,
 ) -> str:
     parts: list[str] = []
     parts.append(
@@ -637,6 +641,8 @@ def _log_entry_body(
             parts.append(f"decision_status={decision_status}.")
     if tags:
         parts.append(f"tags: {tags}.")
+    if origin is not None:
+        parts.append(promotions.origin_clause(origin))
     return " ".join(parts)
 
 
@@ -708,8 +714,13 @@ def link(
     validate_only: bool = False,
     registry_scope: str | None = None,
     relations: list[dict] | None = None,
+    origin: Mapping[str, Any] | None = None,
 ) -> LinkResult | IdentityPreparation:
     """Create an entity through detached structural preflight.
+
+    `origin` is `{path, operation_id}` for the write that led here; `path` is
+    None when the caller could not read that write. It goes in the log entry and
+    the recent-promotions entry, and a call without one logs no origin.
 
     A name that already denotes active entities only of OTHER types returns a
     non-mutating `IdentityPreparation`; a same-type match stays ENTITY_EXISTS
@@ -1037,6 +1048,7 @@ def link(
                 project=project,
                 decision_status=decision_status,
                 tags=_clean_tags(tags),
+                origin=origin,
             ),
             operation_token=token,
         )
@@ -1066,6 +1078,7 @@ def link(
         auxiliary_writes=tuple(auxiliary),
         derived_auxiliary_writes=tuple(derived_auxiliaries),
         operation="create",
+        promotion_origin=origin,
     )
     return LinkResult(
         rel_entity,

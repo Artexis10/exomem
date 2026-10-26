@@ -381,7 +381,8 @@ def _ordered(snapshot: Snapshot, usage: Any) -> list[Entry]:
 def save_contract(spec: RegistrySpec) -> dict[str, Any]:
     """What a `save` delta for this registry may carry, for a caller to read."""
     return {
-        "verbs": ["upsert", "alias", "deprecate"],
+        # `remove` is offered where a usage check can show a key unused first.
+        "verbs": ["upsert", "alias", "deprecate", *(["remove"] if spec.usage is not None else [])],
         "fields": sorted(spec.fields),
         "attributes": sorted(spec.attributes),
         "fixed_once_saved": sorted(spec.immutable),
@@ -517,20 +518,54 @@ def _inherited(spec: RegistrySpec, snapshot: Snapshot, entry: Entry) -> dict[str
     }
 
 
+#: Most pages a removal report lists for one still-used key.
+DEPENDANT_PAGES = 20
+#: Pages one receipt line names; the full report carries `DEPENDANT_PAGES`.
+_RECEIPT_PAGES = 3
+
+
+def _removal_report(
+    after_entries: Mapping[str, Entry], delta: object, usage: Any
+) -> dict[str, dict[str, Any]]:
+    """What a `remove` delta did to each key it named: removed, or deprecated with its pages."""
+    names = delta.get("remove") if isinstance(delta, Mapping) else None
+    report: dict[str, dict[str, Any]] = {}
+    for key in names or ():
+        entry = after_entries.get(key)
+        if entry is None:
+            report[key] = {"action": "removed"}
+            continue
+        pages = usage.holders(key, DEPENDANT_PAGES) if usage.holders is not None else None
+        report[key] = {
+            "action": "deprecated",
+            "replaced_by": entry.replaced_by,
+            "dependants": {
+                "count": usage.count(key),
+                "source": usage.source,
+                "pages": None if pages is None else list(pages),
+            },
+        }
+    return report
+
+
 def _candidate(
-    spec: RegistrySpec, snapshot: Snapshot, delta: object
-) -> tuple[dict[str, Any], dict[str, Entry], Any, list[dict[str, Any]]]:
-    """The overlay document after a delta, its typed registry and blocking findings."""
-    document, touched = registry.apply_delta(spec, snapshot, delta)
+    vault_root: Path, spec: RegistrySpec, snapshot: Snapshot, delta: object
+) -> tuple[dict[str, Any], dict[str, Entry], Any, list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """The overlay document after a delta, its typed registry, blocking findings and removals."""
+    removing = isinstance(delta, Mapping) and bool(delta.get("remove"))
+    usage = _usage(vault_root, spec, snapshot) if removing else None
+    document, touched = registry.apply_delta(spec, snapshot, delta, usage=usage)
     candidate = spec.adapter.parse_document(document)
-    registry.validate_replacements(spec, spec.adapter.entries(candidate))
+    after_entries = spec.adapter.entries(candidate)
+    registry.validate_replacements(spec, after_entries)
     blocking = registry.new_findings(snapshot, tuple(spec.adapter.findings(candidate)))
+    removal = _removal_report(after_entries, delta, usage) if removing else {}
     continuity = getattr(spec.adapter, "continuity", None)
     if continuity is not None:
-        blocking.extend(dict(item) for item in continuity(snapshot.typed, candidate))
-    vault_entries = sum(
-        1 for entry in spec.adapter.entries(candidate).values() if entry.origin == "vault"
-    )
+        # A key the delta removed after counting it unused is no continuity break.
+        gone = {key for key, outcome in removal.items() if outcome["action"] == "removed"}
+        blocking.extend(dict(item) for item in continuity(snapshot.typed, candidate, gone))
+    vault_entries = sum(1 for entry in after_entries.values() if entry.origin == "vault")
     if vault_entries > spec.cap:
         blocking.append(
             {
@@ -540,7 +575,7 @@ def _candidate(
                 "detail": f"{spec.name} holds at most {spec.cap} vault entries",
             }
         )
-    return document, touched, candidate, blocking
+    return document, touched, candidate, blocking, removal
 
 
 def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, Any]:
@@ -553,7 +588,9 @@ def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, An
     snapshot = registry.load(spec, vault_root)
     out: dict[str, Any] = {"subject": spec.name, "expected_hash": snapshot.content_hash}
     try:
-        _document, touched, candidate, blocking = _candidate(spec, snapshot, delta)
+        _document, touched, candidate, blocking, removal = _candidate(
+            vault_root, spec, snapshot, delta
+        )
     except RegistryError as exc:
         code, _, detail = str(exc).partition(": ")
         return {
@@ -571,6 +608,12 @@ def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, An
     collisions: list[dict[str, str]] = []
     near: list[dict[str, Any]] = []
     for key, proposed in touched.items():
+        if key in removal:
+            rows.append(
+                {"key": key, "exists": True, "valid": True, "entry": proposed.as_dict(),
+                 "action": removal[key]["action"]}
+            )
+            continue
         # The validated entry when it survived validation, else the proposal as sent.
         entry = candidate_entries.get(key, proposed)
         found = _collisions(snapshot, entry)
@@ -594,6 +637,7 @@ def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, An
         "counts": "available" if usage.available else "unavailable",
         "findings": blocking,
         "save": save_contract(spec),
+        **({"removal": removal} if removal else {}),
     }
 
 
@@ -606,16 +650,39 @@ def _restore_route(spec: RegistrySpec, version: str) -> str:
     )
 
 
+def _removal_line(spec: RegistrySpec, key: str, outcome: Mapping[str, Any], route: str) -> str:
+    """The receipt line for a removed or deprecated key; a pages list that is too long drops."""
+    if outcome["action"] == "removed":
+        return f"{spec.name}: removed {key}, which nothing used. Revert: {route}"
+    dependants = outcome["dependants"]
+    pages = dependants["pages"] or []
+    successor = f" in favour of {outcome['replaced_by']}" if outcome["replaced_by"] else ""
+    shown = ", ".join(pages[:_RECEIPT_PAGES])
+    more = f" and {len(pages) - _RECEIPT_PAGES} more" if len(pages) > _RECEIPT_PAGES else ""
+    uses = f"; {dependants['count']} {dependants['source']} still use it"
+    line = f"{spec.name}: deprecated {key}{successor}{uses}"
+    full = f"{line}: {shown}{more}. Revert: {route}" if shown else f"{line}. Revert: {route}"
+    from .. import mutation_terminal
+
+    # A receipt line past the terminal's bound would drop the whole receipt.
+    bound = mutation_terminal._VOCABULARY_RECEIPT_CHARS
+    return full if len(full) <= bound else f"{line}. Revert: {route}"
+
+
 def receipt_lines(
     spec: RegistrySpec,
     before: Snapshot,
     after_entries: Mapping[str, Entry],
     touched: tuple[str, ...],
     version: str,
+    removal: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[str]:
     """One line per key a write registered or changed, with its revert route."""
     lines: list[str] = []
     for key in touched:
+        if removal and key in removal:
+            lines.append(_removal_line(spec, key, removal[key], _restore_route(spec, version)))
+            continue
         entry = after_entries.get(key)
         if entry is None:
             continue
@@ -746,7 +813,7 @@ def save(
         raise RegistryError(
             f"STALE_REGISTRY: {spec.name} changed since expected_hash was read; inspect again"
         )
-    document, touched, candidate, blocking = _candidate(spec, snapshot, delta)
+    document, touched, candidate, blocking, removal = _candidate(root, spec, snapshot, delta)
     if blocking:
         return {"subject": spec.name, "valid": False, "findings": blocking, "saved": None}
     if reason is not None:
@@ -778,8 +845,9 @@ def save(
         "findings": [],
         "why": why.strip(),
         "changed_keys": list(touched),
+        **({"removal": removal} if removal else {}),
         "vocabulary_receipt": receipt_lines(
-            spec, snapshot, after.entries, tuple(touched), history["version"]
+            spec, snapshot, after.entries, tuple(touched), history["version"], removal
         ),
         "saved": {
             "path": spec.overlay(root).relative_to(root).as_posix(),

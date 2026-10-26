@@ -96,6 +96,7 @@ from pathlib import Path
 from typing import Any
 
 from . import call_spans
+from . import promotions as promotions_module
 from . import review_state as review_state_module
 from .collection_store.preview import (
     bound_writer,
@@ -3816,6 +3817,9 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     rows = [row for row in (block.get("top") or []) if isinstance(row, dict)]
     if not rows:
         return
+    # A promotion notice is spent once an interactive conversation other than its
+    # creator's has been shown it; `settle_delivered` decides who counts.
+    promotions_module.settle_delivered(vault_root, rows)
     try:
         entries = []
         for row in rows:
@@ -3985,7 +3989,11 @@ def _counted(rows: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in rows:
         counts[row["category"]] = counts.get(row["category"], 0) + 1
-    return {category: counts[category] for category in PROJECTION_CATEGORIES if category in counts}
+    return {
+        category: counts[category]
+        for category in (*PROJECTION_CATEGORIES, promotions_module.FAMILY)
+        if category in counts
+    }
 
 
 def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -4009,6 +4017,7 @@ def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
                 "ref": row["ref"],
                 "fingerprint": row["fingerprint"],
                 "due_since": row["due_since"],
+                **({"new_family": True} if row.get("new_family") else {}),
             }
             for row in rows[:TOP_LIMIT]
         ],
@@ -4034,6 +4043,13 @@ def served(
     rows = served_entries(
         vault_root, today=today, principal=principal, purpose=purpose, include_triaged=True
     )
+    promoted = promotions_module.served_rows(
+        vault_root, principal=principal, purpose=purpose, today=today
+    )
+    # A new family leads; other notices follow authored obligations.
+    leading = [row for row in promoted if row.get("new_family")]
+    trailing = [row for row in promoted if not row.get("new_family")]
+    rows = [*leading, *rows, *trailing]
     if not rows:
         return None
     result = block(rows) or {"total": 0, "categories": {}, "top": []}
