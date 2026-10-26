@@ -58,7 +58,6 @@ _AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 # page to anything else.
 _STRUCTURAL_ORIGINS = ("semantic_unit", "semantic_block")
 _BODY_LINK_ORIGINS = frozenset({"wikilink", "markdown_relation", "semantic_relation"})
-_GENERIC = "relates_to"
 _LINK = "links_to"
 _STATUS_KEYS = (
     "core_specific",
@@ -189,6 +188,7 @@ def infer_counts(
             "generic": 0,
             "unregistered": 0,
         }
+        generic_key = relation_registry.generic_relation_key()
         authored: set[str] = set()
         body_linked: set[str] = set()
         for row in reader.rows():
@@ -204,7 +204,7 @@ def infer_counts(
                 relation_counts["deprecated"] += 1
             elif status == "unregistered":
                 relation_counts["unregistered"] += 1
-            elif row.relation == _GENERIC:
+            elif row.relation == generic_key:
                 relation_counts["generic"] += 1
             elif status == "core":
                 relation_counts["core"] += 1
@@ -620,6 +620,7 @@ def _census_payload(
     from .memory_schema import _normalize_indexed_relation
 
     registry = relation_registry.load_registry(vault_root)
+    generic_key = relation_registry.generic_relation_key()
     types = entity_types.load_entity_types(vault_root)
     eligible, undated, outside = _eligible_cohort(vault_root, reader, start=start, end=end)
 
@@ -690,7 +691,7 @@ def _census_payload(
             connected.add(source)
             if typed:
                 typed_pages.add(source)
-                if row.relation != _GENERIC:
+                if row.relation != generic_key:
                     specific_pages.add(source)
         if typed:
             # Core definitions are shared by every instance; any other key means
@@ -737,9 +738,9 @@ def _census_payload(
             if other != source and other is not None and entity_family(other) is not None:
                 bucket = _bucket(row)
                 entity_edges[bucket] += 1
-                generic = row.relation == _GENERIC and bucket == "core_generic"
+                generic = row.relation == generic_key and bucket == "core_generic"
                 entity_generic_only[source] = entity_generic_only.get(source, True) and generic
-                if typed and row.relation != _GENERIC:
+                if typed and row.relation != generic_key:
                     entity_specific.add(source)
 
     directed_both_ways, inverse_duplicates = reader.pair_checks(eligible, registry)
@@ -997,6 +998,7 @@ def sample(
         if reader is None:
             return _unavailable("counts")
         registry = relation_registry.load_registry(vault_root)
+        generic_key = relation_registry.generic_relation_key()
         eligible, _undated, _outside = _eligible_cohort(vault_root, reader)
         strata: Counter[str] = Counter()
         # Per family, a max-heap (by negated hash) of the `size` smallest hashes.
@@ -1006,7 +1008,7 @@ def sample(
                 not row.in_view
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
-                or row.relation in (None, _GENERIC, _LINK)
+                or row.relation in (None, generic_key, _LINK)
                 or row.status == "unregistered"
             ):
                 continue
@@ -1167,7 +1169,7 @@ def _bucket(row: _Row) -> str:
     status = row.status
     if status in {"unregistered", "scope_violation", "deprecated"}:
         return status
-    if row.relation == _GENERIC:
+    if row.relation == relation_registry.generic_relation_key():
         return "core_generic"
     if status == "core":
         return "core_specific"

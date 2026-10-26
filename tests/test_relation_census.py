@@ -215,9 +215,7 @@ def test_generic_share_typed_and_specific_coverage_on_fixture(census_vault: Path
     assert metrics["specific_coverage"] == {"pages": 4, "ratio": pytest.approx(0.4444)}
     assert metrics["predicate_utilisation"] == {
         "core_keys_used": 3,
-        # The shipped core vocabulary: 28 plus the five R4 core relations
-        # (located_at, operates, supplies, produces, member_of).
-        "core_keys": 33,
+        "core_keys": len(relation_registry.core_registry().core),
         "extension_keys_used": 3,
         "extension_keys": 4,
         "top3_edges": 6,

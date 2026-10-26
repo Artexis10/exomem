@@ -10,6 +10,7 @@ from . import (
     entity_types,
     epistemic_graph,
     memory_refs,
+    relation_registry,
     vocabulary_provenance,
     vocabulary_review,
 )
@@ -160,10 +161,16 @@ def _note_pairs(connection, path, known_types, after):
             "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
             "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND t.kind='file' "
-            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) IN ('links_to', 'relates_to') "
+            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) IN ('links_to', ?) "
             f"AND t.page_type IN ({placeholders}) AND t.path {comparison} ? "
             "ORDER BY t.path LIMIT ?",
-            (epistemic_graph._page_rel(path), *known_types, boundary, limit),
+            (
+                epistemic_graph._page_rel(path),
+                relation_registry.generic_relation_key(),
+                *known_types,
+                boundary,
+                limit,
+            ),
         ).fetchall()
 
     lefts = neighbours(after[0], 2, inclusive=True)
@@ -201,10 +208,15 @@ def _candidate_rows(connection, path, known_types, anchor, after):
             "FROM graph_edges e JOIN graph_nodes s ON s.node_key=e.src_key "
             "JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND s.kind='file' AND t.kind='file' "
-            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) = 'relates_to' "
+            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) = ? "
             "AND (s.path, t.path) > (?, ?) "
             "GROUP BY s.node_key, t.node_key ORDER BY s.path, t.path LIMIT ?",
-            (epistemic_graph._page_rel(path), *after, EDGE_PAGE + 1),
+            (
+                epistemic_graph._page_rel(path),
+                relation_registry.generic_relation_key(),
+                *after,
+                EDGE_PAGE + 1,
+            ),
         ).fetchall()
         next_after = (
             [rows[EDGE_PAGE - 1][0], rows[EDGE_PAGE - 1][4]] if len(rows) > EDGE_PAGE else None
@@ -465,7 +477,7 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
             source_ref=source_ref,
             target_ref=target_ref,
             resolved=True,
-            relation="relates_to",
+            relation=relation_registry.generic_relation_key(),
             projection_status="current",
             origins=origins,
         )

@@ -13,7 +13,7 @@ import re
 from collections.abc import Container, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -37,6 +37,11 @@ _ORIGINS = {
     "wikilink",
 }
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+#: Explicit spelling of a core relation: `core.<key>` names the core meaning of a
+#: bare label that a vault alias also uses.
+CORE_PREFIX = "core."
+#: Fields a vault extension may set. `generic` is deliberately absent: only the
+#: shipped core pack marks the generic relation, so an extension cannot claim it.
 _DEFINITION_FIELDS = {
     "description",
     "parent",
@@ -52,6 +57,11 @@ _DEFINITION_FIELDS = {
     "replaced_by",
     "presentation_role",
 }
+#: Fields a shipped core relation may carry. This closed set is the pack's own schema
+#: (field names, not vocabulary); a pack with another field is a build defect.
+_CORE_FIELDS = frozenset(
+    {"description", "family", "direction", "inverse", "origins", "presentation_role", "generic"}
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,9 @@ class RelationDefinition:
     core: bool = False
     # Optional renderer metadata never changes the relation's meaning or display label.
     presentation_role: str | None = None
+    # Marks the core pack's one relation for "related, with no specific meaning". An
+    # extension never carries it, so a specific refinement is never taken for it.
+    generic: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -91,6 +104,8 @@ class RelationDefinition:
         ):
             if scalar_value:
                 out[key] = scalar_value
+        if self.generic:
+            out["generic"] = True
         for key, collection_value in (
             ("aliases", self.aliases),
             ("source_kinds", self.source_kinds),
@@ -134,6 +149,11 @@ class RelationRegistry:
     def families(self) -> frozenset[str]:
         return frozenset(item.family for item in (*self.core.values(), *self.extensions.values()))
 
+    @cached_property
+    def generic_key(self) -> str:
+        """The key of the one generic relation; the core pack guarantees exactly one."""
+        return next(key for key, definition in self.core.items() if definition.generic)
+
     def definition(self, key: str) -> RelationDefinition | None:
         return self.core.get(key) or self.extensions.get(key)
 
@@ -156,11 +176,21 @@ class RelationRegistry:
         label = normalize_relation(raw)
         canonical = self.aliases.get(label, label)
         definition = self.definition(canonical)
+        explicit_core = False
+        if definition is None and label.startswith(CORE_PREFIX):
+            # After every saved key and alias, so no saved label changes meaning.
+            canonical = label.removeprefix(CORE_PREFIX)
+            definition = self.core.get(canonical)
+            explicit_core = definition is not None
         if definition is None:
             return RelationResolution(
                 raw=raw, canonical=None, parent=None, status="unregistered", definition=None
             )
-        status = "alias" if canonical != label else ("core" if definition.core else "extension")
+        status = (
+            "alias"
+            if canonical != label and not explicit_core
+            else ("core" if definition.core else "extension")
+        )
         findings: list[dict[str, str]] = []
         if definition.status == "deprecated":
             status = "deprecated"
@@ -212,10 +242,17 @@ def extension_registry_path(vault_root: Path) -> Path:
 
 @lru_cache(maxsize=1)
 def core_registry() -> RelationRegistry:
+    """The shipped core relations. A malformed pack is a build defect, so this raises."""
     data = yaml.safe_load(vocabulary_registry.pack_text("relations.yaml"))
     version = int(data["schema_version"])
     definitions: dict[str, RelationDefinition] = {}
     for key, value in data["relations"].items():
+        unknown = sorted(set(value) - _CORE_FIELDS)
+        if unknown or not isinstance(value.get("generic", False), bool):
+            raise RuntimeError(
+                f"shipped relations pack: {key!r} has unknown fields {unknown} "
+                "or a generic that is not a boolean"
+            )
         definitions[key] = RelationDefinition(
             key=key,
             description=str(value["description"]),
@@ -224,9 +261,20 @@ def core_registry() -> RelationRegistry:
             inverse=value.get("inverse"),
             origins=frozenset(value.get("origins") or ["semantic_relation"]),
             presentation_role=value.get("presentation_role"),
+            generic=value.get("generic", False),
             core=True,
         )
+    generic = sorted(key for key, definition in definitions.items() if definition.generic)
+    if len(generic) != 1:
+        raise RuntimeError(
+            f"shipped relations pack must mark exactly one generic relation, found {generic}"
+        )
     return RelationRegistry(version, "none", definitions)
+
+
+def generic_relation_key() -> str:
+    """The core pack's generic relation, for code that must not name it."""
+    return core_registry().generic_key
 
 
 class _EveryKey:
@@ -248,8 +296,9 @@ def load_registry(
     """Load the saved registry, or parse a proposal.
 
     With both a vault and a proposal, an extension already saved with the same
-    parent and declared family keeps any `family_mismatch` as a warning: a rule
-    added later never turns a saved registry into a refusal.
+    parent and declared family keeps any `family_mismatch` as a warning, and an
+    alias already saved keeps binding to its extension when it shadows a core key:
+    a rule or core key added later never turns a saved registry into a refusal.
     """
     core = core_registry()
     if proposal is not None:
@@ -257,8 +306,13 @@ def load_registry(
         grandfathered = (
             _unchanged_saved_extensions(vault_root, proposal) if vault_root is not None else ()
         )
+        saved_aliases = _alias_pairs(load_registry(vault_root)) if vault_root is not None else ()
         return _parse_extension_data(
-            proposal, _content_hash(raw), core, grandfathered=grandfathered
+            proposal,
+            _content_hash(raw),
+            core,
+            grandfathered=grandfathered,
+            saved_aliases=saved_aliases,
         )
     if vault_root is None:
         return core
@@ -286,7 +340,16 @@ def _parse_overlay_text(raw: str | None, digest: str) -> RelationRegistry:
             core.core,
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
         )
-    return _parse_extension_data(data, digest, core, grandfathered=_EveryKey())
+    return _parse_extension_data(data, digest, core, saved=True)
+
+
+def _alias_pairs(registry: RelationRegistry) -> frozenset[tuple[str, str]]:
+    """Each (extension key, alias) binding a registry holds."""
+    return frozenset(
+        (key, alias)
+        for key, definition in registry.extensions.items()
+        for alias in definition.aliases
+    )
 
 
 def _unchanged_saved_extensions(vault_root: Path, proposal: dict[str, Any]) -> frozenset[str]:
@@ -481,6 +544,8 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
         _content_hash(yaml.safe_dump(result, sort_keys=True)),
         core_registry(),
         grandfathered=frozenset(map(str, current.get("extensions") or {})),
+        # An alias this delta adds to an older extension is not grandfathered.
+        saved_aliases=_alias_pairs(_parse_extension_data(current, "", core_registry(), saved=True)),
     )
     if _blocking(registry):
         raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
@@ -666,7 +731,21 @@ def _parse_extension_data(
     digest: str,
     core: RelationRegistry,
     grandfathered: Container[str] = (),
+    saved_aliases: Container[tuple[str, str]] = (),
+    *,
+    saved: bool = False,
 ) -> RelationRegistry:
+    """Parse an overlay document into a registry and its findings.
+
+    `saved` marks the document as the vault's saved overlay: it is grandfathered
+    whole, and a field this release does not know is a warning, because a later
+    release may have written it. Otherwise `grandfathered` names the extension
+    keys and `saved_aliases` the (extension, alias) pairs that a saved overlay
+    already holds, so a rule or core key added later never refuses them.
+    """
+    if saved:
+        grandfathered = saved_aliases = _EveryKey()
+    unknown_severity = "warning" if saved else "error"
     findings: list[dict[str, str]] = []
     if not isinstance(data, dict):
         return RelationRegistry(
@@ -677,7 +756,9 @@ def _parse_extension_data(
         )
     allowed_root = {"schema_version", "extensions"}
     for key in sorted(set(data) - allowed_root):
-        findings.append(_finding("unknown_field", key, "unknown registry field"))
+        findings.append(
+            _finding("unknown_field", key, "unknown registry field", severity=unknown_severity)
+        )
     if data.get("schema_version") != EXTENSION_SCHEMA_VERSION:
         findings.append(
             _finding("invalid_version", "schema_version", f"must be {EXTENSION_SCHEMA_VERSION}")
@@ -688,7 +769,8 @@ def _parse_extension_data(
         raw_extensions = {}
     extensions: dict[str, RelationDefinition] = {}
     aliases: dict[str, str] = {}
-    occupied = set(core.core)
+    core_spellings = {f"{CORE_PREFIX}{key}" for key in core.core}
+    occupied = set(core.core) | core_spellings
     for raw_key, value in raw_extensions.items():
         key = str(raw_key)
         span = f"extensions.{key}"
@@ -708,6 +790,10 @@ def _parse_extension_data(
                     span,
                     "canonical key collides with an existing relation",
                     relation=key,
+                    # A saved key that already spells a core relation keeps its meaning.
+                    severity=(
+                        "warning" if key in core_spellings and key in grandfathered else "error"
+                    ),
                 )
             )
         occupied.add(key)
@@ -728,6 +814,7 @@ def _parse_extension_data(
                     f"{span}.{unknown}",
                     "unknown definition field",
                     relation=key,
+                    severity=unknown_severity,
                 )
             )
         parent = value.get("parent")
@@ -897,14 +984,29 @@ def _parse_extension_data(
                 # resolved with `alias` standing, exactly as though it had
                 # passed the validation the registry claims to apply.
                 continue
-            if alias in occupied or alias in aliases:
+            if alias in aliases:
+                findings.append(
+                    _finding("collision", span, f"alias {alias!r} collides", relation=key)
+                )
+            elif alias in core.core or alias in core_spellings:
+                # The same code, path and detail serve the warning and the refusal, so a
+                # save that keeps a saved shadow is not a new finding to the generic gate.
+                kept = (key, alias) in saved_aliases
                 findings.append(
                     _finding(
-                        "collision",
+                        "core_shadowed",
                         span,
-                        f"alias {alias!r} collides",
+                        f"alias {alias!r} shadows a core relation; every core relation "
+                        f"stays reachable as {CORE_PREFIX}<key>",
                         relation=key,
+                        severity="warning" if kept else "error",
                     )
+                )
+                if kept:
+                    aliases[alias] = key
+            elif alias in occupied:
+                findings.append(
+                    _finding("collision", span, f"alias {alias!r} collides", relation=key)
                 )
             else:
                 aliases[alias] = key
@@ -1157,6 +1259,9 @@ class _Adapter:
                 attributes["inverse"] = definition.inverse
             if definition.presentation_role is not None:
                 attributes["presentation_role"] = definition.presentation_role
+            # Read-only: `SPEC.attributes` omits it, so no delta can set it on a vault entry.
+            if definition.generic:
+                attributes["generic"] = True
             for name in ("source_kinds", "target_kinds"):
                 if getattr(definition, name):
                     attributes[name] = sorted(getattr(definition, name))

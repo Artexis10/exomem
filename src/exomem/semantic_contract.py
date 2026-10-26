@@ -1088,6 +1088,7 @@ def _copy_definition(
         status=definition.status,
         replaced_by=definition.replaced_by,
         core=definition.core,
+        generic=definition.generic,
     )
 
 
@@ -4961,14 +4962,19 @@ def _registry_findings(
         else:
             governed_element_identity = ("relations", "registry", raw)
             resolved_rule = ("relations", "*", "registry")
+        severity = str(registry_finding.get("severity", "error"))
         findings.append(
             ContractFinding(
                 code=str(registry_finding.get("code", "invalid_relation_registry")),
-                severity="error",
+                severity=severity,
                 path=page.path,
                 span=None,
                 detail=str(registry_finding.get("detail", "invalid relation registry")),
-                remediation="Repair the relation registry before validating pages.",
+                remediation=(
+                    "Repair the relation registry before validating pages."
+                    if severity == "error"
+                    else "Review the relation registry when convenient; this never blocks a write."
+                ),
                 governed_element_identity=governed_element_identity,
                 resolved_rule=resolved_rule,
             )

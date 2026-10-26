@@ -8270,6 +8270,7 @@ class EpistemicGraphIndex:
             # Selected meanings decide suppression and candidates before any
             # rank: SQL rows below are interpreted facts, never stored guesses.
             authored_pages, authored_raw = _authored_relations(conn, view, selected)
+            generic = relation_registry.generic_relation_key()
             unit_relations = _unit_relation_rows(conn, view, sources=selected)
             selected_registries = {source: view.registry_for(source) for source in selected}
             authored_json = json.dumps(
@@ -8313,7 +8314,7 @@ class EpistemicGraphIndex:
                 question_candidates.append((
                     source, other, question, unit_ref, anchor, other_ref, other_anchor,
                     target_id, target_count,
-                    int((source, _file_key(other), "relates_to") in authored_raw),
+                    int((source, _file_key(other), generic) in authored_raw),
                 ))
             question_rows = _ranked(
                 question_candidates,
@@ -8332,7 +8333,7 @@ class EpistemicGraphIndex:
                     continue
                 resolution_candidates.append((
                     *resolution, target_id, target_count,
-                    int((source, _file_key(other), "relates_to") in authored_raw),
+                    int((source, _file_key(other), generic) in authored_raw),
                 ))
             resolution_rows = _ranked(
                 resolution_candidates,
@@ -8396,7 +8397,7 @@ class EpistemicGraphIndex:
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e1.source_path) "
                 "AND p.dst_page_key = ('file:' || e2.source_path) "
-                "AND p.raw_relation = 'relates_to') AS authored_match, "
+                "AND p.raw_relation = ?) AS authored_match, "
                 "ROW_NUMBER() OVER (PARTITION BY e1.source_path "
                 "ORDER BY e2.source_path, e1.dst_key) AS source_rank, "
                 "COUNT(*) OVER (PARTITION BY e1.source_path) AS source_total "
@@ -8411,14 +8412,14 @@ class EpistemicGraphIndex:
                 "AND NOT EXISTS (SELECT 1 FROM authored p "
                 "WHERE p.source_path = e1.source_path "
                 "AND p.dst_page_key = ('file:' || e2.source_path) "
-                "AND p.relation_type = 'relates_to')) "
+                "AND p.relation_type = ?)) "
                 "SELECT source_path, target_path, dst_key, exomem_id, "
                 "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
                 "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
                 "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
                 "FROM ranked WHERE source_rank <= ? "
                 "ORDER BY source_path, target_path, dst_key LIMIT ?",
-                (authored_json, *selected, per_source_cap, branch_cap + 1),
+                (authored_json, generic, *selected, generic, per_source_cap, branch_cap + 1),
             ).fetchall()
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
@@ -13682,11 +13683,12 @@ def _question_matches(
         return []
     theirs = _question_units(conn, view, questions=[question for _p, question, _r, _a in mine])
     authored = authored or {}
+    generic = relation_registry.generic_relation_key()
     matches = []
     for source, question, unit_ref, anchor in mine:
         for other, other_question, other_ref, other_anchor in theirs:
             if other == source or other_question != question or any(
-                target == _file_key(other) and relation == "relates_to"
+                target == _file_key(other) and relation == generic
                 for target, relation, _origin in authored.get(source, ())
             ):
                 continue
@@ -13724,13 +13726,14 @@ def _resolution_matches(
         if edge["relation_type"] in _RESOLUTION_RELATION_TYPES
     ]
     authored = authored or {}
+    generic = relation_registry.generic_relation_key()
     matches = []
     for edge in mine:
         source = str(edge["source_path"])
         for other in theirs:
             other_page = str(other["source_path"])
             if other_page == source or other["dst_key"] != edge["dst_key"] or any(
-                target == _file_key(other_page) and relation == "relates_to"
+                target == _file_key(other_page) and relation == generic
                 for target, relation, _origin in authored.get(source, ())
             ):
                 continue

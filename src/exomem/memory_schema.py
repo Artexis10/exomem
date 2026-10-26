@@ -600,7 +600,7 @@ def _relation_census(
             relation_counts["deprecated"] += 1
         elif status == "unregistered":
             relation_counts["unregistered"] += 1
-        elif canonical == "relates_to":
+        elif canonical == relation_registry.generic_relation_key():
             relation_counts["generic"] += 1
         elif status == "core":
             relation_counts["core"] += 1

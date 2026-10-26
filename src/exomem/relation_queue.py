@@ -434,9 +434,9 @@ def _shared_source_candidates(
             "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
             "WHERE p.src_key = ('file:' || e1.source_path) "
             "AND p.dst_page_key = ('file:' || e2.source_path) "
-            "AND p.relation_type = 'relates_to') "
+            "AND p.relation_type = ?) "
             "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
-            (rel_path, max(0, int(limit))),
+            (rel_path, relation_registry.generic_relation_key(), max(0, int(limit))),
         ).fetchall()
     except sqlite3.Error:
         return []
