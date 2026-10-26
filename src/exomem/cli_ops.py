@@ -90,7 +90,8 @@ _REMEDIATION: dict[str, str] = {
         "Retry the same write shortly; linked names are re-checked in the background."
     ),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": (
-        "Retry with the same mutation identity; do not submit a revised payload."
+        "Do not change the payload or use a new identity. Retry only with the original "
+        "replay identity; if none exists, reconcile the outcome before submitting again."
     ),
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": (
         "Do not rerun with a new identity; reconcile the committed mutation and retry "

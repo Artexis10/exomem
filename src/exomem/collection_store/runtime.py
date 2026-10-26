@@ -1165,7 +1165,6 @@ class StoreServer:
             raise OpError(
                 "MUTATION_ACKNOWLEDGEMENT_PENDING",
                 "the accepted collection-store operation is still executing and may still commit",
-                connection.PENDING_REMEDIATION,
                 details={"status": "uncertain", "committed": None},
             )
         if request.error is not None:
