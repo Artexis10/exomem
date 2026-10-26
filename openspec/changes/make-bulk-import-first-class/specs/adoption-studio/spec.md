@@ -45,6 +45,8 @@ An explicit flag value other than `1` SHALL restore synchronous fan-out. The fla
 
 Both chunk and individual-note pacing SHALL leave headroom for mandatory custody proof and pending publication. When the acknowledgement observation budget expires, the reply SHALL report unproven work as pending without scanning the remaining component states. It SHALL preserve observed completions, failures and diagnostics, and retain any applicable stable advisory reference. Operational checkpoints SHALL NOT synchronously drain existing graph debt during the durable acknowledgement session.
 
+Finish SHALL distinguish confirmed recall results from incomplete or failed queries. An absent target in an incomplete query SHALL remain pending, and a failed query SHALL remain unknown. Only a complete query SHALL establish a miss. Coverage SHALL retain confirmed hits and report how many sampled queries remain unevaluated. Ordinary pending convergence SHALL NOT produce a maintenance recommendation.
+
 #### Scenario: A media import returns while graph work is slow
 
 - **WHEN** default apply imports admitted media and graph or index fan-out cannot finish before the reply
@@ -67,6 +69,12 @@ Both chunk and individual-note pacing SHALL leave headroom for mandatory custody
 
 - **WHEN** acknowledgement observes a component failure and then exhausts its budget before reading every component
 - **THEN** the reply retains that failure and its diagnostic, leaves unread required work pending, and excludes observed completions from unfinished work
+
+#### Scenario: Finish checks recall before a large import has converged
+
+- **WHEN** the pending overlay cannot hydrate every imported page and recall returns an incomplete result
+- **THEN** finish reports unverified targets as pending, preserves confirmed hits, and reports unknown counts instead of zero hits or confirmed misses
+- **AND** the existing background worker retains responsibility for convergence
 
 ### Requirement: A folder outside the vault imports through local staging
 

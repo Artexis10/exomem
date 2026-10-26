@@ -2007,15 +2007,23 @@ def _same_page(left: str, right: str) -> bool:
     return left.removesuffix(".md") == right.removesuffix(".md")
 
 
-def _find_paths(root: Path, query: str) -> list[str] | None:
-    """Paths of the first keyword hits for `query`, or None when search failed."""
+def _find_paths(root: Path, query: str) -> tuple[list[str] | None, list[str]]:
+    """Keep confirmed keyword hits separate from incomplete or failed recall."""
     from . import find as find_module
 
+    degraded: list[str] = []
     try:
-        hits = find_module.find(root, query=query, mode="keyword", limit=5, graph=False)
+        hits = find_module.find(
+            root, query=query, mode="keyword", limit=5, graph=False,
+            degraded_out=degraded,
+        )
     except Exception:  # noqa: BLE001 - recall failure never blocks finish
-        return None
-    return [str(getattr(hit, "path", "")) for hit in hits]
+        return None, degraded
+    return [str(getattr(hit, "path", "")) for hit in hits], degraded
+
+
+def _recall_warming(components: list[str]) -> dict:
+    return {"components": sorted(set(components)), "since_s": None}
 
 
 def _applied_items(run: dict) -> list[tuple[dict, dict]]:
@@ -2041,11 +2049,16 @@ def _recall_check(root: Path, run: dict) -> dict:
     else:
         packs = run.get("pack_suggestions") or []
         title, target = (packs[0].get("name") if packs else "") or "", ""
-    paths = _find_paths(root, title) if title else None
+    paths, degraded = _find_paths(root, title) if title else ([], [])
     ok = bool(target) and any(_same_page(path, target) for path in paths or [])
     result: dict = {"query": title, "ok": ok, "hits": paths or []}
     if not ok:
-        result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
+        if paths is None or degraded:
+            result.update(ok=None, status="failed" if paths is None else "pending")
+            if degraded:
+                result["warming"] = _recall_warming(degraded)
+        else:
+            result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
     return result
 
 
@@ -2065,13 +2078,29 @@ def _recall_sample(root: Path, run: dict) -> dict:
         depth += 1
     found = 0
     missed: list[str] = []
+    pending, failed = 0, 0
+    degraded: list[str] = []
     for item, outcome in picks:
-        paths = _find_paths(root, item.get("title") or item["original_path"])
+        paths, incomplete = _find_paths(root, item.get("title") or item["original_path"])
         if paths is not None and any(_same_page(path, outcome["target_path"]) for path in paths):
             found += 1
+        elif paths is None:
+            failed += 1
+        elif incomplete:
+            pending += 1
+            degraded.extend(incomplete)
         else:
             missed.append(outcome["target_path"])
-    return {"sampled": len(picks), "found": found, "missed": missed}
+    result: dict = {"sampled": len(picks), "found": found, "missed": missed}
+    if pending or failed:
+        evaluated = found + len(missed)
+        result.update(
+            status="failed" if failed else "pending", evaluated=evaluated,
+            found=found if evaluated else None, pending=pending, failed=failed,
+        )
+        if degraded:
+            result["warming"] = _recall_warming(degraded)
+    return result
 
 
 def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:

@@ -150,6 +150,8 @@ Chunk and individual-note pacing retain the existing terminal reserve for mandat
 
 The boundary proof blocks sidecar fan-out and checks that default apply returns with bytes, a sidecar, an extraction job and pending recall intact. It also checks exact replay, convergence and the explicit synchronous rollback. The own-note benchmark repeats the existing seed with caller-supplied selection rules and checks every page after the rerun.
 
+Large imports can exceed the pending overlay's hydration bound before the existing worker catches up. Finish reads the existing recall degradation markers. It preserves confirmed hits and distinguishes pending or failed reads from complete queries that found no target. The coverage report shows evaluated and unresolved samples, and an entirely unresolved count stays unknown. Pending convergence does not suggest maintenance or change the hydration bound.
+
 ## Risks / Trade-offs
 
 - **Existing backlogs grow.** Sources whose only derivatives are drafts, or whose back-reference is stale, reappear in `unprocessed_source`. This is the honest count; the release notes say so.
