@@ -23,7 +23,12 @@ from pathlib import Path
 import asyncpg
 import pytest
 
-from cellctl.control_test_contract import control_test_sql, export_test_sql, import_test_sql
+from cellctl.control_test_contract import (
+    control_test_sql,
+    export_test_sql,
+    import_test_sql,
+    media_key_test_sql,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CONTRACT_ALERTS = json.loads(
@@ -197,6 +202,7 @@ async def _create_cell_db(server: PostgresServer) -> str:
         await owner_connection.execute(import_test_sql(FIXTURES))
         await owner_connection.execute(export_test_sql(FIXTURES))
         await owner_connection.execute(grants_sql)
+        await owner_connection.execute(media_key_test_sql(FIXTURES))
     finally:
         await owner_connection.close()
     return name

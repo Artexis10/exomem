@@ -54,3 +54,12 @@ def export_test_sql(fixtures: Path) -> str:
     if not _committed_sql(fixtures, "exports_migration").startswith(local):
         raise RuntimeError("exomem_cloud_exports.sql is not the Exomem half of the pinned migration 0066")
     return local + "\n" + _committed_sql(fixtures, "custody_migration")
+
+
+def media_key_test_sql(fixtures: Path) -> str:
+    """The media key columns and cellctl's grant on them, run after the pinned grants.
+
+    The pinned grants script revokes every earlier grant on the cell table, so this must follow it.
+    Stand-in for a Substrate migration that has not shipped.
+    """
+    return (fixtures / "exomem_cloud_media_keys.sql").read_text(encoding="utf-8")

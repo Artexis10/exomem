@@ -41,6 +41,9 @@ OBSERVED_COLUMNS = (
     "backup_key_version",
     "cell_root_key_wrapped",
     "cell_root_key_version",
+    # add-cloud-media-store D5: the media key bundle, wrapped under the cell root.
+    "media_key_wrapped",
+    "media_key_version",
     "content_keys_retired_at",
     "last_live_key_destroyed_at",
     "key_retention_sources",
@@ -155,9 +158,11 @@ async def retire_content_keys(connection: asyncpg.Connection, now: datetime) -> 
     await connection.execute(
         "UPDATE exomem_cloud_cells SET cell_root_key_wrapped=NULL, cell_root_key_version=NULL, "
         "backup_key_wrapped=NULL, backup_key_version=NULL, "
+        "media_key_wrapped=NULL, media_key_version=NULL, "
         "content_keys_retired_at=COALESCE(content_keys_retired_at,$1) "
         "WHERE desired_state='deleted' AND (content_keys_retired_at IS NULL "
-        "OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL)", now)
+        "OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL "
+        "OR media_key_wrapped IS NOT NULL)", now)
 
 
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:
