@@ -85,7 +85,7 @@ This change applies that rule to the media engines, and its spec references the 
 A file-backed weight file is not enough on its own. At load, ONNX Runtime folds constant expressions into private memory in every process. In the Whisper decoder, it folds the transposes of the tied embedding table: 316 MiB per process.
 So the speech artifact saves its decoder already folded, at ONNX Runtime's hardware-independent basic level, with the folded tables as file-backed initializers. The registry recipe names the graphs that the build folds.
 The transcripts stay byte-identical. Measured on 2026-10-27 at 2 threads, one extra concurrent speech job then adds about 0.45 GiB of private memory instead of 0.78 GiB.
-Two concurrent cells hold one copy of every weight mapping, and the first cell to fault a page carries it in its cgroup.
+Two concurrent containers on one host, each with its own memory limit, held one copy of every weight mapping, and the first to fault a page carried it in its cgroup. Task 5.2 still measures this on a node.
 
 ### D4. Documents
 
@@ -233,7 +233,7 @@ The engine writes an atomic progress record under the vault's derived state afte
 A later run of the same path, content digest, window length and engine label continues from the next window, with the recorded language; any other record starts again.
 Removing the file discards its record through the deletion fan-out.
 The engine deletes the record when the transcript completes.
-Today every watchdog stop counts toward the stop limit, so a file that needs more than the stop limit times the job timeout ends over budget. The Cloud delivery work changes the worker: it re-queues a stopped job, and a stop that advanced the record does not count toward the stop limit.
+The worker re-queues a stopped speech job. A timeout, pressure or hard-limit stop that advanced the record does not count toward the stop limit, and a stop without progress counts as before.
 
 ### D7. Off until proven, and the disabled state
 

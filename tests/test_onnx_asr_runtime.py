@@ -185,3 +185,14 @@ def test_removing_a_recording_discards_its_partial_transcript(monkeypatch, vault
     index_sync.delete_after_remove(vault, [RECORDING])
 
     assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 0
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", '{"format": 1}', '{"next_offset": "48000"}'])
+def test_an_unreadable_progress_record_counts_as_no_progress(vault, content):
+    from exomem import onnx_asr_runtime
+
+    path = onnx_asr_runtime._progress_path(vault, RECORDING)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+    assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 0

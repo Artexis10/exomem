@@ -68,10 +68,12 @@ def binary_rel(vault_root: Path, path: Path) -> str | None:
 
 
 def _read_progress(path: Path) -> dict | None:
+    # A record that cannot be read or parsed counts as absent, so the file starts again.
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
+    return record if isinstance(record, dict) and isinstance(record.get("next_offset"), int) else None
 
 
 def _write_progress(vault_root: Path, path: Path, record: dict) -> None:
