@@ -93,7 +93,8 @@ def declarations(root, conn, *, generation=1):
     if any(text is None or tokens.manifest_hash(text) != digest for _cid, _path, _source, _layout, text, digest in rows):
         raise unavailable()
     # Every call rereads and rechecks the rows, so a re-proof still sees any change; within a
-    # request, the parse of an unchanged namespace is reused. Each caller gets its own marker.
+    # request, the parse of an unchanged namespace is reused. Each caller gets its own marker. The
+    # vocabulary overlay is read once per request too; `finish` re-proves in a fresh scope.
     key = (str(root), sid, generation, tuple((*row[:4], row[5]) for row in rows))
     marker, declared = state_paths.request_memo(
         "ownership_declarations", key, lambda: _declarations(root, sid, rows, generation))

@@ -1271,8 +1271,10 @@ class OperationAuthorization:
         A read operation is one SQLite snapshot, so the subject cannot change under it. A mutation
         can edit the manifest, so it reads the subject each time.
         """
-        if cid in self.manifest_subjects:
-            return self.manifest_subjects[cid]
+        # A non-mutation operation can still run on a connection that writes; its writes move the key.
+        memo = (cid, self.conn.total_changes)
+        if memo in self.manifest_subjects:
+            return self.manifest_subjects[memo]
         try:
             found = self.conn.execute("SELECT manifest_path FROM collections WHERE collection_id=?", (cid,)).fetchone()
             subject = None if found is None else next(
@@ -1284,7 +1286,7 @@ class OperationAuthorization:
         if subject is None:
             self.refuse()
         if not self.mutation:
-            self.manifest_subjects[cid] = subject
+            self.manifest_subjects[memo] = subject
         return subject
 
     def summary_manifest(self, cid: str) -> tuple[CanonicalSubject, Decision] | None:

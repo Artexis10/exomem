@@ -661,7 +661,11 @@ def _file_identity(path: Path) -> tuple[int, int]:
 
 
 def _recorded_version(conn: sqlite3.Connection) -> int:
-    """The schema version a store records, read from ``store_meta`` alone so a head reader may ask."""
+    """The schema version a store records, read from ``store_meta`` alone so a head reader may ask.
+
+    A lend checks this number only, where a fresh open also checks the alembic revision: a migration
+    changes both in one transaction, so only an edit from outside Exomem can set them apart.
+    """
     rows = conn.execute("SELECT value FROM store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchall()
     try:
         return int(rows[0][0]) if rows else 0
