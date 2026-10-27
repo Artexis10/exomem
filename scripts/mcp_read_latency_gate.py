@@ -508,6 +508,7 @@ class Arm:
         Each collection is read back and must hold exactly the rows the generator authored.
         """
         from exomem.records import BULK_UPSERT_MAX_ROWS
+        from exomem.structured_collections import plan_ref
 
         why = "latency gate fixture"
         for kind, read_tool, write_tool in (("records", "read_records", "change_records"),
@@ -525,8 +526,15 @@ class Arm:
                             "source": fixture["source_page"]["path"], "why": why}})
                         guard = (await self.tool(read_tool, {"operation": {"kind": "inspect", "collection": path}}))["snapshot"]
                 else:
-                    for item in collection["items"]:
-                        await self.tool(write_tool, {"operation": {"kind": "add", "collection": path, "item": item, "why": why}})
+                    # The product assigns each item key, so a child's `parent` reference is built from its
+                    # parent's add response; the generator orders parents before children.
+                    keys: list[str] = []
+                    for item, parent in zip(collection["items"], collection["parents"]):
+                        if parent is not None:
+                            item = {**item, "parent": plan_ref(collection["id"], keys[parent])}
+                        added = await self.tool(write_tool, {"operation": {
+                            "kind": "add", "collection": path, "item": item, "why": why}})
+                        keys.append(added["plan_id"])
                 held = await self.tool(read_tool, {"operation": {"kind": "query", "collection": path, "limit": 1}})
                 if held["total_matched"] != len(collection["items"]):
                     raise MeasurementRefused("collection-load-incomplete", phase="fixture-load")

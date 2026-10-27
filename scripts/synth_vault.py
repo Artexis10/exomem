@@ -301,7 +301,8 @@ def _record_item(fields: list[dict], rng: random.Random, ordinal: str) -> dict:
     return item
 
 
-def _planning_item(title: str, governed: list[str], values: dict[str, list[str]], rng: random.Random) -> dict:
+def _planning_item(title: str, kind: str, governed: list[str], values: dict[str, list[str]],
+                   rng: random.Random, tries: int = 500) -> dict:
     """Draw governed values until the product's own validator accepts the combination.
 
     Status, commitment and horizon constrain each other, so independent draws are often refused.
@@ -310,8 +311,8 @@ def _planning_item(title: str, governed: list[str], values: dict[str, list[str]]
     from exomem import planning
     from exomem.structured_collections import CollectionError
 
-    for _ in range(500):
-        item = {"title": title, **{name: rng.choice(values[name]) for name in governed}}
+    for _ in range(tries):
+        item = {"title": title, "kind": kind, **{name: rng.choice(values[name]) for name in governed}}
         try:
             planning.normalize_item(item, vault_root=None)
         except CollectionError:
@@ -320,12 +321,66 @@ def _planning_item(title: str, governed: list[str], values: dict[str, list[str]]
     raise ValueError("planning-item-unsatisfiable")
 
 
+def _planning_layers(parents: dict[str, list[str]], governed: list[str], values: dict[str, list[str]],
+                     rng: random.Random) -> list[list[str]]:
+    """Registry kinds by depth in their `parents` graph, roots first.
+
+    A kind is usable when the validator accepts it with delivery-state values and, unless it is a root,
+    when one of its parent kinds is usable at a shallower depth. Both facts come from the registry and
+    the validator at run time, so the generator names no kind.
+    """
+    carriers = set()
+    for kind in parents:
+        try:
+            _planning_item("probe", kind, governed, values, rng, tries=100)
+        except ValueError:
+            continue
+        carriers.add(kind)
+    depth = {kind: 0 for kind in carriers if not parents[kind]}
+    placed = True
+    while placed:
+        placed = False
+        for kind in carriers - depth.keys():
+            shallower = [depth[parent] for parent in parents[kind] if parent in depth]
+            if shallower:
+                depth[kind] = 1 + min(shallower)
+                placed = True
+    return [sorted(kind for kind, level in depth.items() if level == wanted) for wanted in range(max(depth.values()) + 1)]
+
+
+def _planning_hierarchy(size: int, layers: list[list[str]], parents: dict[str, list[str]], fanout: int,
+                        rng: random.Random) -> list[tuple[str, int | None]]:
+    """`(kind, parent index)` for each of `size` items, parents before children, roots without parent.
+
+    Level sizes grow by `fanout` per level; each child takes the next parent of an allowed kind in turn.
+    """
+    levels = min(len(layers), size)
+    weights = [fanout ** level for level in range(levels)]
+    sizes = [max(1, round(size * weight / sum(weights))) for weight in weights[:-1]]
+    sizes.append(size - sum(sizes))
+    placed: list[tuple[str, int | None]] = []
+    turn: dict[str, int] = {}
+    for level, count in enumerate(sizes):
+        for _ in range(count):
+            options = [kind for kind in layers[level]
+                       if level == 0 or any(prior in parents[kind] for prior, _ in placed)]
+            kind = rng.choice(options)
+            if level == 0:
+                placed.append((kind, None))
+                continue
+            candidates = [index for index, (prior, _) in enumerate(placed) if prior in parents[kind]]
+            turn[kind] = turn.get(kind, -1) + 1
+            placed.append((kind, candidates[turn[kind] % len(candidates)]))
+    return placed
+
+
 def gen_collection_fixture(profile: dict) -> dict:
     """Records and Planning collections with skewed row counts, plus manifest-less trackers.
 
     Planning values (status, commitment, horizon, priority) come from the shipped
     planning-values registry at run time. Only statuses of the registry's `open`
-    class are used, so every row stays in the default query view.
+    class are used, so every row stays in the default query view. Planning items form
+    the hierarchy the registry's kind `parents` rules require.
     """
     from exomem.planning_values import PlanningValues
 
@@ -349,6 +404,8 @@ def gen_collection_fixture(profile: dict) -> dict:
         raise ValueError("planning-field-unregistered")
     values = {name: [value for value in registry.values(name)
                      if name != "status" or registry.planning_class(value) == "open"] for name in governed}
+    parents = {kind: registry.find("kind", kind).attributes["parents"] for kind in registry.values("kind")}
+    layers = _planning_layers(parents, governed, values, rng)
     planning = []
     for index, size in enumerate(_skewed_sizes(planning_spec, rng)):
         title = f"{planning_spec['title']} {index:02d}"
@@ -357,10 +414,15 @@ def gen_collection_fixture(profile: dict) -> dict:
         # the registry governs the others.
         fields = {name: {"type": "string", **({"required": True} if name == "title" else {})}
                   for name in dict.fromkeys(("title", "lifecycle", *registry.fields(), *planning_spec["free_fields"]))}
+        shape = _planning_hierarchy(size, layers, parents, planning_spec["fanout"], rng)
         planning.append({
             "id": identity, "title": title, "manifest_path": f"Knowledge Base/Planning/{title}/_collection.md",
             "manifest_text": _manifest_text("planning", identity, title, fields, "title", "Items"),
-            "items": [_planning_item(f"{title} item {row:04d}", governed, values, rng) for row in range(size)],
+            "items": [_planning_item(f"{title} item {row:04d}", kind, governed, values, rng)
+                      for row, (kind, _parent) in enumerate(shape)],
+            # Index of each item's parent among `items` (None for a root); the loader turns it into a plan
+            # reference from the add response, because the product assigns the item key.
+            "parents": [parent for _kind, parent in shape],
         })
     trackers = []
     for index in range(profile["legacy_trackers"]["count"]):
