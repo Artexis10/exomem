@@ -1186,6 +1186,10 @@ def _drain_graph_work(
             # Not any page's fault, so no receipt moves: a writer's debt signal
             # or the drain's backoff retries the whole batch. Isolating would
             # meet the same refusal once per page, each with a boundary wait.
+            # The per-path record keeps its last verdict: a held boundary says
+            # nothing about per-path readiness, and releasing barrier recovery
+            # would start a whole-vault pass against that same boundary. A
+            # refusal that persists releases it through the oldest receipt's age.
             log.info("deferred graph batch refused (%s); work remains queued", refusal)
             return 0
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)

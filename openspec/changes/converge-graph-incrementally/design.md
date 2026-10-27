@@ -554,7 +554,9 @@ disposition. The rule reuses the existing predicates and adds no new proof.
   resets that count. A queue whose latest drain found the epoch unsettled or the vault
   not ready owns nothing, and recovery runs as it does on an empty queue. The drain
   records that outcome, because deriving it again can build a cold resolver or wait on
-  the canonical boundary.
+  the canonical boundary. A queue whose oldest receipt has waited the stall threshold
+  also owns nothing: progress around a receipt that never drains restarts the stall
+  count, so only that receipt's age bounds the barrier.
 - A standing full marker owns the whole-vault pass for a caller that may stop at queued.
   The marker already records the debt, and the drain pays it once. A caller that meets
   a rebuild disposition or an unproven predecessor behind it queues its own paths at its

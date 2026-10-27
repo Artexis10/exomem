@@ -47,6 +47,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import state_paths
+
 log = logging.getLogger(__name__)
 
 #: Let a burst of writes settle before draining. Repair dispatched into a live
@@ -99,8 +101,10 @@ _last_debt = 0.0
 #: epoch refused it, or the vault was not ready (no sidecar, no live recall
 #: registry, no resolver, no topology proof). Recorded by the drain rather than
 #: re-derived, because deriving it can build a cold resolver or wait on the
-#: canonical boundary. Scheduling state only, like `_covered_generation`.
-_per_path_blocked: set[str] = set()
+#: canonical boundary. Keyed by the resolved vault path, because the drain that
+#: records it and the recovery that reads it may name the vault differently.
+#: Scheduling state only, like `_covered_generation`.
+_per_path_blocked: set[Path] = set()
 _PER_PATH_LOCK = threading.Lock()
 
 #: The checkpoint generation this process last spent a covering drain on, per
@@ -123,25 +127,26 @@ def note_graph_debt() -> None:
     _DEBT.set()
 
 
-def note_graph_progress() -> None:
-    """Wake the drain without waiting out a backoff: the graph was just published.
+def note_graph_progress(vault_root: Path) -> None:
+    """Wake the drain without waiting out a backoff: this vault's graph was just published.
 
-    A publication also changes what the next per-path drain can do, so the
-    record of a blocked one is dropped until that drain says so again.
+    A publication also changes what the next per-path drain can do, so this
+    vault's record of a blocked one is dropped until that drain says so again.
     """
     with _PER_PATH_LOCK:
-        _per_path_blocked.clear()
+        _per_path_blocked.discard(state_paths.resolved_vault_path(vault_root))
     _PROGRESS.set()
     _DEBT.set()
 
 
 def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
     """Record whether this vault's latest per-path drain could repair per path."""
+    key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
         if admissible:
-            _per_path_blocked.discard(str(vault_root))
+            _per_path_blocked.discard(key)
         else:
-            _per_path_blocked.add(str(vault_root))
+            _per_path_blocked.add(key)
 
 
 def per_path_repair_blocked(vault_root: Path) -> bool:
@@ -150,8 +155,9 @@ def per_path_repair_blocked(vault_root: Path) -> bool:
     While it could not, queued receipts do not own a barrier's repair: the drain
     cannot pay it, and the vault may stay unready until recovery runs.
     """
+    key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        return str(vault_root) in _per_path_blocked
+        return key in _per_path_blocked
 
 
 def disabled() -> bool:
@@ -491,9 +497,11 @@ def _work_once(vault_root: Path) -> int:
     (`epistemic_graph.recovery_decline_reason`): the queue owns that repair,
     and the drain that empties it publishes and clears the barrier. A behind
     publication's repair set drains that way, batch by batch. When this pass's
-    drain could not repair per path at all, recovery runs as it would with an
-    empty queue. A queue that drains without making progress reaches the
-    whole-vault route only through the stall escalation in `_run_owned`.
+    drain could not repair per path at all, or the oldest queued receipt has
+    waited longer than `stall_seconds`, recovery runs as it would with an empty
+    queue. The age bounds a receipt that never drains behind writes that do:
+    their progress restarts the stall escalation in `_run_owned`, which is the
+    route for a queue that drains without making any progress.
     """
     from . import epistemic_graph
 
@@ -577,12 +585,14 @@ def _whole_vault_hold(vault_root: Path, not_before: float, held_since: float | N
     return max(0.0, not_before - now, quiet)
 
 
-def _stall_seconds() -> float:
+def stall_seconds() -> float:
     """How long queued work may stay stuck on an unreadable graph before whole-vault.
 
     The whole backoff ladder, ceiling included: 5+10+20+40+80+120 = 275 s with
     the shipped constants. Wall time rather than a pass count, because write
     signals cut each backoff wait short and would reach the ceiling in seconds.
+    Barrier recovery reads it too, against the oldest queued receipt's age
+    (`epistemic_graph.recovery_decline_reason`).
     """
     total, step = 0.0, RETRY_SECONDS
     while 0.0 < step < MAX_RETRY_SECONDS:
@@ -696,14 +706,17 @@ def _run_owned(vault_root: Path) -> None:
             # a readable graph, an empty queue or a standing marker, whose
             # convergence is the whole-vault attempt, starts the count again. A
             # barrier does not: recovery declines behind queued receipts that
-            # the drain can repair per path.
+            # the drain can repair per path, until the oldest of them has
+            # waited this same threshold. Progress restarts this count, so that
+            # age is what bounds a receipt that never drains behind writes that
+            # do.
             if _marker_pending(vault_root) or not (
                 _queue_pending(vault_root) and _availability_pending(vault_root)
             ):
                 stalled_since = None
             elif stalled_since is None:
                 stalled_since = now
-            elif now - stalled_since >= _stall_seconds():
+            elif now - stalled_since >= stall_seconds():
                 _request_full_rebuild(vault_root, cause="queue_stalled")
 
 

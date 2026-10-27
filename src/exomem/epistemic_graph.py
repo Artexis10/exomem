@@ -1135,7 +1135,7 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
     try:
         from . import graph_drain
 
-        graph_drain.note_graph_progress()
+        graph_drain.note_graph_progress(vault_root)
     except Exception:  # noqa: BLE001 - a missed wake costs one poll, never the repair
         pass
 
@@ -1175,7 +1175,10 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     could not repair per path at all -- an epoch that refused it, or a vault
     not ready for it, as a restarted worker leaves it -- owns nothing, and
     recovery goes on to the reasons below. Declining there left the graph
-    unavailable until the stall escalation, longer than a reader waits.
+    unavailable until the stall escalation, longer than a reader waits. Nor
+    does a queue whose oldest receipt has waited the drain's stall threshold:
+    one receipt that never drains, behind writes that do, held the barrier for
+    good, because their progress restarts the stall escalation's clock.
     """
     from . import freshness
 
@@ -1202,16 +1205,22 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
     """Whether queued per-path receipts, with no marker, are repair the drain can run.
 
     The drain's own record answers "can run": its latest per-path attempt was
-    not refused by the epoch or by an unready vault. An unreadable queue reads
-    as empty, which leaves recovery to the reasons after this one.
+    not refused by the epoch or by an unready vault. The oldest receipt's age
+    bounds it: a requeue keeps a receipt's first enqueue time, so a receipt
+    that never drains ages past the threshold however much drains around it.
+    An unreadable queue reads as empty, which leaves recovery to the reasons
+    after this one.
     """
     from . import graph_drain
 
     if graph_drain.per_path_repair_blocked(vault_root):
         return False
     try:
+        count, oldest_age = deferred_index.graph_queue_age(vault_root)
         return (
-            deferred_index.graph_queue_age(vault_root)[0] > 0
+            count > 0
+            and oldest_age is not None
+            and oldest_age < graph_drain.stall_seconds()
             and deferred_index.graph_full_rebuild_pending(vault_root) is None
         )
     except Exception:  # noqa: BLE001 - an unreadable queue owns no repair

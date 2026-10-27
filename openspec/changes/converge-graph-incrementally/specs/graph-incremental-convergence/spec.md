@@ -147,10 +147,12 @@ is admissible, the queue owns the repair. Barrier recovery SHALL decline with it
 reason, ahead of the external change check, and the drain SHALL NOT raise whole-vault
 debt for that barrier. Per-path repair is not admissible while the drain's latest
 per-path attempt could not repair per path at all: the epoch refused it, or the vault
-was not ready for it, as a restarted worker leaves it. Then the queue SHALL NOT own the
-repair, and barrier recovery SHALL go on to its other reasons. A queue that the drain
-can repair but that makes no progress reaches the whole-vault route through the drain's
-stall escalation, and a standing barrier SHALL NOT reset that escalation's count.
+was not ready for it, as a restarted worker leaves it. The queue also SHALL NOT own the
+repair once its oldest receipt has waited longer than the drain's stall threshold,
+counted from that receipt's first enqueue. Then barrier recovery SHALL go on to its
+other reasons. A queue that the drain can repair but that makes no progress reaches the
+whole-vault route through the drain's stall escalation, and a standing barrier SHALL
+NOT reset that escalation's count.
 
 Before reconciliation clears an observed external epoch, it SHALL evict the
 resolver and inbound caches affected by that recall publication. Clearing SHALL
@@ -172,14 +174,16 @@ complete, but it SHALL NOT repopulate the shared cache.
 
 - **WHEN** per-path receipts are queued
 - **AND** per-path repair is admissible
+- **AND** the oldest queued receipt has waited less than the stall threshold
 - **THEN** barrier recovery waits and only the stall escalation may raise whole-vault debt
 
 #### Scenario: Queued receipts that cannot drain release barrier recovery
 
 - **WHEN** per-path receipts are queued behind a read barrier
 - **AND** the drain's latest per-path attempt found the vault not ready for per-path
-  repair
-- **THEN** barrier recovery does not decline for the queue
+  repair, or the oldest queued receipt has waited past the stall threshold
+- **THEN** barrier recovery does not decline for the queue, even when other receipts
+  drained in the same pass
 - **AND** the barrier recovers, or the drain raises whole-vault debt for an external
   epoch, without waiting for the stall escalation
 

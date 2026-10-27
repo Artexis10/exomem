@@ -611,5 +611,13 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   and passes with the rule. The same seven graph modules: 338 passed, 3 skipped, 3
   failed, with the same three names and reasons as the base. The four watcher and
   index_sync modules: 182 passed.
+  The queue also owns nothing once its oldest receipt has waited the drain's stall
+  threshold, read from `deferred_index.graph_queue_age`, which keeps a receipt's first
+  enqueue time across rotation. Without this bound, one receipt that never drains held
+  the barrier for good while other writes drained, because their progress restarts the
+  stall escalation's count. A held-boundary refusal of the batch keeps the drain's last
+  per-path verdict, and the age bounds a refusal that persists. Evidence:
+  `test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waited_the_stall`,
+  red on the previous head.
 - [ ] 11.7 Sandbox A/B (orchestrator): zero whole-vault passes per ordinary governed
   write on the real managed worker with its watcher on; drift 0.

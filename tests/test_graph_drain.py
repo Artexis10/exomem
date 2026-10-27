@@ -998,6 +998,54 @@ def test_a_barrier_behind_queued_repair_that_cannot_drain_recovers_at_once(
     assert EpistemicGraphIndex(vault).available(), "the barrier was not recovered"
 
 
+def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waited_the_stall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """Writes that drain around a stuck receipt do not hold the barrier for good.
+
+    The stuck page's registry never records its bytes, so its receipt stays
+    queued while a recorded page drains on every pass. That progress restarts
+    the stall escalation's clock, and recovery declined behind the queue on
+    every pass. The oldest receipt's age bounds it at the stall threshold.
+    """
+    vault = _published_vault(tmp_path)
+    notes = vault / "Knowledge Base/Notes/Insights"
+    stuck = notes / "stuck.md"
+    stuck.write_text(_page("Stuck", "Stuck links to [[a]]."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [stuck.relative_to(vault).as_posix()])
+    EpistemicGraphIndex(vault).suspend_reads()
+    real_clock = time.time
+    waited = 0.0
+    monkeypatch.setattr(deferred_index, "time", SimpleNamespace(time=lambda: real_clock() + waited))
+
+    def drainable_write(name: str) -> str:
+        page = notes / f"{name}.md"
+        page.write_text(_page(name, f"{name} links to [[b]]."), encoding="utf-8")
+        freshness.on_files_changed(vault, changed=[page])
+        rel = page.relative_to(vault).as_posix()
+        deferred_index.add_graph_receipts(vault, [rel])
+        return rel
+
+    early = drainable_write("early")
+    graph_drain._work_once(vault)
+
+    assert early not in deferred_index.list_graph_paths(vault)
+    assert not EpistemicGraphIndex(vault).available(), (
+        "recovery ran behind a queue the drain is still repairing"
+    )
+
+    waited = graph_drain.stall_seconds() + 1.0
+    late = drainable_write("late")
+    graph_drain._work_once(vault)
+
+    assert late not in deferred_index.list_graph_paths(vault)
+    assert EpistemicGraphIndex(vault).available(), (
+        "a receipt that never drains held the barrier past the stall threshold"
+    )
+
+
 def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1419,7 +1467,7 @@ def test_a_publication_elsewhere_ends_the_drains_backoff(
     time.sleep(0.3)
     assert len(attempts) == 1, "a write signal cut a 30 s whole-vault backoff short"
 
-    graph_drain.note_graph_progress()
+    graph_drain.note_graph_progress(tmp_path)
 
     assert _wait_for(lambda: len(attempts) >= 2, timeout=5.0), (
         "a publication by another owner did not wake the backed-off drain"

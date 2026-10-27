@@ -1422,7 +1422,7 @@ def test_a_standalone_dispatch_behind_a_covering_acknowledgement_still_converges
     _assert_matches_a_fresh_rebuild(vault)
 
 
-AFFECTED ="Knowledge Base/Notes/Insights/queue-affected.md"
+AFFECTED = "Knowledge Base/Notes/Insights/queue-affected.md"
 AFFECTED_LINKER = "Knowledge Base/Notes/Insights/queue-affected-linker.md"
 TARGET = "Knowledge Base/Notes/Insights/queue-target.md"
 
