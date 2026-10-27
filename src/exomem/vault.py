@@ -7749,7 +7749,14 @@ def normalize_wikilink(
     paths. Bare names use `resolver` or lazily call `resolver_factory`.
     """
     def _seen(no_ext: str) -> bool:
-        return visible is None or visible(f"{no_ext}.md")
+        # The resolver strips one lowercase `.md`, so a key ending in `.md` may name
+        # `x.MD` (the key itself) or `x.md.md`; see it only when both spellings are seen.
+        if visible is None:
+            return True
+        seen = visible(f"{no_ext}.md")
+        if no_ext.lower().endswith(".md"):
+            seen = seen and visible(no_ext)
+        return seen
 
     def _matches(values: list[str] | None) -> list[str] | None:
         if values is None or visible is None:
@@ -7792,9 +7799,11 @@ def normalize_wikilink(
         if contains(candidate) and _seen(candidate):
             return candidate + anchor, None
 
-    # 2. KB-stripped match (target looks like KB-relative).
-    kb_match = contains(kb_prefix() + cleaned) if targeted else cleaned in resolver.kb_stripped
-    if kb_match and _seen(kb_prefix() + cleaned):
+    # 2. KB-relative match (target looks like KB-relative). The KB page itself must
+    # exist: `kb_stripped` also holds the keys of pages outside the Knowledge Base,
+    # so a hidden vault-root page named like the target would pass a membership test
+    # on it and then be judged by `_seen` on a path that is not in the vault.
+    if contains(kb_prefix() + cleaned) and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.

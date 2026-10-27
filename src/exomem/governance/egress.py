@@ -8270,8 +8270,10 @@ def filter_withheld_entries(
         return allowed
 
     resolved_items: dict[str, str | None] = {}
-    # One listing per directory per call: (exact names, first name per casefold).
-    listings: dict[Path, tuple[frozenset[str], dict[str, str]] | None] = {}
+    # One listing per directory per call: each entry by exact name, in scandir order. The
+    # casefold map of a directory is built only when an exact name misses in it.
+    listings: dict[Path, dict[str, os.DirEntry[str]] | None] = {}
+    folded_listings: dict[Path, dict[str, str]] = {}
     def _markup_targets(text: str) -> list[str]:
         targets = []
         for raw in _WIKILINK_ANYWHERE.findall(text):
@@ -8349,29 +8351,34 @@ def filter_withheld_entries(
         """
         current = vault_root
         real: list[str] = []
+        entry: os.DirEntry[str] | None = None
         for part in parts:
             if current not in listings:
                 try:
-                    with os.scandir(current) as entries:
-                        names = [entry.name for entry in entries]
+                    with os.scandir(current) as scanned:
+                        listings[current] = {item.name: item for item in scanned}
                 except OSError:
                     listings[current] = None
-                else:
-                    first: dict[str, str] = {}
-                    for name in names:
-                        first.setdefault(name.casefold(), name)
-                    listings[current] = (frozenset(names), first)
             listing = listings[current]
             if listing is None:
                 return None
-            exact_names, by_casefold = listing
-            match = part if part in exact_names else by_casefold.get(part.casefold())
-            if match is None:
-                return None
-            real.append(match)
-            current = current / match
+            entry = listing.get(part)
+            if entry is None:
+                folded = folded_listings.get(current)
+                if folded is None:
+                    folded = folded_listings[current] = {}
+                    for name in listing:
+                        folded.setdefault(name.casefold(), name)
+                match = folded.get(part.casefold())
+                if match is None:
+                    return None
+                entry = listing[match]
+            real.append(entry.name)
+            current = current / entry.name
         try:
-            return "/".join(real) if current.is_file() else None
+            # The entry's own file type proves a regular file without a stat; a symlink
+            # leaf is followed exactly as `Path.is_file` followed it.
+            return "/".join(real) if entry is not None and entry.is_file() else None
         except OSError:
             return None
 

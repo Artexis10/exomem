@@ -15,8 +15,10 @@ from urllib.parse import quote, unquote
 
 from . import (
     access,
+    call_spans,
     capabilities,
     collection_claims,
+    freshness,
     memory_refs,
     mutation_terminal,
     query_compat,
@@ -1021,11 +1023,23 @@ class _LinkProjector:
     manifest: collections.CollectionManifest
     resolver: vault.WikilinkResolver
     memory_targets: Mapping[str, tuple[str, ...]]
-    admitted: Mapping[str, bool]
+    admitted: dict[str, bool]
     candidate_index_complete: bool | None
     verdicts: dict[str, bool]
+    # Verdict per stripped raw value, so the many rows of one query that carry the same
+    # link value resolve it once.
+    by_value: dict[str, bool]
     policy: Any | None
     authorize_path: Callable[[str], bool] | None = None
+    # Whether this reader may see a page, decided without a release receipt. It is the
+    # visibility test for pages the projector only consults. `authorize_path` can carry
+    # receipts, and a receipt claims a release, so it decides only a link's final target.
+    visible_path: Callable[[str], bool] | None = None
+    walk_allowed: bool = True
+    # The published corpus generation lent for this projector's life, when the index came
+    # from it instead of a walk, and its per-identity owner lookup.
+    borrowed: Any | None = None
+    owners_of: Callable[[str], tuple[str, ...] | None] | None = None
 
     @classmethod
     def create(
@@ -1036,25 +1050,91 @@ class _LinkProjector:
         policy: Any | None = None,
         allow_cold_index: bool = True,
         authorize_path: Callable[[str], bool] | None = None,
+        visible_path: Callable[[str], bool] | None = None,
     ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
         # bare title or memory identity actually needs it.
         #
+        # The lookup first borrows the published corpus generation, which costs no
+        # walk. Only when none can be borrowed does it walk the vault, within the
+        # caps below.
+        #
         # `allow_cold_index=False` (bounded-latency callers only, e.g. late
-        # link projection) starts already in the existing "index incomplete"
-        # state instead of "not yet attempted": a bare title or memory
-        # reference then resolves exactly as it already does whenever a cold
-        # walk hits its cap mid-scan -- withheld, never a new public state --
-        # and `vault.walk_vault_md` is never called. Path-shaped links never
-        # needed the index and keep resolving and being authorized as today.
+        # link projection) never takes that walk: when no generation can be
+        # borrowed it starts in the existing "index incomplete" state instead,
+        # so a bare title or memory reference resolves exactly as it already
+        # does whenever a cold walk hits its cap mid-scan -- withheld, never a
+        # new public state -- and `vault.walk_vault_md` is never called.
+        # Path-shaped links never needed the index and keep resolving and being
+        # authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None if allow_cold_index else False, {}, policy,
-                   authorize_path)
+        return cls(root, manifest, empty, {}, {}, None, {}, {}, policy, authorize_path,
+                   visible_path, allow_cold_index)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
             return self.candidate_index_complete
+        # Lazy: `semantic_contract` imports a module that imports this one.
+        from . import semantic_contract
+
+        with call_spans.span("records.link_index", {}) as measured:
+            borrowed = semantic_contract.borrow_link_snapshot(self.root, declined=measured)
+            if borrowed is not None:
+                self.borrowed = borrowed
+                self.owners_of = memory_refs.reference_owner_lookup(
+                    self.root, borrowed.reference_owners,
+                    # A pending identity is only uncertain when its page is not proven hidden.
+                    admit_pending_paths=lambda paths: [path for path in paths if self._visible(path)],
+                )
+                complete, route = True, "borrowed"
+            elif not self.walk_allowed:
+                complete, route = False, "incomplete"
+            else:
+                complete = self._walk_candidate_index()
+                route = "walk" if complete else "incomplete"
+            measured[route] = 1
+        self.candidate_index_complete = complete
+        return complete
+
+    def _visible(self, relative: str) -> bool:
+        """Whether this reader may see `relative`, decided live and once per page."""
+        seen = self.admitted.get(relative)
+        if seen is None:
+            check = self.visible_path or self.authorize_path
+            seen = self.admitted[relative] = (
+                check(relative) if check is not None
+                else _authorize(self.root, relative, policy=self.policy)
+            )
+        return seen
+
+    def _memory_target(self, identity: str) -> str | None:
+        """The one page this reader may see holding `identity`, else None."""
+        if self.owners_of is None:
+            matches = self.memory_targets.get(identity, ())
+            return matches[0] if len(matches) == 1 else None
+        owners = self.owners_of(identity)
+        if owners is None:
+            return None
+        # Visibility is applied before uniqueness: a page the reader cannot see
+        # neither makes a visible one ambiguous nor tells the reader it exists.
+        visible = tuple(path for path in owners if self._visible(path))
+        if visible and freshness.external_pending_for(self.root, [self.root / path for path in visible]):
+            # The borrowed generation may predate an outside edit the watcher has seen
+            # and not yet published. Every page re-read is one this reader may see.
+            # A page that no longer holds the identity is dropped, never resolved around.
+            with call_spans.span("records.link_stale_recheck", {}) as measured:
+                measured["stale_rechecks"] = len(visible)
+                visible = tuple(
+                    path for path in visible
+                    if memory_refs.read_reference_owner(self.root, self.root / path) == identity
+                )
+        return visible[0] if len(visible) == 1 else None
+
+    def _walk_candidate_index(self) -> bool:
+        # Lazy: `semantic_contract` imports a module that imports this one.
+        from . import semantic_contract
+
         entries: list[tuple[str, str | None]] = []
         memory_targets: dict[str, list[str]] = {}
         admitted: dict[str, bool] = {}
@@ -1079,7 +1159,9 @@ class _LinkProjector:
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = (self.authorize_path(relative) if self.authorize_path is not None
+            # Only a link's final target takes a receipt, so the walk asks visibility.
+            check = self.visible_path or self.authorize_path
+            allowed = (check(relative) if check is not None
                        else _authorize(self.root, relative, policy=self.policy))
             admitted[relative] = allowed
             if not allowed:
@@ -1106,7 +1188,11 @@ class _LinkProjector:
             except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError):
                 complete = False
                 break
-            entries.append((relative, title))
+            # The published corpus gives a Knowledge Base `trash/` page no title or
+            # stem but keeps its identity; the walk answers as the borrowed route does.
+            # The census owns that rule, so the walk asks it rather than keep a copy.
+            if not semantic_contract._is_reference_only_path(relative):
+                entries.append((relative, title))
             if identity is not None:
                 memory_targets.setdefault(identity, []).append(relative)
         if complete:
@@ -1115,7 +1201,6 @@ class _LinkProjector:
                 identity: tuple(sorted(paths)) for identity, paths in memory_targets.items()
             }
             self.admitted = admitted
-        self.candidate_index_complete = complete
         return complete
 
     def __call__(self, values: Mapping[str, Any]) -> dict[str, Any]:
@@ -1160,6 +1245,12 @@ class _LinkProjector:
 
     def _allowed(self, value: str) -> bool:
         raw = value.strip()
+        verdict = self.by_value.get(raw)
+        if verdict is None:
+            verdict = self.by_value[raw] = self._decide(raw)
+        return verdict
+
+    def _decide(self, raw: str) -> bool:
         try:
             if raw.lower().startswith(memory_refs.REF_PREFIX):
                 if not self._candidate_index_available():
@@ -1167,10 +1258,9 @@ class _LinkProjector:
                 identity = memory_refs.parse_memory_ref(raw)
                 if identity is None or raw != memory_refs.memory_ref(identity):
                     return False
-                matches = self.memory_targets.get(identity, ())
-                if len(matches) != 1:
+                target = self._memory_target(identity)
+                if target is None:
                     return self._remember(f"memory:{identity}", False)
-                target = matches[0]
             elif raw.lower().startswith(("exomem://vault/", "exomem://source/")):
                 target = memory_refs.resolve_identifier_read_only(self.root, raw)
             elif (match := re.fullmatch(r"\[\[([^\[\]]+)\]\]", raw)) is not None:
@@ -1178,18 +1268,27 @@ class _LinkProjector:
                 if not inner or inner.count("|") > 1:
                     return False
                 target_text = inner.split("|", 1)[0].strip().split("#", 1)[0].strip()
-                if "/" not in target_text and not self._candidate_index_available():
+                bare = "/" not in target_text
+                if bare and not self._candidate_index_available():
                     return False
+                # A bare title resolves over the borrowed generation filtered to the pages
+                # this reader may see. A path-shaped link never reads the borrowed index, so
+                # its verdict does not depend on which value came first.
+                lend = self.borrowed is not None and bare
+                resolver = self.borrowed.resolver if lend else self.resolver
+                visible = self._visible if lend else None
                 try:
                     canonical, _warning = vault.normalize_wikilink(
                         inner.split("|", 1)[0].strip(),
                         self.root,
-                        resolver=self.resolver,
+                        resolver=resolver,
                         strict=True,
+                        visible=visible,
                     )
                 except vault.UnresolvedWikilinkError:
                     canonical, _warning = vault.normalize_wikilink(
-                        inner.split("|", 1)[0].strip(), self.root, resolver=self.resolver
+                        inner.split("|", 1)[0].strip(), self.root, resolver=resolver,
+                        visible=visible,
                     )
                 except vault.WikilinkError:
                     return False
@@ -1338,11 +1437,17 @@ def query_collection(
             if writer is None:
                 policy = egress.policy_module.load(root)
                 manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
-                authorize_path = lambda path: _authorize(root, path, receipt=True, policy=policy)
+                def authorize_path(path: str) -> bool:
+                    return _authorize(root, path, receipt=True, policy=policy)
+
+                def visible_path(path: str) -> bool:
+                    # A page only consulted to resolve a link is not released by it.
+                    return _authorize(root, path, policy=policy)
             else:
                 manifest = writer._collection(collection, facade_profile=semantic_profile)[1]
                 policy = writer._operation.policy
                 authorize_path = writer._operation.allows_file
+                visible_path = None
             if manifest.semantic_profile != semantic_profile:
                 error_code = (
                     "RECORDS_PROFILE_REQUIRED"
@@ -1357,7 +1462,7 @@ def query_collection(
                 raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
             links = _LinkProjector.create(
                 root, manifest, policy=policy, allow_cold_index=not late_link_projection,
-                authorize_path=authorize_path,
+                authorize_path=authorize_path, visible_path=visible_path,
             )
             view = kwargs.get("view")
             if view is not None:
