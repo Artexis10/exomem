@@ -935,13 +935,20 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     # release-evidence-landed runs after the gate and depends on it.
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it. The push-run
-    # cancel is a best-effort saving that must not decide evidence.
+    # cancel is a best-effort saving that must not decide evidence. The MCP read latency jobs
+    # report without gating until a full run fits its step budget (measure-sandbox-mcp-reads 4.8).
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
         "quality",
+        "mcp-read-latency-plan",
+        "mcp-read-latency-paired",
+        "mcp-read-latency-aggregate",
     }
+    # An advisory job outside the gate must also not turn the full run red, or release evidence stays red.
+    assert all(workflow["jobs"][name].get("continue-on-error") is True
+               for name in ("mcp-read-latency-plan", "mcp-read-latency-paired", "mcp-read-latency-aggregate"))
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
     assert "test" not in gate["needs"]
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ toJSON(needs) }}"
