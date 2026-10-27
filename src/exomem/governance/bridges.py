@@ -439,12 +439,17 @@ def strip_provenance(
     identities: tuple[StripIdentity, ...],
     *,
     direct_page: bool = False,
+    whole_excerpts: bool = False,
 ) -> Any:
     """Return a copy with every dependency identity removed recursively.
 
     A bridge approval authorizes the compiled claim, not its source trail.
     The stripping target comes from the approval snapshot itself, so this is
     independent of which dependencies happened to enter a retrieval pool.
+
+    `whole_excerpts` is the caller's statement that its builder withheld every excerpt it would have
+    cut, so an excerpt is stripped line by line like a body and survives; without it, every excerpt
+    is dropped.
     """
     keys = _identity_keys(identities)
     aliases = _embedded_identity_aliases(identities)
@@ -458,7 +463,7 @@ def strip_provenance(
         reference_context: bool = False,
     ) -> Any:
         if isinstance(node, str):
-            if field == "body":
+            if field == "body" or (whole_excerpts and field == "excerpt"):
                 return _strip_body_lines(
                     node, keys, patterns, reference_context=reference_context
                 )
@@ -504,7 +509,7 @@ def strip_provenance(
                 # start or end inside a link or path to a stripped source, and the whole-identity
                 # match never sees the fragment. Withhold every excerpt and every cut body rather than
                 # trust each builder to mark its cuts.
-                if name == "excerpt" or (name == "body" and body_cut):
+                if (name == "excerpt" and not whole_excerpts) or (name == "body" and body_cut):
                     continue
                 if name in {"nodes", "seeds"} and isinstance(value, list):
                     value = [

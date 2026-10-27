@@ -1553,6 +1553,37 @@ def project_hits(
     return out
 
 
+def _strip_bridge_pack_page(
+    pack: dict[str, Any], path: str, identities: tuple[bridges.StripIdentity, ...]
+) -> None:
+    """Remove the source trail of one released bridge page from the pack sections that hold it.
+
+    A released bridge page carries its claim, never its source trail. The terminal backstop only
+    recognises a pack's `parent` blocks (they carry a path and ref), so the claim text, unit text,
+    unit relations and block metadata of such a page are stripped here, where the page's own decision
+    is known. Each unit and block is stripped on its own: as a list entry, one that names a stripped
+    source anywhere would be dropped with its claim. The assembler withheld every value it would have
+    cut, so an excerpt is stripped line by line instead of dropped.
+    """
+
+    def strip(value: Any) -> Any:
+        return bridges.strip_provenance(value, identities, whole_excerpts=True)
+
+    claims = pack.get("claims")
+    if isinstance(claims, dict) and path in claims:
+        claims[path] = strip(claims[path])
+    units = pack.get("semantic_units")
+    if isinstance(units, dict) and isinstance(units.get(path), dict):
+        units[path] = {
+            **units[path],
+            "parent": strip(units[path].get("parent")),
+            "units": [strip(unit) for unit in units[path].get("units") or []],
+        }
+    blocks = pack.get("semantic_blocks")
+    if isinstance(blocks, dict) and isinstance(blocks.get(path), list):
+        blocks[path] = [strip(block) for block in blocks[path]]
+
+
 def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[str, Any] | None:
     """Carry governance context in the pack header, never sub-notice content.
 
@@ -1560,9 +1591,14 @@ def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[s
     is clean by construction. What still needs scrubbing is everything the
     pack derives from the graph — neighbours, contradictions, claims — since
     those walk edges out of permitted pages and can land on a withheld one.
+    A page released under a bridge approval also loses its source trail here.
     """
     if pack is None:
         return None
+    for hit in release.hits:
+        decision = getattr(hit, "decision", None)
+        if decision is not None and decision.release_strip:
+            _strip_bridge_pack_page(pack, _hit_path(hit), decision.release_strip)
     withheld = release.withheld_paths
     if withheld:
         for section in (

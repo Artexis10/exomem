@@ -167,6 +167,8 @@ def _bridge_text(
     source_path: str = SOURCE_PATH,
     padding: str = "",
     relations: str | None = None,
+    sources: str | None = None,
+    lede: str = "",
 ) -> str:
     return (
         "---\n"
@@ -177,13 +179,14 @@ def _bridge_text(
         "created: 2026-07-28\n"
         "updated: 2026-07-28\n"
         "sources:\n"
-        f"  - '[[{source_path.removesuffix('.md')}]]'\n"
-        f"bridge_of: [{SOURCE_REF!r}]\n"
+        + (sources or f"  - '[[{source_path.removesuffix('.md')}]]'\n")
+        + f"bridge_of: [{SOURCE_REF!r}]\n"
         "bridge_scope: workload-planning\n"
         f"bridge_review: {review}\n"
         "tags: [planning]\n"
         "---\n\n"
         "# Workload constraint\n\n"
+        f"{lede}"
         "## Observations\n"
         "- [constraint] Do not assume unlimited evening capacity #planning ^capacity\n\n"
         f"{padding}"
@@ -211,6 +214,8 @@ def _write_bridge_fixture(
     bridge_suffix: str = "",
     bridge_padding: str = "",
     bridge_relations: str | None = None,
+    bridge_sources: str | None = None,
+    bridge_lede: str = "",
 ) -> tuple[Path, Path]:
     source = vault / source_path
     bridge = vault / bridge_path
@@ -223,6 +228,8 @@ def _write_bridge_fixture(
             source_path=source_path,
             padding=bridge_padding,
             relations=bridge_relations,
+            sources=bridge_sources,
+            lede=bridge_lede,
         )
         + bridge_suffix,
         encoding="utf-8",
@@ -1148,6 +1155,153 @@ def test_an_uncut_read_body_of_a_page_under_a_release_strip_keeps_its_text_witho
     assert page["body_truncated"] is False
     assert "Do not assume unlimited evening capacity" in page["body"]
     assert "private" not in page["body"].casefold()
+
+
+# A stem that no other word of a pack shares, so a surviving fragment of it can only come from the
+# source. A link to it is 39 characters of directory before the stem and 2 closing brackets after.
+_TRAIL_STEM = "zqxv-lab-panel"
+_TRAIL_PATH = f"Knowledge Base/Notes/Research/Health/{_TRAIL_STEM}.md"
+_TRAIL_LINK = f"[[{_TRAIL_PATH.removesuffix('.md')}]]"
+_LONG_TRAIL_PATH = f"Knowledge Base/Notes/Research/Health/{'long-' * 38}/{_TRAIL_STEM}.md"
+_TRAIL_DECISION = (
+    "\n## Decision\n"
+    "- id: cap-evening\n"
+    "- category: planning\n"
+    f"- relations: evidenced_by: {_TRAIL_LINK}\n"
+    f"- context: Derived from {_TRAIL_LINK} in full.\n\n"
+    f"Cap the evening load, as {_TRAIL_LINK} shows.\n"
+)
+
+
+def test_a_deep_pack_of_a_page_under_a_release_strip_carries_no_source_trail(
+    vault: Path,
+) -> None:
+    _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_path=_TRAIL_PATH,
+        bridge_suffix=_TRAIL_DECISION,
+        bridge_relations="No further relations.\n",
+    )
+
+    with request_scope(_external()):
+        found = commands.op_ask_memory(
+            vault, query="unlimited evening capacity", mode="keyword", limit=10, deep=True
+        )
+
+    entry = found["pack"]["semantic_units"][BRIDGE_PATH]
+    compact, decision = entry["units"]
+    assert entry["parent"]["sources"] == []
+    assert decision["relations"] == []
+    assert "context" not in decision
+    assert found["pack"]["semantic_blocks"][BRIDGE_PATH][0]["relations"] == []
+    assert "Decision" not in " ".join(found["pack"]["claims"][BRIDGE_PATH]["sections"])
+    # The released claim itself stays.
+    assert compact["excerpt"] == "Do not assume unlimited evening capacity"
+    wire = json.dumps(found, sort_keys=True, default=str).casefold()
+    for length in range(4, len(_TRAIL_STEM) + 1):
+        assert _TRAIL_STEM[:length] not in wire, _TRAIL_STEM[:length]
+        assert _TRAIL_STEM[-length:] not in wire, _TRAIL_STEM[-length:]
+
+
+# Each case puts the link where one builder's length cut ends inside the stem, and nowhere else in
+# the page. `word ` is 5 characters, so `"word " * n` places the link at offset 5n of its field.
+_DECISION_HEAD = "\n## Decision\n- id: cap-evening\n- category: planning\n"
+_CUT_FIELD_UNDER_STRIP = [
+    pytest.param(
+        {"bridge_sources": f"  - '{'word ' * 39}{_TRAIL_LINK}'\n"},
+        _TRAIL_PATH,
+        id="parent-sources-entry",
+    ),
+    pytest.param(
+        {
+            "bridge_suffix": f"{_DECISION_HEAD}- context: {'word ' * 39}{_TRAIL_LINK}\n\n"
+            "Cap the evening load.\n"
+        },
+        _TRAIL_PATH,
+        id="unit-context",
+    ),
+    pytest.param(
+        {
+            "bridge_suffix": f"{_DECISION_HEAD}- note: {'word ' * 22}{_TRAIL_LINK}\n\n"
+            "Cap the evening load.\n"
+        },
+        _TRAIL_PATH,
+        id="block-metadata-value-and-section-lead",
+    ),
+    pytest.param(
+        {"bridge_suffix": f"{_DECISION_HEAD}\n{'word ' * 62}{_TRAIL_LINK} shows.\n"},
+        _TRAIL_PATH,
+        id="unit-excerpt-and-block-body",
+    ),
+    pytest.param(
+        {"bridge_lede": f"{'word ' * 46}{_TRAIL_LINK}\n\n"},
+        _TRAIL_PATH,
+        id="claim-lede",
+    ),
+    pytest.param(
+        {
+            "bridge_suffix": f"{_DECISION_HEAD}"
+            f"- relations: evidenced_by: [[{_LONG_TRAIL_PATH.removesuffix('.md')}]]\n\n"
+            "Cap the evening load.\n",
+        },
+        _LONG_TRAIL_PATH,
+        id="unit-relation-target",
+    ),
+]
+
+
+@pytest.mark.parametrize(("fixture", "source_path"), _CUT_FIELD_UNDER_STRIP)
+def test_a_pack_field_that_a_length_cut_would_end_inside_a_source_link_is_withheld(
+    vault: Path, fixture: dict[str, str], source_path: str
+) -> None:
+    # The page names the source nowhere but in the field under test.
+    _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_path=source_path,
+        **{
+            "bridge_sources": "  - 'a note'\n",
+            "bridge_relations": "No further relations.\n",
+            **fixture,
+        },
+    )
+
+    with request_scope(_external()):
+        found = commands.op_ask_memory(
+            vault, query="unlimited evening capacity", mode="keyword", limit=10, deep=True
+        )
+
+    wire = json.dumps(found, sort_keys=True, default=str).casefold()
+    for length in range(4, len(_TRAIL_STEM) + 1):
+        assert _TRAIL_STEM[:length] not in wire, _TRAIL_STEM[:length]
+        assert _TRAIL_STEM[-length:] not in wire, _TRAIL_STEM[-length:]
+
+
+def test_a_deep_pack_in_an_ungoverned_vault_keeps_the_source_trail_and_trims_a_long_field(
+    vault: Path,
+) -> None:
+    (vault / BRIDGE_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (vault / BRIDGE_PATH).write_text(
+        _bridge_text(source_path=_TRAIL_PATH, relations="No further relations.\n")
+        + _TRAIL_DECISION.replace(
+            f"Derived from {_TRAIL_LINK} in full.", f"{'word ' * 39}{_TRAIL_LINK}"
+        ),
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+
+    with request_scope(_external()):
+        found = commands.op_ask_memory(
+            vault, query="unlimited evening capacity", mode="keyword", limit=10, deep=True
+        )
+
+    entry = found["pack"]["semantic_units"][BRIDGE_PATH]
+    decision = entry["units"][1]
+    assert entry["parent"]["sources"] == [_TRAIL_LINK]
+    assert decision["relations"][0]["target"] == _TRAIL_LINK
+    assert decision["context"].endswith("zqxv-l…")
+    assert _TRAIL_LINK in decision["excerpt"]
 
 
 def test_due_bridge_is_in_default_attention_with_date_stable_signal(
