@@ -207,7 +207,10 @@ def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCovera
 #: so an external edit could be missing from any bounded set we could enqueue.
 #: Deferring there would quietly leave the rest of the graph stale, which is a
 #: worse failure than the cost being removed. These stay whole-vault, and the
-#: value of writing them down is that they stay few.
+#: value of writing them down is that they stay few. A caller that may stop at
+#: queued never runs that pass on its own thread: without a checkpoint it
+#: advances the full marker (`_leave_rebuild_to_the_drain`), and with one it
+#: registers the pass.
 _FALLBACK_DISPOSITIONS = {
     "path_outside_vault": "defer",
     "path_unreadable": "defer",
@@ -6009,7 +6012,8 @@ class EpistemicGraphIndex:
                 # The generation this repair is owed for, so a later predecessor
                 # probe can prove the gap this deferral opens is covered by
                 # durable work. A caller with no checkpoint leaves it unknown,
-                # which is honest: it rebuilds after release and claims nothing.
+                # which is honest: it claims the path is owed, never for which
+                # generation.
                 generation=(
                     int(graph_checkpoint.generation) if graph_checkpoint is not None else None
                 ),

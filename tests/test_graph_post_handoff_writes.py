@@ -332,13 +332,13 @@ def _messages_from_this_thread(caplog: pytest.LogCaptureFixture, needle: str) ->
     """Records matching `needle` that the calling thread itself emitted.
 
     `caplog` captures every thread in the process, and these tests run a real
-    watcher. A watcher dispatch is a standalone library caller, so
-    `_caller_can_carry_pending` is False for it and a deferral it makes must
-    converge before it returns -- it registers a rebuild of its own and says
-    `reason=incremental_refresh_queued_for_a_caller_that_must_converge`. That
-    is by design and is not what any oracle here is about; it was also making
-    the fence test fail about one full-file run in three, purely on when the
-    watcher's loop landed inside a per-write window.
+    watcher. A watcher dispatch is a background caller inside the join waiver,
+    so it may stop at queued; but it still starts registered rebuilds, and a
+    proven verdict such as an unusable sidecar still registers one with its own
+    `graph dispatch registered a whole-vault rebuild` line. That is by design
+    and is not what any oracle here is about; it was also making the fence test
+    fail about one full-file run in three, purely on when the watcher's loop
+    landed inside a per-write window.
 
     The governed write dispatches synchronously on the thread that called it,
     so the emitting thread is exact attribution rather than a heuristic.
@@ -1288,13 +1288,16 @@ def test_an_unscoped_fan_out_mark_is_the_only_one_that_fences_a_write(
 def test_a_fan_out_scope_that_cannot_be_established_still_fences_everything(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail closed: an unknown scope is a whole-vault scope."""
+    """Fail closed: an unknown scope is a whole-vault scope.
+
+    A standing whole-vault marker is not an unknown scope. It owns the repair,
+    so the watcher marks nothing (`test_a_fan_out_whose_repair_is_owned_marks_nothing`).
+    """
     root = handoff_vault
-    batch = [f"{GENERATED}/generated-note-{i:04d}.md" for i in range(3)]
     deferred_index.mark_graph_full_rebuild(root, generation=1)
 
-    assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
-        "whole-vault repair outstanding is a whole-vault scope"
+    assert file_watcher._graph_repair_owned(root, batch_owned=False) is True, (
+        "a standing marker owes every path its repair, so nothing is marked"
     )
 
     deferred_index.clear_graph_full_rebuild(root)
@@ -1307,8 +1310,8 @@ def test_a_fan_out_scope_that_cannot_be_established_still_fences_everything(
         "graph_full_rebuild_pending",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("marker unreadable")),
     )
-    assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
-        "an unreadable marker is an unknown scope"
+    assert file_watcher._graph_repair_owned(root, batch_owned=True) is None, (
+        "an unreadable marker is an unknown scope, whatever the batch queued"
     )
 
 

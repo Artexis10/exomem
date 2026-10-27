@@ -29,7 +29,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -803,6 +803,74 @@ def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
     return deferred_index.add_full(vault_root, _rel_md_paths(vault_root, paths))
 
 
+def graph_repair_is_owned(
+    vault_root: Path,
+    component: IndexComponentOutcome,
+    replaced_rels: set[str],
+    *,
+    note: Callable[[str], None] = lambda _reason: None,
+) -> bool:
+    """Whether a graph component left its repair to a flight or to the queue.
+
+    A registration owns it when a flight exists for the exact checkpoint. A
+    deferral owns it when its code claims durable coverage and the queue holds
+    every graph input in `replaced_rels`. Without a checkpoint only
+    `graph_repair_queued_for_drain` claims that coverage, and that epoch has no
+    generation to compare, so any queued receipt for a path counts. Any other
+    component answers False. `full_upsert_succeeded` and the watcher's fan-out
+    both ask this; `note` counts the queue judgement for `deferral_telemetry`.
+    """
+    from . import graph_sync
+
+    if component.component != "epistemic_graph":
+        return False
+    checkpoint = component.graph_checkpoint
+    if checkpoint is None:
+        if component.code != "graph_repair_queued_for_drain":
+            return False
+    elif component.outcome not in {"registered", "deferred"}:
+        return False
+    elif graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
+        return True
+    elif component.outcome != "deferred" or component.code not in _GRAPH_COVERAGE_CODES:
+        return False
+    # Mirror of the embeddings warm-up carve-out in `full_upsert_succeeded`:
+    # per-path graph receipts ARE the exact durable demand for those paths, so
+    # minting a whole-component refresh on top is the same double-accounting.
+    # This matters most precisely where it used to hurt: during
+    # `recovery_required` the registered checkpoint never equals the live one,
+    # so the clause above never fires and EVERY write minted -- backlog feeding
+    # the backlog.
+    #
+    # Only a code that means "durably queued" may be blessed;
+    # `graph_index_disabled`/`graph_scheduling_disabled` record nothing, so a
+    # stale queue entry can never launder them.
+    graph_rels = {rel for rel in replaced_rels if graph_sync.is_graph_input_path(rel)}
+    if graph_rels:
+        # Only receipts queued at or after the generation this deferral
+        # reports. A row naming the same path from an earlier generation is
+        # repair that is already owed for older bytes; blessing this batch with
+        # it would let a stale queue entry launder a fresh deferral, and the
+        # path would sit with nothing scheduled for what just changed. An
+        # unknown generation cannot clear that bar either: a receipt that
+        # cannot say what it owes proves nothing about this checkpoint. A
+        # deferral without a checkpoint reports no generation and sets no bar.
+        graph_receipt_rels = {
+            receipt.rel_path
+            for receipt in deferred_index.snapshot_graph(vault_root)
+            if checkpoint is None
+            or (
+                receipt.graph_generation is not None
+                and receipt.graph_generation >= checkpoint.generation
+            )
+        }
+        if graph_rels <= graph_receipt_rels:
+            note("covered_deferral_accepted")
+            return True
+    note("uncovered_deferral_escalated")
+    return False
+
+
 def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object) -> bool:
     """Whether a full-upsert report completed or retained exact durable work."""
     from . import graph_sync, index_paths
@@ -819,7 +887,6 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
     ):
         return False
     receipt_rels: set[str] | None = None
-    graph_receipt_rels: set[str] | None = None
     replaced_rels: set[str] = set()
     root = Path(vault_root).resolve()
     for path in replaced:
@@ -847,51 +914,9 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
             "registered",
             "deferred",
         }:
-            checkpoint = component.graph_checkpoint
-            if checkpoint is None:
-                return False
-            if graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
+            if graph_repair_is_owned(vault_root, component, replaced_rels, note=_note_deferral):
                 continue
-            if component.outcome == "deferred" and component.code in _GRAPH_COVERAGE_CODES:
-                # Mirror of the embeddings warm-up carve-out above: per-path
-                # graph receipts ARE the exact durable demand for those paths,
-                # so minting a whole-component refresh on top is the same
-                # double-accounting. This matters most precisely where it used
-                # to hurt: during `recovery_required` the registered checkpoint
-                # never equals the live one, so the clause above never fires and
-                # EVERY write minted — backlog feeding the backlog.
-                #
-                # Only a code that means "durably queued" may be blessed;
-                # `graph_index_disabled`/`graph_scheduling_disabled` record
-                # nothing, so a stale queue entry can never launder them.
-                graph_rels = {
-                    rel for rel in replaced_rels if graph_sync.is_graph_input_path(rel)
-                }
-                if graph_rels:
-                    if graph_receipt_rels is None:
-                        # Only receipts queued at or after the generation this
-                        # deferral reports. A row naming the same path from an
-                        # earlier generation is repair that is already owed for
-                        # older bytes; blessing this batch with it would let a
-                        # stale queue entry launder a fresh deferral, and the
-                        # path would sit with nothing scheduled for what just
-                        # changed. An unknown generation cannot clear that bar
-                        # either: a receipt that cannot say what it owes proves
-                        # nothing about this checkpoint.
-                        required_generation = checkpoint.generation
-                        graph_receipt_rels = {
-                            receipt.rel_path
-                            for receipt in deferred_index.snapshot_graph(vault_root)
-                            if (
-                                receipt.graph_generation is not None
-                                and receipt.graph_generation >= required_generation
-                            )
-                        }
-                    if graph_rels <= graph_receipt_rels:
-                        _note_deferral("covered_deferral_accepted")
-                        continue
-                _note_deferral("uncovered_deferral_escalated")
-                return False
+            return False
         if component.component == "embeddings" and component.outcome == "deferred":
             # A deferral that is already durably queued path-by-path is not a
             # batch failure — declaring it one is what escalated an O(1) cause
