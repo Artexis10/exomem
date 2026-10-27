@@ -138,6 +138,8 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     # as a standby and whether the offline migrator ran.
     printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; s=json.load(sys.stdin); h=(s.get("handoff") or (s.get("last_transition") or {}).get("handoff")) or {}; m=h.get("migration") or {}; p=h.get("promotion") or {}; print("Handoff: standby={} migration={}({}) snapshot={} unavailable_ms={}{}".format(h.get("standby","unknown"), m.get("state","unknown"), m.get("reason",""), p.get("snapshot","n/a") + ("(" + p["reason"] + ")" if p.get("reason") else ""), h.get("unavailable_ms","n/a"), "" if h.get("standby") != "discarded" else "; waited on " + str(h.get("waiting")))) if h else None' \
         || echo "Handoff: this supervisor predates the standby sequence"
+    # A retention skip or failure repeats on every upgrade unless someone sees it.
+    printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; r=json.load(sys.stdin).get("release_retention"); print("Release retention: removed {} freed_bytes {} failures {} skipped {}".format(len(r["removed"]), r["bytes_freed"], len(r["failures"]), r["skipped"] or "no")) if r else print("Release retention: this operator predates release retention")' || true
     echo "Managed serving version: $SERVED"
     exit 0
 fi

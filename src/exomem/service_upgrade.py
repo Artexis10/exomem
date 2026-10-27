@@ -44,6 +44,13 @@ _LABELLED_SECRET_RE = re.compile(
     r"(?i)(password|passwd|token|secret|api[_-]?key)(\s*[=:]\s*)\S+"
 )
 _BASIC_AUTH_RE = re.compile(r"(?i)(authorization\s*:\s*basic\s+)\S+")
+#: The `uuid4().hex` name `stage()` gives each release directory. A format
+#: check: only an entry this module could have created is ever removed.
+_RELEASE_NAME_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def _new_release_name() -> str:
+    return uuid.uuid4().hex
 PROFILES = {
     "lean": "",
     "onnx": "embeddings-onnx",
@@ -51,6 +58,10 @@ PROFILES = {
     "standard": "embeddings,media",
     "media": "embeddings,media,vision,diarization",
 }
+
+
+def _releases_directory(runtime_dir: Path) -> Path:
+    return runtime_dir.parent / "releases"
 
 
 def _check_runtime_dir(runtime_dir: Path) -> None:
@@ -387,14 +398,36 @@ def stage(
     launcher = Path(launcher_python)
     if not launcher.is_absolute() or not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise RuntimeError("manager reported an invalid launcher interpreter")
-    releases = runtime_dir.parent / "releases"
+    releases = _releases_directory(runtime_dir)
     if releases.is_symlink():
         raise RuntimeError("managed releases directory must not be a symlink")
     releases.mkdir(mode=0o700, exist_ok=True)
     if releases.stat().st_uid != os.getuid() or releases.stat().st_mode & 0o077:
         raise RuntimeError("managed releases directory is not owner-only")
-    target_dir = releases / uuid.uuid4().hex
+    target_dir = releases / _new_release_name()
     target_dir.mkdir(mode=0o700)
+    try:
+        return _stage_into(target_dir, launcher, profile, package_version, wheel, source_revision)
+    except BaseException as error:
+        # A failed or interrupted staging leaves nothing for anyone to serve.
+        try:
+            shutil.rmtree(target_dir)
+        except OSError as cleanup:
+            if isinstance(error, RuntimeError):
+                raise RuntimeError(
+                    f"{error}; release directory {target_dir.name} was not removed: {cleanup.strerror}"
+                ) from error
+        raise
+
+
+def _stage_into(
+    target_dir: Path,
+    launcher: Path,
+    profile: str,
+    package_version: str,
+    wheel: Path | None,
+    source_revision: str,
+) -> dict[str, Any]:
     if target_dir.stat().st_uid != os.getuid() or target_dir.stat().st_mode & 0o077:
         raise RuntimeError("managed release directory is not owner-only")
     snapshot: Path | None = None
@@ -540,6 +573,136 @@ def _refresh_hooks_after_promotion(target: dict[str, Any]) -> dict[str, Any]:
         return report
 
 
+def _python_of(record: Any, *, nested: bool = False) -> str | None:
+    """The interpreter a manager record names; `nested` reads a transition's target."""
+    if record is None:
+        return None
+    if nested:
+        record = record.get("target") if isinstance(record, dict) else None
+    python = record.get("python") if isinstance(record, dict) else None
+    if not isinstance(python, str) or not os.path.isabs(python):
+        raise ValueError("a manager record names no absolute interpreter")
+    return python
+
+
+def _pythons_in_use(
+    runtime_dir: Path, before: dict[str, Any], after: dict[str, Any], target: dict[str, Any]
+) -> list[str]:
+    """Every interpreter the service may still run: serving, rollback, recorded.
+
+    The manager keeps no record of the release it replaced, so the rollback is
+    the release the status read before staging reported active. An unreadable
+    or malformed record raises: a reference nobody can read proves nothing.
+    """
+    from .service_manager import ReleaseRecords
+
+    rollback = _python_of(before.get("active"))
+    if rollback is None:
+        raise ValueError("the replaced release is unknown")
+    records = ReleaseRecords(runtime_dir)
+    pythons = [
+        str(target["python"]),
+        rollback,
+        _python_of(after.get("active")),
+        _python_of(after.get("pending"), nested=True),
+        _python_of(records.active()),
+        _python_of(records.pending(), nested=True),
+    ]
+    pythons += [
+        str(status["launcher_python"])
+        for status in (before, after)
+        if isinstance(status.get("launcher_python"), str)
+    ]
+    return [python for python in pythons if python]
+
+
+def _directory_identities(paths: list[str]) -> set[tuple[int, int]]:
+    """The device and inode of every directory on the way to each path.
+
+    Read by identity, never by normalized spelling: the kernel resolves each
+    ancestor, symlinks and `..` included. A missing ancestor is no reference;
+    any other error leaves the reference unresolved and stops retention.
+    """
+    identities: set[tuple[int, int]] = set()
+    for path in paths:
+        for ancestor in Path(path).parents:
+            try:
+                info = ancestor.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            identities.add((info.st_dev, info.st_ino))
+    return identities
+
+
+def _bytes_freed_by_removing(directory: Path) -> int:
+    """Allocated bytes that removing `directory` releases.
+
+    A file hard-linked from outside the tree (uv links from its cache) frees
+    nothing, so it counts only when every link to it lies inside the tree. A
+    reflinked copy shares extents without a link, so it is overcounted.
+    """
+    total = 0
+    links: dict[tuple[int, int], tuple[int, int, int]] = {}
+    for root, directories, files in os.walk(directory, followlinks=False):
+        total += os.lstat(root).st_blocks * 512
+        for name in directories + files:
+            info = os.lstat(os.path.join(root, name))
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            seen = links.get((info.st_dev, info.st_ino), (0, info.st_nlink, info.st_blocks * 512))
+            links[(info.st_dev, info.st_ino)] = (seen[0] + 1, seen[1], seen[2])
+    return total + sum(size for seen, nlink, size in links.values() if seen >= nlink)
+
+
+def _retain_releases(
+    runtime_dir: Path, before: dict[str, Any], after: dict[str, Any], target: dict[str, Any]
+) -> dict[str, Any]:
+    """Remove the release directories a verified promotion left unused.
+
+    Runs once the staged target is confirmed active. Keeps the serving release,
+    the one it replaced and any release the manager still records, and keeps
+    every entry it cannot prove is an unused release this module created. The
+    launcher and the unit's initial worker live outside `releases/`. With a
+    failure, `bytes_freed` omits what a partial removal freed. Like
+    the hook refresh, it never fails an upgrade that already succeeded: a
+    problem is reported, not raised.
+    """
+    report: dict[str, Any] = {"removed": [], "bytes_freed": 0, "kept": {}, "failures": [], "skipped": None}
+    releases = _releases_directory(runtime_dir)
+    try:
+        info = releases.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("managed releases directory is not owner-only")
+        in_use = _directory_identities(_pythons_in_use(runtime_dir, before, after, target))
+        entries = sorted(os.scandir(releases), key=lambda entry: entry.name)
+    except Exception as error:  # noqa: BLE001 - must never fail a completed upgrade
+        report["skipped"] = (
+            _uv_stderr_tail(str(error).encode("utf-8", errors="replace")) or type(error).__name__
+        )
+        return report
+    for entry in entries:
+        try:
+            entry_info = entry.stat(follow_symlinks=False)
+            if not _RELEASE_NAME_RE.fullmatch(entry.name) or not stat.S_ISDIR(entry_info.st_mode):
+                report["kept"][entry.name] = "not a release directory"
+                continue
+            if entry_info.st_uid != os.getuid():
+                report["kept"][entry.name] = "foreign owner"
+                continue
+            if (entry_info.st_dev, entry_info.st_ino) in in_use:
+                report["kept"][entry.name] = "in use"
+                continue
+            freed = _bytes_freed_by_removing(Path(entry.path))
+            shutil.rmtree(entry.path)
+        except Exception as error:  # noqa: BLE001 - must never fail a completed upgrade
+            reason = getattr(error, "strerror", None) or type(error).__name__
+            report["failures"].append({"release": entry.name, "error": reason})
+            continue
+        report["removed"].append(entry.name)
+        report["bytes_freed"] += freed
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
@@ -587,7 +750,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 result = control(args.runtime_dir, {"command": "upgrade", "target": target})
                 result = _wait_for_target(args.runtime_dir, target, result)
-                result = {**result, "hook_refresh": _refresh_hooks_after_promotion(target)}
+                result = {
+                    **result,
+                    "hook_refresh": _refresh_hooks_after_promotion(target),
+                    "release_retention": _retain_releases(args.runtime_dir, current, result, target),
+                }
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
