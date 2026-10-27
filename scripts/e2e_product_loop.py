@@ -1845,7 +1845,8 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     vault = Path(args.vault)
     work = Path(args.work)
     home = Path(args.home)
-    # The installed journey takes the shipped default packet mode: `_clean_env` strips every EXOMEM_* setting.
+    # The installed journey takes the shipped default packet mode:
+    # `_clean_env` strips every EXOMEM_* setting.
     env = _clean_env(home, vault)
     state: dict[str, Any] = {}
     state["vault"] = str(vault)
