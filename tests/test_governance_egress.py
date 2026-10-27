@@ -649,18 +649,6 @@ def _page_excerpts(hits: list[dict]) -> dict[str, str]:
     return {hit["path"]: hit["excerpt"] for hit in hits if "path" in hit}
 
 
-def test_op_find_compact_excerpt_is_what_the_ceiling_releases_in_full_mode(vault: Path) -> None:
-    write_scope(vault)
-    write_rule(vault, ceiling=egress.LEVEL_EXCERPT)
-    query = "kill switch risky releases"
-    with request_scope(_external()):
-        full = commands.op_find(vault, query=query, limit=10)
-        compact = commands.op_find(vault, query=query, limit=10, detail="compact")
-
-    assert RESTRICTED_PATH in _page_excerpts(full)
-    assert _page_excerpts(compact) == _page_excerpts(full)
-
-
 def test_op_find_compact_releases_nothing_of_a_page_the_ceiling_withholds(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_ABSTRACT)

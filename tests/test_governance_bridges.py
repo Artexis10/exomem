@@ -165,6 +165,7 @@ def _bridge_text(
     bridge_id: str = "00000000-0000-4000-8000-000000000201",
     review: str = "2026-12-01",
     source_path: str = SOURCE_PATH,
+    padding: str = "",
 ) -> str:
     return (
         "---\n"
@@ -184,6 +185,7 @@ def _bridge_text(
         "# Workload constraint\n\n"
         "## Observations\n"
         "- [constraint] Do not assume unlimited evening capacity #planning ^capacity\n\n"
+        f"{padding}"
         "## Relations\n"
         f"- derived_from [[{source_path.removesuffix('.md')}]]\n"
     )
@@ -206,6 +208,7 @@ def _write_bridge_fixture(
     bridge_path: str = BRIDGE_PATH,
     source_path: str = SOURCE_PATH,
     bridge_suffix: str = "",
+    bridge_padding: str = "",
 ) -> tuple[Path, Path]:
     source = vault / source_path
     bridge = vault / bridge_path
@@ -213,7 +216,8 @@ def _write_bridge_fixture(
     bridge.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(_bridge_source_text(title=source_title), encoding="utf-8")
     bridge.write_text(
-        _bridge_text(review=review, source_path=source_path) + bridge_suffix, encoding="utf-8"
+        _bridge_text(review=review, source_path=source_path, padding=bridge_padding) + bridge_suffix,
+        encoding="utf-8",
     )
     _write_policy(vault, "scopes", "private", _scope_document(SCOPE_A, path=source_path))
     _write_policy(
@@ -998,6 +1002,73 @@ def test_release_strips_dependency_provenance_from_direct_and_search_outputs(
     assert "content" not in page
     assert "bridge_of" not in page.get("frontmatter", {})
     assert "unlimited evening capacity" in page["body"]
+
+
+# The cut lands inside the link at the end of the excerpt (`capacity` anchors before the
+# Relations line) or at its start (`zebra` anchors about 90 characters after the link).
+_CUT_QUERIES = [("capacity", ""), ("zebra", "\n" + "filler " * 12 + "zebra\n")]
+
+
+@pytest.mark.parametrize("detail", ["compact", "full"])
+@pytest.mark.parametrize(("query", "suffix"), _CUT_QUERIES)
+def test_an_excerpt_cut_inside_a_link_to_a_stripped_source_leaks_no_fragment(
+    vault: Path, detail: str, query: str, suffix: str
+) -> None:
+    _write_bridge_fixture(vault, approval=True, bridge_suffix=suffix)
+
+    with request_scope(_external()):
+        found = commands.op_ask_memory(
+            vault, query=query, mode="keyword", limit=10, detail=detail
+        )
+
+    bridge_hit = next(hit for hit in found["hits"] if hit["path"] == BRIDGE_PATH)
+    excerpt = bridge_hit["excerpt"].casefold()
+    assert excerpt
+    stem = SOURCE_PATH.rsplit("/", 1)[-1].removesuffix(".md")
+    for length in range(4, len(stem) + 1):
+        assert stem[:length] not in excerpt, stem[:length]
+        assert stem[-length:] not in excerpt, stem[-length:]
+
+
+def test_a_truncated_read_body_cut_inside_a_link_to_a_stripped_source_leaks_no_fragment(
+    vault: Path,
+) -> None:
+    # The source name holds spaces, so the whole-word cut of the bounded body can end inside it.
+    source_path = "Knowledge Base/Notes/Research/Health/private source note.md"
+    padding = "filler " * 57 + "\n\n"
+    bridge, _source = _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_path=source_path,
+        source_ceiling=egress.LEVEL_EXCERPT,
+        bridge_padding=padding,
+    )
+    # The source is readable at the excerpt level, so only the bridge strip removes it. The bridge
+    # page itself is capped at the excerpt level, so a read returns the bounded body.
+    _write_policy(vault, "scopes", "bridge", _scope_document(SCOPE_B, path=BRIDGE_PATH))
+    _write_policy(
+        vault,
+        "rules",
+        "bridge",
+        _rule_document(
+            scope_ids=(SCOPE_B,),
+            ceiling=egress.LEVEL_EXCERPT,
+            rule_id="01ARZ3NDEKTSV4RRFFQ69G5FBD",
+        ),
+    )
+    policy._CACHE.clear()
+    cut = egress._excerpt_of(bridge.read_text(encoding="utf-8").split("\n---\n", 1)[1])
+    assert cut.endswith("private source …")
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=BRIDGE_PATH)
+
+    assert page["body_truncated"] is True
+    assert "unlimited evening capacity" in page["body"]
+    body = page["body"].casefold()
+    stem = "private source note"
+    for length in range(4, len(stem) + 1):
+        assert stem[:length] not in body, stem[:length]
 
 
 def test_due_bridge_is_in_default_attention_with_date_stable_signal(

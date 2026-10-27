@@ -101,7 +101,9 @@ def test_compact_detail_carries_the_excerpt_and_omits_signals(vault: Path) -> No
     compact = commands.op_find(vault, query="metabolism", detail="compact")
     assert [h["path"] for h in compact] == [h["path"] for h in full]
     for h, f in zip(compact, full, strict=True):
-        assert h["excerpt"] == f["excerpt"]
+        # Compact may cut the excerpt; it never rewrites what the full hit says.
+        assert h["excerpt"]
+        assert " ".join(f["excerpt"].split()).startswith(h["excerpt"].removesuffix(" …"))
         assert "signals" not in h
         assert h["path"] and "title" in h and "updated" in h and "type" in h
 
