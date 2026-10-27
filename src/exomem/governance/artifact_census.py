@@ -275,6 +275,23 @@ class ArtifactCensus:
             listing.files == self.listings[relative].files for relative, listing in listings.items()
         )
 
+    def files_named(self, name: str) -> tuple[str, ...]:
+        """The vault-relative files called exactly `name`; the name index folds case, so filter it."""
+        return tuple(rel for rel in self.by_name.get(name.casefold(), ()) if rel.rpartition("/")[2] == name)
+
+    def files_under(self, directory: str) -> Iterator[str]:
+        """The vault-relative files in `directory` and in the directories below it, as of the walk.
+
+        A walk lists a symlinked directory as neither file nor directory, so none is entered.
+        """
+        pending = [directory]
+        while pending:
+            current = pending.pop()
+            listing = self.listings.get(current)
+            if listing is not None:
+                yield from (f"{current}/{name}" for name in listing.files)
+                pending.extend(f"{current}/{name}" for name in listing.directories)
+
 
 _CENSUSES: OrderedDict[tuple[str, str], ArtifactCensus] = OrderedDict()
 _CENSUS_LOCK = threading.Lock()
