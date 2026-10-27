@@ -104,6 +104,42 @@ def test_a_withheld_namesake_and_titled_page_change_no_byte_for_a_restricted_cal
     assert HIDDEN_SLED not in json.dumps(guests[0]) and HIDDEN_NOTE not in json.dumps(guests[0])
 
 
+#: Withheld notes that repeat the turn's words, so withheld pages would move the slice's lexical statistics.
+HAULING_LOGS = tuple(f"{KB}/Notes/Hauling/hauling-log-{index:02d}.md" for index in range(20))
+#: A turn with more distinct words than the lexical stage keeps, so how rare each word is decides which ones it asks.
+LONG_TURN = (
+    "Does Marit Solheim's freight coordinator ledger for the northern corridor depot track the cargo sled stock"
+    " and the winter schedule owner?"
+)
+
+
+def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(vault: Path, tmp_path: Path) -> None:
+    """Twenty withheld notes that say "cargo sled", in a vault past the lexical corpus floor, change no byte of
+    a restricted caller's packet: its slice ranks and selects the turn's words over the pages it may see."""
+    from test_working_set_carry import seed_ordinary_notes
+
+    twin = _second_vault(tmp_path)
+    for root, hidden in ((vault, True), (twin, False)):
+        _seed_structure(root)
+        seed_ordinary_notes(root)
+        if hidden:
+            for index, path in enumerate(HAULING_LOGS):
+                _write(root, path, (
+                    f"---\ntype: note\nstatus: active\nupdated: 2026-08-02\n---\n\n# Hauling log {index:02d}\n\n"
+                    f"## Summary\n\n- [note] The cargo sled went out on the runners again. ^h-{index}\n"
+                ))
+        _withhold(root, *HAULING_LOGS, ceiling=0)
+        _built(root).close()
+        lexstore.ensure_fresh(root)
+    guests = []
+    for root in (vault, twin):
+        _cold()
+        guests.append(_activate(root, _external(), turn=LONG_TURN))
+    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    # The control: leads whose evidence the statistics decide.
+    assert any("retrieval" in item["evidence"] for item in guests[0]["turn_slice"]["items"])
+
+
 def _guarded_world(vault: Path) -> None:
     """The structured vault plus a page that a restricted caller's view withholds."""
     _structured(vault)

@@ -84,6 +84,7 @@ A `maps` packet SHALL carry a `turn_slice` block beside the map, unless `EXOMEM_
 - Each item SHALL carry its catalogue entry's kind, title, description and description origin, its ref, the profile ref and the state line for anchors and collections, `match` and `evidence`. `match` SHALL be one of `resolved`, `partial`, `ambiguous`, `named`, `related` or `carried`. `evidence` SHALL be the categorical evidence kinds that the evidence requirement fixes, with no score.
 - Display text SHALL come only from catalogue entries that the caller may see. A lead with no such entry SHALL be dropped. A turn with no admitted lead SHALL give `state: empty` and no item.
 - The map SHALL compile first, over the caller's view, at the request's `max_chars` less a reserve that one named constant fixes. A slice that fails or finds no room SHALL set its `state` and SHALL NOT remove or change the map. The slice SHALL NOT change `map_generation` or the `continuity` token. Slice lines SHALL be whole lines, lines that do not fit SHALL become the overflow count, and `used_chars` SHALL count the map and the slice together.
+- For a restricted caller, the slice's lexical pass and its dependence check SHALL choose the turn's terms and rank on the pages that the caller admits.
 - The terminal guard SHALL serve a slice item only from a record that the invocation pinned for the same caller and packet limit, and SHALL serve an `unavailable` slice otherwise.
 - The relevant-due-refs association SHALL read the resolved items of the slice as it reads resolved anchors.
 - The retrieve hook SHALL render the slice on a turn whose map generation is unchanged.
@@ -98,6 +99,10 @@ A `maps` packet SHALL carry a `turn_slice` block beside the map, unless `EXOMEM_
 
 #### Scenario: A withheld anchor changes no byte for a restricted caller
 - **WHEN** a vault holds, beside a visible anchor, a withheld anchor of the same name and a withheld titled page
+- **THEN** a restricted caller's packet is byte-identical to the packet from a vault without them
+
+#### Scenario: Withheld pages move no lexical statistic of the slice
+- **WHEN** a vault holds withheld pages that share words with the turn
 - **THEN** a restricted caller's packet is byte-identical to the packet from a vault without them
 
 #### Scenario: Due advice rides on a resolved lead

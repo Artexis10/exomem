@@ -93,6 +93,7 @@ from . import (
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
+from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
 from . import link_summary as link_summary_module
 from . import list_directory as list_directory_module
@@ -6926,6 +6927,7 @@ def _compile_guarded_activation(
     conversation: working_set_conversation_module.Conversation | None = None,
     intent_resolution: dict[str, Any] | None = None,
     read_thread: Callable[[], _ThreadRead] | None = None,
+    rank_on_admission: bool = False,
 ) -> _CompiledActivation:
     """Lexical evidence, release plane, `serve`, then the terminal guard: the
     one compile both packet shapes read their anchors from.
@@ -6935,7 +6937,12 @@ def _compile_guarded_activation(
     packet's hook for the caller's thread: it runs after the exits that must
     leave without one, and its result is handed back for the token. A caller
     that has no thread (the turn slice of a maps packet) passes none and gets
-    an anchor-free compile of the turn's own words."""
+    an anchor-free compile of the turn's own words.
+
+    `rank_on_admission` (the turn slice) gives a restricted reader's lexical
+    pass and dependence check the statistics of the pages it admits, so a
+    withheld page moves no term choice or rank. The anchors packet still ranks
+    on the catalogue's statistics; the owner does in both."""
 
     def stopped(*args: Any, **kwargs: Any) -> _CompiledActivation:
         return _CompiledActivation(abstain(*args, **kwargs), False)
@@ -6972,6 +6979,16 @@ def _compile_guarded_activation(
                 if evidence.snapshot
                 else None
             )
+            # Over a view built after the pin, so the pages the pin proved withheld are not admitted either.
+            lexical_admission = (
+                working_set_runtime_module.request_admission(
+                    vault_root,
+                    egress_module.visible_page_filter(vault_root, purpose=purpose),
+                    lifecycle_statuses_module.Basis(vault_root),
+                )
+                if rank_on_admission and reader_view is not None
+                else None
+            )
             if anchor and trigger == "user_turn":
                 hits, lexical_state = [], "agent_choice"
             else:
@@ -6987,6 +7004,7 @@ def _compile_guarded_activation(
                     freshness=evidence.lexical_freshness,
                     recall_checkpoint=lexical_checkpoint,
                     selection=lexical_selection,
+                    query_context=lexical_admission,
                 )
         lexical_seconds = max(0.0, time.monotonic() - lexical_started)
         if timings is not None and lexical_selection:
@@ -7061,6 +7079,7 @@ def _compile_guarded_activation(
         conversation=conversation,
         trigger=trigger,
         intent_resolution=intent_resolution,
+        lexical_admission=lexical_admission,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -7424,6 +7443,7 @@ def _op_activate_context_body(
                     evidence_stamp=evidence_stamp,
                 ),
                 abstain=_abstain,
+                rank_on_admission=True,
             )
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
             return context_views_module.turn_leads(compiled.packet)

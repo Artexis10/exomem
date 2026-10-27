@@ -2640,10 +2640,12 @@ def _lexical_hits_without(
     words: frozenset[str],
     *,
     freshness_snapshot: Any = None,
+    query_context: Any = None,
 ) -> frozenset[str]:
     """`working_set_resolve.candidates_for`'s dependence check, read at the
-    lexical checkpoint the request's first lexical pass read. Empty when that
-    snapshot is unreadable: the anchors then stay leads."""
+    lexical checkpoint and with the admission (`query_context`) that the
+    request's first lexical pass read. Empty when that snapshot is unreadable:
+    the anchors then stay leads."""
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -2657,7 +2659,7 @@ def _lexical_hits_without(
 
     return working_set_runtime.lexical_hits_without(
         vault_root, turn, pages, words,
-        freshness=freshness, recall_checkpoint=recall_checkpoint,
+        freshness=freshness, recall_checkpoint=recall_checkpoint, query_context=query_context,
     )
 
 
@@ -4021,6 +4023,7 @@ def _compile_packet(
     status_basis: lifecycle_statuses.Basis | None = None,
     trigger: str = "user_turn",
     _intent_resolution: dict[str, Any] | None = None,
+    lexical_admission: Any = None,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -4035,7 +4038,8 @@ def _compile_packet(
     so a packet is always compiled against the profile it was keyed on; left
     out, it is read here. `attribution` is the caller's derived session and
     workspace keys (ruling S5-1) and `marks` the served threads the caller may
-    see, both for the ranking only.
+    see, both for the ranking only. `lexical_admission` is the admission that
+    the request's first lexical pass ranked on (`working_set_runtime.serve`).
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     task_refresh = trigger == "task_refresh"
@@ -4060,7 +4064,7 @@ def _compile_packet(
         if unchecked:
             independent = _lexical_hits_without(
                 root, turn, frozenset(unchecked), words,
-                freshness_snapshot=freshness_snapshot,
+                freshness_snapshot=freshness_snapshot, query_context=lexical_admission,
             )
             checked.update((path, path in independent) for path in unchecked)
         return frozenset(path for path in pages if checked[path])

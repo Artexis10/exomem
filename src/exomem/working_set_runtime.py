@@ -1183,6 +1183,7 @@ def lexical_evidence(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
+    query_context=None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
@@ -1199,6 +1200,10 @@ def lexical_evidence(
     `lexical_term_budget`); ranking and corroboration then read every row
     they match. `selection`, when given, receives how many units were kept
     and dropped — counts only, never the turn's words.
+
+    `query_context` (`request_admission`), when given, chooses the units and
+    ranks on the pages it admits, so a page it withholds moves no statistic.
+    Without it the catalogue's own statistics apply.
     """
     from . import find_types
 
@@ -1216,6 +1221,7 @@ def lexical_evidence(
                 freshness=freshness,
                 recall_checkpoint=recall_checkpoint,
                 selection=selection,
+                query_context=query_context,
             )
         if not result.readiness.complete:
             return [], result.readiness.status
@@ -1248,10 +1254,12 @@ def _lexical_query(
     recall_checkpoint=None,
     selection: dict | None = None,
     excluded_corroboration_stems: frozenset[str] | None = None,
+    query_context=None,
 ):
     """The activation lexical query: `paths` ranked by the content words of
     `words`, each hit matching at least two distinct content units.
-    Units containing `excluded_corroboration_stems` cannot corroborate."""
+    Units containing `excluded_corroboration_stems` cannot corroborate.
+    `query_context` admits and ranks as in `lexical_evidence`."""
     from . import lexstore
 
     # A full-page match on the same single name word is not a second fact.
@@ -1270,6 +1278,7 @@ def _lexical_query(
         term_budget=lexical_term_budget(),
         term_selection=selection,
         excluded_corroboration_stems=excluded_corroboration_stems,
+        query_context=query_context,
     )
 
 
@@ -1281,10 +1290,12 @@ def lexical_hits_without(
     *,
     freshness=None,
     recall_checkpoint=None,
+    query_context=None,
 ) -> frozenset[str]:
     """Which of `pages` the activation lexical query still reaches for `turn`
     when the stems of the `left_out` words are not counted
     (`working_set_resolve.candidates_for`'s dependence check).
+    `query_context` is the first pass's (`lexical_evidence`).
 
     Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
     bring "hedge" back unless its stem is what is left out. The query keeps
@@ -1309,6 +1320,7 @@ def lexical_hits_without(
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
             excluded_corroboration_stems=dropped,
+            query_context=query_context,
         )
     except Exception:  # noqa: BLE001 - one optional evidence lane
         log.debug("activation lexical dependence check unavailable", exc_info=True)
@@ -2454,6 +2466,7 @@ def serve(
     status_basis: lifecycle_statuses.Basis | None = None,
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
+    lexical_admission=None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -2472,6 +2485,9 @@ def serve(
     profile is handed to the compile, so a packet is always compiled against
     the profile it was keyed on. `attribution` is the caller's derived keys
     (ruling S5-1).
+
+    `lexical_admission` is the request's lexical pass's `query_context`
+    (`lexical_evidence`), handed to the compile's dependence check.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
@@ -2701,6 +2717,7 @@ def serve(
             status_basis=status_basis,
             trigger=trigger,
             _intent_resolution=intent_resolution,
+            lexical_admission=lexical_admission,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The
