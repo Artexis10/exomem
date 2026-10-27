@@ -30,6 +30,8 @@ GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
 ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
+MEDIA_SLOT_PORT = 8768
+MEDIA_SLOT_POD_LABEL_VALUE = "exomem-media-slot-lease"
 STORAGE_CLASS = LEGACY_CLASS
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
@@ -74,7 +76,7 @@ def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
 
 
-def check_artifact_broker_url(endpoint: str) -> None:
+def _check_service_url(endpoint: str, port: int, name: str) -> None:
     """The preflighted Service IPv4 address needs neither runtime DNS nor discovery."""
     if not endpoint:
         return
@@ -84,14 +86,19 @@ def check_artifact_broker_url(endpoint: str) -> None:
         private = any(address in ipaddress.IPv4Network(cidr) for cidr in (
             "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
         ))
-        valid = private and endpoint in (
-            f"http://{address}:{ARTIFACT_BROKER_PORT}",
-            f"http://{address}:{ARTIFACT_BROKER_PORT}/",
-        )
+        valid = private and endpoint in (f"http://{address}:{port}", f"http://{address}:{port}/")
     except ValueError:
         valid = False
     if not valid:
-        raise ValueError("artifact broker endpoint must be literal RFC1918 IPv4 HTTP on port 8767")
+        raise ValueError(f"{name} endpoint must be literal RFC1918 IPv4 HTTP on port {port}")
+
+
+def check_artifact_broker_url(endpoint: str) -> None:
+    _check_service_url(endpoint, ARTIFACT_BROKER_PORT, "artifact broker")
+
+
+def check_media_slot_url(endpoint: str) -> None:
+    _check_service_url(endpoint, MEDIA_SLOT_PORT, "media slot")
 
 
 @dataclass(frozen=True)
@@ -188,12 +195,15 @@ class CellManifestSpec:
     # otherwise-0.0.0.0/0 rule to object storage on 443.
     job_egress_except: tuple[str, ...] = ()
     artifact_broker_url: str = ""
+    # cloud-multimodal-processing D10: the node media-slot lease a cell asks before a media child.
+    media_slot_url: str = ""
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
 
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
+        check_media_slot_url(self.media_slot_url)
 
     @property
     def namespace(self) -> str:
@@ -341,14 +351,19 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
             "egress": [],
         },
     }
-    if spec.artifact_broker_url:
-        runtime_ingress["spec"]["egress"] = [{
-            "to": [{
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
-                "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: ARTIFACT_BROKER_POD_LABEL_VALUE}},
-            }],
-            "ports": [{"protocol": "TCP", "port": ARTIFACT_BROKER_PORT}],
-        }]
+    # The broker rule comes first, the media slot rule second; the admission policy pins this order.
+    for url, pod_label_value, port in (
+        (spec.artifact_broker_url, ARTIFACT_BROKER_POD_LABEL_VALUE, ARTIFACT_BROKER_PORT),
+        (spec.media_slot_url, MEDIA_SLOT_POD_LABEL_VALUE, MEDIA_SLOT_PORT),
+    ):
+        if url:
+            runtime_ingress["spec"]["egress"].append({
+                "to": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
+                    "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: pod_label_value}},
+                }],
+                "ports": [{"protocol": "TCP", "port": port}],
+            })
     # L4: a bare `ports: [443]` rule with no `to:` reaches any in-cluster
     # listener and the node's hostPort on 443, not just object storage. An
     # ipBlock of 0.0.0.0/0 that excepts the cluster/private/CGNAT/link-local
@@ -598,6 +613,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": "EXOMEM_CLOUD_READ_ONLY", "value": "1"})
     if spec.artifact_broker_url:
         env.append({"name": "EXOMEM_CLOUD_ARTIFACT_BROKER_URL", "value": spec.artifact_broker_url})
+    if spec.media_slot_url:
+        env.append({"name": "EXOMEM_CLOUD_MEDIA_SLOT_URL", "value": spec.media_slot_url})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": "/data/vault"},
