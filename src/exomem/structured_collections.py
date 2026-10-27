@@ -1232,7 +1232,8 @@ def discover_collections_with_errors(
     from .governance import artifact_census
 
     candidates = []
-    # The census only proposes; the guards below read the disk and decide. Sorted before the bound applies.
+    # The census names files across the whole vault and only proposes: `_declared_candidate_rel` drops
+    # whatever lies outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
     proposed = sorted(root / rel for rel in artifact_census.vault_census(root).files_named(MANIFEST_FILENAME))
     for candidate in proposed:
         rel = _declared_candidate_rel(root, candidate)

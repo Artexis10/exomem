@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from test_collection_inventory_errors import (
+    _MISLOCATED_PLANNING_MANIFEST,
     _UNPARSEABLE_MANIFEST,
     _UNPARSEABLE_PATH,
     _seed_records_collection,
@@ -80,3 +81,16 @@ def test_a_manifest_written_in_the_same_timestamp_tick_as_the_walk_is_found(tmp_
     _write_manifest(tmp_path, _UNPARSEABLE_PATH, _UNPARSEABLE_MANIFEST)
 
     assert [row["path"] for row in record_memory(tmp_path, "inspect")["unreadable_manifests"]] == [_UNPARSEABLE_PATH]
+
+
+def test_a_manifest_outside_the_knowledge_base_is_neither_listed_nor_reported(tmp_path):
+    """Defect: the census names files across the whole vault, so a note or attachment folder holding a file
+    called `_collection.md` would appear in the inventory as a collection or an unreadable row."""
+    released = _seed_records_collection(tmp_path)
+    _write_manifest(tmp_path, "Attachments/Scans/_collection.md", _UNPARSEABLE_MANIFEST)
+    _write_manifest(tmp_path, "Other/_collection.md", _MISLOCATED_PLANNING_MANIFEST)
+
+    inventory = record_memory(tmp_path, "inspect")
+
+    assert [row["manifest_path"] for row in inventory["collections"]] == [released]
+    assert inventory["unreadable_manifests"] == []
