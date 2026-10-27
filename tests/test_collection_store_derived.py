@@ -613,18 +613,54 @@ def test_an_ordered_collection_refuses_a_location_natural_key_by_revise_and_by_i
     assert refused.value.code == "IMPORT_MAPPING_INVALID" and refused.value.details["at"] == "mapping.coverage"
 
 
-def test_the_derived_wal_is_cut_back_to_the_size_limit_after_a_checkpoint(derived, monkeypatch):
-    """Defect: a large import or rebuild leaves its whole WAL on disk, hundreds of megabytes beside the rows."""
-    monkeypatch.setattr(derived_rows, "_JOURNAL_SIZE_LIMIT", 256 << 10)
+@pytest.mark.parametrize("scheme", ["ordered-v1", "hashed-v1"])
+def test_a_recipient_who_cannot_see_a_natural_key_field_cannot_read_it_back_through_the_item_key(
+        derived, monkeypatch, scheme):
+    """Defect: an ordered item key spells the natural key, so a principal whose field plan withholds a
+    natural-key field reads that value by selecting, filtering or sorting on `item_key`."""
+    from test_collection_field_admission import GUEST
+
+    from exomem import item_keys
+    from exomem.query_engine import route
+
+    if scheme == "hashed-v1":
+        monkeypatch.setattr(CollectionWriter, "_new_item_key_scheme", lambda self, manifest: item_keys.HASHED_V1)
+    writer, job = derived("recipient", DAYS, text=TEXT.replace("natural_key: [series, at]", "natural_key: [device, at]"))
+    assert finish(writer, job)["state"] == "complete"
+    assert writer.connection.execute("SELECT item_key_scheme FROM collections").fetchone() == (scheme,)
+
+    def ask(who, **raw):
+        with request_scope(who):
+            return route.run(writer, DERIVED, {"version": 1, "page": {"limit": 3}, **raw}, facade_profile="records")
+
+    with pytest.raises(Exception) as hidden:
+        ask(GUEST, select=["device"])
+    assert hidden.value.code == "QUERY_FIELD_UNAVAILABLE"
+    owner_keys = [row["item_key"] for row in ask(owner_principal(), select=["item_key"])["rows"]]
+    assert len(owner_keys) == 3
+    if scheme == "hashed-v1":
+        # The uuid spells nothing, so the recipient reads it as before.
+        assert [row["item_key"] for row in ask(GUEST, select=["item_key"])["rows"]] == owner_keys
+        return
+    reached = {"select": {"select": ["item_key"]},
+               "filter": {"where": {"field": "item_key", "op": "eq", "value": owner_keys[0]}},
+               "sort": {"order_by": [{"field": "item_key"}]},
+               "prefix": {"where": {"field": "item_key", "op": "startswith", "value": owner_keys[0][:4]}}}
+    for name, raw in reached.items():
+        with pytest.raises(Exception) as refused:
+            ask(GUEST, **raw)
+        assert (name, refused.value.code) == (name, "QUERY_FIELD_UNAVAILABLE")
+    # Rows of an ordinary page carry no key, and the owner still reads, filters and sorts by it.
+    assert all("item_key" not in row for row in ask(GUEST)["rows"])
+    assert ask(owner_principal(), **reached["filter"], select=["item_key"])["rows"] == [{"item_key": owner_keys[0]}]
+    assert [row["item_key"] for row in ask(owner_principal(), **reached["sort"], select=["item_key"])["rows"]] == owner_keys
+
+
+def test_the_derived_connection_caps_its_wal_at_the_journal_size_limit(derived):
+    """Defect: the derived file's connection loses the limit, so a large import leaves its whole WAL on disk,
+    hundreds of megabytes beside the rows."""
     writer, _ = derived("journal")
-    conn = derived_rows.open_store(writer).conn
-    conn.execute("CREATE TABLE bulk (payload BLOB)")
-    conn.execute("INSERT INTO bulk VALUES (zeroblob(?))", (3 << 20,))
-    wal = Path(f"{derived_rows.path(writer.handle.path)}-wal")
-    assert wal.stat().st_size >= 3 << 20
-    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-    conn.execute("INSERT INTO bulk VALUES (x'00')")  # the next write restarts the WAL, which the limit then cuts
-    assert wal.stat().st_size <= 256 << 10
+    assert derived_rows.open_store(writer).conn.execute("PRAGMA journal_size_limit").fetchone() == (64 << 20,)
 
 
 def test_a_rebuild_leaves_the_vault_commit_generation_where_it_was(derived):

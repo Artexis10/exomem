@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
-from .. import record_formats
+from .. import item_keys, record_formats
 from ..governance import policy, raw_protection
 from .connection import CollectionStoreError
 
@@ -225,6 +225,8 @@ class FieldPlan:
     manifest: object
     owner: bool
     grants: tuple
+    # An ordered-v1 item key spells the natural key, so it is withheld with any natural-key field the plan withholds.
+    item_key_withheld: bool = False
 
     @property
     def whole_fields(self):
@@ -307,7 +309,12 @@ def resolve(operation, manifest):
                       fields=MappingProxyType({name: spec for name, spec in manifest.schema.fields.items() if name in selected}),
                       natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)))
     # A false refusal hides the unresolved field from recipients; accepting could disclose a private subtree.
-    return FieldPlan(basis, MappingProxyType(selected), visible, False, grants)
+    # The store records the scheme; a manifest parsed from its text carries the default.
+    scheme = operation.conn.execute("SELECT item_key_scheme FROM collections WHERE collection_id=?",
+                                    (manifest.collection_id,)).fetchone()
+    spelled = (scheme is not None and scheme[0] == item_keys.ORDERED_V1
+               and len(visible.schema.natural_key) < len(manifest.schema.natural_key))
+    return FieldPlan(basis, MappingProxyType(selected), visible, False, grants, item_key_withheld=spelled)
 
 
 def public_basis(operation, manifest):
