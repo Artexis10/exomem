@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 6ed890eb8b750a098db73d9d09e35d5b74f81dc6a14f7be3d9776b8a3b431c27
+  skill_contract: 52484efd328452ea0c9cc8002a8dc6ba57d9acb8a415a3784de2a6308c2e21a4
   version: "0.32.0"
 ---
 
@@ -64,7 +64,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
 | Review, adopt, audit, restructure, or maintain a vault | `review_memory`, `triage_memory`, `adopt_vault`, `maintain_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `schema_memory` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
-| Give maps topics, or file unfiled pages under topics | `review_memory(mode="vocabulary")` topic-carrier items, then `schema_memory(subject="topic-carriers")` | [vocabulary: Topic carriers](references/vocabulary.md#topic-carriers); never edit pages one by one for this |
+| Give maps topics, or file unfiled pages under topics | `review_memory(mode="vocabulary")` topic-carrier items, then `schema_memory(subject="topic-carriers")` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
 | Configured governance policy or a reserved withhold notice | `govern_memory` | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
 
 If the vocabulary reference is missing, inspect the exposed bootstrap schema.
