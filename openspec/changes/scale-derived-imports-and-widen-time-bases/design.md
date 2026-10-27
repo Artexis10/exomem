@@ -56,6 +56,12 @@ coverage.
 Ties now sort by natural key. A row query with no `order_by` returns the lowest natural
 keys first, and `describe` says so. The cursor format is unchanged.
 
+An ordered key spells its natural key, so a principal whose field plan withholds any
+natural-key field cannot read, filter or sort by `item_key` on an `ordered-v1` collection;
+the key is withheld like the field. Such a principal still receives rows in natural-key
+order among ties and by default, because the key stays the index tiebreak. That reveals
+relative order, never a value. A location field never enters an ordered key at all.
+
 Rejected alternatives:
 
 - A UUIDv8 with an ordered prefix has too few ordered bits for string or wall-clock keys,
@@ -157,8 +163,10 @@ row, and adds its triggers. Writer admission migrates the store, as for revision
 The derived layout stays at revision 3, so nothing rebuilds on upgrade.
 
 Older releases refuse revision 14 with `COLLECTION_STORE_SCHEMA_NEWER`, locally and on
-Cloud cells. A rollback restores the automatic pre-upgrade backup, then re-imports the
-collections created since from the kept export files.
+Cloud cells. No step takes a backup automatically. The upgrade procedure in
+`docs/deployment.md` backs up the store with `exomem collections backup` before the upgrade.
+A rollback restores that backup, then re-imports the collections created since from the
+kept export files. Writes made after the backup are lost.
 
 A member that a previous release opened has no `row_floor`, so a stop falls back to a
 full rebuild. A marker in store metadata or the manifest was rejected: older releases

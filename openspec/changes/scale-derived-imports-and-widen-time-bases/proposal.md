@@ -53,8 +53,9 @@ document. Today each of these needs a mapping workaround or cannot be imported.
 - Affected capability: `structured-collections`.
 - Stored data: store revision 14 adds `collections.item_key_scheme`. The derived layout
   stays at revision 3. Nothing rebuilds on upgrade.
-- Compatibility: a rollback to an older release restores the automatic pre-upgrade
-  backup, then re-imports the collections created since from the kept export files.
+- Compatibility: a rollback to an older release restores the store backup that the
+  upgrade procedure takes with `exomem collections backup`, then re-imports the collections
+  created since from the kept export files.
 - Existing mappings keep their canonical hash. A mapping hash changes only when the
   mapping declares one of the new keys.
 - Code: `structured_collections`, `collection_store` (importer, derived rows, native
