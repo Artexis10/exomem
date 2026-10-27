@@ -447,6 +447,9 @@ def inspect(
         out["count_source"] = usage.source
     else:
         out["reason"] = usage.reason
+    extra = getattr(spec.adapter, "inspect_extra", None)
+    if extra is not None:
+        out.update(extra(vault_root))
     return out
 
 
@@ -568,6 +571,13 @@ def _candidate(
         # A key the delta removed after counting it unused is no continuity break.
         gone = {key for key, outcome in removal.items() if outcome["action"] == "removed"}
         blocking.extend(dict(item) for item in continuity(snapshot.typed, candidate, gone))
+    admission = getattr(spec.adapter, "admission", None)
+    if admission is not None:
+        # Checks that read the vault run for the entries this delta touched, so state that moved
+        # since an earlier save never blocks an unrelated one.
+        blocking.extend(
+            dict(item) for item in admission(vault_root, candidate, {k: v for k, v in touched.items() if k not in removal})
+        )
     vault_entries = sum(1 for entry in after_entries.values() if entry.origin == "vault")
     if vault_entries > spec.cap:
         blocking.append(

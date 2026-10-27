@@ -11014,7 +11014,8 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
-            source-kinds, domains, statuses, planning-values, note-types or homes);
+            source-kinds, domains, statuses, planning-values, note-types, homes or
+            topic-carriers);
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
