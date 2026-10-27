@@ -1238,9 +1238,9 @@ def discover_collections_with_errors(
     from .governance import artifact_census
 
     candidates = []
-    # The census names files across the whole vault and only proposes: `_declared_candidate_rel` drops
+    # The listing names files across the whole vault and only proposes: `_declared_candidate_rel` drops
     # whatever lies outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
-    proposed = sorted(root / rel for rel in artifact_census.vault_census(root).files_named(MANIFEST_FILENAME))
+    proposed = sorted(root / rel for rel in artifact_census.vault_listing(root).files_named(MANIFEST_FILENAME))
     for candidate in proposed:
         rel = _declared_candidate_rel(root, candidate)
         # Recoverable trash retains bytes but declares no live collection ownership.
@@ -1305,10 +1305,10 @@ def discover_legacy_trackers(
     from .governance import artifact_census
 
     candidates = []
-    # The census only proposes; the guards below read the disk and decide. Sorted before the bound applies.
-    census = artifact_census.vault_census(root)
+    # The listing only proposes; the guards below read the disk and decide. Sorted before the bound applies.
+    listing = artifact_census.vault_listing(root)
     proposed = sorted(
-        root / rel for rel in census.files_under(records_root.relative_to(root).as_posix())
+        root / rel for rel in listing.files_under(records_root.relative_to(root).as_posix())
         if rel.endswith(".md")
     )
     for candidate in proposed:

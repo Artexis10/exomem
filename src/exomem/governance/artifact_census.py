@@ -275,23 +275,6 @@ class ArtifactCensus:
             listing.files == self.listings[relative].files for relative, listing in listings.items()
         )
 
-    def files_named(self, name: str) -> tuple[str, ...]:
-        """The vault-relative files called exactly `name`; the name index folds case, so filter it."""
-        return tuple(rel for rel in self.by_name.get(name.casefold(), ()) if rel.rpartition("/")[2] == name)
-
-    def files_under(self, directory: str) -> Iterator[str]:
-        """The vault-relative files in `directory` and in the directories below it, as of the walk.
-
-        A walk lists a symlinked directory as neither file nor directory, so none is entered.
-        """
-        pending = [directory]
-        while pending:
-            current = pending.pop()
-            listing = self.listings.get(current)
-            if listing is not None:
-                yield from (f"{current}/{name}" for name in listing.files)
-                pending.extend(f"{current}/{name}" for name in listing.directories)
-
 
 _CENSUSES: OrderedDict[tuple[str, str], ArtifactCensus] = OrderedDict()
 _CENSUS_LOCK = threading.Lock()
@@ -411,6 +394,58 @@ def _walk_census(
 def vault_census(vault_root: Path) -> ArtifactCensus:
     """The vault's census, walked again only where a directory changed."""
     return _walk_census(vault_root)
+
+
+@dataclass(frozen=True, slots=True)
+class VaultListing:
+    """Every directory's file and subdirectory names under a vault, as of one walk.
+
+    It builds none of the census's alias tables, so a walk after a file is added
+    or removed costs the changed directories, not a pass over every name.
+    """
+
+    listings: Mapping[str, _Listing]
+
+    def files_named(self, name: str) -> tuple[str, ...]:
+        """The vault-relative files called exactly `name`."""
+        return tuple(
+            f"{directory}/{name}" if directory else name
+            for directory, listing in self.listings.items()
+            if name in listing.files
+        )
+
+    def files_under(self, directory: str) -> Iterator[str]:
+        """The vault-relative files in `directory` and in the directories below it, as of the walk.
+
+        A walk lists a symlinked directory as neither file nor directory, so none is entered.
+        """
+        pending = [directory]
+        while pending:
+            current = pending.pop()
+            listing = self.listings.get(current)
+            if listing is not None:
+                yield from (f"{current}/{name}" for name in listing.files)
+                pending.extend(f"{current}/{name}" for name in listing.directories)
+
+
+_LISTINGS: OrderedDict[tuple[str, str], Mapping[str, _Listing]] = OrderedDict()
+
+
+def vault_listing(vault_root: Path) -> VaultListing:
+    """The vault's directory listings, read again only where a directory changed."""
+    key = _vault_key(vault_root)
+    with _CENSUS_LOCK:
+        previous = _LISTINGS.get(key, {})
+    racy_after = time.time_ns() - _CENSUS_RACY_NS
+    if not os.path.isdir(vault_root):
+        return VaultListing(MappingProxyType({}))
+    listings = MappingProxyType(_walk_listings(str(vault_root), previous, racy_after))
+    with _CENSUS_LOCK:
+        _LISTINGS.pop(key, None)
+        _LISTINGS[key] = listings
+        while len(_LISTINGS) > _CENSUS_LIMIT:
+            _LISTINGS.popitem(last=False)
+    return VaultListing(listings)
 
 
 def _joined(first: tuple[str, ...], second: tuple[str, ...]) -> tuple[str, ...]:
@@ -774,6 +809,7 @@ def clear() -> None:
     """Forget every census, for a test that rebuilds a vault in place."""
     with _CENSUS_LOCK:
         _CENSUSES.clear()
+        _LISTINGS.clear()
         _FEEDS.clear()
     _resolved_root.cache_clear()
     tombstone_aliases.cache_clear()

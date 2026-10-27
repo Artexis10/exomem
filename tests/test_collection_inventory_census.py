@@ -1,6 +1,6 @@
-"""The inventory's sweeps list directories from the artifact census, and a change must reach them.
+"""The inventory's sweeps list directories from the vault listing, and a change must reach them.
 
-The census keeps each directory's listing between calls and reads it again only when the
+The walk keeps each directory's names between calls and reads it again only when the
 directory's stamp moves. A listing served past a change hides a collection from the next
 inventory, and it would hide it without an error.
 """
@@ -84,7 +84,7 @@ def test_a_manifest_written_in_the_same_timestamp_tick_as_the_walk_is_found(tmp_
 
 
 def test_a_manifest_outside_the_knowledge_base_is_neither_listed_nor_reported(tmp_path):
-    """Defect: the census names files across the whole vault, so a note or attachment folder holding a file
+    """Defect: the listing names files across the whole vault, so a note or attachment folder holding a file
     called `_collection.md` would appear in the inventory as a collection or an unreadable row."""
     released = _seed_records_collection(tmp_path)
     _write_manifest(tmp_path, "Attachments/Scans/_collection.md", _UNPARSEABLE_MANIFEST)
