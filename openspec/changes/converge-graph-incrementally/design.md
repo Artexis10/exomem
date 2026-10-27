@@ -547,10 +547,14 @@ disposition. The rule reuses the existing predicates and adds no new proof.
   marker, or a batch whose dispatch registered a rebuild or queued every graph input.
   It asks the predicate that `full_upsert_succeeded` already used. Such a mark only
   fenced later writes, and an unscoped one sent each of them to a whole-vault rebuild.
-- Barrier recovery declines while per-path receipts are queued and no marker stands. A
-  queue that did not shrink no longer releases recovery. A queue that cannot drain still
-  reaches the whole-vault route through the stall escalation, and a standing barrier no
-  longer resets that count.
+- Barrier recovery declines while per-path receipts are queued, no marker stands and the
+  drain can repair them per path. A queue that did not shrink no longer releases
+  recovery. A queue that the drain can repair but that makes no progress still reaches
+  the whole-vault route through the stall escalation, and a standing barrier no longer
+  resets that count. A queue whose latest drain found the epoch unsettled or the vault
+  not ready owns nothing, and recovery runs as it does on an empty queue. The drain
+  records that outcome, because deriving it again can build a cold resolver or wait on
+  the canonical boundary.
 - A standing full marker owns the whole-vault pass for a caller that may stop at queued.
   The marker already records the debt, and the drain pays it once. A caller that meets
   a rebuild disposition or an unproven predecessor behind it queues its own paths at its

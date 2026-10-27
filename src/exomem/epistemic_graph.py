@@ -1167,12 +1167,15 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     measured it" -- so the reason is now a value a caller can log and a test can
     assert, rather than something to be inferred from an absence.
 
-    Queued per-path receipts with no whole-vault marker come first: the queue
-    owns that repair, and the drain that empties it publishes and clears the
-    barrier. Recovery behind it ran a whole-vault pass for work already queued,
-    and an external mark on the queued paths turned it into whole-vault debt. A
-    queue that cannot drain reaches the whole-vault route through the drain's
-    stall escalation instead.
+    Queued per-path receipts with no whole-vault marker come first, while the
+    drain can repair them per path: the queue owns that repair, and the drain
+    that empties it publishes and clears the barrier. Recovery behind it ran a
+    whole-vault pass for work already queued, and an external mark on the
+    queued paths turned it into whole-vault debt. A queue whose latest drain
+    could not repair per path at all -- an epoch that refused it, or a vault
+    not ready for it, as a restarted worker leaves it -- owns nothing, and
+    recovery goes on to the reasons below. Declining there left the graph
+    unavailable until the stall escalation, longer than a reader waits.
     """
     from . import freshness
 
@@ -1196,11 +1199,16 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
 
 
 def _graph_receipts_own_repair(vault_root: Path) -> bool:
-    """Whether per-path receipts are queued and no whole-vault marker stands.
+    """Whether queued per-path receipts, with no marker, are repair the drain can run.
 
-    An unreadable queue reads as empty, which leaves recovery to the reasons
-    after this one.
+    The drain's own record answers "can run": its latest per-path attempt was
+    not refused by the epoch or by an unready vault. An unreadable queue reads
+    as empty, which leaves recovery to the reasons after this one.
     """
+    from . import graph_drain
+
+    if graph_drain.per_path_repair_blocked(vault_root):
+        return False
     try:
         return (
             deferred_index.graph_queue_age(vault_root)[0] > 0

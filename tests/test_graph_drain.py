@@ -963,6 +963,41 @@ def test_a_barrier_behind_queued_repair_waits_for_the_queue(
     assert passes == []
 
 
+@pytest.mark.parametrize("scoped_mark", [False, True], ids=["unmarked", "scoped_mark"])
+def test_a_barrier_behind_queued_repair_that_cannot_drain_recovers_at_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    real_barrier: None,
+    scoped_mark: bool,
+) -> None:
+    """Queued receipts own a barrier's repair only while the drain can repair per path.
+
+    A restarted worker has no live recall registry, so the drain cannot repair
+    the queued page per path and leaves it queued. Recovery declined behind it
+    as `queue_owns_repair` until the stall escalation, 275 s later, and a client
+    polling the unavailable graph gave up after 120 s. With the page's own
+    scoped mark, recovery routes the barrier through the full marker instead.
+    """
+    vault = _published_vault(tmp_path)
+    page = vault / "Knowledge Base/Notes/Insights/c.md"
+    page.write_text(_page("C", "C changed before the worker restarted."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [page.relative_to(vault).as_posix()])
+    EpistemicGraphIndex(vault).suspend_reads()
+    if scoped_mark:
+        freshness.mark_external_pending(vault, paths=[page])
+    freshness.invalidate(vault)
+    assert not freshness.recall_is_live(vault, "vault"), "the restart shape needs a cold registry"
+
+    with caplog.at_level("INFO", logger="exomem.epistemic_graph"):
+        graph_drain._work_once(vault)
+        graph_drain._work_once(vault)
+
+    assert "graph barrier repair declined reason=queue_owns_repair" not in caplog.text, (
+        "recovery declined behind a queue the drain cannot repair per path"
+    )
+    assert EpistemicGraphIndex(vault).available(), "the barrier was not recovered"
+
+
 def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

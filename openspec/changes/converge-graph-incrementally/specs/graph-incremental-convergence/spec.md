@@ -142,11 +142,15 @@ convergence reconcile and rebuild the complete recall corpus. It SHALL retain th
 existing publication-refusal backoff and active-owner coalescing behavior, and SHALL
 NOT create duplicate markers while one is pending.
 
-While per-path receipts are queued and no full-rebuild marker stands, the queue owns
-the repair. Barrier recovery SHALL decline with its own reason, ahead of the external
-change check, and the drain SHALL NOT raise whole-vault debt for that barrier. A queue
-that cannot drain reaches the whole-vault route through the drain's stall escalation,
-and a standing barrier SHALL NOT reset that escalation's count.
+While per-path receipts are queued, no full-rebuild marker stands, and per-path repair
+is admissible, the queue owns the repair. Barrier recovery SHALL decline with its own
+reason, ahead of the external change check, and the drain SHALL NOT raise whole-vault
+debt for that barrier. Per-path repair is not admissible while the drain's latest
+per-path attempt could not repair per path at all: the epoch refused it, or the vault
+was not ready for it, as a restarted worker leaves it. Then the queue SHALL NOT own the
+repair, and barrier recovery SHALL go on to its other reasons. A queue that the drain
+can repair but that makes no progress reaches the whole-vault route through the drain's
+stall escalation, and a standing barrier SHALL NOT reset that escalation's count.
 
 Before reconciliation clears an observed external epoch, it SHALL evict the
 resolver and inbound caches affected by that recall publication. Clearing SHALL
@@ -167,7 +171,17 @@ complete, but it SHALL NOT repopulate the shared cache.
 #### Scenario: Queued receipts hold barrier recovery
 
 - **WHEN** per-path receipts are queued
+- **AND** per-path repair is admissible
 - **THEN** barrier recovery waits and only the stall escalation may raise whole-vault debt
+
+#### Scenario: Queued receipts that cannot drain release barrier recovery
+
+- **WHEN** per-path receipts are queued behind a read barrier
+- **AND** the drain's latest per-path attempt found the vault not ready for per-path
+  repair
+- **THEN** barrier recovery does not decline for the queue
+- **AND** the barrier recovers, or the drain raises whole-vault debt for an external
+  epoch, without waiting for the stall escalation
 
 #### Scenario: Cold recovery includes unqueued recall content
 
@@ -306,8 +320,9 @@ marker, or a queue it cannot read. This holds even when the batch covers the com
 checkpoint. The marker and the acknowledgement describe the whole graph, and that
 page's rows may be stale. The drain that leaves nothing queued publishes. An
 acknowledgement that is still behind afterwards is closed by one bounded drain of the
-committed checkpoint. While per-path receipts are queued and no full-rebuild marker
-stands, barrier recovery SHALL wait for the queue rather than run a whole-vault pass.
+committed checkpoint. While per-path receipts are queued, no full-rebuild marker
+stands, and per-path repair is admissible, barrier recovery SHALL wait for the queue
+rather than run a whole-vault pass.
 
 Coverage SHALL be membership in the processed batch rather than in the indexed set. A
 deletion named by a checkpoint is processed by removing its rows and has no source bytes

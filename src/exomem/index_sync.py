@@ -1168,10 +1168,13 @@ def _drain_graph_work(
         # Whole-vault convergence covers every receipt in this exact snapshot;
         # compare-and-swap receipt clearing preserves anything newer.
         return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
+    from . import graph_drain
+
     if not index.epoch_admits_incremental_repair():
         # Not a warning: under a live writer the ordinary cause is a batch
         # mid-flight, which the next tick clears. The work stays queued.
         log.info("deferred graph drain skipped; graph epoch is not settled")
+        graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0
     processed = 0
     batch = [vault_root / receipt.rel_path for receipt in receipts]
@@ -1196,7 +1199,12 @@ def _drain_graph_work(
         # retries, and the paths that genuinely require a rebuild reach one
         # through the checkpoint's own full-scope marker.
         log.info("deferred graph drain deferred; vault not ready for incremental repair")
+        graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0
+    if report:
+        # The pass ran per path. A failed batch, isolated below, says nothing
+        # about readiness either way.
+        graph_drain.note_per_path_repair(vault_root, admissible=True)
     covered = set(report.get("indexed", ()))
     if covered:
         done = [receipt for receipt in receipts if receipt.rel_path in covered]

@@ -95,6 +95,14 @@ _PROGRESS = threading.Event()
 #: Monotonic time of the last debt signal: the start of the current quiet window.
 _last_debt = 0.0
 
+#: Vaults whose latest per-path drain could not repair per path at all: the
+#: epoch refused it, or the vault was not ready (no sidecar, no live recall
+#: registry, no resolver, no topology proof). Recorded by the drain rather than
+#: re-derived, because deriving it can build a cold resolver or wait on the
+#: canonical boundary. Scheduling state only, like `_covered_generation`.
+_per_path_blocked: set[str] = set()
+_PER_PATH_LOCK = threading.Lock()
+
 #: The checkpoint generation this process last spent a covering drain on, per
 #: vault. Scheduling state only, like `_last_debt`: it authorizes nothing, and a
 #: restart that forgets it costs one more bounded drain.
@@ -116,9 +124,34 @@ def note_graph_debt() -> None:
 
 
 def note_graph_progress() -> None:
-    """Wake the drain without waiting out a backoff: the graph was just published."""
+    """Wake the drain without waiting out a backoff: the graph was just published.
+
+    A publication also changes what the next per-path drain can do, so the
+    record of a blocked one is dropped until that drain says so again.
+    """
+    with _PER_PATH_LOCK:
+        _per_path_blocked.clear()
     _PROGRESS.set()
     _DEBT.set()
+
+
+def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
+    """Record whether this vault's latest per-path drain could repair per path."""
+    with _PER_PATH_LOCK:
+        if admissible:
+            _per_path_blocked.discard(str(vault_root))
+        else:
+            _per_path_blocked.add(str(vault_root))
+
+
+def per_path_repair_blocked(vault_root: Path) -> bool:
+    """Whether this vault's latest per-path drain could not repair per path.
+
+    While it could not, queued receipts do not own a barrier's repair: the drain
+    cannot pay it, and the vault may stay unready until recovery runs.
+    """
+    with _PER_PATH_LOCK:
+        return str(vault_root) in _per_path_blocked
 
 
 def disabled() -> bool:
@@ -453,12 +486,14 @@ def _work_once(vault_root: Path) -> int:
     no pass -- a busy boundary, an unavailable epoch -- does not hold recovery
     back.
 
-    Recovery also waits while per-path receipts are queued and no marker
-    stands (`epistemic_graph.recovery_decline_reason`): the queue owns that
-    repair, and the drain that empties it publishes and clears the barrier. A
-    behind publication's repair set drains that way, batch by batch. A queue
-    that cannot drain reaches the whole-vault route only through the stall
-    escalation in `_run_owned`.
+    Recovery also waits while per-path receipts are queued, no marker stands
+    and the drain can repair them per path
+    (`epistemic_graph.recovery_decline_reason`): the queue owns that repair,
+    and the drain that empties it publishes and clears the barrier. A behind
+    publication's repair set drains that way, batch by batch. When this pass's
+    drain could not repair per path at all, recovery runs as it would with an
+    empty queue. A queue that drains without making progress reaches the
+    whole-vault route only through the stall escalation in `_run_owned`.
     """
     from . import epistemic_graph
 
@@ -660,7 +695,8 @@ def _run_owned(vault_root: Path) -> None:
             # ladder, hand it to the whole-vault route. Only that time counts:
             # a readable graph, an empty queue or a standing marker, whose
             # convergence is the whole-vault attempt, starts the count again. A
-            # barrier does not: recovery declines behind queued receipts.
+            # barrier does not: recovery declines behind queued receipts that
+            # the drain can repair per path.
             if _marker_pending(vault_root) or not (
                 _queue_pending(vault_root) and _availability_pending(vault_root)
             ):

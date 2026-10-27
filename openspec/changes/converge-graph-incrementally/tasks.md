@@ -585,7 +585,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   drains the queue after the flush before it asserts convergence. The re-arm test
   is now `test_a_standing_whole_vault_marker_owns_the_watcher_rearm`, because a
   standing marker owns the repair the old test re-armed.
-- [x] 11.6 Barrier recovery declines while per-path receipts are queued.
+- [x] 11.6 Barrier recovery declines while per-path receipts are queued and per-path
+  repair is admissible.
   `recovery_decline_reason` returns `queue_owns_repair` first when receipts are
   queued and no marker stands. The drain asks for whole-vault debt behind a barrier
   only on an external-epoch decline, and the stall count resets only on a full
@@ -600,5 +601,15 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   rollback test named in 11.2, which passes after that rule. Thirteen are the
   lifecycle replay driver's environment checks, which fail on the base the same
   way. The last reads the installed CLI's help and passes on a rerun on both trees.
+  The queue owns nothing while the drain's latest per-path attempt could not repair
+  per path: the epoch refused it, or the vault was not ready, as a restarted worker
+  leaves it. The drain records that outcome through `graph_drain.note_per_path_repair`,
+  and a publication clears it. Declining there kept the graph unavailable for longer
+  than the 120 s that the installed stdio journey waits. Evidence:
+  `test_a_barrier_behind_queued_repair_that_cannot_drain_recovers_at_once`, red on the
+  previous head. The installed stdio journey, run alone, failed on the previous head
+  and passes with the rule. The same seven graph modules: 338 passed, 3 skipped, 3
+  failed, with the same three names and reasons as the base. The four watcher and
+  index_sync modules: 182 passed.
 - [ ] 11.7 Sandbox A/B (orchestrator): zero whole-vault passes per ordinary governed
   write on the real managed worker with its watcher on; drift 0.
