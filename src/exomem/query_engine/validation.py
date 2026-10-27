@@ -256,7 +256,7 @@ class _Binder:
         self.reduction_fields: dict[str, Field] | None = None
         self.leaves = 0
 
-    def field(self, name: Any, at: str, *, reduction=False, evaluated=False) -> Field:
+    def field(self, name: Any, at: str, *, reduction=False, evaluated=False, implicit=False) -> Field:
         """Bind a declared field; ``evaluated`` marks a use that SQL evaluates on stored values."""
         if reduction:
             fields = self.reduction_fields or {}
@@ -293,6 +293,9 @@ class _Binder:
                 allowed,
                 "Describe the source and choose a declared field.",
             )
+        if fields[path].get("withheld") and not implicit:
+            # The key spells a field this caller cannot see; it is refused exactly as that field is.
+            _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (), "Describe the admitted collection fields.")
         if evaluated and fields[path].get("projected"):
             # Each caller sees this field's values only after projection, so a filter, sort or join
             # on the stored values would reveal what a row omits, to the owner as to anyone else.
@@ -626,7 +629,7 @@ def normalize_query(
                 )
             )
         if aggregate is None and domain == "collections":
-            identity = binder.field("item_key", "order_by")
+            identity = binder.field("item_key", "order_by", implicit=True)
             if not any(key.field == identity for key in sort):
                 sort.append(SortKey(identity))
         elif aggregate is not None:

@@ -7,6 +7,7 @@ import json
 import sqlite3
 from dataclasses import replace
 
+from .. import item_keys
 from . import (
     index_migrations,
     native_identity,
@@ -53,7 +54,12 @@ def _template(conn, cid):
     return plan
 
 
-def _begin(conn, cid, fields, *, identity="uuid16"):
+def _begin(conn, cid, fields, *, identity=None):
+    """Start a native candidate; its identity codec follows the collection's item key scheme, unless one is forced."""
+    scheme, derived = conn.execute("SELECT item_key_scheme,derived FROM collections WHERE collection_id=?",
+                                   (cid,)).fetchone()
+    if identity is None:
+        identity = native_identity.ORDERED if scheme == item_keys.ORDERED_V1 else native_identity.UUID16
     template = _template(conn, cid)
     if template is None:
         raise typed_storage.TypedStorageError("native migration requires declared query intent")
@@ -77,7 +83,6 @@ def _begin(conn, cid, fields, *, identity="uuid16"):
     typed_storage.create_history(conn, layout)
     query_generation = conn.execute("SELECT COALESCE(MAX(generation),0)+1 FROM query_projection_mappings "
                                     "WHERE collection_id=?", (cid,)).fetchone()[0]
-    derived = conn.execute("SELECT derived FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
     plan = NativeProjectionPlan(cid, query_generation, template.scalars, template.indexes, layout,
                                 FileRole.DERIVED if derived else FileRole.STORE)
     conn.execute("UPDATE collections SET query_plan_hash=? WHERE collection_id=?", (index_migrations._hash(plan), cid))

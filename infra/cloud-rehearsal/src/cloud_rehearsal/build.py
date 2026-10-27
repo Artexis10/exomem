@@ -22,10 +22,14 @@ upstream Dockerfiles themselves.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 from . import images
 from .infra import docker_labels
@@ -107,6 +111,31 @@ def _derive(context: Path, base: str, tag: str, body: str, *, labels: list[str] 
     context.mkdir(parents=True, exist_ok=True)
     (context / "Dockerfile").write_text(f"FROM {base}\n{body}", encoding="utf-8")
     run(["docker", "build", *(labels or []), "--tag", tag, str(context)], timeout=900)
+
+
+def build_reservation_provider_image(run_id: str, workdir: Path, provider: Path) -> str:
+    """Reuse the pinned sidecars while replacing the source-built provider binary."""
+    provenance = json.loads((provider / "provenance.json").read_text())
+    expected_commit = run(["git", "rev-parse", "HEAD"], cwd=images.REPO_ROOT).stdout.strip()
+    # A stale build would qualify another tree; only this disposable drill pays the refusal.
+    if provenance["exomem_source_sha"] != expected_commit or not provenance["exomem_source_clean"]:
+        raise RuntimeError("the reservation provider was not built from this clean source revision")
+    for relative in ("build/hypertopolvm", "build/reservation-host-proof",
+                     "config/crd/bases/topolvm.io_logicalvolumes.yaml"):
+        if hashlib.sha256((provider / relative).read_bytes()).hexdigest() != provenance["outputs"][relative]:
+            raise RuntimeError("a reservation provider output differs from its build receipt")
+    generated_crd = images.REPO_ROOT / "infra/helm/platform/files/topolvm/logicalvolumes.yaml"
+    if generated_crd.read_bytes() != (provider / "config/crd/bases/topolvm.io_logicalvolumes.yaml").read_bytes():
+        raise RuntimeError("the installed volume schema differs from the source-built provider")
+    settings = yaml.safe_load((images.REPO_ROOT / "infra/helm/platform/values.yaml").read_text())["topolvm"]["image"]
+    base = f"{settings['repository']}:{settings['reference']}"
+    context = workdir / "reservation-provider-image"
+    context.mkdir()
+    shutil.copy2(provider / "build/hypertopolvm", context / "hypertopolvm")
+    tag = f"rehearsal.local/topolvm-reservations:{run_id}"
+    _derive(context, base, tag, "COPY --chmod=0755 hypertopolvm /hypertopolvm\n",
+            labels=docker_labels(run_id, image=True))
+    return tag
 
 
 def trust_rehearsal_ca(tag: str, ca_path: Path, workdir: Path, *, run_id: str | None = None) -> str:

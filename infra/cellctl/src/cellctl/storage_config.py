@@ -25,6 +25,9 @@ class LocalStorage:
     # the source volume's node; the backup Job then follows it there (D3).
     clone_class: str = "exomem-cloud-local-clone"
     snapshot_class: str = "exomem-cloud-local-snapshot"
+    # D12 stays disabled until the paired provider image passes the storage drill.
+    reservations: bool = False
+    reservation_namespace: str = "exomem-local-reservations"
     driver: str = "topolvm.io"
     device_class: str = "thin"
     topology_key: str = "topology.topolvm.io/node"
@@ -47,9 +50,13 @@ class LocalStorage:
     array_port: int = 9100
 
     def __post_init__(self) -> None:
-        for name in (self.class_name, self.clone_class, self.snapshot_class, self.driver, self.device_class):
+        if type(self.reservations) is not bool:
+            raise ValueError("reservations must be a boolean")
+        for name in (self.class_name, self.clone_class, self.snapshot_class, self.driver, self.device_class, self.reservation_namespace):
             if not isinstance(name, str) or not _NAME.fullmatch(name):
                 raise ValueError("local storage names must be DNS subdomain names")
+        if "." in self.reservation_namespace or len(self.reservation_namespace) > 63:
+            raise ValueError("the reservation namespace must be a DNS label")
         if len({self.class_name, self.clone_class, LEGACY_CLASS}) != 3:
             raise ValueError("the local, clone and Hetzner classes must differ")
         if type(self.backup_concurrency_per_node) is not int or self.backup_concurrency_per_node < 1:
@@ -64,6 +71,11 @@ class LocalStorage:
         for port in (self.thin_pool_port, self.array_port):
             if type(port) is not int or not 0 < port < 65536:
                 raise ValueError("a metrics port must be a TCP port number")
+
+    @property
+    def reservation_annotation(self) -> str:
+        """The node's atomic observation of the provider's guarded pool."""
+        return f"reservation.{self.driver}/{self.device_class}"
 
     @property
     def capacity_annotation(self) -> str:

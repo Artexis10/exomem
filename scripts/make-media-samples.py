@@ -216,8 +216,11 @@ def main(out: Path) -> None:
     _png(out / "ocr-jpn.png", OCR_LINES["ocr-jpn.png"], font=CJK_FONT)
     _png(out / "ocr-jpn-vert.png", OCR_LINES["ocr-jpn-vert.png"], font=CJK_FONT, vertical=True)
 
-    (out / "expected.json").write_text(
-        json.dumps(PHRASES, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8"
+    expected_path = out / "expected.json"
+    # Independently sourced speech fixtures keep their source-authored expectations.
+    existing = json.loads(expected_path.read_text()) if expected_path.exists() else {}
+    expected_path.write_text(
+        json.dumps(existing | PHRASES, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 

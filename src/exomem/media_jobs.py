@@ -99,6 +99,8 @@ _SELF_RETURNING_SQL = ",".join(f"'{reason}'" for reason in sorted({*_WAITING_REA
 OVER_BUDGET_ERROR = "ExceedsProcessingBudget: the file exceeds this deployment's processing budget"
 OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget"
 WAIT_ACTION = "wait for media processing"
+#: A stop that moved the engine forward leaves the job pending and spends none of its stops.
+_UNCOUNTED_STOP = "state = 'pending', blocked_reason = NULL, last_error = NULL, blocked_context = NULL"
 
 
 def _canonical_json(value: object) -> str:
@@ -506,6 +508,21 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     return int(deleted + kept)
 
 
+def _next_pending_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The job to claim next: the oldest fresh job, else the oldest resumed speech job.
+
+    A resumed speech job has a progress row. It runs only when no fresh job waits, so a
+    long recording that keeps advancing delays a new upload by at most one job timeout.
+    Two indexed `LIMIT 1` queries keep the claim cheap on a long queue.
+    """
+    return conn.execute(
+        "SELECT * FROM jobs WHERE state = 'pending' AND NOT EXISTS "
+        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id) ORDER BY id LIMIT 1"
+    ).fetchone() or conn.execute(
+        "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
+    ).fetchone()
+
+
 class MediaJobStore:
     def __init__(self, vault_root: Path, *, create: bool = True) -> None:
         self.vault_root = vault_root.resolve()
@@ -624,6 +641,16 @@ class MediaJobStore:
                     """
                 )
                 self._migrate_result_schema(conn)
+                # How far the engine had transcribed a speech job at its last stop; the row goes with the job.
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS speech_progress (
+                        job_id INTEGER PRIMARY KEY,
+                        stop_offset INTEGER NOT NULL,
+                        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                    )
+                    """
+                )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS runtime (
@@ -880,9 +907,7 @@ class MediaJobStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
-            ).fetchone()
+            row = _next_pending_row(conn)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
@@ -1137,14 +1162,21 @@ class MediaJobStore:
             conn.close()
 
     def record_memory_stop(
-        self, job: MediaJob, *, kind: str, stop_limit: int, context: str
+        self,
+        job: MediaJob,
+        *,
+        kind: str,
+        stop_limit: int,
+        context: str,
+        progress: int | None = None,
     ) -> str | None:
         """Return a memory-stopped running job to pending, refunding its attempt.
 
         After `stop_limit` consecutive stops the job is blocked instead: over budget
         when every stop was a hard-limit failure, memory-blocked when any was a
-        pressure stop. Returns PENDING, MEMORY_BLOCKED, OVER_BUDGET, or None when the
-        claim is no longer this job's.
+        pressure stop. A stop of a speech job whose `progress` moved past its last
+        stop's does not count. Returns PENDING, MEMORY_BLOCKED, OVER_BUDGET, or None
+        when the claim is no longer this job's.
         """
         soft = 0 if kind == media_brakes.HARD_LIMIT else 1
         blocked_error = "MemoryBlocked: waiting for memory after repeated memory stops"
@@ -1168,16 +1200,21 @@ class MediaJobStore:
                 stop_limit, soft, OVER_BUDGET_ERROR, blocked_error,
                 stop_limit, context,
             ),
+            progress,
         )
 
-    def record_timeout_stop(self, job: MediaJob, *, stop_limit: int, context: str) -> str | None:
+    def record_timeout_stop(
+        self, job: MediaJob, *, stop_limit: int, context: str, progress: int | None = None
+    ) -> str | None:
         """Return a job the watchdog stopped to pending, refunding its attempt.
 
         A watchdog stop spends the time budget, not memory, so it counts apart from
         memory stops and a memory-blocked return does not reset it. After `stop_limit`
         of them the file is over budget, with `context` naming the timeout it exceeded:
-        a file costs at most `stop_limit` timeouts before it leaves the queue. Returns
-        PENDING, OVER_BUDGET, or None when the claim is no longer this job's.
+        a file costs at most `stop_limit` timeouts before it leaves the queue. A stop of
+        a speech job whose `progress` moved past its last stop's does not count: a long
+        recording that advances each time finishes. Returns PENDING, OVER_BUDGET, or
+        None when the claim is no longer this job's.
         """
         return self._record_stop(
             job,
@@ -1194,12 +1231,21 @@ class MediaJobStore:
                 stop_limit, OVER_BUDGET_ERROR,
                 stop_limit, context,
             ),
+            progress,
         )
 
-    def _record_stop(self, job: MediaJob, assignments: str, params: tuple[object, ...]) -> str | None:
+    def _record_stop(
+        self,
+        job: MediaJob,
+        assignments: str,
+        params: tuple[object, ...],
+        progress: int | None,
+    ) -> str | None:
         """Apply a stop's counter `assignments` to the still-claimed running job.
 
-        Every stop refunds the job's attempt. Returns PENDING or the blocked reason the
+        Every stop refunds the job's attempt. A stop whose `progress` offset is past
+        the one recorded at the job's last stop (0 when none) counts nothing and
+        leaves the job pending. Returns PENDING or the blocked reason the
         stop left, or None when the claim is no longer this job's.
         """
         if job.id is None:
@@ -1207,6 +1253,11 @@ class MediaJobStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT stop_offset FROM speech_progress WHERE job_id = ?", (job.id,)
+            ).fetchone()
+            if progress is not None and progress > (0 if previous is None else int(previous[0])):
+                assignments, params = _UNCOUNTED_STOP, ()
             changed = conn.execute(
                 "UPDATE jobs SET attempts = MAX(0, attempts - 1), updated_at = ?, "
                 + assignments
@@ -1215,6 +1266,12 @@ class MediaJobStore:
                 "WHERE media_job_results.job_id = jobs.id)",
                 (time.time(), *params, job.id, job.claim_revision),
             ).rowcount
+            if changed == 1 and progress is not None:
+                conn.execute(
+                    "INSERT INTO speech_progress(job_id, stop_offset) VALUES (?, ?) "
+                    "ON CONFLICT(job_id) DO UPDATE SET stop_offset = excluded.stop_offset",
+                    (job.id, progress),
+                )
             row = conn.execute(
                 "SELECT state, blocked_reason FROM jobs WHERE id = ?", (job.id,)
             ).fetchone()
@@ -1246,17 +1303,18 @@ class MediaJobStore:
     def recover_memory_verdicts(self, *, lifted: Any, include_memory_blocked: bool) -> int:
         """Return memory-blocked and over-budget jobs to pending when they may now fit.
 
-        Both return when `lifted(media_type, blocked_context)` reports that what their
-        verdict depended on changed: the cell's limit, the engine's budget, or a longer
-        job timeout. Memory-blocked jobs also return when `include_memory_blocked` is
-        set: at supervisor start, and on the periodic retry while memory pressure is low.
+        Both return when `lifted(job, blocked_context)` reports that what their
+        verdict depended on changed: the cell's limit, the budget of the engines the job
+        loads, or a longer job timeout. Memory-blocked jobs also return when
+        `include_memory_blocked` is set: at supervisor start, and on the periodic retry
+        while memory pressure is low.
         An over-budget job returns with fresh stop counts; a memory-blocked one keeps
         its watchdog count, so the watchdog's bound per file holds across its returns.
         """
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT id, media_type, blocked_reason, blocked_context FROM jobs "
+                "SELECT * FROM jobs "
                 "WHERE state = 'blocked' AND blocked_reason IN (?, ?) "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id) ORDER BY id",
@@ -1265,7 +1323,7 @@ class MediaJobStore:
             due = [
                 (int(row["id"]), row["blocked_reason"])
                 for row in rows
-                if lifted(str(row["media_type"]), row["blocked_context"])
+                if lifted(self._row_to_job(row), row["blocked_context"])
                 or (include_memory_blocked and row["blocked_reason"] == MEMORY_BLOCKED)
             ]
             changed = 0
@@ -1332,9 +1390,7 @@ class MediaJobStore:
         """The job `claim_next` would claim now, without claiming it."""
         conn = self._connect(readonly=True)
         try:
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
-            ).fetchone()
+            row = _next_pending_row(conn)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()

@@ -438,12 +438,14 @@ def test_new_unclassified_root_format_fails_closed(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("suffix", [".public.pem", ".json.complete"])
+@pytest.mark.parametrize(
+    "filename", ["registry.public.pem", "registry.json.complete", "provider.go", "upstream-commit"]
+)
 @pytest.mark.parametrize("content_kind", ["clean", "private", "invalid_utf8"])
-def test_registry_publication_artifacts_are_scanned_as_text(
-    tmp_path: Path, suffix: str, content_kind: str
+def test_public_text_artifacts_are_scanned_as_text(
+    tmp_path: Path, filename: str, content_kind: str
 ) -> None:
-    artifact = tmp_path / f"registry{suffix}"
+    artifact = tmp_path / filename
     if content_kind == "invalid_utf8":
         artifact.write_bytes(b"generic\n\xff")
         expected_rule = "invalid_utf8"

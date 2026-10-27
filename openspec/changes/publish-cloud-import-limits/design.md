@@ -48,7 +48,7 @@ The module constants stay only as defaults for the standalone verify and the CLI
 
 For attachable storage, `max_storage_gib` is the larger of the cap and the cell's current size, `max(storage_gib, grown_storage_gib)`. A paid cell above the cap therefore never loses an import to the cap alone.
 
-Local import growth remains open. This delivery actively writes `import_limits` to NULL for local cells, including cells with an earlier object. Classification uses the actual PVC class, then the PV class, then the configured domain. A local PVC without a bound PV therefore stays unpublished. Unpublished limits preserve legacy admission, which does not raise either storage size.
+The attachable delivery keeps local limits NULL. The guarded follow-up uses D12 of `move-cloud-cells-to-local-storage`: explicit reservation mode, a fresh provider frame and a matching PVC/PV/LogicalVolume physical identity permit publication of the same limit object. Missing or expired proof actively clears an earlier object. Classification uses the actual PVC class, then the PV class, then the configured domain. An unbound local claim stays unpublished. Unpublished limits preserve legacy admission, which does not raise either storage size.
 
 cellctl compares the object or NULL with the stored value and writes only on change. The cells touch trigger does not change, so publication bumps no generation and sends no notification.
 
@@ -73,11 +73,11 @@ The raise restarts the pod once, because of the render digest. The wait reads ob
 
 The wait ends at `import_growth_deadline`, counted from the import's `created_at`. The default is 60 minutes, above `backup_deadline`, so a backup that overlaps the wait does not use it up. `CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES` sets it, in the same way as the other deadlines. On expiry cellctl fails the import with `IMPORT_STORAGE_UNAVAILABLE` through the existing cleanup.
 
-Local growth is unfinished and does not ship in this delivery. Existing local backup growth keeps its earlier room sampling, manifest sizing, quota and pod behavior. The shared cap moves to `StorageConfig` without changing that algorithm.
+The initial attachable delivery leaves local growth unfinished. In explicit guarded mode, the D12 follow-up requires an exact acknowledged provider target before every larger claim. Its no-room acknowledgement fails an unmet import requirement before the prepare Job, through existing cleanup. Unknown acknowledgement keeps waiting. The row retains its desired target and the claim retains its accepted size. Unguarded mode keeps local limits NULL and its earlier backup behavior.
 
 Before local import growth ships, one node budget must include physical allocations, accepted pending requests and same-pass increases. Cached free bytes can lag accepted expansion, so neither a same-pass counter nor pending resize deltas prove this budget. A raw pool size minus Kubernetes inventory also misses unclaimed physical volumes after control-plane recovery. The existing [node recovery procedure](../../../docs/runbooks/cloud-node-loss.md) preserves those volumes.
 
-The local followup must supply authoritative capacity and use one budget for publication, admission and every local allocation increase. It must retain accepted claim requests when growth cannot fit, leave desired size raised, and never shrink a claim. Unknown room must wait; known insufficient room must refuse with `IMPORT_STORAGE_NO_ROOM`. Tests must cover concurrent cells, restarts, lagging capacity readings and recovery with unclaimed volumes. The local cutover rehearsal must prove this behavior before local import growth ships. Hetzner delivery proceeds independently.
+The D12 local follow-up supplies authoritative capacity and uses one budget for publication, admission and every local allocation increase. It must retain accepted claim requests when growth cannot fit, leave desired size raised, and never shrink a claim. Unknown room must wait; known insufficient room must refuse with `IMPORT_STORAGE_NO_ROOM`. Tests must cover concurrent cells, restarts, lagging capacity readings and recovery with unclaimed volumes. The local cutover rehearsal must prove this behavior before local import growth ships. Hetzner delivery proceeds independently.
 
 No new observed state exists. Substrate derives `storage_ready` from the same receipt.
 
@@ -117,7 +117,7 @@ The CLI maps `IMPORT_TOO_MANY_FILES`, `IMPORT_STORAGE_LIMIT` and `IMPORT_PARTS_L
 - **Hetzner online expansion has no production record.** Every cell class allows it, but nobody has raised a live volume. The rehearsal raises one real volume and records the capacity, the claim's conditions and any pod restart.
 - **`space_factor` is an assumption.** The rehearsal measures the peak volume use of an import against `space_factor × declared bytes`.
 - **An abandoned import keeps its grown volume.** A claim cannot shrink, and the cap bounds the cost.
-- **Local growth remains open.** Local cells publish NULL until an authoritative shared budget includes physical allocations and accepted requests. Cached-capacity admission remains existing debt.
+- **Local activation remains open.** Guarded local publication requires the D12 provider and paired controller proof. Until activation, the default remains NULL. Cached-capacity admission remains debt of unguarded mode.
 
 ## Migration Plan
 

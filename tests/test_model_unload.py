@@ -29,14 +29,14 @@ def _stop_test_reaper() -> None:
 @pytest.fixture(autouse=True)
 def _reset() -> None:
     _stop_test_reaper()
-    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
+    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = embeddings._CLIP_QUERY_MODEL = None
     for g in (embeddings.BGE_GUARD, embeddings.RERANKER_GUARD, embeddings.CLIP_GUARD):
         g._inflight = 0
         g._last_activity = 0.0
     readiness.reset()
     yield
     _stop_test_reaper()
-    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
+    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = embeddings._CLIP_QUERY_MODEL = None
     readiness.reset()
 
 

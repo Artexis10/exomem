@@ -17,6 +17,7 @@ from sqlalchemy import (
     or_,
 )
 
+from .. import item_keys
 from . import native_identity, tables
 from .native_layout import MASK_BITS, NativeLayout
 from .typed_storage import _AnyValue
@@ -55,6 +56,8 @@ def current(layout: NativeLayout, name: str, *, canonical: bool = True, temporar
     columns = [row_id, identity, Column("row_version", Integer, nullable=False), *payload_columns(layout)]
     if layout.identity == native_identity.UUID16:
         columns.append(CheckConstraint(func.length(identity) == 16))
+    if layout.identity == native_identity.ORDERED:
+        columns.append(CheckConstraint(func.length(identity).between(1, item_keys.MAX_KEY_BYTES)))
     return Table(name, metadata, *columns, schema="temp" if temporary else None, sqlite_strict=True)
 
 

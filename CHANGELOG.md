@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.147.0](https://github.com/Artexis10/exomem/compare/v0.146.1...v0.147.0) (2026-10-27)
+
+
+### Features
+
+* **activation:** serve context maps by default ([#2152](https://github.com/Artexis10/exomem/issues/2152)) ([9ecd139](https://github.com/Artexis10/exomem/commit/9ecd1391cb7bb0cafd027e363c19639cda8101ea))
+* add shared note homes and reversible promotions ([#2122](https://github.com/Artexis10/exomem/issues/2122)) ([ae04ef7](https://github.com/Artexis10/exomem/commit/ae04ef7716b62508885562490e9f334069dc3bca))
+* **bench:** compare Cloud and local recall over the same MCP wire ([#2148](https://github.com/Artexis10/exomem/issues/2148)) ([059bd6b](https://github.com/Artexis10/exomem/commit/059bd6be2bc2237eda10e24f47d7e1699c400149))
+* capture original files through session upload handoffs ([#2132](https://github.com/Artexis10/exomem/issues/2132)) ([c333eb4](https://github.com/Artexis10/exomem/commit/c333eb423f1daa96508f6ca45414c7b88470542c))
+* **cloud:** accept gateway upload handoffs on selected cells ([#2144](https://github.com/Artexis10/exomem/issues/2144)) ([669e969](https://github.com/Artexis10/exomem/commit/669e9691a42a5992f53845fa434bae3d5e0f49fb))
+* **cloud:** isolate cell keys and protect content scratch ([#2126](https://github.com/Artexis10/exomem/issues/2126)) ([4acf160](https://github.com/Artexis10/exomem/commit/4acf160e4efa381d17eb9c1c9f5f7cb35450ca6a))
+* **cloud:** publish import limits and wait for safe storage growth ([#2121](https://github.com/Artexis10/exomem/issues/2121)) ([dd74a41](https://github.com/Artexis10/exomem/commit/dd74a41cdd92b149c85d961faa7499cd4501c000))
+* **search:** carry a bounded excerpt on compact page hits ([#2149](https://github.com/Artexis10/exomem/issues/2149)) ([4b2d4ec](https://github.com/Artexis10/exomem/commit/4b2d4ec55e9c9b72cf3680b9096f07732b0b2629))
+
+
+### Bug Fixes
+
+* **benchmarks:** stop prepared servers before copying evidence ([#2138](https://github.com/Artexis10/exomem/issues/2138)) ([0928a13](https://github.com/Artexis10/exomem/commit/0928a13bca515128c7f4a28f43f6248e96f69aa5))
+* **capture:** tolerate legacy pages during identity lookup ([#2127](https://github.com/Artexis10/exomem/issues/2127)) ([be0f9cc](https://github.com/Artexis10/exomem/commit/be0f9cc9e73dbfe27033717560299fa989ba5fcd))
+* **ci:** stop the MCP read latency gate from failing full runs until it fits its budget ([#2158](https://github.com/Artexis10/exomem/issues/2158)) ([6497c63](https://github.com/Artexis10/exomem/commit/6497c63d1a163945226a799541b10a07be563df5))
+* defer derived work during bulk imports ([#2124](https://github.com/Artexis10/exomem/issues/2124)) ([8aa0a40](https://github.com/Artexis10/exomem/commit/8aa0a40e0d419f5b2b2570685b0cf0e711a20bed))
+* guide full-source compilation and relation review ([#2136](https://github.com/Artexis10/exomem/issues/2136)) ([1c28844](https://github.com/Artexis10/exomem/commit/1c288447861562872d7bbba65557b02b6e262070))
+* hand migrated file custody to the SQL owner ([#2135](https://github.com/Artexis10/exomem/issues/2135)) ([0934d61](https://github.com/Artexis10/exomem/commit/0934d617bba84e19fc5aa9289fd0618789d4d57c))
+* preserve canonical query sources without rendering views ([#2143](https://github.com/Artexis10/exomem/issues/2143)) ([0a2fcad](https://github.com/Artexis10/exomem/commit/0a2fcad3831f499cf75c41d6fb1da877abb1ffe5))
+* restore Python 3.11 homes imports ([#2133](https://github.com/Artexis10/exomem/issues/2133)) ([93e9722](https://github.com/Artexis10/exomem/commit/93e9722882ca8c75f1c60745bd8f7a32d35d437c))
+* **sensing:** bound status details and guard projection rebuilds ([#2128](https://github.com/Artexis10/exomem/issues/2128)) ([3f794e3](https://github.com/Artexis10/exomem/commit/3f794e35bc137050b007039b8a009dcf5ff91915))
+* **store:** keep a restored store unadmitted while its cutover replaces it ([#2146](https://github.com/Artexis10/exomem/issues/2146)) ([0571d3d](https://github.com/Artexis10/exomem/commit/0571d3d0533f314a58dc04892569088dab35e7bf))
+* **store:** refresh stale query history before MCP release ([#2130](https://github.com/Artexis10/exomem/issues/2130)) ([a9a33cb](https://github.com/Artexis10/exomem/commit/a9a33cbaa7b930deff1c6ad93f009ef708e0a8da))
+
+
+### Performance
+
+* cut Records and Planning read, query and list latency at the MCP boundary ([#2151](https://github.com/Artexis10/exomem/issues/2151)) ([c77aa58](https://github.com/Artexis10/exomem/commit/c77aa584acdb507061b41408758906155343be6d))
+* **recall:** add paired latency measurement and request CPU accounting ([#2101](https://github.com/Artexis10/exomem/issues/2101)) ([c2eba4c](https://github.com/Artexis10/exomem/commit/c2eba4c38c0ee137e435a1f4ec53366e906a9b63))
+* **recall:** reuse published release verdicts for unit ranking ([#2129](https://github.com/Artexis10/exomem/issues/2129)) ([fd5f01a](https://github.com/Artexis10/exomem/commit/fd5f01a13d5ad70825e8de4aa4e38a6cae28e808))
+* skip store item views in the Records legacy tracker sweep ([#2147](https://github.com/Artexis10/exomem/issues/2147)) ([fe57078](https://github.com/Artexis10/exomem/commit/fe5707848a8869c5b0aa4c2bc66cb1ce53a04d13))
+
 ## [0.146.1](https://github.com/Artexis10/exomem/compare/v0.146.0...v0.146.1) (2026-10-26)
 
 

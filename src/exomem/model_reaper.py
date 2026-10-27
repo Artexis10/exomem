@@ -173,7 +173,7 @@ def default_slots() -> list[ResourceSlot]:
             is_model=True,
         ),
         ResourceSlot(
-            "clip", lambda: e._CLIP_MODEL is not None,
+            "clip", lambda: e._CLIP_MODEL is not None or e._CLIP_QUERY_MODEL is not None,
             e.CLIP_GUARD.inflight, e.CLIP_GUARD.last_activity, e.unload_clip_model,
             is_model=True,
         ),

@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +39,10 @@ STOP_LIMIT_ENV = "EXOMEM_MEDIA_STOP_LIMIT"
 JOB_TIMEOUT_ENV = "EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS"
 #: The budget entry that applies to media whose kind needs no engine.
 DEFAULT_BUDGET_KEY = "default"
+#: The budget entry of the CLIP image tower. It is no media engine: it has no switch of
+#: its own and serves no kind, but a child that embeds an image loads it beside the
+#: extraction engine and needs its memory too.
+CLIP_BUDGET_KEY = "clip"
 
 #: Stop kinds the job ledger records. Hard-limit failures can mark a file over the
 #: memory budget and watchdog stops over the time budget; a pressure stop never marks
@@ -111,6 +115,21 @@ class Settings:
     def budget_for(self, engine: str | None) -> Budget:
         return self.budgets.get(engine or "", self.default_budget)
 
+    def budget_for_loaded(self, engines: Iterable[str | None]) -> Budget:
+        """The budget of one child that loads every one of `engines` (none: the default).
+
+        Anonymous memory adds: each engine keeps its own heap until the child exits.
+        VmData does not: it counts clean file mappings of model weights, and the child's
+        limit is its largest entry. The runbook records the measured child that holds the
+        speech engine and the tower, which fits the speech entry; adding the entries
+        would grant more than any measurement needs.
+        """
+        budgets = [self.budget_for(engine) for engine in engines] or [self.default_budget]
+        return Budget(
+            sum(budget.anon_bytes for budget in budgets),
+            max(budget.vmdata_bytes for budget in budgets),
+        )
+
 
 @dataclass(frozen=True)
 class CellMemory:
@@ -142,8 +161,8 @@ def _number(values: Mapping[str, str], name: str, default: float, *, low: float,
 def _budgets(raw: str, cell_max: int | None) -> dict[str, Budget]:
     """Parse EXOMEM_MEDIA_BUDGETS; an entry that cannot hold keeps its default.
 
-    A budget at or below zero admits nothing, and one above the cell's limit can
-    never be met, so neither is an operator's real intent.
+    Anonymous memory must fit the cell. VmData includes clean mapped weights,
+    so its virtual limit can exceed the cell's physical limit.
     """
     try:
         parsed = json.loads(raw)
@@ -155,7 +174,8 @@ def _budgets(raw: str, cell_max: int | None) -> dict[str, Budget]:
     budgets: dict[str, Budget] = {}
     for key, entry in parsed.items():
         engine = str(key)
-        if engine != DEFAULT_BUDGET_KEY and engine not in media_engines.ENGINES:
+        # A closed set the code implements: each engine, the CLIP tower and the default.
+        if engine not in (DEFAULT_BUDGET_KEY, CLIP_BUDGET_KEY, *media_engines.ENGINES):
             _warn_once(f"{BUDGETS_ENV} names unknown engine {engine!r}; ignored")
             continue
         try:
@@ -164,9 +184,10 @@ def _budgets(raw: str, cell_max: int | None) -> dict[str, Budget]:
         except (TypeError, KeyError, ValueError):
             _warn_once(f"{BUDGETS_ENV}[{engine!r}] needs integer anon_mib and vmdata_mib; using the default")
             continue
-        if anon <= 0 or vmdata <= 0 or (cell_max is not None and max(anon, vmdata) > cell_max):
+        # VmData includes clean file mappings and can exceed physical memory.max.
+        if anon <= 0 or vmdata <= 0 or (cell_max is not None and anon > cell_max):
             _warn_once(
-                f"{BUDGETS_ENV}[{engine!r}] must be above 0 and within the cell's memory.max; using the default"
+                f"{BUDGETS_ENV}[{engine!r}] must be positive with anon within memory.max; using the default"
             )
             continue
         budgets[engine] = Budget(anon, vmdata)
@@ -178,7 +199,7 @@ def settings(env: Mapping[str, str] | None = None, cell: CellMemory | None = Non
 
     Falling back keeps media running under conservative values rather than stopping
     every job on an operator typo; the warning names the value. `cell`, when given,
-    bounds each budget by the cell's memory.max.
+    bounds the anonymous-memory budget by the cell's memory.max.
     """
     values = os.environ if env is None else env
     raw = (values.get(BUDGETS_ENV) or "").strip()
