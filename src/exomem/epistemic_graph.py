@@ -10260,6 +10260,38 @@ def _standing_marker_owns_the_pass(
     ) is not None and _caller_can_carry_pending(vault_root, mutation_coordinator)
 
 
+def _failure_left_to_the_queue(
+    vault_root: Path,
+    error: BaseException,
+    required: graph_sync.GraphSyncCheckpoint,
+    paths: Iterable[Path],
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether a failed dispatch's repair is this write's own paths, queued here.
+
+    A failure that may not mark the registry -- a busy boundary, a refused
+    publication, a moved projection, a rebuild already running -- says the
+    registry saw this write and only this projection did not land, so the
+    write's paths are the whole repair. A caller that may stop at queued queues
+    them for the drain instead of registering a whole-vault pass. An
+    unclassifiable failure has marked the whole vault, and a failed enqueue
+    loses nothing only if the pass still runs, so both register as before.
+    """
+    if may_mark_external_pending(error) or not _caller_can_carry_pending(
+        vault_root, mutation_coordinator
+    ):
+        return False
+    scope = {rel for path in paths if (rel := _vault_rel(vault_root, Path(path))) is not None}
+    try:
+        index = EpistemicGraphIndex(vault_root, mutation_coordinator=mutation_coordinator)
+        return index._queue_graph_repair(
+            scope, reason="graph_dispatch_failed", graph_checkpoint=required
+        )
+    except Exception:  # noqa: BLE001 - an unqueued repair registers the pass instead
+        log.warning("failed graph dispatch could not queue its repair", exc_info=True)
+        return False
+
+
 def _caller_has_pending_boundary(
     vault_root: Path,
     mutation_coordinator: mutation_lock.VaultMutationCoordinator,
@@ -10561,8 +10593,8 @@ def upsert_after_write(
         return GraphDispatchResult.not_required()
     required = graph_sync.read_checkpoint(vault_root)
     mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None
+    created = list(created_paths)
     try:
-        created = list(created_paths)
         replay: dict[str, bool] = {"replayed": True} if replayed else {}
         from .writer_lease import active_manager
 
@@ -10835,6 +10867,10 @@ def upsert_after_write(
         )
         if required is not None:
             assert mutation_coordinator is not None
+            if _failure_left_to_the_queue(
+                vault_root, error, required, (*written_paths, *created), mutation_coordinator
+            ):
+                return GraphDispatchResult("deferred", "graph_repair_queued", required)
             return _join_registered_standalone(
                 vault_root,
                 _registered_or_failure(vault_root, required, None, mutation_coordinator),
@@ -10848,6 +10884,10 @@ def upsert_after_write(
         log.warning("graph post-commit dispatch failed", exc_info=True)
         if required is not None:
             assert mutation_coordinator is not None
+            if _failure_left_to_the_queue(
+                vault_root, error, required, (*written_paths, *created), mutation_coordinator
+            ):
+                return GraphDispatchResult("deferred", "graph_repair_queued", required)
             return _join_registered_standalone(
                 vault_root,
                 _registered_or_failure(vault_root, required, None, mutation_coordinator),

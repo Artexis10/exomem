@@ -418,6 +418,13 @@ that generation, and report a queued-repair code. It SHALL NOT register a second
 With no standing marker, or when the enqueue or the marker advance fails, the caller
 registers the pass as before.
 
+When a dispatch fails for a caller that may stop at queued, and the failure is one that
+may not mark the registry (a busy boundary, a refused publication, a moved projection or
+a rebuild already running), the caller SHALL queue the write's own paths at its
+generation and report a queued-repair code. Such a failure says that the registry
+observed the write and only this projection did not publish. An unclassifiable failure
+marks the whole vault, so it registers the pass as before, and so does a failed enqueue.
+
 The file watcher SHALL NOT mark a graph fan-out that it could not complete as an external
 change when that repair is already owned: a whole-vault marker stands, or the batch's own
 dispatch registered a rebuild or left every graph input of the batch on the queue. Such a
@@ -443,6 +450,14 @@ watcher still marks the whole vault.
 - **THEN** its paths are queued at its generation and the marker covers that generation
 - **AND** the request reports a queued-repair code and registers no rebuild
 - **AND** a request whose paths cannot be queued still registers the pass
+
+#### Scenario: A background dispatch that meets a busy boundary queues its paths
+
+- **WHEN** a background caller's graph dispatch fails because another graph operation
+  holds the vault mutation boundary
+- **THEN** the write's paths are queued and the dispatch reports a queued-repair code
+- **AND** no whole-vault pass runs
+- **AND** an unclassifiable dispatch failure still registers the pass
 
 #### Scenario: An owned fan-out repair is not marked as an external change
 

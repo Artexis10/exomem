@@ -621,3 +621,17 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   red on the previous head.
 - [ ] 11.7 Sandbox A/B (orchestrator): zero whole-vault passes per ordinary governed
   write on the real managed worker with its watcher on; drift 0.
+- [x] 11.8 A classified dispatch failure is queued repair for a caller that may stop
+  at queued. The sandbox A/B found the route. The derived drain's dispatch met
+  `MUTATION_BUSY` while the graph drain held the boundary, and the failure branch
+  registered a whole-vault pass for one write. `_failure_left_to_the_queue` queues the
+  write's paths when `may_mark_external_pending` is false and the caller may stop at
+  queued; otherwise the branch registers as before. Evidence:
+  `test_a_background_dispatch_that_meets_a_busy_boundary_stops_at_queued`, red on the
+  previous head, and
+  `test_a_background_dispatch_that_fails_unclassified_still_registers`, which fails
+  when the classification is dropped. Scoped suites (all graph modules, freshness
+  liveness, bounded join, index_sync and relation-registry sync): 975 passed, 13
+  skipped, 8 failed, all in `test_graph_post_handoff_writes.py`. A serial rerun of that
+  file fails seven, each on a timing bound, and the previous head fails the same file
+  on timing bounds on this host.
