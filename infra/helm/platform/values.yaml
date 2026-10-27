@@ -278,6 +278,35 @@ artifactBroker:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
 
+# add-cloud-media-store: the media edge, the one place that holds the bucket's
+# credential. Cells reach it through a literal Service IP on port 8769. It runs
+# the broker's image (`artifactBroker.image`). `cellIds` lists the cells it serves,
+# such as one canary; `allCells` serves every cell, including each cell created
+# later, and works beside the list. Raise a cell's number in `credentialEpochs`
+# to replace its credential and revoke the old one. `storePolicy` holds the
+# eviction and hydration settings cells read beside their keys. Create the
+# signing key and the edge's Secrets first (docs/runbooks/cloud-media-edge.md).
+mediaEdge:
+  enabled: false
+  endpoint: ""
+  cellIds: []
+  allCells: false
+  credentialEpochs: {}
+  maxObjectBytes: 1073741824
+  storePolicy: {}
+  bucket: ""
+  b2SecretName: exomem-media-edge-b2
+  signingKeySecretName: exomem-media-edge-signing-key
+  signingKeySecretKey: signing-key
+  publicKeySecretName: exomem-media-edge-public-key
+  publicKeySecretKey: public-key
+  state:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
 cloudGateway:
   enabled: false
   artifactTransportEnabled: false

@@ -12,6 +12,7 @@ import os
 import re
 from datetime import timedelta
 
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
@@ -21,6 +22,7 @@ from .capacity import CapacityConfig, SharedWorkerPolicy
 from .decide import ReconcileConfig
 from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
+from .media_edge import MediaEdgeConfig
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
@@ -174,6 +176,33 @@ def build_alert_thresholds() -> AlertThresholds:
     )
 
 
+def _json_env(name: str, default: str, kind: type, what: str):
+    value = json.loads(os.environ.get(name, default))
+    if not isinstance(value, kind):
+        raise ValueError(f"{what} must be a JSON {kind.__name__}")
+    return value
+
+
+def build_media_edge_config() -> MediaEdgeConfig | None:
+    """add-cloud-media-store: None while the chart leaves the media edge off. A half-set
+    configuration refuses at startup, so a cell never renders without the keys it needs."""
+
+    url = os.environ.get("CELLCTL_MEDIA_EDGE_URL", "")
+    if not url:
+        return None
+    with open(os.environ["CELLCTL_MEDIA_EDGE_SIGNING_KEY_FILE"], "rb") as handle:
+        signing_key = load_pem_private_key(handle.read(), password=None)
+    return MediaEdgeConfig(
+        url=url,
+        max_object_bytes=int(os.environ["CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES"]),
+        signing_key=signing_key,
+        cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_CELL_IDS", "[]", list, "media edge cell IDs")),
+        all_cells=_json_env("CELLCTL_MEDIA_EDGE_ALL_CELLS", "false", bool, "media edge all-cells switch"),
+        credential_epochs=_json_env("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", "{}", dict, "media edge credential epochs"),
+        store_policy=_json_env("CELLCTL_MEDIA_EDGE_STORE_POLICY", "{}", dict, "media store policy"),
+    )
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -225,6 +254,7 @@ def build_cluster_config() -> ClusterConfig:
         artifact_broker_url=os.environ.get("CELLCTL_ARTIFACT_BROKER_URL", ""),
         artifact_broker_cell_ids=tuple(artifact_cell_ids),
         artifact_broker_all_cells=artifact_all_cells,
+        media_edge=build_media_edge_config(),
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),

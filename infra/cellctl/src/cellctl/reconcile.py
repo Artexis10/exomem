@@ -64,6 +64,7 @@ from .exports import job_name as export_job_name
 from .manifests import (
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
+    GATEWAY_NAMESPACE,
     HOURLY_RETENTION_ARGS,
     RENDER_VERSION,
     RETENTION_ARGS,
@@ -83,6 +84,18 @@ from .manifests import (
     render_import_job,
     render_restore_job,
     render_volume_snapshot,
+)
+from .media_edge import (
+    ActiveSet,
+    MediaEdgeConfig,
+    mint_bundle,
+    open_bundle,
+    plan_active_set,
+    read_active_set,
+    render_active_set,
+    sign_credential,
+    unwrap_bundle,
+    wrap_bundle,
 )
 from .rollout import (
     current_image,
@@ -270,6 +283,9 @@ class LoopMemory:
     # A volume confirmed absent stays absent: its id is never reused.
     volumes_absent: set[str] = field(default_factory=set)
     refusals: dict[str, RefusalPark] = field(default_factory=dict)
+    # add-cloud-media-store D6: the newest active set generation the edge reported as loaded and
+    # drained. A restart forgets it and asks the edge again; it is never assumed.
+    media_edge_confirmed_generation: int = 0
     # B2 keys cannot change after creation, so a key listed with every
     # capability the backup needs is never listed again by this process.
     object_storage_keys_verified: set[str] = field(default_factory=set)
@@ -437,6 +453,8 @@ class ClusterConfig:
     # here only after it is on in each existing cell through the selection above, so the
     # default changes no existing cell's render. An empty default renders as before.
     media_engine_fleet_default: tuple[str, ...] = ()
+    # add-cloud-media-store D4-D6: the media edge's settings; None leaves every cell as before.
+    media_edge: MediaEdgeConfig | None = None
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -544,6 +562,10 @@ class ClusterGateway:
     def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation: ...  # pragma: no cover
     def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
     def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]: ...  # pragma: no cover
+    # Only called when ClusterConfig.media_edge is set.
+    def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
+    def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
+    def media_edge_generation(self, url: str) -> int: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -657,12 +679,37 @@ def _augment_deletion_observation(
     )
 
 
+async def _resolve_media_bundle(connection: asyncpg.Connection, current: CellRow, root: bytes) -> dict[str, object]:
+    """D5: the cell's media key bundle, minted once and wrapped under its root. Half a pair of
+    columns is damage, not an unset bundle, so it is refused rather than minted over."""
+    from .secrets import CONTENT_KEY_VERSION
+
+    if (current.media_key_wrapped is None) != (current.media_key_version is None):
+        raise ValueError("incomplete media key state")
+    if current.media_key_wrapped is None:
+        raw, version = mint_bundle(), CONTENT_KEY_VERSION
+        await db.write_observed(connection, current.cell_id, {
+            "media_key_wrapped": wrap_bundle(root, raw, cell_id=current.cell_id),
+            "media_key_version": version,
+        })
+    else:
+        version = current.media_key_version
+        raw = unwrap_bundle(root, current.media_key_wrapped, cell_id=current.cell_id, key_version=version)
+    bundle = open_bundle(raw)
+    return {
+        "media_age_identity": bundle.identity,
+        "media_recipient": bundle.recipient,
+        "media_name_key": bundle.name_key,
+        "media_key_version": version,
+    }
+
+
 async def _resolve_secret_material(
-    connection: asyncpg.Connection, row: CellRow, secrets_config: SecretsConfig
+    connection: asyncpg.Connection, row: CellRow, secrets_config: SecretsConfig, *, media: bool = False
 ) -> tuple[dict[str, object], int]:
     """Ensures the write-once wrapped keys exist, then returns the plaintext
     material this pass's Secret render needs, and the backup key version in
-    use. Never persists plaintext."""
+    use. With `media`, the same for the cell's media key bundle. Never persists plaintext."""
 
     bearer_current = derive_cell_bearer(secrets_config.cell_token_key_current, row.cell_id)
     bearer_previous = (
@@ -673,6 +720,7 @@ async def _resolve_secret_material(
 
     from .secrets import CONTENT_KEY_VERSION, derive_volume_passphrase, generate_backup_data_key
 
+    media_material: dict[str, object] = {}
     async with connection.transaction():
         current = await db.lock_cell(connection, row.cell_id)
         if current.desired_state == "deleted" or current.content_keys_retired_at is not None:
@@ -704,11 +752,15 @@ async def _resolve_secret_material(
                 raise ValueError("root has no backup child")
             password = unwrap_secret(root, current.backup_key_wrapped, cell_id=row.cell_id,
                 column="backup_key_wrapped", key_version=current.backup_key_version)
+        # After either branch: a root minted just now has no bundle yet either.
+        if media:
+            media_material = await _resolve_media_bundle(connection, current, root)
     return {
         "bearer_current": bearer_current,
         "bearer_previous": bearer_previous,
         "backup_password": password.hex(),
         "volume_passphrase": derive_volume_passphrase(root, cell_id=row.cell_id),
+        **media_material,
     }, CONTENT_KEY_VERSION
 
 
@@ -877,7 +929,11 @@ def _delete_object_storage_key(object_storage, key_id: str, cell_id: str) -> Non
 
 
 def _compute_render_digest(
-    row: CellRow, cluster_config: ClusterConfig, secrets_config: SecretsConfig, storage_class: str = STORAGE_CLASS
+    row: CellRow,
+    cluster_config: ClusterConfig,
+    secrets_config: SecretsConfig,
+    storage_class: str = STORAGE_CLASS,
+    media_credential_version: int | None = None,
 ) -> str:
     """D4: a SHA-256 over the non-secret render inputs -- the renderer
     version, chart-level cell settings, the set of cell_token_key versions
@@ -909,6 +965,16 @@ def _compute_render_digest(
         # Only a cell whose engine set changes sees its digest move: a canary restarts
         # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
+    edge = cluster_config.media_edge
+    if edge is not None and media_credential_version is not None:
+        # A rotated credential or changed policy restarts one cell; an unchanged set restarts none.
+        material["media_edge"] = {
+            "url": edge.url,
+            "key_version": row.media_key_version,
+            "credential_version": media_credential_version,
+            "max_object_bytes": edge.max_object_bytes,
+            "policy": dict(edge.store_policy),
+        }
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on
         # a Hetzner volume keeps the digest it had before local storage.
@@ -1158,6 +1224,58 @@ def _log_orphan_namespaces(cluster: ClusterGateway, rows: list[CellRow], now: da
             logger.warning("cellctl: orphan namespace %s is labelled for cell %s, which has no row; left in place", namespace, cell_id)
 
 
+def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
+    """The credential version the edge admits for this cell; None when the edge does not serve it."""
+    edge = cluster_config.media_edge
+    if edge is None or active is None or row.desired_state == "deleted" or not edge.selects(row.cell_id):
+        return None
+    return active.cells.get(row.cell_id)
+
+
+def _publish_media_edge_set(
+    cluster: ClusterGateway, edge: MediaEdgeConfig, cell_ids: list[str], now: datetime
+) -> ActiveSet | None:
+    """D6: publish the active set before any Secret that carries a credential for it.
+
+    Returns the set the edge is to load, or None when the cluster would not say, in which case
+    no selected cell renders this pass. An unchanged set writes nothing."""
+    try:
+        current = cluster.read_media_edge_active_set()
+        published = read_active_set(current)
+        planned = plan_active_set(published, edge.selection(cell_ids), int(now.timestamp() * 1000))
+        manifest = render_active_set(planned, GATEWAY_NAMESPACE)
+        if current != manifest["data"]:
+            cluster.apply_media_edge_active_set(manifest)
+            logger.info("cellctl: media edge active set published at generation %d for %d cell(s)",
+                        planned.generation, len(planned.cells))
+        return planned
+    except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
+        logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
+        return None
+
+
+def _media_edge_settled(
+    cluster: ClusterGateway, edge: MediaEdgeConfig, active: ActiveSet | None, memory: LoopMemory
+) -> bool:
+    """Whether the edge has loaded the published set and drained every request of the one before.
+
+    A revocation is done only when the edge says so. An edge that is down, behind or unreadable is
+    unsettled, and no failure counts as confirmation."""
+    if active is None:
+        return False
+    if active.generation <= memory.media_edge_confirmed_generation:
+        return True
+    try:
+        reported = cluster.media_edge_generation(edge.url)
+    except Exception as error:  # noqa: BLE001 - unreadable is unsettled, not confirmed
+        logger.error("cellctl could not read the media edge generation: %s", _describe_error(error))
+        return False
+    if reported < active.generation:
+        return False
+    memory.media_edge_confirmed_generation = active.generation
+    return True
+
+
 async def reconcile_once(
     connection: asyncpg.Connection,
     cluster: ClusterGateway,
@@ -1215,6 +1333,15 @@ async def reconcile_once(
     _log_orphan_namespaces(cluster, rows, now, memory)
     # D4 API budget: only cleanup observed at the current generation retires a row.
     rows = [row for row in rows if row.cell_id in committed]
+    # D6: the media edge's set comes from every committed live cell, observed or not. A cell this
+    # pass could not observe must not drop out of the set and lose its credential.
+    media_active: ActiveSet | None = None
+    media_unsettled = False
+    if cluster_config.media_edge is not None:
+        media_active = _publish_media_edge_set(
+            cluster, cluster_config.media_edge, [row.cell_id for row in rows if row.desired_state != "deleted"],
+            now)
+        media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
     # D4 API budget: one list per kind for the whole fleet, not reads per cell.
@@ -1254,7 +1381,8 @@ async def reconcile_once(
     )
     render_digests = {
         row.cell_id: _compute_render_digest(
-            row, cluster_config, secrets_config, _claim_class(cluster_config, observations[row.cell_id])
+            row, cluster_config, secrets_config, _claim_class(cluster_config, observations[row.cell_id]),
+            _media_credential_version(cluster_config, media_active, row),
         )
         for row in rows
     }
@@ -1317,6 +1445,7 @@ async def reconcile_once(
     # not hold the whole fleet at the fast cadence.
     fast = (
         fleet_unobserved
+        or media_unsettled
         or upgrade_candidate is not None
         or bool(relocation_candidates)
         or bool(backup_candidates)
@@ -1346,6 +1475,7 @@ async def reconcile_once(
                 refusal_parked=row.cell_id in parked,
                 memory=memory,
                 storage_room=storage_room,
+                media_active=media_active,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
@@ -1723,6 +1853,7 @@ async def _reconcile_row(
     memory: LoopMemory,
     start_relocation: bool = False,
     storage_room: StorageRoom | None = None,
+    media_active: ActiveSet | None = None,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -2057,7 +2188,14 @@ async def _reconcile_row(
     refused: list[tuple[str, str]] = []
     applied_cleanly = False
     if decision.apply_manifests and decision.image:
-        secret_material, backup_key_version = await _resolve_secret_material(connection, row, secrets_config)
+        edge = cluster_config.media_edge
+        media_selected = edge is not None and row.desired_state != "deleted" and edge.selects(row.cell_id)
+        media_version = _media_credential_version(cluster_config, media_active, row)
+        if media_selected and media_version is None:
+            # Fail closed: rendering without the edge would strip a running cell's store and read evicted originals as deleted.
+            raise ValueError("the media edge active set does not admit this cell")
+        secret_material, backup_key_version = await _resolve_secret_material(
+            connection, row, secrets_config, media=media_selected)
         # A hold's Jobs read the key from the Secret, so it is only checked
         # and replaced outside a hold, including the pass that starts one.
         key_id, key_secret, b2_key_version = await _resolve_object_storage_key(
@@ -2076,10 +2214,12 @@ async def _reconcile_row(
         storage_class = _claim_class(cluster_config, observation, relocating=decision.relocation_volume is not None,
                                      target=row.relocation_target_storage_class)
         render_digest = _compute_render_digest(
-            dataclass_replace(row, backup_key_version=backup_key_version, b2_key_version=b2_key_version),
+            dataclass_replace(row, backup_key_version=backup_key_version, b2_key_version=b2_key_version,
+                              media_key_version=secret_material.get("media_key_version", row.media_key_version)),
             cluster_config,
             secrets_config,
             storage_class,
+            media_version,
         )
         # D6/D8: the backup-retry-after backoff must survive a hold ending,
         # so unless this decision explicitly changes it, the currently
@@ -2100,6 +2240,14 @@ async def _reconcile_row(
             retry_minutes = observation.statefulset_backup_retry_minutes
         resources, placement = cluster_config.workload_for_cell(row.cell_id)
         local_volume = cluster_config.storage.is_local(storage_class)
+        media_fields: dict[str, object] = {}
+        if media_selected:
+            media_fields = {
+                "media_edge_url": edge.url,
+                "media_edge_credential": sign_credential(edge.signing_key, cell_id=row.cell_id, version=media_version),
+                "media_max_object_bytes": edge.max_object_bytes,
+                "media_store_policy": dict(edge.store_policy),
+            }
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
@@ -2135,6 +2283,7 @@ async def _reconcile_row(
             b2_key_id=key_id,
             b2_key_secret=key_secret,
             **secret_material,
+            **media_fields,
         )
 
         # D6 step 3: the first apply of a target image inside an upgrade

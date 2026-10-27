@@ -37,6 +37,7 @@ from .manifests import (
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
     CLONE_CLAIM_NAME,
+    GATEWAY_NAMESPACE,
     GROW_STORAGE_ANNOTATION,
     HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
@@ -56,6 +57,7 @@ from .manifests import (
     hold_job_name,
     namespace_name,
 )
+from .media_edge import ACTIVE_SET_NAME, read_generation
 from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
 from .storage.topolvm import LocalVolumeState, LogicalVolume
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
@@ -241,6 +243,28 @@ class ClusterClient:
         if key not in data:
             raise KeyError(f"secret {namespace}/{name} has no key {key}")
         return base64.b64decode(data[key]).decode("utf-8").strip()
+
+    def read_media_edge_active_set(self) -> dict[str, str] | None:
+        """add-cloud-media-store D6: the edge's active-set ConfigMap data, None before the first publish.
+        The chart grants `get` on that ConfigMap alone."""
+
+        try:
+            return dict(self._core.read_namespaced_config_map(ACTIVE_SET_NAME, GATEWAY_NAMESPACE).data or {})
+        except ApiException as error:
+            if _not_found(error):
+                return None
+            raise
+
+    def apply_media_edge_active_set(self, manifest: dict) -> None:
+        """Publish the active set. Admission confines cellctl to this one ConfigMap."""
+
+        metadata = manifest["metadata"]
+        if manifest["kind"] != "ConfigMap" or (metadata["namespace"], metadata["name"]) != (GATEWAY_NAMESPACE, ACTIVE_SET_NAME):
+            raise ValueError("cellctl publishes only the media edge active set")
+        self.apply(manifest)
+
+    def media_edge_generation(self, url: str) -> int:
+        return read_generation(url)
 
     def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
         """Tasks 5.5 and 5.6: the `/metrics` text of each node's pod that
