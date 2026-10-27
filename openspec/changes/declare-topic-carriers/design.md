@@ -105,10 +105,9 @@ The producer runs for the owner only. Its evidence aggregates the whole vault, a
 Each item's fingerprint covers:
 - the carrier identity;
 - the registry hashes;
-- a bucketed unfiled count;
-- the deterministic sample.
+- a bucketed unfiled count.
 
-So a single new page does not re-offer deferred advice, and a material change does.
+The deterministic sample is evidence only, because any sample over a growing set changes when a page lands. So a single new page does not re-offer deferred advice, and a material change does.
 
 The consideration reaches ordinary work in two places:
 - **After a committed write.** The producer reads the written page's own folder chain, tags and project keys from the page. It counts only those carriers, with indexed queries, and offers at most one item in the single advisory slot when the slot is free. A whole-vault ranking never runs on the write path.

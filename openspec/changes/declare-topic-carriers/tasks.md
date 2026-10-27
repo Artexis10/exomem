@@ -13,7 +13,7 @@
 ## 3. Vocabulary family
 
 - [x] 3.1 Register `topic-carrier/v1` under the agent-led vocabulary workflow with `defer` as its only decision, its choice contract, review-family mapping, freshness check and bootstrap listing.
-- [x] 3.2 Produce owner-only considerations: the written page's own carriers after a committed write, and a bounded vault ranking in explicit review, with a fingerprint over the carrier, registry hashes, a bucketed count and a deterministic sample.
+- [x] 3.2 Produce owner-only considerations: the written page's own carriers after a committed write, and a bounded vault ranking in explicit review, with a fingerprint over the carrier, the registry hashes and a bucketed unfiled count.
 
 ## 4. Onboarding and skill
 
