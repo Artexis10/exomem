@@ -1474,3 +1474,103 @@ def test_attachable_only_fleet_receives_the_shared_cap(monkeypatch: pytest.Monke
     assert storage.local is None and storage.max_cell_gib == 24
     refused = _helm_render("--set", "cellStorage.maxCellGib=24", "--set", "cellStorage.local.maxCellGib=28")
     assert refused.returncode != 0 and "cellStorage.maxCellGib and cellStorage.local.maxCellGib must agree" in refused.stderr
+
+
+MEDIA_SLOT_ARGS = (
+    "--set", "mediaSlotLease.enabled=true",
+    "--set-string", "mediaSlotLease.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "mediaSlotLease.endpoint=http://10.43.0.26:8768",
+    "--set-json", 'mediaSlotLease.cellIds=["aaaaaaaaaaaaaaaa"]',
+)
+
+
+def _admission_expression(documents: list[dict[str, Any]], message_start: str) -> str:
+    policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    return next(v["expression"] for v in policy["spec"]["validations"] if v["message"].startswith(message_start))
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_media_slot_lease_is_default_off_and_leaves_no_trace_in_the_chart() -> None:
+    documents = _helm_template()
+    assert not any(doc["metadata"]["name"] == "exomem-media-slot-lease" for doc in documents)
+    cellctl = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
+    assert not any("MEDIA_SLOT" in e["name"] for e in cellctl["env"])
+    expression = _admission_expression(documents, "cellctl may write runtime-ingress")
+    assert "8768" not in expression and "media-slot" not in expression
+    # Turning the broker on beside the off switch changes nothing about the lease.
+    with_broker = _helm_template(*ARTIFACT_BROKER_ARGS)
+    assert "media-slot" not in _admission_expression(with_broker, "cellctl may write runtime-ingress")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_media_slot_lease_holds_no_secret_reaches_nothing_and_admits_only_cell_runtimes() -> None:
+    documents = _helm_template(*MEDIA_SLOT_ARGS)
+    deployment = _find(documents, "Deployment", "exomem-media-slot-lease")
+    assert deployment["spec"]["replicas"] == 1 and deployment["spec"]["strategy"] == {"type": "Recreate"}
+    pod = deployment["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    container, = pod["containers"]
+    assert container["command"] == ["python", "-m", "exomem.media_slot_lease"]
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert all("valueFrom" not in e for e in container["env"])
+    assert {e["name"]: e["value"] for e in container["env"]} == {
+        "EXOMEM_MEDIA_SLOT_POOL_MIB": "1280", "EXOMEM_MEDIA_SLOT_QUEUE_SECONDS": "60",
+        "EXOMEM_MEDIA_SLOT_MAX_JOB_SECONDS": "900", "EXOMEM_MEDIA_SLOT_MARGIN_SECONDS": "60",
+        "TMPDIR": "/tmp",
+    }
+    service = _find(documents, "Service", "exomem-media-slot-lease")["spec"]
+    assert service["clusterIP"] == "10.43.0.26"
+    assert service["ports"] == [{"name": "http", "port": 8768, "targetPort": "http", "protocol": "TCP"}]
+    policy = _find(documents, "NetworkPolicy", "exomem-media-slot-lease")["spec"]
+    assert policy["policyTypes"] == ["Ingress", "Egress"] and "egress" not in policy
+    peer, = policy["ingress"][0]["from"]
+    assert policy["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8768}]
+    runtime = {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": "aaaaaaaaaaaaaaaa"}
+    assert _selects(peer["podSelector"], runtime)
+    assert not _selects(peer["podSelector"], {**runtime, "exomem.io/cell-job": "backup"})
+    assert not _selects(peer["podSelector"], {**runtime, "exomem.io/cell": "bbbbbbbbbbbbbbbb"})
+    controller = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e.get("value") for e in controller["env"]}
+    assert env["CELLCTL_MEDIA_SLOT_URL"] == "http://10.43.0.26:8768"
+    assert env["CELLCTL_MEDIA_SLOT_CELL_IDS"] == '["aaaaaaaaaaaaaaaa"]'
+    assert "CELLCTL_MEDIA_SLOT_ALL_CELLS" not in env
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_media_slot_fleet_switch_opens_the_lease_to_every_cell_runtime() -> None:
+    documents = _helm_template(*MEDIA_SLOT_ARGS, "--set", "mediaSlotLease.allCells=true")
+    env = {e["name"]: e.get("value") for e in
+           _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CELLCTL_MEDIA_SLOT_ALL_CELLS"] == "true"
+    peer, = _find(documents, "NetworkPolicy", "exomem-media-slot-lease")["spec"]["ingress"][0]["from"]
+    runtime = {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": "bbbbbbbbbbbbbbbb"}
+    assert _selects(peer["podSelector"], runtime)
+    assert not _selects(peer["podSelector"], {**runtime, "exomem.io/cell-job": "backup"})
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_admission_policy_pins_the_lease_rule_after_the_broker_rule() -> None:
+    expression = _admission_expression(_helm_template(*MEDIA_SLOT_ARGS, *ARTIFACT_BROKER_ARGS),
+                                       "cellctl may write runtime-ingress")
+    assert "'exomem-media-slot-lease'" in expression and "== 8768" in expression
+    # Both rules together are pinned in the cellctl order: broker at index 0, lease at index 1.
+    both = expression[expression.index("size(variables.np.egress) == 2"):]
+    assert both.index("exomem-artifact-broker") < both.index("exomem-media-slot-lease")
+    assert "egress[0].ports[0].port == 8767" in both and "egress[1].ports[0].port == 8768" in both
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize(("setting", "refused_at"), [
+    (("--set-string", "mediaSlotLease.image=example:latest"), "/mediaSlotLease/image"),
+    (("--set-string", "mediaSlotLease.endpoint=http://10.43.0.26:8767"), "/mediaSlotLease/endpoint"),
+    (("--set-string", "mediaSlotLease.endpoint=http://8.8.8.8:8768"), "/mediaSlotLease/endpoint"),
+    (("--set-string", "mediaSlotLease.endpoint="), "/mediaSlotLease/endpoint"),
+    (("--set-json", 'mediaSlotLease.cellIds=["bad"]'), "/mediaSlotLease/cellIds"),
+    (("--set-json", "mediaSlotLease.poolMiB=0"), "/mediaSlotLease/poolMiB"),
+    (("--set-json", "mediaSlotLease.queueSeconds=5"), "/mediaSlotLease/queueSeconds"),
+    (("--set-json", "mediaSlotLease.maxJobSeconds=0"), "/mediaSlotLease/maxJobSeconds"),
+])
+def test_media_slot_lease_refuses_an_unusable_configuration(setting: tuple[str, str], refused_at: str) -> None:
+    result = _helm_template_result(*MEDIA_SLOT_ARGS, *setting)
+    assert result.returncode != 0, setting
+    assert refused_at in result.stderr, result.stderr

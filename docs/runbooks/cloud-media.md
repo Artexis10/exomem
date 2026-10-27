@@ -169,6 +169,35 @@ The rollout still needs its owner-sized backlog and existing service capacity ch
 
 Do not set a `documents` VmData budget below 384 MiB. MarkItDown loads an ONNX Runtime model to detect file types, and that session hangs, without failing, when the limit blocks its thread stacks. Probes hung at 203 and 265 MiB. The watchdog stops such a hang, and the file ends over budget without extracting.
 
+## Node media-slot lease
+
+The brakes above see one cell. Two cells that start an engine child at the same time can together use more memory than the node has free, and the kubelet then evicts a pod, possibly a tenant's serving pod. The node media-slot lease closes that gap. It is a small stateless service, off by default. A cell's supervisor asks it for a slot before it starts a media child, and releases the slot when the child exits.
+
+- **One rule.** The anonymous-memory bytes that the service has granted add up to at most `mediaSlotLease.poolMiB`. The cell sends the byte count of the job its child will claim, computed from its own `EXOMEM_MEDIA_BUDGETS` for every engine that child loads (the image tower included), and its job timeout. The service holds no copy of the budgets and branches on no engine name. This is operator data, never tenant data.
+- **Order.** First in, first out across cells, with one entry per cell and per source address. A request that does not fit blocks the ones behind it. A lease lasts the stated job timeout plus `mediaSlotLease.leaseMarginSeconds`, counted from the moment the cell learns of its grant, because that is when its child and watchdog start. The margin lets the watchdog stop a child before its lease ends.
+- **What the service sees.** The cell ID, the engine names of the next job, one byte count, one timeout and timing. It stores nothing and mounts no Secret. Its network policy admits only the runtime pods of the selected cells, never a backup or restore Job, and it has no egress. It logs each refusal at info level with its code: `SLOT_ABOVE_POOL`, `SLOT_JOB_TOO_LONG`, `SLOT_LEDGER_FULL`, `SLOT_SOURCE_BUSY`, `SLOT_ENTRY_EXISTS`.
+- **When it waits.** A job waits as pending, exactly as a memory-blocked job does, when the service is unreachable, restarting, or has no room. No stop is counted and the tenant sees nothing. The cell does not fall back to its own brakes: they cannot see the other cells, so a fallback would drop the node rule exactly when the service is down. After a restart the service grants nothing for `maxJobSeconds` plus the margin, because a child started under an earlier lease may still run.
+- **A heavier job after a restart.** A child recovers interrupted jobs before it claims one, so it can claim a heavier job than the supervisor sized the slot for. It then claims nothing, counts no stop, and exits. The supervisor logs `media child found its node slot too small; asking again`, releases the slot and asks for the right size.
+- **A budget above the pool, or a timeout above `maxJobSeconds`,** is refused. The job waits, and the service log shows `SLOT_ABOVE_POOL` or `SLOT_JOB_TOO_LONG`. Raise `poolMiB` or `maxJobSeconds`, or lower the cell's budget or timeout.
+
+| Value | Default | Reason for the default |
+|---|---|---|
+| `mediaSlotLease.poolMiB` | 1280 | About 1.25 GiB: room for one speech job, or two default jobs, beside the serving pods. Measure it on the node before the fleet switch. |
+| `mediaSlotLease.queueSeconds` | 60 | How long a waiting cell may go without polling, and how long a grant may go uncollected. The supervisor polls every 15 seconds, so keep it above 30. |
+| `mediaSlotLease.maxJobSeconds` | 900 | The longest job timeout a cell may state. It matches the default `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS`. A larger value also lengthens the grant-free wait after a service restart. |
+| `mediaSlotLease.leaseMarginSeconds` | 60 | Time for the watchdog to stop a child and for the supervisor to release the slot. |
+
+If a cell raises `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS` above `maxJobSeconds` through its model environment, raise `maxJobSeconds` first, or that cell's media waits.
+
+1. Choose a time outside 02:00-05:00 UTC. Expect no overlap with the nightly backup window.
+2. Deploy the service with `mediaSlotLease.enabled`, `image` and a free private Service address as `endpoint` (port 8768). Leave `cellIds` empty and `allCells` off. Expect one ready pod and no cell change.
+3. Measure the pool: with two cells contending for speech, watch the node's available memory. Set `poolMiB` below the headroom you measure. Expect no eviction and no out-of-memory kill while both cells hold work.
+4. Name one canary cell in `mediaSlotLease.cellIds` and deploy. Expect only that cell to restart.
+5. Wait the service's restart hold (`maxJobSeconds` plus the margin). Expect the canary's media to start after that, and the service log to show `media slot granted` and `media slot released`.
+6. Turn `mediaSlotLease.allCells` on after the canary has run a full job. Expect every other cell to restart once.
+
+To switch the lease off, set `allCells` false, empty `cellIds`, and deploy. Each cell restarts without the URL, and the service can be disabled after the last cell has restarted.
+
 ## Document and OCR measurements
 
 Measured on 2026-10-10 with the Cloud image, the media child's `OPENBLAS_NUM_THREADS=1`, and the samples in `tests/fixtures/media-samples/`.

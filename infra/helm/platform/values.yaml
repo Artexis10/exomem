@@ -278,6 +278,31 @@ artifactBroker:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
 
+# The node media-slot lease caps heavy media work across all cells of the node
+# (cloud-multimodal-processing D10). Stage it before any cell asks: set
+# `endpoint` to the verified Service IP, list a canary in `cellIds`, then turn
+# `allCells` on. `poolMiB` is the anonymous memory the node can spare for media
+# beyond what the serving pods use; measure it on the node (docs/runbooks/cloud-media.md).
+# `queueSeconds` is how long a waiting cell may go without polling. A cell states
+# its own media job timeout and byte budget; the service refuses a budget above
+# `poolMiB` and a timeout above `maxJobSeconds`. A lease lasts the stated timeout
+# plus `leaseMarginSeconds`, and after a restart the service grants nothing for
+# `maxJobSeconds` plus the margin. Keep `maxJobSeconds` at the longest
+# EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS any cell runs.
+mediaSlotLease:
+  enabled: false
+  image: ""
+  endpoint: ""
+  cellIds: []
+  allCells: false
+  poolMiB: 1280
+  queueSeconds: 60
+  maxJobSeconds: 900
+  leaseMarginSeconds: 60
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 128Mi}
+
 cloudGateway:
   enabled: false
   artifactTransportEnabled: false
