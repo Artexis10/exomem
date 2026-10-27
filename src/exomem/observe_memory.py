@@ -31,6 +31,9 @@ from .mutation_timings import MutationTimings, write_timings_enabled
 ObserveOperation = Literal["add", "update", "remove", "validate"]
 
 _OPERATIONS = frozenset({"add", "update", "remove", "validate"})
+
+# How this tool validates without writing; the contract's refusal text names it.
+VALIDATE_FORM = "operation=validate"
 _COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
@@ -364,7 +367,10 @@ def observe_memory(
                 timings=timings,
             )
     except semantic_writes.SemanticWriteError as error:
-        raise ObserveMemoryError(error.code, error.reason) from error
+        raise ObserveMemoryError(
+            error.code,
+            semantic_contract.localize_validate_form(error.reason, VALIDATE_FORM),
+        ) from error
 
     access_tier = access.access_tier(vault_root, editable.rel_path)
     if access_tier != access.TIER_READ_WRITE:
@@ -495,7 +501,10 @@ def observe_memory(
                 timings=timings,
             )
     except semantic_writes.SemanticWriteError as error:
-        raise ObserveMemoryError(error.code, error.reason) from error
+        raise ObserveMemoryError(
+            error.code,
+            semantic_contract.localize_validate_form(error.reason, VALIDATE_FORM),
+        ) from error
 
     final = semantic_index.current_parent_index_state(vault_root, editable.rel_path)
     final_unit = _unit_by_anchor(final.document, target_anchor)

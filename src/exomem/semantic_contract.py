@@ -840,6 +840,16 @@ class SemanticContractResult:
 
 ERROR_FINDING_LIMIT = 3
 
+# The validate form every writer's remediation text names. Edit and creation
+# writers take it as a parameter; an operation that validates differently
+# (observe_memory: operation=validate) rewrites it with `localize_validate_form`.
+VALIDATE_FORM = "validate_only=true"
+
+
+def localize_validate_form(reason: str, validate_form: str) -> str:
+    """Name the calling operation's own validate form in a blocking reason."""
+    return reason.replace(VALIDATE_FORM, validate_form)
+
 
 def blocking_finding_text(finding: ContractFinding) -> str:
     text = finding.code
@@ -876,7 +886,7 @@ def blocking_reason(
     rendered = "; ".join(blocking_finding_text(item) for item in shown)
     omitted = len(findings) - len(shown)
     if omitted:
-        rendered += f"; +{omitted} more (validate_only returns the full set)"
+        rendered += f"; +{omitted} more ({VALIDATE_FORM} returns the full set)"
     return f"{prefix}: {rendered}"
 
 
@@ -5207,11 +5217,11 @@ def _disposition_finding(
         # test_disposition_remediation_is_route_neutral is the ceiling to
         # respect when editing it.
         remediation=(
-            ("Fix: add a qualifying typed relation. " + RELATION_REVIEW_STABLE_ID_REMEDIATION)
+            ("Add a qualifying typed relation. " + RELATION_REVIEW_STABLE_ID_REMEDIATION)
             if existing and page.identity_kind == "path"
             else (
-                "Fix: add a qualifying typed relation. Retriggers: "
-                "validate_only=true; re-issue the same edit with "
+                "Add a qualifying typed relation. Retriggers: "
+                f"{VALIDATE_FORM}; re-issue the same edit with "
                 "transition_token=<returned>, "
                 "relation_disposition=\"reviewed_none\", "
                 "relation_review_hash=<returned>, "
@@ -5219,8 +5229,8 @@ def _disposition_finding(
             )
             if existing
             else (
-                "Fix: add a qualifying typed relation. Retriggers: "
-                "call validate_only=true, then "
+                "Add a qualifying typed relation. Retriggers: "
+                f"call {VALIDATE_FORM}, then "
                 "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
                 "draft_hash=<returned draft_hash>, draft_token=<returned "
                 "draft_token>, relation_disposition=\"reviewed_none\", "
