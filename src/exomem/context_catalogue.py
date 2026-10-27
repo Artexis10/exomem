@@ -28,7 +28,7 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -38,15 +38,17 @@ from . import (
     foreground_priority,
     freshness,
     lifecycle_statuses,
+    note_types,
     sidecar_store,
     source_taxonomy,
+    topic_carriers,
     vault,
     working_set_index,
     working_set_runtime,
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
-from .kbdir import kb_dirname
+from .kbdir import kb_dirname, kb_prefix
 from .state_paths import vault_state_dir
 from .working_set_runtime import READY
 
@@ -115,6 +117,8 @@ class Entry:
     topics: tuple[str, ...] = ()
     projects: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
+    #: The page's frontmatter tags in carrier form (`topic_carriers.tag_form`).
+    tags: tuple[str, ...] = ()
 
     def digest(self) -> str:
         """Identity of everything this entry stores, to diff a stored row without loading it."""
@@ -123,7 +127,7 @@ class Entry:
                 self.kind, self.anchor_kind, self.path, self.ref, self.title, self.description,
                 self.description_origin, self.status, self.lifecycle_class, self.activity,
                 self.thread_key, self.thread_order, self.source_signature,
-                self.topics, self.projects, self.sources,
+                self.topics, self.projects, self.sources, self.tags,
             ],
             separators=(",", ":"),
         )
@@ -140,6 +144,11 @@ class Memberships:
     unresolved: Mapping[str, tuple[str, ...]]
     #: project key -> its registry `domain` values the domains registry does not resolve.
     unresolved_project_domains: Mapping[str, tuple[str, ...]]
+    #: carrier key or home key -> its topics the domains registry does not resolve.
+    unresolved_carriers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    unresolved_homes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: carrier key -> how many entries it files, for every active carrier.
+    carrier_hits: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +260,8 @@ class ContextCatalogue:
             ("entry_projects", "project_key"),
             ("membership_edges", "target_path"),
             ("source_refs", "ref"),
+            # Added in place: a catalogue built before it keeps its rows and fills it by one background fold.
+            ("entry_tags", "tag"),
         ):
             conn.execute(
                 f"CREATE TABLE IF NOT EXISTS {table} "
@@ -274,7 +285,7 @@ class ContextCatalogue:
         """
         for table in (
             "entries", "declared_topics_raw", "entry_projects", "membership_edges",
-            "source_refs", "pending", "catalogue_meta",
+            "source_refs", "entry_tags", "pending", "catalogue_meta",
         ):
             conn.execute(f"DELETE FROM {table}")
         sidecar_store.bump_meta(conn, "generation")
@@ -293,6 +304,18 @@ class ContextCatalogue:
     def built(self) -> bool:
         """Whether one complete fold has finished: a cold catalogue is not a small one."""
         return self._meta("built") == "1"
+
+    def tags_filled(self) -> bool:
+        """Whether one full fold has stored every entry's tags since `entry_tags` was added."""
+        return self._meta("entry_tags_filled") == "1"
+
+    def count_entries_under(self, folder: str) -> int:
+        """How many entries sit in `folder` (vault-relative) or below it, folders compared casefolded."""
+        conn = self._connect()
+        if conn is None:
+            return 0
+        prefix = f"{folder.casefold().rstrip('/')}/"
+        return sum(1 for (path,) in conn.execute("SELECT path FROM entries") if str(path).casefold().startswith(prefix))
 
     def freshness_stamp(self) -> str:
         return self._meta("freshness_key") or ""
@@ -344,7 +367,8 @@ class ContextCatalogue:
         declared = {
             table: _grouped(conn, table, column)
             for table, column in (
-                ("declared_topics_raw", "raw"), ("entry_projects", "project_key"), ("source_refs", "ref")
+                ("declared_topics_raw", "raw"), ("entry_projects", "project_key"), ("source_refs", "ref"),
+                ("entry_tags", "tag"),
             )
         }
         out = []
@@ -357,6 +381,7 @@ class ContextCatalogue:
                     topics=declared["declared_topics_raw"].get(entry_id, ()),
                     projects=declared["entry_projects"].get(entry_id, ()),
                     sources=declared["source_refs"].get(entry_id, ()),
+                    tags=declared["entry_tags"].get(entry_id, ()),
                 )
             )
         return tuple(out)
@@ -375,19 +400,31 @@ class ContextCatalogue:
 
     # -- owner-only reads --------------------------------------------------- #
 
-    def memberships(self, among: Iterable[Entry] | None = None, *, projects: bool = True) -> Memberships:
+    def memberships(
+        self,
+        among: Iterable[Entry] | None = None,
+        *,
+        projects: bool = True,
+        carriers: bool = True,
+        homes: bool = True,
+    ) -> Memberships:
         """Resolve each entry's declarations through the registries as they stand now.
 
         `among` limits the join to the entries a reader may see (default: every entry),
         so a relation to an entry outside it adds nothing. `projects=False` is for a
         reader who may not read the project registry: no project key files an entry.
+        `carriers` and `homes` are the same admission for the `topic-carriers` and
+        `homes` overlays: a reader denied one gets no membership from it.
 
         An entry belongs to the topics its own `topics` values resolve to, the
-        domains of its project keys, and the topics its membership-relation
-        targets declare through their own `topics` and project keys. It is not
+        domains of its project keys (hand-written, or from a project carrier),
+        the topics of the folder carriers and the home that hold it, the topics of
+        the tag carriers that match its frontmatter tags, and the topics its
+        membership-relation targets declare through any of those. It is not
         transitive: a target's own relations add nothing. A page's `domain`
-        field is never read, and a mention is not an edge.
+        field is never read, and a mention or a citation is not an edge.
         """
+        from . import homes as homes_module
         from . import project_keys, vocabulary_resolution
 
         taxonomy = source_taxonomy.load_taxonomy(self.vault_root)
@@ -396,6 +433,20 @@ class ContextCatalogue:
         )
         entries = tuple(self.entries() if among is None else among)
         edges = self.membership_edges()
+        carrier_set = topic_carriers.load(self.vault_root) if carriers else topic_carriers.CarrierSet()
+        home_set = homes_module.load(self.vault_root) if homes else homes_module.HomeSet()
+        carrier_topics = {
+            carrier.key: vocabulary_resolution.resolve_topics(taxonomy, carrier.topics)
+            for carrier in carrier_set.carriers if carrier.active
+        }
+        home_topics = {
+            home.key: vocabulary_resolution.resolve_topics(taxonomy, home.topics) for home in home_set.homes if home.active
+        }
+        by_project = {carrier.match: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_PROJECT)}
+        by_folder = {carrier.folder_parts: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_FOLDER)}
+        by_tag = {carrier.match: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_TAG)}
+        hits = dict.fromkeys(carrier_topics, 0)
+        kb = kb_prefix()
         project_topics: dict[str, vocabulary_resolution.TopicResolution] = {}
 
         def of_project(key: str) -> vocabulary_resolution.TopicResolution:
@@ -410,8 +461,22 @@ class ContextCatalogue:
         for entry in entries:
             declared = vocabulary_resolution.resolve_topics(taxonomy, entry.topics)
             keys = set(declared.resolved)
+            reached: list[topic_carriers.Carrier] = []
             for key in entry.projects:
                 keys.update(of_project(key).resolved)
+                if key in by_project:
+                    reached.append(by_project[key])
+            # An entry sits in its own folder and every folder above it, so each folder carrier on that path files it.
+            folder = tuple(part.casefold() for part in entry.path.removeprefix(kb).split("/")[:-1]) if entry.path.startswith(kb) else ()
+            reached.extend(by_folder[folder[:depth]] for depth in range(1, len(folder) + 1) if folder[:depth] in by_folder)
+            reached.extend(by_tag[tag] for tag in entry.tags if tag in by_tag)
+            for carrier in reached:
+                keys.update(carrier_topics[carrier.key].resolved)
+                hits[carrier.key] += 1
+            # A home is the placement rule of the Notes folder it names, so its folder is searched below the Notes root.
+            home = home_set.containing(folder[1:]) if folder[:1] == (note_types.NOTES_FOLDER.casefold(),) else None
+            if home is not None:
+                keys.update(home_topics[home.key].resolved)
             own[entry.entry_id] = frozenset(keys)
             if declared.unresolved:
                 unresolved[entry.entry_id] = declared.unresolved
@@ -426,7 +491,14 @@ class ContextCatalogue:
             for key in project_registry.project_to_domains
             if (resolution := of_project(key)).unresolved
         }
-        return Memberships(topics, unresolved, unresolved_domains)
+        return Memberships(
+            topics,
+            unresolved,
+            unresolved_domains,
+            {key: found.unresolved for key, found in carrier_topics.items() if found.unresolved},
+            {key: found.unresolved for key, found in home_topics.items() if found.unresolved},
+            hits,
+        )
 
     def owner_coverage(self) -> dict[str, Any]:
         """Description coverage and unresolved-declaration counts, for the owner only.
@@ -471,10 +543,31 @@ class ContextCatalogue:
                 "undescribed": len(topic_keys) - registry_described,
             },
             "unfiled_entries": sum(1 for keys in joined.topics.values() if not keys),
+            "carriers": self._carrier_coverage(joined),
             "unresolved_declarations": {
                 "topics": sum(len(values) for values in joined.unresolved.values()),
                 "project_domains": sum(len(values) for values in joined.unresolved_project_domains.values()),
+                "carrier_topics": sum(len(values) for values in joined.unresolved_carriers.values()),
+                "home_topics": sum(len(values) for values in joined.unresolved_homes.values()),
             },
+        }
+
+    def _carrier_coverage(self, joined: Memberships) -> dict[str, Any]:
+        """What the declared carriers reach. A tag carrier is `unknown` until the tag fill has stored every entry's tags."""
+        filled = self.tags_filled()
+        declared = [carrier for carrier in topic_carriers.load(self.vault_root).carriers if carrier.active]
+        unknown = [carrier for carrier in declared if carrier.kind == topic_carriers.KIND_TAG and not filled]
+        known = [carrier for carrier in declared if carrier not in unknown]
+        return {
+            "declared": len(declared),
+            # A carrier files entries only when it matches some and at least one of its topics resolves.
+            "filing": sum(
+                1 for carrier in known
+                if joined.carrier_hits.get(carrier.key, 0)
+                and len(carrier.topics) > len(joined.unresolved_carriers.get(carrier.key, ()))
+            ),
+            "dangling": sum(1 for carrier in known if not joined.carrier_hits.get(carrier.key, 0)),
+            "unknown": len(unknown),
         }
 
     # -- writes ------------------------------------------------------------- #
@@ -491,6 +584,7 @@ class ContextCatalogue:
         expected: Mapping[str, freshness.FileSignature] | None = None,
         limit: int | None = None,
         freshness_stamp: str | None = None,
+        fill_tags: bool = False,
     ) -> dict[str, Any]:
         """Bring the catalogue to the current vault state, bumping only on change.
 
@@ -500,7 +594,8 @@ class ContextCatalogue:
         vault), the pending ones and the pages whose kind moved are folded.
         `expected` binds a path to the file signature a freshness delta
         observed; a file that differs is left in `pending`. `limit` folds that
-        many pages and leaves the rest in `pending`.
+        many pages and leaves the rest in `pending`. `fill_tags` runs one full fold when the
+        entries' tags were never stored: only a background pass sets it, since a full fold ignores `limit`.
         """
         return self._write(
             full=False,
@@ -509,6 +604,7 @@ class ContextCatalogue:
             expected=expected,
             limit=limit,
             freshness_stamp=freshness_stamp,
+            fill_tags=fill_tags,
         )
 
     def _write(
@@ -520,6 +616,7 @@ class ContextCatalogue:
         expected: Mapping[str, freshness.FileSignature] | None = None,
         limit: int | None = None,
         freshness_stamp: str | None = None,
+        fill_tags: bool = False,
     ) -> dict[str, Any]:
         foreground_priority.check_cancelled()
         if disabled():
@@ -536,6 +633,7 @@ class ContextCatalogue:
                 deleted=list(deleted),
                 expected=expected,
                 limit=limit,
+                fill_tags=fill_tags,
             )
             foreground_priority.check_cancelled()
             try:
@@ -629,11 +727,18 @@ class _Fold:
         deleted: list[str],
         expected: Mapping[str, freshness.FileSignature] | None,
         limit: int | None,
+        fill_tags: bool = False,
     ) -> None:
         basis = self._basis_state()
         self.expected = {self._relative(path): signature for path, signature in (expected or {}).items()}
         # A moved status registry or conventions file can change any row's class or kind.
-        self.full = full or basis == "moved" or self.meta.get("conventions_hash") != self.registry.conventions_hash
+        self.full = (
+            full
+            or basis == "moved"
+            or self.meta.get("conventions_hash") != self.registry.conventions_hash
+            # Rows from before `entry_tags` hold no tags: one full fold stores them, with no wipe.
+            or (fill_tags and self.meta.get("entry_tags_filled") != "1")
+        )
         walked: dict[str, Path] | None = None
         if self.full or changed is None:
             walked = {
@@ -865,6 +970,7 @@ class _Fold:
             topics=_sorted_values(frontmatter.get("topics")),
             projects=tuple(sorted(find_corpus.all_projects(frontmatter))),
             sources=_sorted_values(frontmatter.get("sources")),
+            tags=_tags(frontmatter.get("tags")),
         )
 
     def _mirror_other_anchors(self) -> None:
@@ -947,6 +1053,8 @@ class _Fold:
             "graph_state": self.edge_state,
             "graph_token": self.graph_token,
         }
+        if self.full:
+            updates["entry_tags_filled"] = "1"
         if freshness_stamp is not None:
             updates["freshness_key"] = freshness_stamp
         return updates
@@ -959,6 +1067,11 @@ def _read_page(absolute: Path, vault_root: Path) -> Any:
 
 def _sorted_values(value: object) -> tuple[str, ...]:
     return tuple(sorted(set(working_set_index._strings(value))))  # noqa: SLF001 - activation's frontmatter string reader
+
+
+def _tags(value: object) -> tuple[str, ...]:
+    """The page's frontmatter tags in the form a tag carrier matches; no other field is read."""
+    return tuple(sorted({form for tag in _sorted_values(value) if (form := topic_carriers.tag_form(tag))}))
 
 
 def _title(*candidates: object) -> str:
@@ -1054,7 +1167,7 @@ def _stored(conn: sqlite3.Connection) -> list[_Stored]:
 
 
 def _delete_entry(conn: sqlite3.Connection, entry_id: str, *, keep_edges: bool = False) -> None:
-    for table in ("entries", "declared_topics_raw", "entry_projects", "membership_edges", "source_refs"):
+    for table in ("entries", "declared_topics_raw", "entry_projects", "membership_edges", "source_refs", "entry_tags"):
         if keep_edges and table == "membership_edges":
             continue
         conn.execute(f"DELETE FROM {table} WHERE entry_id = ?", (entry_id,))
@@ -1071,6 +1184,7 @@ def _insert_entry(conn: sqlite3.Connection, entry: Entry, digest: str) -> None:
         ("declared_topics_raw", "raw", entry.topics),
         ("entry_projects", "project_key", entry.projects),
         ("source_refs", "ref", entry.sources),
+        ("entry_tags", "tag", entry.tags),
     ):
         conn.executemany(f"INSERT INTO {table} (entry_id, {column}) VALUES (?, ?)", [(entry.entry_id, value) for value in rows])
 
@@ -1107,7 +1221,7 @@ def keep_current(vault_root: Path) -> bool:
         refreshed = working_set_index.WorkingSetIndex(root).update()
         if refreshed.get("unavailable"):
             return False
-        result = catalogue.update()
+        result = catalogue.update(fill_tags=True)
         if result.get("unavailable") or result.get("pending"):
             return False
         # A graph still being built owes the membership edges; its own pipeline publishes them and a retry reads them.
@@ -1179,7 +1293,7 @@ def ensure_unlisted(
         if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and not catalogue.pending():
             return READY, catalogue, index_stale
         with _inline_lock(root.absolute()):
-            result = catalogue.update(freshness_stamp=freshness_stamp or None)
+            result = catalogue.update(freshness_stamp=freshness_stamp or None, fill_tags=True)
         return READY, catalogue, index_stale or bool(result.get("unavailable"))
     return READY, catalogue, _advance(root, catalogue, index, freshness_stamp) or index_stale
 
@@ -1188,6 +1302,18 @@ def _advance(
     root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str
 ) -> bool:
     """Fold the freshness delta of a warm catalogue; True when it may be behind by work `pending()` cannot list."""
+    # A catalogue from before `entry_tags` serves its rows, marked stale, while one background fold stores the tags.
+    if not catalogue.tags_filled():
+        # The fill is a full fold, so it also brings in the freshness delta.
+        _schedule(root, freshness_stamp)
+        return True
+    return _advance_delta(root, catalogue, index, freshness_stamp)
+
+
+def _advance_delta(
+    root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str
+) -> bool:
+    """The freshness-delta half of `_advance`."""
     pending = catalogue.pending()
     mirrored = catalogue.mirrored_activation_token() == json.dumps(list(index.token()))
     if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and mirrored and not pending:
@@ -1242,7 +1368,7 @@ def _schedule(root: Path, freshness_stamp: str = "") -> None:
 
     def _fold() -> None:
         checkpoint = freshness.consumer_checkpoint(root, "kb") if freshness.is_live(root, "kb") else None
-        result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None)
+        result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None, fill_tags=True)
         if checkpoint is not None and not result.get("unavailable"):
             _CHECKPOINTS[key] = checkpoint
 
