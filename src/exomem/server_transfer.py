@@ -27,6 +27,8 @@ from . import (
     auth_sessions,
     cf_access,
     local_ingress,
+    media_store,
+    originals,
     reserved_paths,
     upload_handoff,
     upload_sessions,
@@ -317,6 +319,22 @@ def load_transfer_config() -> TransferConfig:
             os.environ.get("EXOMEM_LOCAL_UPLOAD_MAX_BYTES", str(DEFAULT_LOCAL_UPLOAD_MAX_BYTES))
         ),
     )
+
+
+def _download_target(vault_root: Path, path: str) -> tuple[Path, str]:
+    """Resolve a download path; an evicted original resolves by its binding (D1)."""
+    try:
+        return resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
+    except VaultPathError as missing:
+        if missing.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
+            raise
+        try:
+            abs_path, rel = resolve_under_vault(vault_root, path, must_be_file=True)
+            if originals.evicted(vault_root, rel):
+                return abs_path, rel
+        except (VaultPathError, reserved_paths.ReservedPathLeafError):
+            pass
+        raise missing
 
 
 def download_principal(
@@ -1128,9 +1146,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         # Spelled exactly as the resolver spells a path it cannot find.
         requested = path.strip().replace("\\", "/").lstrip("/")
         try:
-            abs_path, rel = resolve_under_vault(
-                vault_root, path, must_exist=True, must_be_file=True
-            )
+            abs_path, rel = _download_target(vault_root, path)
             # Release gate on the download TARGET after path resolution but before
             # the response snapshot is opened or its bytes are read (design D1: the
             # transfer routes bypass `invoke_command`, so they carry the gate
@@ -1146,9 +1162,17 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             ):
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
             try:
-                snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                # The grant route's pin: hydrate only after the release gate, and
+                # keep eviction out until the bytes are read.
+                with media_store.local_originals(vault_root, (rel,)):
+                    snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            except media_store.MediaStoreError:
+                return JSONResponse(
+                    {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},
+                    status_code=503,
+                )
             if not await auth_sessions.origin_session_active(who):
                 return JSONResponse(
                     {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},

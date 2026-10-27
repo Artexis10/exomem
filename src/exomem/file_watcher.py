@@ -1822,10 +1822,9 @@ class FileWatcher:
         changed_set = set(changed)
         deleted_set = set(deleted)
         for sp in changed_set & deleted_set:
-            from .originals import original_state
+            from .originals import evicted
 
-            if (Path(sp).exists() if Path(sp).suffix.lower() == ".md"
-                    else original_state(self._vault_root, Path(sp)).present):
+            if Path(sp).exists() or evicted(self._vault_root, Path(sp)):
                 deleted_set.discard(sp)
             else:
                 changed_set.discard(sp)

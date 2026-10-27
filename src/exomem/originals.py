@@ -49,6 +49,7 @@ class OriginalSnapshot:
     binary_size: int | None = None
     reference: StoredObject | None = None
     sidecar_hash: str | None = None
+    offloadable: bool = False
 
     @property
     def present(self) -> bool:
@@ -91,6 +92,14 @@ def bound_path(fields: dict[str, object]) -> str | None:
     if not paths or any(not isinstance(path, str) or path != paths[0] for path in paths):
         return None
     return paths[0]
+
+
+def is_note_path(relative: str) -> bool:
+    """A vault note is never offloaded, so it is never evicted (design D1).
+
+    `.md` is the note extension that the vault format fixes, not a vocabulary.
+    """
+    return relative.lower().endswith(".md")
 
 
 def binary_binding(fields: dict[str, object]) -> BinaryBinding | None:
@@ -150,6 +159,42 @@ def sidecar_path(path: Path) -> Path:
     return _sidecar_path(path, protected=marked(path.as_posix()))
 
 
+def evicted(vault: Path, path: str | Path) -> bool:
+    """Whether a path names an evicted original; an unbound vault and a note never do."""
+    if binding_for(vault) is None:
+        return False
+    return not is_note_path(Path(path).as_posix()) and original_state(vault, path).state == "evicted"
+
+
+def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object], bytes] | None:
+    """Return the first companion candidate whose pointer fields all name this original.
+
+    preserve owns the candidate layout, legacy Source forms included. A malformed
+    candidate raises UnicodeError or FrontmatterError; each caller decides what it means.
+    """
+    from . import reserved_paths
+    from .governance.raw_protection import marked
+    from .kbdir import kb_dirname
+    from .preserve import _sidecar_paths
+    from .vault import parse_frontmatter
+
+    target = Path(relative)
+    for candidate in _sidecar_paths(
+        target, protected=marked(relative), source=target.is_relative_to(Path(kb_dirname()) / "Sources"),
+    ):
+        companion = candidate.as_posix()
+        try:
+            data = reserved_paths.read_generic_bytes(vault, companion).data
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+            continue
+        fields, _body, marker = parse_frontmatter(data.decode("utf-8"), strict=True)
+        if marker is not None and bound_path(fields) == relative:
+            return companion, fields, data
+    return None
+
+
 def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | None = None) -> OriginalSnapshot:
     """Resolve local, cached, evicted or missing from one exact sibling binding.
 
@@ -157,24 +202,19 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
     Foreign references deliberately confer no presence in the selected vault.
     """
     from . import reserved_paths
-    from .governance.raw_protection import marked
-    from .kbdir import kb_dirname
-    from .preserve import _sidecar_paths
-    from .vault import FrontmatterError, parse_frontmatter
+    from .vault import FrontmatterError
 
-    vault = Path(vault).resolve()
     target = Path(path)
     if target.is_absolute():
-        target = target.relative_to(vault)
+        # A caller may spell the root through a symlink; both spellings name this vault.
+        root = Path(vault)
+        target = target.relative_to(root if target.is_relative_to(root) else root.resolve())
+    vault = Path(vault).resolve()
     relative = target.as_posix()
     canonical = PurePosixPath(relative)
     if not relative or relative != canonical.as_posix() or any(p in {".", ".."} for p in canonical.parts):
         raise ValueError("original path must be canonical and vault-relative")
     binary = vault / target
-    # preserve owns the companion layout, legacy Source forms included; one rule decides both.
-    candidates = tuple(vault / candidate for candidate in _sidecar_paths(
-        target, protected=marked(relative), source=target.is_relative_to(Path(kb_dirname()) / "Sources"),
-    ))
     try:
         reserved_paths.inspect_generic_file(vault, relative)
         physical = True
@@ -182,29 +222,29 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
         if error.code != "MISSING":
             raise
         physical = False
-    base = OriginalSnapshot("local" if physical else "missing", binary, candidates[0])
-    for sidecar in candidates:
-        try:
-            snapshot = reserved_paths.read_generic_bytes(vault, sidecar.relative_to(vault).as_posix())
-            fields, _body, marker = parse_frontmatter(snapshot.data.decode("utf-8"), strict=True)
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code != "MISSING":
-                raise
-            continue
-        except (UnicodeError, FrontmatterError):
-            return base
-        if marker is None or bound_path(fields) != relative:
-            continue
-        binary_binding_value = binary_binding(fields)
-        if binary_binding_value is None:
-            return base
-        reference = stored_reference(fields.get("stored_object"))
-        selected = binding if binding is not None else binding_for(vault)
-        if selected is None or (reference is not None and reference.store != selected.store):
-            reference = None
-        return OriginalSnapshot(
-            ("cached" if physical else "evicted") if reference is not None else base.state,
-            binary, sidecar, binary_binding_value.sha256, binary_binding_value.size,
-            reference, hashlib.sha256(snapshot.data).hexdigest(),
-        )
-    return base
+    try:
+        found = bound_companion(vault, relative)
+    except (UnicodeError, FrontmatterError):
+        found = None
+    if found is None:
+        from .governance.raw_protection import marked
+        from .preserve import _sidecar_path
+
+        return OriginalSnapshot("local" if physical else "missing", binary,
+                                vault / _sidecar_path(target, protected=marked(relative)))
+    companion, fields, data = found
+    sidecar = vault / companion
+    binary_binding_value = binary_binding(fields)
+    if binary_binding_value is None:
+        return OriginalSnapshot("local" if physical else "missing", binary, sidecar)
+    reference = stored_reference(fields.get("stored_object"))
+    selected = binding if binding is not None else binding_for(vault)
+    if selected is None or (reference is not None and reference.store != selected.store):
+        reference = None
+    state = ("cached" if physical else "evicted") if reference is not None else ("local" if physical else "missing")
+    return OriginalSnapshot(
+        state, binary, sidecar, binary_binding_value.sha256, binary_binding_value.size,
+        reference, hashlib.sha256(data).hexdigest(),
+        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
+        offloadable=not is_note_path(relative) and "data_file" not in fields,
+    )

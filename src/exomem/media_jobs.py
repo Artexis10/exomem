@@ -621,6 +621,10 @@ class MediaJobStore:
                 conn.execute("CREATE TABLE IF NOT EXISTS media_access ("
                              "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, pid INTEGER NOT NULL, "
                              "temporary_bytes INTEGER NOT NULL DEFAULT 0, hydrating INTEGER NOT NULL DEFAULT 0)")
+                # A store refusal that is final for one original's exact bytes; rebuildable.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_offload_refusals ("
+                             "binary_rel TEXT PRIMARY KEY, sha256 TEXT NOT NULL, code TEXT NOT NULL, "
+                             "ciphertext_size INTEGER NOT NULL, created_at REAL NOT NULL)")
                 self._migrate_claim_revision(conn)
                 self._migrate_blocked_reasons(conn)
                 conn.execute(
@@ -882,6 +886,21 @@ class MediaJobStore:
                     "UPDATE jobs SET do_offload = 0 WHERE id = ? AND claim_revision = ? "
                     "AND offload_generation = ?",
                     (job.id, job.claim_revision, job.offload_generation),
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def rearm_offload(self, job: MediaJob) -> bool:
+        """Return a failed or blocked attempt's retained offload demand to the queue."""
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', last_error = NULL, blocked_reason = NULL, "
+                    "blocked_context = NULL, updated_at = ? WHERE id = ? AND claim_revision = ? "
+                    "AND do_offload = 1 AND state IN ('failed', 'blocked') AND NOT EXISTS "
+                    "(SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id)",
+                    (time.time(), job.id, job.claim_revision),
                 ).rowcount == 1
         finally:
             conn.close()
@@ -1673,16 +1692,8 @@ class MediaJobStore:
             conn.close()
 
     def has_binary(self, binary_path: Path) -> bool:
-        """Whether the ledger has work for this exact vault-relative binary."""
-        binary_rel = self._relative(binary_path)
-        conn = self._connect()
-        try:
-            return conn.execute(
-                "SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
-                (binary_rel,),
-            ).fetchone() is not None
-        finally:
-            conn.close()
+        """Whether the ledger has processing work for this exact vault-relative binary."""
+        return self.get_by_binary(binary_path) is not None
 
     def has_pending_ocr(self, binary_path: Path) -> bool:
         """Whether the ledger still holds an OCR stage for this exact binary."""
@@ -2401,6 +2412,7 @@ def tool_status(vault_root: Path | None) -> dict[str, Any]:
 
         if originals.binding_for(vault_root) is not None:
             result["stored_originals"] = media_store.processing_status(vault_root)
+            result["offload_refusals"] = media_store.offload_refusals(vault_root)
     return result
 
 

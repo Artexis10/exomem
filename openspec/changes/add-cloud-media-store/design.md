@@ -135,8 +135,13 @@ Alternatives:
 - **A forwarding proxy to the provider.** Its endpoint is shared by all of the provider's customers, so it would be an exfiltration channel.
 - **Folding this into the artifact broker.** The broker fetches arbitrary public URLs; storage credentials do not belong behind that surface.
 
-The source comparison below selects a narrow custom edge for code and sandbox work.
-Task 2.1 retains the cluster hydration measurement; this decision does not claim live transfer performance.
+Decision, 2026-10-26: build a narrow custom edge. Neither gateway can enforce the two controls that decide the choice:
+- a per-object bound on the declared upload size, refused before the store accepts any byte;
+- a set generation that the edge reports only after every request accepted under an earlier set has drained, so cellctl can observe when a revocation takes effect.
+
+rclone has two further gaps. A delete through it becomes a provider hide, which the edge must refuse, and it cannot read a named version.
+
+The 1 GB in-cluster hydration measurement is pending a live run. Task 2.1 stays open until design.md records it; this decision claims no live transfer performance.
 
 #### Source comparison, 2026-10-26
 
@@ -144,8 +149,8 @@ This comparison covers versitygw 1.10.0 and rclone 1.75.2. Neither dependency is
 
 | Option | Reusable capability | Remaining work |
 |---|---|---|
-| versitygw 1.10.0 | Its S3 proxy forwards an exact version ID and byte range to the provider. | Add cellctl credential verification, prefix derivation, operation filtering, declared-size accounting and the active-generation drain barrier. |
-| rclone 1.75.2 | Its authentication proxy can select a caller-specific backend root. | Add the same controls and a version bridge: its S3 server does not support versioning and returns no version ID after multipart completion. |
+| versitygw 1.10.0 | Its S3 proxy forwards an exact version ID and byte range to the provider. Since 1.8 it issues STS credentials with role policies. | It cannot bound a declared upload size or report a drained generation. Its web-identity verifier does not accept Ed25519 tokens, which the artifact broker's credential shape uses. |
+| rclone 1.75.2 | Its authentication proxy can select a caller-specific backend root. | The same two gaps, plus hide-on-delete and no version reads: its S3 server does not support versioning and returns no version ID after multipart completion. |
 | A narrow custom edge | Reuse maintained HTTP, JWT and provider clients. | Maintain the media protocol, provider adapter, bounded upload sessions and generation accounting. Avoid a general S3 server or custom cryptography. |
 
 The source evidence is the tagged [versitygw version/range forwarding](https://github.com/versity/versitygw/blob/v1.10.0/backend/s3proxy/s3.go#L1085-L1206),

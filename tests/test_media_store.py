@@ -307,24 +307,61 @@ def test_authorized_delete_holds_original_pins_through_the_transition(vault: Pat
     assert originals.original_state(vault, path).state == "missing"
 
 
-def test_store_failure_keeps_the_job_and_committed_protection(vault: Path, selected_store, monkeypatch):
-    from exomem import media_jobs, media_store, reserved_paths
+@pytest.mark.parametrize("failure", ["outage", "disabled"])
+def test_store_failure_keeps_offload_demand_retryable_through_the_worker(vault: Path, selected_store, monkeypatch, failure):
+    """A failed attempt once stranded its demand: the row ended failed and nothing re-queued it."""
+    import os
 
+    from exomem import media_jobs, media_store, media_worker
+
+    values, config = selected_store
+    if failure == "disabled":
+        config.write_text(json.dumps({"vaults": {str(vault): {**values, "enabled": False}}}))
     path = _preserved(vault)
     ledger = media_jobs.MediaJobStore(vault)
+    with monkeypatch.context() as outage:
+        if failure == "outage":
+            def unavailable(self, name, stream, *, size, sha256):
+                with sqlite3.connect(ledger.path) as captured:
+                    assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+                raise OSError("store unavailable")
 
-    def unavailable(self, name, stream):
-        with sqlite3.connect(ledger.path) as captured:
-            assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
-        raise OSError("store unavailable")
-
-    monkeypatch.setattr(media_store.FilesystemStore, "upload", unavailable)
-    with pytest.raises(reserved_paths.ReservedPathLeafError):
-        media_store.offload(vault, path)
+            outage.setattr(media_store.FilesystemStore, "upload", unavailable)
+        # A second discovery retries an outage but leaves a disabled store's demand parked.
+        for _attempt in range(2):
+            media_store.enqueue_offloads(vault)
+            assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    failed = ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
+    assert failed.do_offload and "MEDIA_STORE_UNAVAILABLE" in failed.last_error
     assert originals.original_state(vault, path).state == "local"
-    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).state == "pending"
     with sqlite3.connect(ledger.path) as captured:
-        assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+        assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == int(failure == "outage")
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    assert media_store.enqueue_offloads(vault) == 1
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert originals.original_state(vault, path).state == "cached"
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    with sqlite3.connect(ledger.path) as captured:
+        assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 0
+
+
+def test_an_over_bound_original_stays_local_and_reported_without_retrying(vault: Path, selected_store):
+    """A size refusal retried forever as an outage; it is final for these bytes (D10)."""
+    import os
+
+    from exomem import media_jobs, media_store, media_worker
+
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_object_bytes": 64}}}))
+    path = _preserved(vault)
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert originals.original_state(vault, path).state == "local"
+    assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    assert media_store.enqueue_offloads(vault) == 0
+    [refusal] = media_jobs.tool_status(vault)["offload_refusals"]
+    assert refusal["path"] == path.relative_to(vault).as_posix()
+    assert refusal["code"] == "MEDIA_OBJECT_TOO_LARGE" and refusal["ciphertext_size"] > 64
+    assert not list((Path(values["root"])).rglob("*"))
 
 
 def test_uncertain_publication_keeps_protection_until_confirmed(vault: Path, selected_store, monkeypatch):
@@ -374,7 +411,7 @@ def test_unknown_store_result_preserves_the_reference_and_local_bytes(vault: Pat
     monkeypatch.setattr(media_store.FilesystemStore, "head", unavailable)
     assert not media_store.evict(vault, path)
     assert path.exists()
-    with pytest.raises(TimeoutError):
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
         media_store.offload(vault, path)
     assert originals.original_state(vault, path).reference == reference
 
@@ -697,6 +734,78 @@ def test_move_materializes_the_original_and_retains_its_version(vault: Path, sel
     assert destination.with_name(destination.name + ".md").read_bytes() == before
 
 
+def test_move_preview_and_withheld_refusal_never_hydrate(vault: Path, selected_store, monkeypatch):
+    """Move once hydrated before its checks: an offline store broke NOT_FOUND, and a refusal fetched bytes."""
+    from exomem import media_store, move_file
+    from exomem.governance import egress
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    relative = path.relative_to(vault).as_posix()
+    destination = path.with_name("renamed.txt").relative_to(vault).as_posix()
+    root = Path(selected_store[0]["root"])
+    root.rename(root.with_name("offline-objects"))
+    preview = move_file.move_file(vault, old_path=relative, new_path=destination, validate_only=True)
+    assert isinstance(preview, move_file.MoveFileValidation)
+    for online in (False, True):
+        if online:
+            root.with_name("offline-objects").rename(root)
+        with monkeypatch.context() as hidden:
+            hidden.setattr(egress, "restricted_release_filter", lambda *_args, **_kwargs: lambda _path: False)
+            with pytest.raises(move_file.MoveFileError) as withheld:
+                move_file.move_file(vault, old_path=relative, new_path=destination)
+        assert withheld.value.code == "NOT_FOUND"
+    assert originals.original_state(vault, path).state == "evicted"
+
+
+def test_authorized_path_download_serves_an_evicted_original(vault: Path, selected_store, monkeypatch):
+    """The `?path=` download answered an evicted original with 404, as if it were deleted."""
+    from starlette.testclient import TestClient
+
+    from exomem import media_store, server, upload_tokens
+
+    path = _preserved(vault)
+    expected = path.read_bytes()
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "test-secret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    token = upload_tokens.mint_bound("test-secret", audience="owner")
+    response = client.get("/download", params={"path": path.relative_to(vault).as_posix()},
+                          headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200 and response.content == expected
+
+
+def test_dataset_original_stays_local_so_query_data_reads_it(vault: Path, selected_store):
+    """An evicted dataset made query_data answer NOT_FOUND; datasets stay on the volume (D1)."""
+    from exomem import media_store, preserve, query_data
+
+    captured = preserve.preserve(vault, scope="Test", category="data", filename="table.csv", content="a,b\n1,2\n")
+    path = vault / captured.path
+    assert media_store.enqueue_offloads(vault) == 0
+    assert media_store.offload(vault, path) is None
+    assert not media_store.evict(vault, path)
+    assert originals.original_state(vault, path).state == "local"
+    assert query_data.query_data(vault, path=captured.path).rows == [{"a": "1", "b": "2"}]
+
+
+def test_offload_demand_does_not_hide_pending_extraction(vault: Path, selected_store):
+    """The offload-only row counted as processing work, so discovery never re-queued a lost extraction."""
+    from exomem import media_jobs, media_processing
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"pending original")
+    media_processing.reconcile_media(vault, path)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.discard(ledger.get_by_binary(path))
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
+    media_processing.reconcile_all_media(vault)
+    assert ledger.has_pending_ocr(path)
+
+
 def test_explicit_trash_removes_the_stored_binding(vault: Path, selected_store):
     from exomem import delete_file, media_jobs, media_processing, media_store, preserve
 
@@ -816,11 +925,14 @@ def test_captured_source_original_reconciles_and_recovers_without_metadata_rewri
         assert page.read_bytes() == completed
     else:
         assert media_processing.reconcile_media(vault, path, explicit=False) is None
+    # A `.md` original is a vault note: it is never offloaded, so never evicted (D1).
+    stored = layout in {"native", "opaque"}
     media_store.enqueue_offloads(vault)
-    _offload(vault, path)
+    assert (_offload(vault, path) is not None) is stored
     published = page.read_bytes()
     assert originals.original_state(vault, path).sidecar_path == page
-    assert media_store.evict(vault, path)
+    assert media_store.evict(vault, path) is stored
+    assert originals.original_state(vault, path).state == ("evicted" if stored else "local")
     assert media_processing.reconcile_all_media(vault) == 0
     assert page.read_bytes() == published
     who = owner_principal(surface="mcp")

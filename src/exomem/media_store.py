@@ -32,6 +32,13 @@ class MediaStoreError(RuntimeError):
         super().__init__(f"{code}: {reason}")
 
 
+class ObjectTooLarge(MediaStoreError):
+    """The store refuses this declared size for good; retrying the same bytes cannot succeed."""
+
+    def __init__(self, size: int, bound: int):
+        super().__init__("MEDIA_OBJECT_TOO_LARGE", f"{size} bytes exceed the per-object bound of {bound}")
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectHead:
     size: int
@@ -39,7 +46,8 @@ class ObjectHead:
 
 
 class Store(Protocol):
-    def upload(self, name: str, stream: BinaryIO) -> str: ...
+    # The declared size and digest let the store refuse before or instead of publishing (D6).
+    def upload(self, name: str, stream: BinaryIO, *, size: int, sha256: str) -> str: ...
     def head(self, name: str, version: str) -> ObjectHead | None: ...
     def open(self, name: str, version: str): ...
 
@@ -58,24 +66,44 @@ def _chunks(stream: BinaryIO):
         yield chunk
 
 
+def _declared_chunks(stream: BinaryIO, size: int, sha256: str):
+    """Yield the stream, then refuse it unless it matched its declaration exactly."""
+    digest = hashlib.sha256()
+    received = 0
+    for chunk in _chunks(stream):
+        received += len(chunk)
+        if received > size:
+            break
+        digest.update(chunk)
+        yield chunk
+    if received != size or digest.hexdigest() != sha256:
+        raise MediaStoreError("MEDIA_UPLOAD_MISMATCH", "the uploaded bytes differ from the declared size or digest")
+
+
 class FilesystemStore:
     """Versioned ciphertext store for isolated tests, with no deletion API."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, max_object_bytes: int | None = None):
         self.root = root
+        self.max_object_bytes = max_object_bytes
 
     def _path(self, name: str, version: str) -> str:
         if not originals.is_sha256(name) or not version or Path(version).name != version or version in {".", ".."}:
             raise ValueError("invalid object locator")
         return f"{name}/{version}"
 
-    def upload(self, name: str, stream: BinaryIO) -> str:
+    def upload(self, name: str, stream: BinaryIO, *, size: int, sha256: str) -> str:
         version = uuid.uuid4().hex
         self._path(name, version)
+        if not originals.is_sha256(sha256) or size < 0:
+            raise ValueError("invalid upload declaration")
+        if self.max_object_bytes is not None and size > self.max_object_bytes:
+            raise ObjectTooLarge(size, self.max_object_bytes)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with held_fs.acquire(self.root).require() as filesystem:
             with filesystem.parent(name, create=True, access="mutate").require() as parent:
-                held_fs.publish_bytes(filesystem, parent, version, held_fs.Chunks(lambda: _chunks(stream))).require()
+                held_fs.publish_bytes(filesystem, parent, version,
+                                      held_fs.Chunks(lambda: _declared_chunks(stream, size, sha256))).require()
                 filesystem.flush_directory(parent).require()
         return version
 
@@ -115,7 +143,17 @@ def store_for(vault: Path) -> Store:
     config = _settings(vault)
     if config.get("adapter") != "filesystem-test":
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
-    return FilesystemStore(Path(str(config["root"])))
+    bound = config.get("max_object_bytes")
+    return FilesystemStore(Path(str(config["root"])), max_object_bytes=None if bound is None else int(bound))
+
+
+@contextmanager
+def _transport(operation: str):
+    """A store transport fault is an outage, which leaves offload demand retryable."""
+    try:
+        yield
+    except (held_fs.HeldFsError, OSError) as error:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", f"the media store {operation} failed: {error}") from error
 
 
 def _reference_key(reference: StoredObject) -> str:
@@ -306,15 +344,20 @@ def processing_status(vault: Path) -> list[dict[str, object]]:
 
 
 def enqueue_offload(vault: Path, path: Path) -> int:
-    if originals.binding_for(vault) is None:
+    config = originals.configuration(vault)
+    if config is None:
         return 0
     snapshot = original_state(vault, path)
-    if snapshot.state != "local" or snapshot.binary_sha256 is None:
+    if snapshot.state != "local" or snapshot.binary_sha256 is None or not snapshot.offloadable:
         return 0
     store = MediaJobStore(vault)
+    if _refused(store, snapshot):
+        return 0
     current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
-        return 0
+        # An outage or a disabled store fails the attempt but keeps its demand;
+        # an enabled store returns it to the queue. A disabled one keeps it parked.
+        return int(config.get("enabled") is True and store.rearm_offload(current))
     # A separate row keeps offload runnable without changing extraction verdicts.
     store.enqueue(MediaJob(snapshot.path, snapshot.sidecar_path,
                            OFFLOAD_MEDIA_TYPE,
@@ -367,7 +410,8 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
 
 
 def _confirmed(store: Store, reference: StoredObject) -> bool:
-    head = store.head(reference.object, reference.version)
+    with _transport("head"):
+        head = store.head(reference.object, reference.version)
     if head is None:
         return False
     if head != ObjectHead(reference.ciphertext_size, reference.ciphertext_sha256):
@@ -394,10 +438,61 @@ def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> Non
         # D9 requires FULL before BEGIN: NORMAL can omit this record from a clone.
         conn.execute("PRAGMA synchronous=FULL")
         with conn:
-            conn.execute("INSERT INTO media_protections(token, binary_rel, object, created_at) VALUES (?, ?, ?, ?)",
-                         (uuid.uuid4().hex, store._relative(snapshot.path), name, time.time()))
+            # One record per object covers every retried attempt for this original.
+            conn.execute("INSERT INTO media_protections(token, binary_rel, object, created_at) "
+                         "SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
+                         "WHERE binary_rel = ? AND object = ?)",
+                         (uuid.uuid4().hex, store._relative(snapshot.path), name, time.time(),
+                          store._relative(snapshot.path), name))
     finally:
         conn.close()
+
+
+def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStoreError, ciphertext_size: int) -> None:
+    """Record a refusal that holds for these exact bytes; the original stays local (D10)."""
+    conn = store._connect()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO media_offload_refusals(binary_rel, sha256, code, ciphertext_size, created_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(binary_rel) DO UPDATE SET sha256=excluded.sha256, "
+                "code=excluded.code, ciphertext_size=excluded.ciphertext_size, created_at=excluded.created_at",
+                (store._relative(snapshot.path), snapshot.binary_sha256, refusal.code, ciphertext_size, time.time()),
+            )
+    finally:
+        conn.close()
+
+
+def _refused(store: MediaJobStore, snapshot: OriginalSnapshot) -> bool:
+    conn = store._connect(readonly=True)
+    try:
+        return conn.execute("SELECT 1 FROM media_offload_refusals WHERE binary_rel = ? AND sha256 = ?",
+                            (store._relative(snapshot.path), snapshot.binary_sha256)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def offload_refusals(vault: Path) -> list[dict[str, object]]:
+    """Originals that stay local because the store refused their exact bytes."""
+    store = MediaJobStore(vault, create=False)
+    if not store.path.exists():
+        return []
+    conn = store._connect(readonly=True)
+    try:
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_offload_refusals' AND type = 'table'").fetchone() is None:
+            return []
+        rows = conn.execute("SELECT binary_rel, sha256, code, ciphertext_size FROM media_offload_refusals "
+                            "ORDER BY binary_rel").fetchall()
+    finally:
+        conn.close()
+    result = []
+    for row in rows:
+        snapshot = original_state(vault, row["binary_rel"])
+        if snapshot.binary_sha256 != row["sha256"]:
+            continue  # Changed bytes are a new offload candidate, not this refusal.
+        result.append({"path": row["binary_rel"], "original_state": snapshot.state,
+                       "code": row["code"], "ciphertext_size": row["ciphertext_size"]})
+    return result
 
 
 def _finish_reference(ledger: MediaJobStore, snapshot: OriginalSnapshot, source: reserved_paths.GenericBinarySource | None = None) -> None:
@@ -410,12 +505,17 @@ def _finish_reference(ledger: MediaJobStore, snapshot: OriginalSnapshot, source:
                 _record_cache(conn, ledger, snapshot, source)
             conn.execute("DELETE FROM media_protections WHERE binary_rel = ? AND object = ?",
                          (ledger._relative(snapshot.path), snapshot.reference.object))
+            conn.execute("DELETE FROM media_offload_refusals WHERE binary_rel = ?", (ledger._relative(snapshot.path),))
     finally:
         conn.close()
 
 
-def offload(vault: Path, path: Path) -> StoredObject:
-    """Protect, encrypt, confirm and durably publish a bound original."""
+def offload(vault: Path, path: Path) -> StoredObject | None:
+    """Protect, encrypt, confirm and durably publish a bound original.
+
+    None means that the original stays local: notes and datasets are never
+    offloaded, and a store refusal for these exact bytes is final (D10).
+    """
     vault = Path(vault).resolve()
     config = _settings(vault)
     if config.get("enabled") is not True:
@@ -426,6 +526,8 @@ def offload(vault: Path, path: Path) -> StoredObject:
         snapshot = original_state(vault, path)
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
+        if not snapshot.offloadable:
+            return None
         if snapshot.reference is not None:
             if _confirmed(backend, snapshot.reference):
                 with ExitStack() as stack:
@@ -484,7 +586,12 @@ def offload(vault: Path, path: Path) -> StoredObject:
                     ciphertext.seek(0)
                     head = _digest(ciphertext)
                     ciphertext.seek(0)
-                    version = backend.upload(name, ciphertext)
+                    try:
+                        with _transport("upload"):
+                            version = backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
+                    except ObjectTooLarge as refusal:
+                        _refuse(ledger, snapshot, refusal, head.size)
+                        return None
                     reference = StoredObject(1, str(config["store"]), key_version, name, version, head.size, head.sha256)
             if not _confirmed(backend, reference):
                 raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
@@ -518,7 +625,7 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
     backend = store_for(vault)
     guard = PathGuard.capture(vault, ledger._relative(snapshot.path), leaf_policy="absent")
     with tempfile.TemporaryFile() as ciphertext, tempfile.TemporaryFile() as plaintext:
-        with backend.open(snapshot.reference.object, snapshot.reference.version) as stream:
+        with _transport("read"), backend.open(snapshot.reference.object, snapshot.reference.version) as stream:
             remaining = snapshot.reference.ciphertext_size
             while chunk := stream.read(min(1024 * 1024, remaining + 1)):
                 if len(chunk) > remaining:
@@ -573,7 +680,7 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...]):
             target = root / target
         relative = target.relative_to(root).as_posix()
         prefixes.append(relative)
-        if relative.lower().endswith(".md"):
+        if originals.is_note_path(relative):
             prefixes.append(relative[:-3])
     scan_roots = {target if target.is_dir() else target.parent
                   for prefix in prefixes for target in (root / prefix,)}
@@ -633,7 +740,8 @@ def evict(vault: Path, path: Path) -> bool:
         return False
     ledger = MediaJobStore(vault)
     snapshot = original_state(vault, path)
-    if snapshot.state != "cached" or snapshot.reference is None or not cache_matches(vault, path, snapshot=snapshot):
+    if (snapshot.state != "cached" or snapshot.reference is None or not snapshot.offloadable
+            or not cache_matches(vault, path, snapshot=snapshot)):
         return False
     identity = _identity(vault, path)
     try:

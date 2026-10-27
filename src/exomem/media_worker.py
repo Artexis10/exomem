@@ -1966,7 +1966,7 @@ class MediaWorker:
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if not media_engines.stage_enabled(media_type):
                 continue  # the engine is off: the sidecar waits without a job
-            if media_type and originals.original_state(self._vault_root, binary).present:
+            if media_type and (binary.exists() or originals.evicted(self._vault_root, binary)):
                 existing = (
                     self._store.get_by_binary(binary)
                     if self._store is not None
@@ -1985,7 +1985,7 @@ class MediaWorker:
             for parent_rel in pending_parents:
                 parent_sidecar = self._vault_root / (parent_rel + ".md")
                 parent_binary = self._vault_root / parent_rel
-                if parent_sidecar.exists() and originals.original_state(self._vault_root, parent_binary).present:
+                if parent_sidecar.exists() and (parent_binary.exists() or originals.evicted(self._vault_root, parent_binary)):
                     self.enqueue(
                         binary_path=parent_binary,
                         sidecar_path=parent_sidecar,
