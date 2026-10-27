@@ -38,11 +38,13 @@ def slices(tmp_path_factory: pytest.TempPathFactory) -> tuple[product.Tree, dict
 
 
 def _leads(block: dict) -> dict[str, dict]:
-    return {item["ref"]: item for item in block["items"]}
+    """The items by ref and by page path: the audit binds a collection to its page, the slice names it by record."""
+    return {name: item for item in block["items"] for name in (item["ref"], item.get("path")) if name}
 
 
 def _refs(tree: product.Tree, keys: tuple[str, ...]) -> set[str]:
-    return {tree.binding.key_to_ref[key] for key in keys}
+    bound = dict(tree.binding.key_to_ref)
+    return {bound[key] for key in keys}
 
 
 def _fixtures(tree: product.Tree, *, passing: bool, resolving: bool) -> list[FixtureCase]:
