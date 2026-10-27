@@ -1545,6 +1545,18 @@ class StoreServer:
                 or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
                 or foreground_priority.foreground_elsewhere())
 
+    def _write(self, method, *args, **kwargs):
+        """Run one of a views tick's store writes on live placement and policy, not the tick's read scope.
+
+        The same rule as ``_serve``: a write decides on the policy and placement it finds after
+        waiting for the mutation boundary, never on the ones the tick read before the wait.
+        """
+        from ..governance import policy
+        from .preview import _mutate
+
+        with state_paths.outside_resolution_scope(), policy.outside_request_policy_snapshot():
+            return _mutate(self.root, method, *args, **kwargs)
+
     def _views_tick(self):
         """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
 
@@ -1563,10 +1575,19 @@ class StoreServer:
         census turn uses one bounded window. While no request waits (``_aside``), one checkout
         runs further windows for up to ``VIEW_SLICE_SECONDS``, so a census pays its checkout,
         policy and release checks once per slice, not once per window.
+
+        The tick reads under one view of path placement and governance policy, opened per tick
+        and never kept across two. Its store writes decide live (``_write``).
         """
+        from ..governance import policy
+
+        with state_paths.resolution_scope(), policy.request_policy_snapshot():
+            return self._views_work()
+
+    def _views_work(self):
         from ..governance import principal
         from . import capability, chain, edit_back
-        from .preview import _mutate, preview_store
+        from .preview import preview_store
 
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
@@ -1595,7 +1616,7 @@ class StoreServer:
 
                     def mutate(method, *args, **kwargs):
                         before = chain.recorded_head(writer.connection)
-                        result = _mutate(self.root, method, *args, **kwargs)
+                        result = self._write(method, *args, **kwargs)
                         if chain.recorded_head(writer.connection) != before:
                             # A new canonical edit needs its own install and confirmation passes.
                             self._views_after, self._views_passes = None, 0
@@ -1636,7 +1657,7 @@ class StoreServer:
             history_policy = (self.runtime._handle, history.release_inputs(self.root))
             if history_policy != self._history_policy:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                    inputs = _mutate(self.root, writer.invalidate_history_pages)
+                    inputs = self._write(writer.invalidate_history_pages)
                     self._history_policy = (self.runtime._handle, inputs)
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
@@ -1645,9 +1666,9 @@ class StoreServer:
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 # Finish one path even under continuous demand; release its boundary before checking for readers.
                 for _ in range(VIEW_BATCH_PATHS):
-                    result = _mutate(self.root, writer.reconcile_views, limit=1,
-                                     after=self._views_after, pending_only=True,
-                                     missing_ready=writer.handle.census(self.root).missing_ready if views else None)
+                    result = self._write(writer.reconcile_views, limit=1,
+                                         after=self._views_after, pending_only=True,
+                                         missing_ready=writer.handle.census(self.root).missing_ready if views else None)
                     self._views_after = result["next_path"]
                     if self._views_after is None or self._aside() or self._stopping():
                         break
