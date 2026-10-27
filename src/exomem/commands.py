@@ -6869,6 +6869,15 @@ def _withhold_vault_generation(vault_root: Path, packet: Any) -> None:
         }
 
 
+def _attach_episode_advice(vault_root: Path, packet: dict[str, Any]) -> None:
+    # After the guard and never cached: advice to this caller about recording
+    # its conversation, not material about the vault, and it names no page.
+    # Both packet modes carry it, so a mode switch never silences the nudge.
+    episode_due = episode_nudge_module.on_activation(vault_root)
+    if episode_due is not None:
+        packet["episode_due"] = episode_due
+
+
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -7167,6 +7176,7 @@ def _op_activate_context_body(
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
             )
+        _attach_episode_advice(vault_root, packet)
         if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()
         return packet
@@ -7476,11 +7486,7 @@ def _op_activate_context_body(
                 seen_ns=time.time_ns(),
             ),
         )
-    # After the guard and never cached: advice to this caller about recording
-    # its conversation, not material about the vault, and it names no page.
-    episode_due = episode_nudge_module.on_activation(vault_root)
-    if episode_due is not None:
-        packet["episode_due"] = episode_due
+    _attach_episode_advice(vault_root, packet)
     if include_timings and timings is not None:
         packet["timings"] = timings.as_dict()
     # Deliberately NOT `_with_due_state`. That helper consults the emission

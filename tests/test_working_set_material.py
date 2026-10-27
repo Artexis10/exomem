@@ -59,6 +59,7 @@ def test_project_material_is_relevant_scoped_and_does_not_bypass_contact(materia
     assert not any(p["ref"].endswith("contact.md") for p in packet["pointers"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_entity_cue_serves_linked_open_category_material_with_its_qualifications(vault: Path):
     supplier = "Knowledge Base/Entities/Organizations/Alder Workshop.md"
     _write(vault, supplier,
@@ -587,6 +588,7 @@ def test_a_name_only_turn_keeps_every_default_lens_of_a_broad_project(
         assert len(served) == working_set.MAX_ITEMS_PER_ROLE
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_requested_constraint_survives_newer_unrelated_default_context(
     material_vault: Path, crowded_project: str,
 ):
@@ -606,6 +608,7 @@ def test_a_requested_constraint_survives_newer_unrelated_default_context(
     assert "quarry relay handoff" in str(recall)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_task_lookup_reaches_a_constraint_beyond_the_recency_prefix(material_vault: Path):
     # A task lookup over the already cut baseline would still miss this older fact.
     _note(material_vault, "recent-stock", "\n".join(
@@ -625,6 +628,7 @@ def test_task_lookup_reaches_a_constraint_beyond_the_recency_prefix(material_vau
     assert {"role": "constraints", "reason": "lane_truncated"} in packet["missing"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_failed_optional_task_lookup_preserves_baseline_and_can_recover(
     material_vault: Path, crowded_project: str, monkeypatch,
 ):
@@ -652,6 +656,7 @@ def test_a_failed_optional_task_lookup_preserves_baseline_and_can_recover(
     assert any(unit["provenance"]["path"] == crowded_project for unit in recovered["units"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_short_budget_keeps_baseline_instead_of_starting_task_matching(
     material_vault: Path, crowded_project: str, monkeypatch,
 ):

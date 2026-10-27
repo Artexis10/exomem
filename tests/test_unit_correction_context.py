@@ -24,6 +24,7 @@ material_vault = material_fixtures.material_vault
 owner = history_fixtures.owner
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_public_compiler_serves_current_connected_claims_after_guarded_corrections(
     material_vault: Path, owner,
 ) -> None:

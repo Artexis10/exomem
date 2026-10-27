@@ -18,6 +18,9 @@ from exomem import (
 )
 from exomem.runtime_resources import ModelBusyError
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 #: Planted signature space: the two outlier anchors sit on axis 0, which is the
 #: turn's own direction; every other signature is a seeded random direction.
 DIM = 64

@@ -26,6 +26,9 @@ from exomem import (
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 TURN = "Ottilie asked about the grant"
 BOTH_PROJECTS = "what about the Estuary Programme"
 

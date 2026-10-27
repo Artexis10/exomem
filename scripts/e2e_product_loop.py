@@ -1845,9 +1845,9 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     vault = Path(args.vault)
     work = Path(args.work)
     home = Path(args.home)
+    # The installed journey takes the shipped default packet mode:
+    # `_clean_env` strips every EXOMEM_* setting.
     env = _clean_env(home, vault)
-    # Opt in only for this synthetic installed journey; other transports retain their defaults.
-    env["EXOMEM_ACTIVATION_PACKET"] = "maps"
     state: dict[str, Any] = {}
     state["vault"] = str(vault)
     state["records"] = _write_records_fixture(vault)

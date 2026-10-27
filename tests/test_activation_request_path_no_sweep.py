@@ -389,6 +389,7 @@ def _warm_activation(vault: Path, warm_managed_cell) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_warm_activation_request_enumerates_no_directory(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -439,6 +440,7 @@ def test_warm_activation_request_enumerates_no_directory(
     assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_warm_activation_request_resolves_the_state_location_once(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1211,6 +1213,7 @@ def _write_unrelated_collection(vault: Path) -> Path:
     return directory
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_collection_the_turn_never_named_stays_off_the_request_path(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1248,6 +1251,7 @@ def test_a_collection_the_turn_never_named_stays_off_the_request_path(
     assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1322,6 +1326,7 @@ def _write_uncatalogued_page(vault: Path) -> Path:
     return page
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_agent_picked_page_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1362,6 +1367,7 @@ def test_an_agent_picked_page_holds_the_same_ceilings(
 
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_agent_pick_that_fires_the_learning_sensor_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1396,6 +1402,7 @@ def test_an_agent_pick_that_fires_the_learning_sensor_holds_the_same_ceilings(
 
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1483,6 +1490,7 @@ def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
 
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_semantic_lane_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1672,6 +1680,7 @@ def _fresh_projection(vault: Path) -> None:
     working_set_heat.profile(vault)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1719,6 +1728,7 @@ def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
     assert many.total <= few.total + 20, (few.report(), many.report())
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_session_start_with_upkeep_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:

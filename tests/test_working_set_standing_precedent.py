@@ -320,6 +320,7 @@ def _recency_referent(vault: Path, turn: str) -> dict:
     return commands.op_activate_context(vault, turn=turn, session="fresh", workspace="bench")
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_recency_only_entity_gets_neither_conclusions_nor_the_standing_page(
     study_vault: Path,
 ) -> None:
@@ -334,6 +335,7 @@ def test_a_recency_only_entity_gets_neither_conclusions_nor_the_standing_page(
     assert not ({CONCLUSION, STANDING} & _paths(packet))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_recency_only_page_in_a_project_gets_no_standing_page_on_a_bare_referential_turn(
     study_vault: Path,
 ) -> None:
@@ -461,6 +463,7 @@ def test_a_referent_carrying_only_recency_and_a_qualifier_is_not_read_for_conclu
     assert got == (frozenset(), frozenset())
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_anchor_the_agent_chose_is_named_and_still_read_for_conclusions(
     study_vault: Path,
 ) -> None:
@@ -479,6 +482,7 @@ def test_an_anchor_the_agent_chose_is_named_and_still_read_for_conclusions(
     assert {CONCLUSION, STANDING} <= _paths(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_recency_referent_the_user_also_read_is_not_read_for_conclusions(
     study_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

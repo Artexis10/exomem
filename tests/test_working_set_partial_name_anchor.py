@@ -34,6 +34,9 @@ from exomem import (
 )
 from exomem.governance.principal import owner_principal, request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 KB = "Knowledge Base"
 PERSON = f"{KB}/Entities/People/Nora.md"
 NAMESAKE = f"{KB}/Entities/People/Nora Quill.md"

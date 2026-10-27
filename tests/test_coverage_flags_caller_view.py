@@ -42,6 +42,9 @@ from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.published_admission import admission_of
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 ANCHOR = "Knowledge Base/Notes/Insights/coverage-anchor.md"
 OUTLINKED = "Knowledge Base/Notes/Insights/coverage-outlinked.md"
 BACKLINKER = "Knowledge Base/Notes/Insights/coverage-backlinker.md"

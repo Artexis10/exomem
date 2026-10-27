@@ -498,6 +498,7 @@ def test_a_corroborated_page_below_many_single_unit_pages_is_still_found(vault: 
     assert [hit.path for hit in hits] == _unbounded_paths(vault, turn, rows) == [anchor]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_activation_timings_report_the_selection_as_counts_only(vault: Path) -> None:
     """The kept and dropped unit counts reach the activation diagnostics, and
     nothing of the turn's own text does."""

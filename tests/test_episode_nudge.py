@@ -213,9 +213,11 @@ def test_the_server_instructions_ask_for_a_record_and_stay_short() -> None:
     assert len(text) <= 900, len(text)
 
 
+@pytest.mark.parametrize("packet_mode", ["anchors", "maps"])
 def test_only_the_advisory_is_added_to_the_packet(
-    monkeypatch: pytest.MonkeyPatch, vault: Path
+    monkeypatch: pytest.MonkeyPatch, vault: Path, packet_mode: str
 ) -> None:
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", packet_mode)
     from test_activate_context_surface import TURN
     from test_working_set_index import _seed_planning, _seed_structure
 

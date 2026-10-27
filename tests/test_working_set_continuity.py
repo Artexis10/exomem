@@ -778,6 +778,7 @@ def test_a_first_turn_reports_continuity_absent_and_returns_a_token(
     assert set(_decoded(packet["continuity"])["refs"]) == set(_resolved_refs(packet))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
@@ -809,6 +810,7 @@ def test_the_kill_switch_still_reports_a_continuity_state(
     assert "continuity" not in packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_returned_token_is_accepted_and_reported_applied(
     activation_vault: Path,
 ) -> None:
@@ -847,6 +849,7 @@ def test_a_valid_token_naming_nothing_is_reported_stale(
     assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
     activation_vault: Path,
 ) -> None:
@@ -939,6 +942,7 @@ def test_an_undecodable_token_is_reported_stale_and_never_raises(
     assert packet["abstained"] is False
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_unresolved_turn_stays_unresolved_with_a_valid_token(
     activation_vault: Path,
 ) -> None:
@@ -954,6 +958,7 @@ def test_an_unresolved_turn_stays_unresolved_with_a_valid_token(
     assert packet["units"] == []
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_token_is_minted_after_the_guard_not_before(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -979,6 +984,7 @@ def test_the_token_is_minted_after_the_guard_not_before(
     assert not dropped & set(_decoded(guarded["continuity"])["refs"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_token_is_never_served_another_requests_cached_packet(
     activation_vault: Path,
 ) -> None:
@@ -991,6 +997,7 @@ def test_a_token_is_never_served_another_requests_cached_packet(
     assert with_token["generation"]["continuity"] == runtime_module.CONTINUITY_APPLIED
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_override_is_never_served_another_requests_cached_packet(
     activation_vault: Path,
 ) -> None:
@@ -1005,6 +1012,7 @@ def test_an_override_is_never_served_another_requests_cached_packet(
     assert _refs(override) == [chosen]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_override_resolves_on_the_chosen_anchor_alone(
     activation_vault: Path,
 ) -> None:
@@ -1022,6 +1030,7 @@ def test_an_override_resolves_on_the_chosen_anchor_alone(
     assert refs[0] not in json.dumps(packet["anchors"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_override_runs_the_role_lanes(activation_vault: Path) -> None:
     plain = commands.op_activate_context(activation_vault, turn=TURN)
 
@@ -1032,6 +1041,7 @@ def test_an_override_runs_the_role_lanes(activation_vault: Path) -> None:
     assert packet["roles"], "the lanes must run for the anchor the agent chose"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_turn_still_chooses_the_lenses_on_the_override_path(
     activation_vault: Path,
 ) -> None:
@@ -1054,6 +1064,7 @@ def test_the_turn_still_chooses_the_lenses_on_the_override_path(
     ], "the turn's cues must still reach role selection"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_unknown_and_a_withheld_anchor_receive_the_same_error(
     activation_vault: Path,
 ) -> None:
@@ -1080,6 +1091,7 @@ def test_an_unknown_and_a_withheld_anchor_receive_the_same_error(
     assert str(unknown.value).split(":", 1)[0].isupper()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_override_records_nothing(activation_vault: Path) -> None:
     plain = commands.op_activate_context(activation_vault, turn=TURN)
     chosen = _refs(plain)[0]
@@ -1101,6 +1113,7 @@ def test_the_override_records_nothing(activation_vault: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_refusal_reaches_a_door_as_a_structured_client_error(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1205,6 +1218,7 @@ def _age_everything(vault: Path, *, newest: Path) -> None:
     _live_cell(vault)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_referential_turn_with_a_token_resolves_the_previous_anchor(
     activation_vault: Path,
 ) -> None:
@@ -1232,6 +1246,7 @@ def test_a_referential_turn_with_a_token_resolves_the_previous_anchor(
     assert packet["continuity"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_referential_turn_without_a_token_resolves_the_freshest_edit(
     activation_vault: Path,
 ) -> None:
@@ -1275,6 +1290,7 @@ def hot_sled_vault(activation_vault: Path) -> Path:
     return activation_vault
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("turn", POINTING_BACK_TURNS)
 def test_a_turn_that_only_points_back_resolves_the_hottest_anchor(
     hot_sled_vault: Path, turn: str
@@ -1288,6 +1304,7 @@ def test_a_turn_that_only_points_back_resolves_the_hottest_anchor(
     assert "recency" in resolved.get("Knowledge Base/Products/Cargo Sled.md", ()), resolved
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     "turn",
     [
@@ -1310,6 +1327,7 @@ def test_a_cue_word_in_its_ordinary_sense_is_not_answered_by_recency(
     assert packet["recent_context"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_referential_turn_keeps_its_referent_past_recall_partials(
     activation_vault: Path,
 ) -> None:
@@ -1380,6 +1398,7 @@ def _one_batch(vault: Path, *, count: int) -> list[Path]:
     return pages
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_vault_written_in_one_batch_is_never_a_menu_of_its_pages(
     activation_vault: Path,
 ) -> None:
@@ -1417,6 +1436,7 @@ def working_set_resolve_rows(vault: Path):
 # R-M: the continuity tier leads only while it is the latest thing that happened.
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_token_says_when_it_was_minted(activation_vault: Path) -> None:
     import time
 
@@ -1483,6 +1503,7 @@ def test_a_token_that_does_not_say_when_it_was_minted_leads(activation_vault: Pa
     )
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_continue_after_another_edit_keeps_a_keyless_thread_on_its_own_work(
     activation_vault: Path,
 ) -> None:
@@ -1563,6 +1584,7 @@ def test_capitals_in_ordinary_prose_never_serve_an_unrelated_anchor(
 # R-N5: a token minted before an anchor gained its identifier still names it.
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_token_from_before_a_backfill_still_leads_by_path(activation_vault: Path) -> None:
     """The reviewer's r2 refcheck: the packet was served while Cargo Sled
     had no identifier, so its token names the page by path. `backfill-ids`
