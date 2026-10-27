@@ -186,11 +186,13 @@ After the target is confirmed active, the operator removes the release
 directories that the service no longer needs. It keeps the serving release, the
 release that the promotion replaced, and every release that `active.json` or
 `transition.json` in the runtime directory records. The launcher venv lives
-outside `releases/` and is never removed. The operator also keeps every entry
-that it did not create: a symlink, a file, a foreign-owned entry, or a name
-other than 32 hexadecimal characters. An unreadable or malformed manager record
-stops retention before it removes anything. A removal failure or an interrupt
-never fails the upgrade.
+outside `releases/` and is never removed. The operator removes only directories
+that the service user owns, that are not symlinks, and whose names are 32
+lowercase hexadecimal characters. It keeps every other entry. An unreadable or
+malformed manager record stops retention before it removes anything. A removal
+failure or an interrupt never fails the operator's result. An interrupted
+`scripts/upgrade.sh` stops itself, but the promoted release keeps serving: check
+`--status`, then run `scripts/upgrade.sh` again to finish the CLI sync.
 
 The manager's records are the only proof of use. A process outside those
 records is not protected, and a later upgrade can remove the release it runs.
@@ -221,8 +223,9 @@ the CLI sync and the managed-install manifest helpers:
 
 1. Install this release in an interpreter outside the service, such as a tested checkout's venv.
 2. Read the runtime directory from the rendered unit's `--runtime-dir` argument.
-3. Run `<operator-python> -m exomem.service_upgrade --runtime-dir <runtime-dir> --profile standard`.
-4. Read the printed JSON result: it contains a `release_retention` report.
+3. Read the profile from `service_profile` in `~/.config/exomem/managed-install.json`.
+4. From the checkout root, run `<operator-python> -m exomem.service_upgrade --runtime-dir <runtime-dir> --profile <profile>`.
+5. Read the printed JSON result: it contains a `release_retention` report.
 
 ## The standby sequence
 
