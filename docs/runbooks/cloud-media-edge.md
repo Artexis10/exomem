@@ -61,7 +61,13 @@ the canary reads and writes media through the edge.
 ## Replace one cell's credential
 
 1. Raise the cell's number in `mediaEdge.credentialEpochs`, for example `{"<canary>": 1}`.
-2. Deploy the char## Undo
+2. Deploy the chart.
+3. Check that the ConfigMap lists the cell with a higher version and that the generation rose.
+
+The old credential stops working when the edge reports the new generation. Treat a
+revocation as finished only when `/v1/generation` reports that number.
+
+## Undo
 
 A cell that leaves the edge keeps its store settings, marked `"enabled":false`. It
 loses its credential, its keys and its egress to the edge. Its evicted originals

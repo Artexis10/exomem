@@ -261,6 +261,8 @@ def _pin(vault: Path, path: Path):
 def _reserve(store: MediaJobStore, token: str, snapshot: OriginalSnapshot, config: dict[str, object]) -> None:
     assert snapshot.reference is not None and snapshot.binary_size is not None
     needed = snapshot.binary_size + snapshot.reference.ciphertext_size
+    if config.get("max_temporary_bytes") is None or config.get("max_hydrations") is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "media hydration limits are not configured")
     maximum = int(config["max_temporary_bytes"])
     concurrent = int(config["max_hydrations"])
     if maximum <= 0 or concurrent <= 0:
