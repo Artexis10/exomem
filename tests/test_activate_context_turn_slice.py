@@ -113,9 +113,8 @@ LONG_TURN = (
 )
 
 
-def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(vault: Path, tmp_path: Path) -> None:
-    """Twenty withheld notes that say "cargo sled", in a vault past the lexical corpus floor, change no byte of
-    a restricted caller's packet: its slice ranks and selects the turn's words over the pages it may see."""
+def _hauling_twins(vault: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """`vault` with the twenty withheld hauling logs, and its twin without them, both past the lexical corpus floor."""
     from test_working_set_carry import seed_ordinary_notes
 
     twin = _second_vault(tmp_path)
@@ -131,6 +130,13 @@ def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(
         _withhold(root, *HAULING_LOGS, ceiling=0)
         _built(root).close()
         lexstore.ensure_fresh(root)
+    return vault, twin
+
+
+def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(vault: Path, tmp_path: Path) -> None:
+    """Twenty withheld notes that say "cargo sled", in a vault past the lexical corpus floor, change no byte of
+    a restricted caller's packet: its slice ranks and selects the turn's words over the pages it may see."""
+    vault, twin = _hauling_twins(vault, tmp_path)
     guests = []
     for root in (vault, twin):
         _cold()
@@ -138,6 +144,43 @@ def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(
     assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
     # The control: leads whose evidence the statistics decide.
     assert any("retrieval" in item["evidence"] for item in guests[0]["turn_slice"]["items"])
+
+
+def full_compile_slices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compile the turn slice with every lane of the anchors compile, which the leads-only compile must agree with."""
+    serve = working_set_runtime.serve
+    monkeypatch.setattr(working_set_runtime, "serve", lambda *args, **kwargs: serve(*args, **{**kwargs, "leads_only": False}))
+
+
+def test_the_leads_only_compile_gives_the_full_compiles_slice_on_the_lexical_twins(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The slice skips the resolved anchors' lanes, whose material it never serves. Every lead, match, evidence
+    kind and state is still the one the full compile gives, for the owner and a restricted caller on both twins."""
+    roots = _hauling_twins(vault, tmp_path)
+    lanes = working_set.run_lanes
+    runs: list[int] = []
+
+    def counted(*args, **kwargs):
+        runs[-1] += 1
+        return lanes(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "run_lanes", counted)
+    for root in roots:
+        for caller in (OWNER, _external()):
+            for turn in (SLED_TURN, LONG_TURN, IRRELEVANT_TURN):
+                _cold()
+                runs[:] = [0]
+                leads_only = _activate(root, caller, turn=turn)["turn_slice"]
+                with monkeypatch.context() as scope:
+                    full_compile_slices(scope)
+                    _cold()
+                    runs.append(0)
+                    full = _activate(root, caller, turn=turn)["turn_slice"]
+                assert leads_only == full, (root.name, turn)
+                if turn == SLED_TURN:
+                    # The control: the turn resolves an anchor, whose lanes only the full compile runs.
+                    assert full["state"] == "ready" and runs[0] < runs[1], (root.name, runs, full)
 
 
 def _guarded_world(vault: Path) -> None:

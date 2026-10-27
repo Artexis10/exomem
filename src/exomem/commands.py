@@ -6944,9 +6944,10 @@ def _compile_guarded_activation(
     reused, and builds one reader view after the checkpoint pin for the rest
     of the compile. A restricted reader's lexical pass, dependence check and
     carry share one admission over that view, so a withheld page moves no term
-    choice or rank. The anchors packet passes none: it builds its views itself
-    and ranks its lexical pass on the catalogue's statistics, as the owner does
-    in both."""
+    choice or rank. The compile then also serves leads only
+    (`working_set.compile_packet`). The anchors packet passes none: it builds
+    its views itself, ranks its lexical pass on the catalogue's statistics, as
+    the owner does in both, and compiles in full."""
 
     def stopped(*args: Any, **kwargs: Any) -> _CompiledActivation:
         return _CompiledActivation(abstain(*args, **kwargs), False)
@@ -7085,6 +7086,7 @@ def _compile_guarded_activation(
         lexical_admission=lexical_admission,
         reader=slice_reader,
         status_basis=status_basis,
+        leads_only=caller is not None,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —

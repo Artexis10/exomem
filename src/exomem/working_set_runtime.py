@@ -2468,6 +2468,7 @@ def serve(
     intent_resolution: dict[str, Any] | None = None,
     lexical_admission=None,
     reader=None,
+    leads_only: bool = False,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -2491,7 +2492,8 @@ def serve(
     (`lexical_evidence`), handed to the compile's dependence check and carry.
     `reader` is a restricted caller's `egress.ReaderView` that the request
     already built after its checkpoint pin; without it the reader's view is
-    built here.
+    built here. `leads_only` compiles a turn slice's packet
+    (`working_set.compile_packet`), which is cached apart from a full one.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
@@ -2662,6 +2664,7 @@ def serve(
         lexical_state,
         index.token(),
         working_set.band_audience_allowed(root),
+        leads_only,
     )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
@@ -2723,6 +2726,7 @@ def serve(
             _intent_resolution=intent_resolution,
             lexical_admission=lexical_admission,
             reader=reader,
+            leads_only=leads_only,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

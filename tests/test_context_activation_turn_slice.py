@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 from epistemic.corpora.context_activation import FixtureCase
 from membench.utility import context_activation_product as product
+from test_activate_context_turn_slice import full_compile_slices
 from test_context_activation_real_compiler import PASSING_TODAY
 
 pytestmark = [pytest.mark.timeout(1800)]
@@ -21,6 +22,8 @@ pytestmark = [pytest.mark.timeout(1800)]
 ACTIVATING_MATCHES = ("resolved", "ambiguous", "carried")
 
 _RUNS: dict[str, tuple[product.Tree, dict[str, dict]]] = {}
+#: Each fixture's `turn_slice` from the full anchors compile, the one the shipped leads-only compile must equal.
+_FULL: dict[str, dict] = {}
 
 
 @pytest.fixture
@@ -34,6 +37,11 @@ def slices(tmp_path_factory: pytest.TempPathFactory) -> tuple[product.Tree, dict
             tree,
             {fixture.case_id: product.activate(tree.root, fixture)["turn_slice"] for fixture in tree.fixtures},
         )
+        with pytest.MonkeyPatch.context() as scope:
+            full_compile_slices(scope)
+            _FULL.update(
+                {fixture.case_id: product.activate(tree.root, fixture)["turn_slice"] for fixture in tree.fixtures}
+            )
     return _RUNS["run"]
 
 
@@ -83,3 +91,12 @@ def test_a_guarded_page_is_never_served_as_an_activated_lead(slices) -> None:
         leads = _leads(blocks[fixture.case_id])
         for ref in _refs(tree, fixture.poison) & set(leads):
             assert leads[ref]["match"] not in ACTIVATING_MATCHES, (fixture.case_id, leads[ref])
+
+
+def test_every_fixture_gets_the_full_compiles_slice_from_the_leads_only_compile(slices) -> None:
+    """The slice skips the lanes whose material it never serves: each fixture's leads, their match and
+    evidence, and the slice's state are the ones the full anchors compile gives."""
+    tree, blocks = slices
+    assert set(_FULL) == {fixture.case_id for fixture in tree.fixtures}
+    for case_id, block in blocks.items():
+        assert block == _FULL[case_id], case_id

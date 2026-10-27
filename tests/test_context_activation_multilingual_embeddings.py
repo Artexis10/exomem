@@ -43,6 +43,7 @@ from membench.utility.context_activation_multilingual import (  # noqa: E402
     multilingual_report,
     score_multilingual_case,
 )
+from test_activate_context_turn_slice import full_compile_slices  # noqa: E402
 from test_latency_gate import (  # noqa: E402
     SLICE_ADDED_MS_CEILING,
     SLICE_ADDED_MS_TARGET,
@@ -126,6 +127,8 @@ class Measured:
     incidental_carry: dict[str, tuple[str, ...]]
     #: Each case's `turn_slice` from the maps packet, semantic evidence on.
     slices: dict[str, dict]
+    #: The same slices from the full anchors compile, which the shipped leads-only compile must equal.
+    full_slices: dict[str, dict]
     #: The maps packet's time with the slice on minus off, one value per pair (`_slice_added_ms`).
     slice_added_ms: list[float]
 
@@ -164,12 +167,16 @@ def _compile_arms(root: Path, turns: list[tuple[str, str, str]], monkeypatch) ->
     return packets
 
 
-def _turn_slices(root: Path, turns: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
+def _turn_slices(
+    root: Path, turns: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, dict], dict[str, dict]]:
     """Each turn's `turn_slice` from the maps packet with the slice on, the
-    encoder loaded, and the catalogue the maps packet reads published first."""
+    encoder loaded, and the catalogue the maps packet reads published first:
+    as shipped, and from the full anchors compile."""
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     context_catalogue.ContextCatalogue(root).rebuild()
     slices: dict[str, dict] = {}
+    full_slices: dict[str, dict] = {}
     with monkeypatch.context() as scope:
         scope.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
         scope.delenv("EXOMEM_ACTIVATION_TURN_SLICE", raising=False)
@@ -177,7 +184,11 @@ def _turn_slices(root: Path, turns: list[tuple[str, str]], monkeypatch: pytest.M
         for case_id, turn in turns:
             working_set_runtime.reset_caches_for_tests()
             slices[case_id] = commands.op_activate_context(root, turn=turn)["turn_slice"]
-    return slices
+        full_compile_slices(scope)
+        for case_id, turn in turns:
+            working_set_runtime.reset_caches_for_tests()
+            full_slices[case_id] = commands.op_activate_context(root, turn=turn)["turn_slice"]
+    return slices, full_slices
 
 
 def _slice_added_ms(root: Path, turns: list[str], monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -246,7 +257,7 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             packet = commands.op_activate_context(root, turn=case.turn, include_timings=True)
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
 
-    slices = _turn_slices(root, [(case.case_id, case.turn) for case in CASES], monkeypatch)
+    slices, full_slices = _turn_slices(root, [(case.case_id, case.turn) for case in CASES], monkeypatch)
     slice_added_ms = _slice_added_ms(root, [case.turn for case in CASES], monkeypatch)
 
     # The same vault with an ordinary note beside each named gold that shares
@@ -318,6 +329,7 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
         incidental,
         incidental_carry,
         slices,
+        full_slices,
         slice_added_ms,
     )
 
@@ -584,3 +596,11 @@ def test_no_twin_or_guarded_page_is_an_unsound_turn_slice_lead(measured: Measure
             item = leads[ref]
             assert item["match"] not in (*_ACTIVATING_MATCHES, "carried"), (case.case_id, item)
             assert "vector_band" not in item["evidence"], (case.case_id, item)
+
+
+def test_every_case_gets_the_full_compiles_slice_from_the_leads_only_compile(measured: Measured) -> None:
+    """The slice skips the lanes whose material it never serves: each planted case's leads, their match and
+    evidence, and the slice's state are the ones the full anchors compile gives with the encoder loaded."""
+    assert set(measured.full_slices) == set(measured.slices)
+    for case_id, block in measured.slices.items():
+        assert block == measured.full_slices[case_id], case_id
