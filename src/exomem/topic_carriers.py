@@ -273,17 +273,21 @@ class _Adapter(registry.FixedPackAdapter):
         return findings
 
     def inspect_extra(self, vault_root: Path) -> dict[str, Any]:
-        """The hand-written project-key domains, read as `reviewed` and never written.
+        """Where considerations are served, and the hand-written project-key domains (read as `reviewed`, never written).
 
         They come from the project registry, so a caller who may not read that file gets no field:
         an empty list would claim the registry declares nothing.
         """
         from . import context_views, project_keys
 
+        # A constant pointer, not a ranking: inspect stays pure, and every agent that inspects
+        # the registry learns where the evidence for a declaration is served.
+        route = {"considerations": {"tool": "review_memory", "mode": "vocabulary"}}
         if not context_views.CallerView.current(vault_root).projects_admitted:
-            return {}
+            return route
         keys = project_keys.load_project_registry(vault_root)
         return {
+            **route,
             "hand_declared": [
                 {"kind": KIND_PROJECT, "match": key, "topics": list(keys.domains_for(key)),
                  "origin": {topic: ORIGIN_REVIEWED for topic in keys.domains_for(key)},
