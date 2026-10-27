@@ -293,6 +293,7 @@ cloudGateway:
   # A non-empty list needs cloudGateway.enabled, cellctl.enabled, the signing key
   # Secret above, and traefik.ports.websecure.transport.respondingTimeouts.readTimeout
   # of at least 900s: Traefik reads a whole request body within that time, 60s by default.
+  # The chart checks the timeout only when cloudIngress.enabled; it never checks the Secrets.
   uploadCellIds: []
   # Enable only after the matched web/gateway release, reviewer schema/grants,
   # and dedicated complimentary sample account are verified. Ordinary Cloud

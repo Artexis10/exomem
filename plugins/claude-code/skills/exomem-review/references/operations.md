@@ -565,7 +565,8 @@ cannot be undone.
   sandbox can't reach the returned URL, report that transport limitation and use
   a supported attachment channel. Never guess an upload endpoint or read a
   credential from the user's environment or machine.
-- **Phone / curl / a shortcut:** multipart-POST to the exact `upload_url`
+- **Phone / curl / a shortcut (personal server only; a Cloud cell accepts only the held
+  upload above):** multipart-POST to the exact `upload_url`
   returned by `transfer_artifact(operation="upload")`
   (`file`, `scope`, `category`, optional `filename`, `description`, `text`) with
   `Authorization: Bearer <returned short-lived token>` (the token is **always** required).

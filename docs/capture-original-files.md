@@ -39,8 +39,8 @@ It carries the header `Authorization: Bearer <token>` and the form fields `file`
 Do not add other fields such as `scope` or `category`; the service refuses them. An installed CLI that predates `--handoff-file` needs the fallback request.
 Check the reply before step 6: `state` is `held`, and `hash` and `size` match the file.
 
-The client sets its own attachment cap: 30 MB per file in claude.ai and Claude desktop chat. Cowork reads files from disk.
-The handoff's byte limit applies as well. A pasted inline image never reaches the sandbox.
+The client sets its own attachment limit; use that limit. The handoff's `max_bytes` is the service limit.
+A pasted inline image never reaches the sandbox.
 
 ## Other clients
 

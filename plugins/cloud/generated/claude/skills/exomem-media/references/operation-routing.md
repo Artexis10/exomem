@@ -134,7 +134,8 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
          ```
          TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')
          URL=$(python3 -c 'import json; print(json.load(open("handoff.json"))["upload_url"])')
-         curl -sS -H "Authorization: Bearer $TOKEN" -F "file=@<file>" -F hold=1 -F lane=source "$URL"
+         LANE=$(python3 -c 'import json; print(json.load(open("handoff.json"))["lane"])')
+         curl -sS -H "Authorization: Bearer $TOKEN" -F "file=@<file>" -F hold=1 -F "lane=$LANE" "$URL"
          ```
     5. Check the reply: `state` is `held`, `hash` equals the digest and `size` equals the
        file's size. Pass its `file` object unchanged to
@@ -142,10 +143,9 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
        Only the receipt that `capture_source` returns proves custody; the upload reply
        proves only a temporary hold.
 
-    The client caps the file the sandbox receives, not Exomem: 30 MB per file in
-    claude.ai and Claude desktop chat, while Cowork reads the file from disk. The
-    handoff's `max_bytes` is the service's own limit. Pasted inline images never
-    reach the sandbox. If the sandbox cannot reach `upload_url`, say so; never guess an
+    The client caps the file the sandbox receives, not Exomem: use the client's own
+    attachment limit. The handoff's `max_bytes` is the service's own limit. Pasted
+    inline images never reach the sandbox. If the sandbox cannot reach `upload_url`, say so; never guess an
     endpoint or read a credential from the user's environment.
   - **No path for the bytes:** tell the user the original was not preserved and, on a
     personal server, offer the browser upload form. Custody is proven only by a returned

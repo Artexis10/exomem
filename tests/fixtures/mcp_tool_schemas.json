@@ -2917,7 +2917,7 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client file handles as append-only Evidence.\n\nAttachments or single-use exomem attach handles; else\ntransfer_artifact(upload, hold=true, expected_sha256=...) then exomem attach\n--handoff-file or POST /upload. Keep the original, not only a transcription.\nNo model-visible base64.\nPer handle: stored, already_stored (exact bytes present; no write), or failed.\nLost replies replay on retry.",
+    "description": "Preserve client file handles as append-only Evidence.\n\nAttachments or single-use exomem attach handles; else a held transfer_artifact\nupload. Keep the original, not only a transcription. No model-visible base64.\nPer handle: stored, already_stored (exact bytes present; no write), or failed.\nLost replies replay on retry.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4504,7 +4504,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare an original upload or download; a handoff does not prove custody.\n\nUpload: hold=true with expected_sha256, then exomem attach --handoff-file or\nthe same multipart POST to upload_url. Capture the returned handle.\nDownload: supply artifact; use MCP or HTTPS delivery.",
+    "description": "Prepare an original upload or download; a handoff does not prove custody.\n\nUpload: hold=true with expected_sha256, then exomem attach --handoff-file or\nPOST to upload_url. Capture the returned handle.\nDownload: supply artifact; use MCP or HTTPS delivery.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

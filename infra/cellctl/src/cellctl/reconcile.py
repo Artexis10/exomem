@@ -478,7 +478,7 @@ class ClusterConfig:
         if (
             not isinstance(cell_ids, tuple)
             or len(cell_ids) > 1024
-            or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
+            or any(not isinstance(cell_id, str) or not db.CELL_ID_RE.fullmatch(cell_id) for cell_id in cell_ids)
             or len(set(cell_ids)) != len(cell_ids)
             or (cell_ids and not self.upload_public_key.strip())
         ):
