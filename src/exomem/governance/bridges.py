@@ -487,6 +487,7 @@ def strip_provenance(
                         item, keys, patterns, reference_context=True
                     )
                 )
+            body_cut = node.get("body_truncated") is True
             out: dict[Any, Any] = {}
             for key, value in node.items():
                 name = str(key).casefold()
@@ -498,6 +499,12 @@ def strip_provenance(
                 if _string_names_identity(
                     str(key), keys, patterns, reference_context=True
                 ):
+                    continue
+                # Builders cut an excerpt or a bounded body by length before this strip, so a cut can
+                # start or end inside a link or path to a stripped source, and the whole-identity
+                # match never sees the fragment. Withhold every excerpt and every cut body rather than
+                # trust each builder to mark its cuts.
+                if name == "excerpt" or (name == "body" and body_cut):
                     continue
                 if name in {"nodes", "seeds"} and isinstance(value, list):
                     value = [
