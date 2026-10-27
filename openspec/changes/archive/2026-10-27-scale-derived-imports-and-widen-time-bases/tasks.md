@@ -35,5 +35,5 @@
 ## 6. Proof and delivery
 
 - [x] 6.1 Commit the write probe under `benchmarks/`, run it on the change for the three key shapes and the cancel arm, and cite the run files in the PR.
-- [ ] 6.2 Review the integrated change independently, with stored data as the main risk; resolve findings.
-- [ ] 6.3 Merge, then synchronize this delta into the canonical specs and archive this change with `openspec archive`.
+- [x] 6.2 Review the integrated change independently, with stored data as the main risk; resolve findings.
+- [x] 6.3 Merge, then synchronize this delta into the canonical specs and archive this change with `openspec archive`.
