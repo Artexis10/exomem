@@ -40,6 +40,7 @@ from . import (
     media_brakes,
     media_engines,
     media_jobs,
+    media_slot_client,
     preserve,
     provenance,
     recall_policy,
@@ -132,6 +133,10 @@ _MEMORY_WAIT_EXIT_CODE = 78
 #: stop mid-job, repeating it at a fixed pace spawns a process every few seconds for
 #: as long as the writer lease is elsewhere, so the supervisor backs off.
 _AUTHORITY_UNAVAILABLE_EXIT_CODE = 79
+#: The child claimed a job that needs more anonymous memory than the node slot it was
+#: started under reserves (an interrupted job it recovered, say). It ran nothing and
+#: counted no stop; the supervisor gives the slot back and asks for the right size.
+_SLOT_TOO_SMALL_EXIT_CODE = 80
 #: Relaunch delay after consecutive authority refusals: from the follower cadence,
 #: doubling to this ceiling, so a lease that frees up still starts work within it.
 _AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
@@ -327,6 +332,10 @@ class MediaWorker:
         self._wake = threading.Event()
         self._stop_event = threading.Event()
         self._child: subprocess.Popen | None = None
+        # The node media-slot lease: None unless cellctl rendered its URL into this cell.
+        self._slot = media_slot_client.SlotClient.from_env()
+        #: The anonymous bytes of the slot the next child is started under.
+        self._leased_anon_bytes: int | None = None
         self._asr_runtime_failure: str | None = None
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
@@ -1439,6 +1448,8 @@ class MediaWorker:
             "--idle-seconds",
             str(self._idle_seconds),
         ]
+        if self._leased_anon_bytes is not None:
+            args += ["--leased-anon-bytes", str(self._leased_anon_bytes)]
         log.info("media worker: starting disposable child")
         env = asr_runtime.cuda_runtime_child_env(os.environ)
         if media_brakes.enabled():
@@ -1522,6 +1533,7 @@ class MediaWorker:
                     returncode = child.returncode
                     child_pid = child.pid
                     self._child = None
+                    self._release_slot()
                     idle_signature = None
                     owns_runtime = self._store.worker_pid() == child_pid
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
@@ -1532,6 +1544,9 @@ class MediaWorker:
                     elif returncode == _MEMORY_WAIT_EXIT_CODE:
                         delay = _MEMORY_WAIT_SECONDS
                         log.info("media child found no memory room; retrying after %.1fs", delay)
+                    elif returncode == _SLOT_TOO_SMALL_EXIT_CODE:
+                        delay = 0.5  # the slot is already released; the next ask is sized again
+                        log.info("media child found its node slot too small; asking again")
                     elif returncode == _AUTHORITY_UNAVAILABLE_EXIT_CODE:
                         delay = self._authority_backoff
                         self._authority_backoff = min(delay * 2, _AUTHORITY_BACKOFF_MAX_SECONDS)
@@ -1596,11 +1611,15 @@ class MediaWorker:
                             relaunch_after = _clock() + _authority_recheck_seconds(
                                 refusal
                             )
+                        elif brakes and self._slot is not None and not self._ask_slot():
+                            # No node slot yet, or no answer: wait as a memory-blocked job waits.
+                            relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
                         else:
                             try:
                                 self._child = self._launch_child()
                                 self._child_started_at = _clock()
                             except OSError:
+                                self._release_slot()
                                 log.exception("media worker: could not start child")
                                 relaunch_after = _clock() + 5.0
                     elif not settled:
@@ -1632,7 +1651,44 @@ class MediaWorker:
                     child.terminate()
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     child.wait(timeout=5)
+                if brakes:
+                    # The child's tools share its session and keep their memory until they are
+                    # killed, and the node slot goes back to another cell next.
+                    with contextlib.suppress(OSError):
+                        os.killpg(child.pid, signal.SIGKILL)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=5)
+                    if child.returncode is not None:
+                        _reap_group(child.pid)
             self._child = None
+            self._release_slot()
+
+    def _ask_slot(self) -> bool:
+        """Whether the node lease holds a slot for the job the next child will claim.
+
+        The job is the one `claim_next` takes (`next_pending` is its read-only twin). The
+        child recovers interrupted jobs first, so it may claim a heavier one than this
+        sees; it then refuses it (`_SLOT_TOO_SMALL_EXIT_CODE`) and this asks again.
+        """
+        assert self._store is not None and self._slot is not None
+        config = media_brakes.settings(cell=media_brakes.read_cell())
+        job = self._store.next_pending()
+        budget = config.default_budget if job is None else _budget_for(job, config)
+        # The names only reach the service log; the bytes and the timeout are what it grants.
+        engines = "-".join(
+            name or media_brakes.DEFAULT_BUDGET_KEY for name in ([] if job is None else _engines_loaded(job))
+        )
+        if self._slot.acquire(
+            engines or media_brakes.DEFAULT_BUDGET_KEY, budget.anon_bytes, config.job_timeout_seconds
+        ):
+            self._leased_anon_bytes = budget.anon_bytes
+            return True
+        return False
+
+    def _release_slot(self) -> None:
+        self._leased_anon_bytes = None
+        if self._slot is not None:
+            self._slot.release()
 
     def _drain_parent_results(self) -> None:
         """Publish bounded child results while the disposable child remains alive."""
@@ -2110,8 +2166,18 @@ def _idle_seconds() -> float:
         return 300.0
 
 
-def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
-    """Claim and process durable jobs until idle or the parent disappears."""
+def run_child(
+    vault_root: Path,
+    *,
+    parent_pid: int,
+    idle_seconds: float,
+    leased_anon_bytes: int | None = None,
+) -> int:
+    """Claim and process durable jobs until idle or the parent disappears.
+
+    `leased_anon_bytes`, set when the parent holds a node media slot, is what that slot
+    reserves; the child claims no job that needs more.
+    """
     store = MediaJobStore(vault_root)
     store.recover_interrupted()
     recovered_compute = store.recover_compute_runtime_failures()
@@ -2140,8 +2206,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
         store.mark(job, FAILED, error)
 
     def admit(job: _Job) -> bool:
-        """Claim only what fits in the cell now; the supervisor checked before spawning."""
+        """Claim only what fits the node slot and the cell now; the supervisor checked before spawning."""
         assert config is not None
+        if leased_anon_bytes is not None and budget_of(job).anon_bytes > leased_anon_bytes:
+            refusal.append(_SLOT_TOO_SMALL_EXIT_CODE)
+            return False
         if not media_brakes.admits(media_brakes.read_cell(), budget_of(job), config):
             refusal.append(_MEMORY_WAIT_EXIT_CODE)
             return False
@@ -2166,7 +2235,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
             )
             job = None if settled else store.claim_next(admit if brakes else None)
             if refusal:
-                log.info("media worker: memory admission refused the next job; child exiting")
+                log.info("media worker: admission refused the next job (exit %d); child exiting", refusal[0])
                 return refusal[0]
             if job is None:
                 if not settled:
