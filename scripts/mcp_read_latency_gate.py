@@ -529,7 +529,7 @@ class Arm:
                     # The product assigns each item key, so a child's `parent` reference is built from its
                     # parent's add response; the generator orders parents before children.
                     keys: list[str] = []
-                    for item, parent in zip(collection["items"], collection["parents"]):
+                    for item, parent in zip(collection["items"], collection["parents"], strict=True):
                         if parent is not None:
                             item = {**item, "parent": plan_ref(collection["id"], keys[parent])}
                         added = await self.tool(write_tool, {"operation": {

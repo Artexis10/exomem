@@ -98,7 +98,9 @@ An absolute verdict counts only on a quiet host.
 
 `gen_collection_fixture` in `scripts/synth_vault.py` builds the collections from `profile.json`:
 30 Records collections, 24 Planning collections with skewed row counts and 3 legacy trackers.
-Registry-constrained values come from the shipped vocabulary packs at run time. The cases come from
+Registry-constrained values come from the shipped vocabulary packs at run time. Planning items form
+the kind hierarchy that the registry's `parents` rules require, sized by `planning.fanout`; the
+loader adds parents first and builds each child's `parent` reference from the add response. The cases come from
 the same profile, so the generator's input is the source of truth for each expected value.
 Every fragment pins `profile_sha256` and `cases_sha256`; the contract pins the profile as
 `fixture_profile_sha256`. A changed profile needs a new digest in the contract.

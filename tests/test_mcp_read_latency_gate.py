@@ -7,6 +7,7 @@ runs that produce real fragments are exercised by the gate's own CI jobs.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ if str(SCRIPTS) not in sys.path:
 
 import mcp_read_latency_gate as gate  # noqa: E402, I001
 from release_arm import MeasurementRefused  # noqa: E402, I001
+from synth_vault import gen_collection_fixture  # noqa: E402, I001
 
 CONTRACT_SHA = "c" * 64
 PROFILE_SHA = "9" * 64
@@ -265,3 +267,24 @@ def test_a_summary_and_its_fragment_validate_against_the_stored_schema() -> None
     gate.validate_document(summary)
     gate.validate_document({"schema_version": 1, "mode": "aggregate", "state": "refused",
                             "failures": [{"code": "arm-not-quiescent", "phase": "quiescence"}]})
+
+
+# --- Fixture -------------------------------------------------------------------
+
+
+def test_every_planning_item_is_valid_and_sits_under_a_parent_the_registry_allows() -> None:
+    """A hierarchy that the worker would refuse is caught here, before a paired run loads it."""
+    from exomem import planning
+    from exomem.planning_values import PlanningValues
+
+    registry = PlanningValues(None)
+    profile = json.loads((ROOT / "benchmarks" / "mcp-read-latency" / "profile.json").read_text())
+    for collection in gen_collection_fixture(profile)["planning"]:
+        for position, (item, parent) in enumerate(zip(collection["items"], collection["parents"], strict=True)):
+            planning.normalize_item(item, vault_root=None)
+            allowed = registry.find("kind", item["kind"]).attributes["parents"]
+            if allowed:
+                assert parent is not None and parent < position
+                assert collection["items"][parent]["kind"] in allowed
+            else:
+                assert parent is None
