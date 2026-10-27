@@ -1481,7 +1481,7 @@ def test_a_background_dispatch_that_fails_unclassified_still_registers(
     assert whole_vault_passes, "an unclassified failure was left to the write's own paths"
 
 
-AFFECTED ="Knowledge Base/Notes/Insights/queue-affected.md"
+AFFECTED = "Knowledge Base/Notes/Insights/queue-affected.md"
 AFFECTED_LINKER = "Knowledge Base/Notes/Insights/queue-affected-linker.md"
 TARGET = "Knowledge Base/Notes/Insights/queue-target.md"
 
