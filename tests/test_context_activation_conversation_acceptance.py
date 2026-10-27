@@ -23,7 +23,8 @@ from test_context_activation_conversation_baseline import Run, run  # noqa: F401
 #: The shared `run` fixture is built by whichever module asks first; when this
 #: one does, it pays the corpus build and every arm, as the baseline module's
 #: own bound allows.
-pytestmark = pytest.mark.timeout(1800)
+# These recorded runs assert anchors-packet outcomes; maps is the default since Amendment 12.
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.usefixtures("anchors_packet")]
 
 #: Rows awaiting a ruling. Empty since the orchestrator's rulings on #1455:
 #: twins W17 to W24 were re-authored with a focus that names nothing (V29 pins
