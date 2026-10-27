@@ -7436,23 +7436,26 @@ def _op_activate_context_body(
             # only the anchors it may see: a withheld namesake must not turn a visible anchor into a question.
             reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
-            compiled = _compile_guarded_activation(
-                vault_root,
-                turn=turn,
-                budget=budget,
-                purpose=purpose,
-                timings=timings,
-                evidence=_ActivationEvidence(
-                    freshness_key=freshness_key,
-                    snapshot=snapshot,
-                    lexical_freshness=lexical_freshness,
-                    anchor_rows=visible_rows,
-                    evidence_token=evidence_token,
-                    evidence_stamp=evidence_stamp,
-                ),
-                abstain=_abstain,
-                caller=caller,
-            )
+            # The slice ends one stage reserve before the request does, so however long it runs, the map's guard can
+            # still start: a slice that spends the budget is skipped, and the map stays.
+            with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
+                compiled = _compile_guarded_activation(
+                    vault_root,
+                    turn=turn,
+                    budget=budget,
+                    purpose=purpose,
+                    timings=timings,
+                    evidence=_ActivationEvidence(
+                        freshness_key=freshness_key,
+                        snapshot=snapshot,
+                        lexical_freshness=lexical_freshness,
+                        anchor_rows=visible_rows,
+                        evidence_token=evidence_token,
+                        evidence_stamp=evidence_stamp,
+                    ),
+                    abstain=_abstain,
+                    caller=caller,
+                )
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
             return context_views_module.turn_leads(compiled.packet)
 

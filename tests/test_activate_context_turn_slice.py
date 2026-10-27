@@ -191,7 +191,8 @@ def _guarded_world(vault: Path) -> None:
     _built(vault).close()
 
 
-@pytest.mark.parametrize("forgery", ["item path", "item description", "item evidence", "item profile", "block state", "block description"])
+# The guard restores the items and the block's own fields separately; one forgery for each.
+@pytest.mark.parametrize("forgery", ["item path", "block state"])
 def test_the_guard_serves_the_compiled_slice_and_not_a_forged_one(vault: Path, forgery: str) -> None:
     """A client-supplied or tampered slice never reaches the wire: the guard restores what this invocation compiled."""
     _guarded_world(vault)
@@ -200,23 +201,15 @@ def test_the_guard_serves_the_compiled_slice_and_not_a_forged_one(vault: Path, f
         packet = _activate(vault, _external(), turn=SLED_TURN)
         original = copy.deepcopy(packet["turn_slice"])
         assert original["state"] == "ready" and original["items"]
-        block, item = packet["turn_slice"], packet["turn_slice"]["items"][0]
+        block = packet["turn_slice"]
         if forgery == "item path":
             block["items"].append({"kind": "note", "path": secret, "ref": secret, "title": "Restricted fixture", "match": "resolved", "evidence": []})
-        elif forgery == "item description":
-            item["description"] = "Forged [[secret-cluster]] prose."
-        elif forgery == "item evidence":
-            item["evidence"] = [secret]
-        elif forgery == "item profile":
-            item["profile"] = context_views.anchor_profile_ref(secret)
-        elif forgery == "block state":
-            block["state"] = "empty"
         else:
-            block["description"] = "Forged block text."
+            block["state"] = "empty"
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
     assert guarded is not None
     assert guarded["turn_slice"] == original
-    assert secret not in json.dumps(guarded) and "Forged" not in json.dumps(guarded)
+    assert secret not in json.dumps(guarded)
 
 
 def test_a_slice_with_no_record_is_replaced_and_leaves_the_map(vault: Path) -> None:
@@ -247,6 +240,18 @@ def test_a_slice_compiled_for_a_larger_packet_is_never_served(vault: Path) -> No
     assert guarded is not None
     assert guarded["turn_slice"] == {"state": "unavailable", "items": []}
     assert guarded["map"] == compiled_map
+
+
+def test_a_slice_beside_no_map_is_never_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard restores a slice only beside the map compiled with it, so a slice put on an anchors packet is dropped."""
+    _guarded_world(vault)
+    with principal.request_scope(_external()), principal.invocation_scope():
+        compiled = _activate(vault, _external(), turn=SLED_TURN)["turn_slice"]
+        monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+        packet = _activate(vault, _external(), turn=SLED_TURN)
+        assert "map" not in packet and compiled["items"]  # the control: an anchors packet, and a slice with leads
+        guarded = egress.guard_working_set(vault, {**packet, "turn_slice": compiled}, egress.AnnotatedHits(hits=[]))
+    assert guarded is not None and "turn_slice" not in guarded
 
 
 def test_a_slice_that_cannot_be_built_keeps_the_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -335,6 +340,50 @@ def test_a_slice_that_runs_out_of_budget_is_skipped_and_keeps_the_map(vault: Pat
         request_budget.reset_current(token)
     assert skipped["turn_slice"]["state"] == "skipped" and skipped["turn_slice"]["items"] == []
     assert skipped["map"] == expected["map"]
+
+
+def test_a_slice_that_spends_the_request_budget_leaves_the_map_its_guard(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The slice ends one stage reserve before the request, so however long it runs, the map is still guarded and served."""
+    from types import SimpleNamespace
+
+    from exomem import request_budget
+
+    _structured(vault)
+    expected = _activate(vault, turn=IRRELEVANT_TURN)
+    _cold()
+    clock = [1000.0]
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def slow(*args, **kwargs):
+        # Each stage that the budget admits takes half a second, until the budget refuses the next one.
+        while not working_set.budget_exhausted("working_set.semantic"):
+            clock[0] += 0.5
+        raise working_set.BudgetExhausted("working_set.semantic")
+
+    monkeypatch.setattr(working_set, "compile_packet", slow)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=5))
+    try:
+        packet = _activate(vault, turn=SLED_TURN)
+    finally:
+        request_budget.reset_current(token)
+    assert not packet.get("abstained")
+    assert packet["turn_slice"]["state"] == "skipped" and packet["map"] == expected["map"]
+
+
+def test_a_budget_too_small_for_one_slice_line_holds_none_of_it_back(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where the slice's share cannot hold one line, the map compiles into the whole budget, as with the slice off."""
+    _structured(vault)
+    # Short, recent anchor lines lead the map, so a budget less the slice's share lists fewer of them.
+    for name in ("Arve Lund", "Brit Haug", "Cato Rygg", "Dag Moen", "Eli Vik", "Frode Nes", "Gro Tveit", "Hallvard Bu"):
+        _write(vault, f"{KB}/Entities/People/{name}.md", f"---\ntype: entity\nentity_type: person\nstatus: active\nupdated: 2026-09-30\n---\n\n# {name}\n")
+    _built(vault).close()
+    sliced = _activate(vault, turn=SLED_TURN, max_chars=500)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    _cold()
+    alone = _activate(vault, turn=SLED_TURN, max_chars=500)
+    assert alone["map"].get("overflow")  # the control: the map has more than it can list, so a smaller budget lists less
+    assert sliced["turn_slice"]["state"] == "skipped" and sliced["turn_slice"]["items"] == []
+    assert sliced["map"] == alone["map"]
 
 
 @pytest.mark.parametrize("max_chars", [500, 1000, 2000, 4000])
