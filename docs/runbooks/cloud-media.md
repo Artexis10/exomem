@@ -135,7 +135,7 @@ The brakes stop media from taking the serving process down. They run only in Clo
 - **One job per child.** Each media child runs one job and exits. Every job, and every counted hard-limit failure, starts in a fresh child with no growth from an earlier job. A child start costs about 1-2 seconds.
 - **Hard limit.** The child runs its job under a data-segment limit (`RLIMIT_DATA`): the largest VmData budget among the engines it loads, plus the margin. Tesseract and the other native tools inherit it. An allocation past the limit fails inside the child, not in the serving process.
 - **Pressure stop.** While a child runs, the supervisor reads the `memory.pressure` 10-second averages. Above the threshold, it kills the child and the tools it started, and returns the job to the queue. Where pressure is unreadable, the supervisor stops the child when anonymous memory reaches the admission ceiling.
-- **Watchdog.** The supervisor kills a child that runs longer than the job timeout. A watchdog stop spends the file's time budget, not memory, so it counts apart from memory stops. After the stop limit of watchdog stops, each in a fresh child, the file is over budget. A file that hangs or outruns the timeout holds the queue for at most the stop limit times the job timeout, 45 minutes with the defaults. The watchdog cannot tell a long job that makes progress from a hang; a progress signal from the child would let such a job finish.
+- **Watchdog.** The supervisor kills a child that runs longer than the job timeout. A watchdog stop spends the file's time budget, not memory, so it counts apart from memory stops. After the stop limit of watchdog stops, each in a fresh child, the file is over budget. A stop counts only when the job made no progress. A speech job whose transcript advanced since its last stop is re-queued without spending a stop, and continues from its last finished window. So a hang, or a file that is not resumable speech, holds the queue for at most the stop limit times the job timeout, 45 minutes with the defaults. A resumed recording is claimed only when no fresh job waits, so it delays a new upload by at most one job timeout.
 
 The brakes fail closed. When the cgroup does not read as a Cloud cell's (cgroup v1, a missing file, no `anon` entry, an unreadable `memory.max`, or no memory limit), no media child starts. Runtime status shows `media_brakes` as `unavailable` with the reason, and `exomem doctor` warns "media brakes unavailable: <reason>". Media waits until the cgroup reads correctly again. Personal installs have no brakes, and runtime status shows them as `off`.
 
@@ -143,7 +143,7 @@ Each value is deployment configuration. Set it in the cell's environment.
 
 | Variable | Default | Reason for the default |
 |---|---|---|
-| `EXOMEM_MEDIA_BUDGETS` | Fallback: 640 MiB anon, 1024 MiB VmData. Cloud overrides: speech 1024 MiB anon, 4096 MiB VmData; `clip` 256 MiB anon, 1536 MiB VmData. | Documents and OCR retain the earlier small-sample margin. Speech uses a provisional budget for its file-backed model; cell qualification remains open. The `clip` entry covers the image tower measured alone at 98 MiB anon and a 1403.5 MiB VmData peak. |
+| `EXOMEM_MEDIA_BUDGETS` | Fallback: 640 MiB anon, 1024 MiB VmData. Cloud overrides: speech 1024 MiB anon, 4096 MiB VmData; `clip` 256 MiB anon, 1792 MiB VmData. | Documents and OCR retain the earlier small-sample margin. Speech uses a provisional budget for its file-backed model; cell qualification remains open. The `clip` entry covers the image tower measured alone at 98 MiB anon and a 1403.5 MiB VmData peak. |
 | `EXOMEM_MEDIA_VMDATA_MARGIN_MIB` | 128 | Covers the allocator's own arenas above the engine's budget. |
 | `EXOMEM_MEDIA_ADMISSION_FRACTION` | 0.80 | The service-v1 profile's 80% cgroup peak gate. |
 | `EXOMEM_MEDIA_PRESSURE_AVG10` | 10.0 | Sustained reclaim, well above an idle cell and below the stalls that come before an OOM kill. |
@@ -155,8 +155,8 @@ The `default` entry covers kinds without an engine.
 The `clip` entry covers the CLIP image tower, which a child loads when it embeds an image or video and image search is on.
 A child keeps each engine it loads until it exits, so its anonymous-memory budget is the sum of their entries.
 Its VmData budget is the largest of their entries, not the sum: weight mappings dominate VmData.
-A measured process that holds the image tower peaks at 3.89 GiB (3983 MiB) of VmData, inside the speech entry's 4096 MiB.
-The sum would grant 5632 MiB to a child that loads both.
+A measured process that holds both speech and the image tower peaks at 3.89 GiB (3983 MiB) of VmData, inside the speech entry's 4096 MiB.
+The sum would grant 5888 MiB to a child that loads both.
 An anonymous-memory budget above the cell's `memory.max`, or a nonpositive budget, keeps the default budget.
 VmData includes clean file mappings and can exceed the cell's physical limit.
 The 4096 MiB speech VmData budget therefore does not allocate 4 GiB of physical memory in a 3 GiB cell.

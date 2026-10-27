@@ -267,3 +267,20 @@ def test_a_worker_restart_mid_job_resumes_from_the_saved_offset(
     [result] = media_jobs.MediaJobStore(vault).pending_results()
     assert result.payload["text"] == "six windows of speech"
     assert sidecar.exists()
+
+
+def test_a_new_upload_is_claimed_before_a_resumed_recording(vault: Path) -> None:
+    binary, _sidecar, _progress = _stopped_speech_job(vault)
+    later = preserve.preserve_bytes(
+        vault, scope="Rental", category="audio", filename="later.mp3", data=b"second recording"
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / later.path, sidecar_path=vault / later.sidecar_path, media_type="audio"
+        )
+    )
+
+    assert store.next_pending().binary_path.name == "later.mp3"
+    assert store.claim_next().binary_path.name == "later.mp3"
+    assert store.claim_next().binary_path == binary

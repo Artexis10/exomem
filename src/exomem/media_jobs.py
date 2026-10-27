@@ -508,6 +508,21 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     return int(deleted + kept)
 
 
+def _next_pending_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The job to claim next: the oldest fresh job, else the oldest resumed speech job.
+
+    A resumed speech job has a progress row. It runs only when no fresh job waits, so a
+    long recording that keeps advancing delays a new upload by at most one job timeout.
+    Two indexed `LIMIT 1` queries keep the claim cheap on a long queue.
+    """
+    return conn.execute(
+        "SELECT * FROM jobs WHERE state = 'pending' AND NOT EXISTS "
+        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id) ORDER BY id LIMIT 1"
+    ).fetchone() or conn.execute(
+        "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
+    ).fetchone()
+
+
 class MediaJobStore:
     def __init__(self, vault_root: Path, *, create: bool = True) -> None:
         self.vault_root = vault_root.resolve()
@@ -892,9 +907,7 @@ class MediaJobStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
-            ).fetchone()
+            row = _next_pending_row(conn)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
@@ -1377,9 +1390,7 @@ class MediaJobStore:
         """The job `claim_next` would claim now, without claiming it."""
         conn = self._connect(readonly=True)
         try:
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
-            ).fetchone()
+            row = _next_pending_row(conn)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()

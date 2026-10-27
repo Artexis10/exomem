@@ -357,7 +357,7 @@ ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
     EXOMEM_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \
     OMP_THREAD_LIMIT=1 \
     EXOMEM_ASR_BACKEND=onnx \
-    EXOMEM_MEDIA_BUDGETS='{"speech":{"anon_mib":1024,"vmdata_mib":4096},"clip":{"anon_mib":256,"vmdata_mib":1536}}'
+    EXOMEM_MEDIA_BUDGETS='{"speech":{"anon_mib":1024,"vmdata_mib":4096},"clip":{"anon_mib":256,"vmdata_mib":1792}}'
 # New media artifacts only fetch their pinned publication; a cell never builds them.
 RUN HF_HUB_OFFLINE=0 python -c "\
 from exomem.media_models import ensure_media_model; \
