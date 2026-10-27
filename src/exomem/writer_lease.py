@@ -4770,6 +4770,7 @@ class LeaseManager:
             else:
                 self._file_store_acquisition = self._file_store_marker = None
             self._record_lease_op("acquire", "granted")
+            transition = self._fencing_token != record.fencing_token
             self._fencing_token = record.fencing_token
             self._note_grant(record.expires_at)
             self._store_released = False
@@ -4783,9 +4784,11 @@ class LeaseManager:
                 # caller — e.g. the media worker's 5s availability probe —
                 # would suppress idle release forever without writing a byte.
                 self._last_activity_monotonic = time.monotonic()
-            # A grant per governed write is routine (thousands an hour); reclaim,
-            # rejected renewal and idle release stay INFO as the diagnostic rows.
-            self._log_lease_event("lease_acquired", level=logging.DEBUG, cause=cause)
+            # A re-grant under the same token is routine (thousands an hour); a grant that
+            # changes the token is a role transition (first grant, takeover, re-grant after idle release).
+            self._log_lease_event(
+                "lease_acquired", level=logging.INFO if transition else logging.DEBUG, cause=cause
+            )
             return record
 
     def _renew_interval_seconds(self) -> float:

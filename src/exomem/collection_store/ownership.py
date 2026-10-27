@@ -227,14 +227,18 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
                   declared, transition), marker, frozenset(admitted))
 
 
+def _read_guard(manager, root, operation):
+    """Every ownership read and its release hold the boundary as a request-driven collection read."""
+    return manager.consistency_guard(root, operation=operation, holder_kind="collection-read")
+
+
 @contextmanager
 def read_snapshot(root):
     """Keep canonical data and its production ownership proof in the same read-only snapshot."""
     root = Path(root).resolve()
     with ExitStack() as stack:
         manager = _manager(root)
-        stack.enter_context(manager.consistency_guard(
-            root, operation="collection_ownership_read", holder_kind="collection-read"))
+        stack.enter_context(_read_guard(manager, root, "collection_ownership_read"))
         try:
             placement, recorded = enrollment(root)
             path = connection.store_path(root)
@@ -318,8 +322,7 @@ class ReadScope:
 
             writer = bound_writer(self.root)
             manager = _manager(self.root)
-            with manager.consistency_guard(
-                self.root, operation="collection_ownership_read", holder_kind="collection-read"):
+            with _read_guard(manager, self.root, "collection_ownership_read"):
                 self.initial = resolve(self.root, conn=None if writer is None else writer.connection,
                     private=writer is not None and not production_bound(self.root),
                     path=writer.handle.path if writer is not None and not production_bound(self.root) else None)
@@ -338,7 +341,7 @@ class ReadScope:
             # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
             # so neither this proof nor the body's WAL snapshot is reused.
             with state_paths.outside_resolution_scope(), state_paths.resolution_scope(), \
-                    manager.consistency_guard(self.root, operation="collection_ownership_release"):
+                    _read_guard(manager, self.root, "collection_ownership_release"):
                 writer = bound_writer(self.root)
                 private = writer is not None and not production_bound(self.root)
                 current = resolve(self.root, private=private, path=writer.handle.path if private else None)
@@ -383,8 +386,7 @@ def current(root, *, conn=None, private=False):
         return scope.proof()
     if conn is None and not private:
         return ReadScope(root).proof()
-    with _manager(root).consistency_guard(
-            root, operation="collection_ownership_read", holder_kind="collection-read"):
+    with _read_guard(_manager(root), root, "collection_ownership_read"):
         return resolve(root, conn=conn, private=private)
 
 

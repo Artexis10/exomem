@@ -1824,15 +1824,16 @@ def test_collection_ownership_read_hold_is_declared_collection_read(
         consistency_guard=lambda root, **kwargs: coordinator.hold(**kwargs)
     )
     monkeypatch.setattr(ownership, "_manager", lambda root: manager)
-    monkeypatch.setattr(ownership, "resolve", lambda root, **kwargs: "proof")
     monkeypatch.setattr(
         mutation_lock_module,
         "time",
         SimpleNamespace(monotonic=lambda: 1.0, time=time.time, sleep=time.sleep),
     )
 
+    # The dominant production path: get_page and list_directory prove ownership
+    # through a ReadScope, not through `current(private=True)`.
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
-        assert ownership.current(vault, private=True) == "proof"
+        ownership.ReadScope(vault).proof()
 
     released = _events(caplog, "mutation_lock_released")
     assert [r.fields["holder_kind"] for r in released] == ["collection-read"]
@@ -2133,11 +2134,11 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     vault.mkdir()
     # The slow-hold arm of `_boundary_event_level` reaches INFO on its own, so
     # a hold that outruns the quiet band passes this test with the overdue
-    # escalation deleted.  A 2ms hold sat under the 5ms band on an idle box and
+    # escalation deleted.  A 2ms hold sat under the old 5ms band on an idle box and
     # over it on a loaded runner (measured 5.13ms and 10.59ms), which made the
     # discriminator a wall clock.  Lifting the band out of reach removes the
     # clock: the escalation is then the only arm that can raise this row.
-    monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 60_000.0)
+    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
     coordinator = VaultMutationCoordinator(
         tmp_path / "state", vault, long_holder_seconds=0.001
     )
@@ -2159,7 +2160,7 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     # The hold has to stay inside the band for the escalation to be the thing
     # under test.  The row carries its own measurement, so this still fails
     # loudly if the lifted band is ever removed or undercut.
-    assert released.fields["hold_ms"] < mutation_lock_module._BACKGROUND_QUIET_HOLD_MS, (
+    assert released.fields["hold_ms"] < mutation_lock_module._QUIET_HOLD_MS, (
         "the hold outran the quiet band; the release row reached INFO through "
         "the slow-hold arm, not through the overdue escalation"
     )
@@ -2461,10 +2462,10 @@ def test_routine_background_holds_fold_into_one_info_summary(
     vault.mkdir()
     # This test is about folding routine holds into a summary, not about the
     # thresholds that decide what is routine. A loaded CI runner can stall a hold
-    # past 5ms or an acquire past one poll, which is correctly loud in production,
+    # past the quiet hold bound or an acquire past one poll, which is correctly loud in production,
     # so widen both thresholds here to keep every hold routine.
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault, poll_interval_seconds=60.0)
-    monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 60_000.0)
+    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
     monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
     mutation_lock_module._reset_hold_summary()
 
@@ -2523,7 +2524,7 @@ def test_a_slow_background_hold_still_reports_itself(
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
-    monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 20.0)
+    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 20.0)
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _background_hold(coordinator):

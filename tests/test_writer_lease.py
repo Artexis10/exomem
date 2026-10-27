@@ -4799,7 +4799,32 @@ def test_probe_acquire_does_not_refresh_idle_activity(tmp_path: Path) -> None:
 def test_routine_lease_grant_does_not_log_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A grant per governed write would flood the INFO log and rotate real evidence out."""
+    """A re-grant under the held token would flood the INFO log and rotate real evidence out."""
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    manager.ensure_writer()
+    held_token = manager._fencing_token
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="exomem.writer_lease"):
+        manager._acquire_writer()
+
+    assert manager._fencing_token == held_token
+    grants = [r for r in caplog.records if getattr(r, "event", None) == "lease_acquired"]
+    assert [r.levelno for r in grants] == [logging.DEBUG]
+
+
+def test_lease_grant_that_changes_the_token_logs_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A first grant is a role transition, so it keeps its INFO row."""
     store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
     manager = LeaseManager(
         LeaseConfig(
@@ -4814,7 +4839,7 @@ def test_routine_lease_grant_does_not_log_at_info(
         manager.ensure_writer()
 
     grants = [r for r in caplog.records if getattr(r, "event", None) == "lease_acquired"]
-    assert [r.levelno for r in grants] == [logging.DEBUG]
+    assert [r.levelno for r in grants] == [logging.INFO]
 
 
 def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(

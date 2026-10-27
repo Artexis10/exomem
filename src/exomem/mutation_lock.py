@@ -62,21 +62,18 @@ _STATUS_TIMEOUT_SECONDS = 0.25
 # Deriving it keeps the two in step if the interval is ever tuned, and it puts
 # the visible band at 25ms by default instead of a number picked by hand.
 #
-# The hold side has no such derivation, so it is a constant. A reserved-state
-# hold and a machine-frequency hold share it: on a production-size vault,
-# uncontended store-identity holds of 5-250ms are routine, and a 5ms bound wrote
-# thousands of INFO rows in half an hour. An earlier 100ms pair demoted the
-# entire band below it, which hid a 55ms contended acquire -- but the acquire
-# bound above, not this one, is what keeps contention visible.
-# Background boundaries publish a holder sidecar but run at machine frequency
-# beside ordinary traffic: graph drains, derived-receipt proofs, watcher
-# freshness, media commits. Their acquire/release pairs rotated the service log
-# about every fifteen minutes. Tens to hundreds of milliseconds is their normal
-# cost, so only a hold past this bound reports itself on its own row; the rest
-# are folded into the periodic hold summary below.
-# Closed set of the boundary's own holder kinds, judged on hold time and contention instead of logging every row.
+# The hold side has no such derivation, so it is a constant.  A reserved-state,
+# machine-frequency or collection-read hold shares it: on a production-size
+# vault, uncontended holds of 5-250ms are routine, and a 5ms bound wrote
+# thousands of INFO rows in half an hour.  Only a hold past it reports itself on
+# its own row; the rest fold into the periodic hold summary below.  An earlier
+# 100ms pair demoted the entire band below it, which hid a 55ms contended
+# acquire -- but the acquire bound above, not this one, keeps contention visible.
+_QUIET_HOLD_MS = 250.0
+# The boundary's own high-frequency holder kinds, request-driven reads included: graph drains,
+# derived-receipt proofs, watcher freshness, media commits and collection ownership reads.
+# Their holds run beside ordinary traffic and would rotate the service log every fifteen minutes.
 _MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "collection-read"})
-_BACKGROUND_QUIET_HOLD_MS = 250.0
 # One INFO `mutation_lock_hold_summary` row per window stands in for every
 # demoted hold in it, so the log keeps hours of boundary evidence.
 _HOLD_SUMMARY_INTERVAL_SECONDS = 60.0
@@ -167,7 +164,7 @@ def _boundary_event_level(
       still reports itself.  An acquire that waited longer than
       `poll_interval_seconds` went round the retry loop at least once, which is
       the cheapest honest definition of contention this code can measure.
-    * the hold was under `_BACKGROUND_QUIET_HOLD_MS` (250ms), so a slow hold
+    * the hold was under `_QUIET_HOLD_MS` (250ms), so a slow hold
       still reports itself. On a production-size vault, uncontended
       store-identity holds of 5-250ms are routine.
 
@@ -182,7 +179,7 @@ def _boundary_event_level(
         return logging.INFO
     if wait_ms >= poll_interval_seconds * 1000.0:
         return logging.INFO
-    if hold_ms is not None and hold_ms >= _BACKGROUND_QUIET_HOLD_MS:
+    if hold_ms is not None and hold_ms >= _QUIET_HOLD_MS:
         return logging.INFO
     return logging.DEBUG
 
