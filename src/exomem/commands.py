@@ -11549,7 +11549,7 @@ def op_schema_memory(
                 current = relation_registry_module.load_registry(vault_root)
                 relation_registry_module.require_current_hash(current.extension_hash, expected_hash)
                 relation_registry_module.merge_extension_delta(
-                    memory_schema_module.relation_registry_proposal(current), proposal
+                    memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
                 )
                 return vocabulary_contract.queue_for_owner(
                     vault_root,
@@ -11568,7 +11568,7 @@ def op_schema_memory(
                 current.extension_hash, expected_hash
             )
             relation_registry_module.merge_extension_delta(
-                memory_schema_module.relation_registry_proposal(current), proposal
+                memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
             )
             from .writer_lease import active_manager, active_mutation_request_id
 
@@ -11583,7 +11583,7 @@ def op_schema_memory(
                     current.extension_hash, expected_hash
                 )
                 merged = relation_registry_module.merge_extension_delta(
-                    memory_schema_module.relation_registry_proposal(current), proposal
+                    memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
                 )
                 before = load_vocabulary(relation_registry_module.SPEC, vault_root)
                 saved = relation_registry_module.save_registry(

@@ -561,7 +561,7 @@ def _candidate(
     candidate = spec.adapter.parse_document(document)
     after_entries = spec.adapter.entries(candidate)
     registry.validate_replacements(spec, after_entries)
-    blocking = registry.new_findings(snapshot, tuple(spec.adapter.findings(candidate)))
+    blocking = registry.new_findings(snapshot.findings, spec.adapter.findings(candidate))
     removal = _removal_report(after_entries, delta, usage) if removing else {}
     continuity = getattr(spec.adapter, "continuity", None)
     if continuity is not None:
@@ -956,7 +956,7 @@ def restore(
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     restored = spec.adapter.parse(text, registry.content_hash(text))
     # Restore preserves legacy reader meaning, but never republishes invalid bytes.
-    blocking = registry.new_findings(None, tuple(spec.adapter.findings(restored)))
+    blocking = registry.new_findings((), spec.adapter.findings(restored))
     if blocking:
         return {"subject": spec.name, "valid": False, "findings": blocking, "saved": None}
     after_entries = spec.adapter.entries(restored)
