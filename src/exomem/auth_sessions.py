@@ -1456,8 +1456,12 @@ class SessionAuthority:
 
 def _request_verifier(origin: Any) -> tuple[SessionAuthority, str] | None:
     """The authority and bearer that verified this request's origin, if it carries them."""
+    from . import local_ingress
     from .governance.principal import _verified_access_token
 
+    grant = local_ingress.current_grant()
+    if grant is not None and isinstance(grant.authority, SessionAuthority) and grant.origin_session == origin:
+        return grant.authority, grant.bearer
     token = _verified_access_token()
     verifier = getattr(token, "_verifier", None)
     if not isinstance(verifier, SessionAuthority) or getattr(token, "origin_session", None) != origin:

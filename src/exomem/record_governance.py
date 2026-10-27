@@ -1801,7 +1801,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         return _authorize(root, path, receipt=True)
 
     discovered, unreadable = collections.discover_collections_with_errors(
-        root, authorize_path=authorize
+        root, authorize_path=authorize, semantic_profile=semantic_profile
     )
     manifests = [
         manifest

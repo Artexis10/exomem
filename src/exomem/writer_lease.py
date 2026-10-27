@@ -7551,10 +7551,13 @@ def _collection_store_thread(func):
                     # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
                     import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
                                      and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
+                    read_only = _store_request_is_read_only(command, kwargs)
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
-                        wake_maintenance=not import_status,
-                        read_only=_store_request_is_read_only(command, kwargs),
+                        # A read cannot start a job, revise a declaration or leave views pending; waking
+                        # every tick after it kept the store thread busy beside the next request.
+                        wake_maintenance=not (read_only or import_status),
+                        read_only=read_only,
                     )
         return func(command, *injected, **kwargs)
 
@@ -7751,6 +7754,8 @@ def invoke_command(
 
     with ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector:
+        # The dispatcher's own checks before the body, which the leaf span alone does not separate.
+        call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
             # Fixed phase labels carry timing only, never caller or vault data.
             with body_meter as measured, call_spans.span("command.body", measured):
@@ -7769,7 +7774,8 @@ def invoke_command(
                         emit_boundary_receipt(collector)
             raise
         try:
-            ownership_scope.finish()
+            with call_spans.span("command.ownership_finish"):
+                ownership_scope.finish()
         finally:
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)

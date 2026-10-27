@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import re
 import stat
 import unicodedata
@@ -1166,6 +1167,7 @@ def discover_collections_with_errors(
     max_raw_candidates: int = _MAX_DISCOVERY_CANDIDATES,
     reject_duplicates: bool = True,
     ownership_proof=None,
+    semantic_profile: str | None = None,
 ) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
     """Discover releasable manifests AND the ones this sweep could not read.
 
@@ -1180,6 +1182,10 @@ def discover_collections_with_errors(
     fails closed: `load_manifest` and `resolve_collection`'s path branch raise
     exactly as before. The discovery bounds also still raise -- a limit is a
     refusal to look further, not a manifest that was looked at and failed.
+
+    ``semantic_profile`` limits the store's own collections to that profile, for a caller that
+    discards the others. Files are still swept whole, and a duplicate identity still refuses
+    when it involves a releasable store collection of any profile.
     """
     if (
         type(max_candidates) is not int
@@ -1208,7 +1214,8 @@ def discover_collections_with_errors(
         proof = ownership.current(root, conn=None if writer is None else writer.connection,
                                   private=writer is not None and not production_bound(root))
     stored, store_errors = ((), ()) if writer is None else writer.discover_collections(
-        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates)
+        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
+        semantic_profile=semantic_profile)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
@@ -1229,22 +1236,27 @@ def discover_collections_with_errors(
                                                  UNSERVED, entry["semantic_profile"]))
     if len(stored) + len(unreadable) > max_raw_candidates:
         raise CollectionError("COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect")
+    from .governance import artifact_census
+
     candidates = []
-    for candidate in kb.rglob(MANIFEST_FILENAME):
-        safe = _safe_candidate_rel(root, candidate)
+    # The Knowledge Base's listing only proposes: `_declared_candidate_rel` still drops whatever lies
+    # outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
+    proposed = sorted(root / rel for rel in artifact_census.vault_listing(root).files_named(MANIFEST_FILENAME))
+    for candidate in proposed:
+        rel = _declared_candidate_rel(root, candidate)
         # Recoverable trash retains bytes but declares no live collection ownership.
-        if safe is None or safe[0].is_relative_to(trash_root):
+        if rel is None or candidate.is_relative_to(trash_root):
             continue
-        if proof.selected(root, safe[1]) is not None:
+        if proof.selected(root, rel) is not None:
             continue  # A physical declaration cannot replace canonical ownership, including an unpublished view.
-        if not authorize(safe[1]):
+        if not _is_plain_file_path(root, rel) or not authorize(rel):
             continue
         candidates.append(candidate)
         if len(candidates) + len(stored) + len(unreadable) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
-    for candidate in sorted(candidates):
+    for candidate in candidates:
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
@@ -1260,7 +1272,12 @@ def discover_collections_with_errors(
         except CollectionError as error:
             unreadable.append(UnreadableManifest(rel, error.code, error.reason))
     if reject_duplicates:
-        raise_duplicate_ids(manifest.collection_id for manifest in manifests)
+        identities = [manifest.collection_id for manifest in manifests]
+        if writer is not None and semantic_profile is not None:
+            # The store pass left out the other profile, so a physical manifest reusing its identity is checked here.
+            files = {manifest.collection_id for manifest in manifests[len(stored):]}
+            identities.extend(writer.released_identities(sorted(files - visible), authorize_path=authorize_path))
+        raise_duplicate_ids(identities)
     return tuple(manifests), tuple(unreadable)
 
 
@@ -1286,8 +1303,17 @@ def discover_legacy_trackers(
     if not records_root.is_dir():
         return (), False
     authorize = authorize_path or (lambda _path: True)
+    from .governance import artifact_census
+
     candidates = []
-    for candidate in records_root.rglob("*.md"):
+    # The listing only proposes; the guards below read the disk and decide. Sorted before the bound applies.
+    records_rel = records_root.relative_to(root).as_posix()
+    proposed = sorted(
+        root / rel for rel in artifact_census.vault_listing(root, records_rel).files_under(records_rel)
+        # Like `rglob("*.md")`: the extension compares by the platform's case rule.
+        if os.path.normcase(rel).endswith(".md")
+    )
+    for candidate in proposed:
         if candidate.relative_to(root).as_posix() in owned_views:
             continue
         safe = _safe_candidate_rel(root, candidate)
@@ -1298,7 +1324,7 @@ def discover_legacy_trackers(
             break
     truncated = len(candidates) > max_raw_candidates
     trackers: list[LegacyCollection] = []
-    for candidate in sorted(candidates[:max_raw_candidates]):
+    for candidate in candidates[:max_raw_candidates]:
         if candidate.name == "_collection.md":
             continue
         safe = _safe_candidate_rel(root, candidate)
@@ -3251,7 +3277,8 @@ def _absent_leaf(root: Path, key: str) -> bool:
     return False
 
 
-def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
+def _declared_candidate_rel(root: Path, candidate: Path) -> str | None:
+    """The candidate's vault-relative path when its spelling is admissible; touches no disk."""
     try:
         rel = candidate.relative_to(root).as_posix()
     except ValueError:
@@ -3260,6 +3287,11 @@ def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
         return None
     if reserved_paths.classify_logical(rel).blocked:
         return None
+    return rel
+
+
+def _is_plain_file_path(root: Path, rel: str) -> bool:
+    """Whether `rel` is a regular, singly linked file reached through no link or reparse point."""
     current = root
     try:
         parts = Path(rel).parts
@@ -3270,13 +3302,20 @@ def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
             if stat.S_ISLNK(info.st_mode) or attributes & getattr(
                 stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
             ):
-                return None
+                return False
             if index < len(parts) - 1:
                 if not stat.S_ISDIR(info.st_mode):
-                    return None
+                    return False
             elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                return None
+                return False
     except OSError:
+        return False
+    return True
+
+
+def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
+    rel = _declared_candidate_rel(root, candidate)
+    if rel is None or not _is_plain_file_path(root, rel):
         return None
     return candidate, rel
 
