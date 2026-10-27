@@ -216,7 +216,9 @@ def _wait_storage_tls(address: str, ca_path: Path, *, server_hostname: str) -> N
     wait_for(probe, timeout=30, description=f"the S3 double to serve TLS for {server_hostname}")
 
 
-def _start_object_store(stack: Stack) -> ObjectStore:
+def _start_object_store(stack: Stack, *, serve_tls: bool | None = None) -> ObjectStore:
+    # A sealed network implies TLS; the drill asks for TLS on its own routed network.
+    serve_tls = bool(stack.sealed_network) if serve_tls is None else serve_tls
     name = f"exo-rehearsal-s3-{stack.run_id}"
     access_key = f"rehearsal{secrets.token_hex(4)}"
     secret_key = secrets.token_urlsafe(24)
@@ -226,7 +228,7 @@ def _start_object_store(stack: Stack) -> ObjectStore:
     options: list[str] = ["--publish", f"127.0.0.1::{S3_PORT}"]
     arguments = ["--port", f":{S3_PORT}", "posix", "/data"]
     bootstrap = None
-    if stack.sealed_network:
+    if serve_tls:
         certificates = stack.workdir / "storage-tls"
         certificates.mkdir(mode=0o700)
         bootstrap = tls.make_pki(certificates / "bootstrap", ("127.0.0.1",))
@@ -236,7 +238,7 @@ def _start_object_store(stack: Stack) -> ObjectStore:
         arguments = ["--port", f":{S3_PORT}", "--cert", "/certificates/cert.pem", "--key", "/certificates/key.pem",
                      "posix", "--versioning-dir", "/data/versions", "/data/buckets"]
     # The image runs as this user for TLS; initialize writable, owned volume paths.
-    bucket = f"/data/buckets/{BACKUP_BUCKET}" if stack.sealed_network else f"/data/{BACKUP_BUCKET}"
+    bucket = f"/data/buckets/{BACKUP_BUCKET}" if serve_tls else f"/data/{BACKUP_BUCKET}"
     run(["docker", "run", "--rm", *docker_labels(stack.run_id), "--mount", data_mount,
          images.BUSYBOX, "sh", "-ec", 'mkdir -p /data/versions "$1"; chmod -R 777 /data', "_", bucket])
     stack.containers.append(name)
@@ -267,7 +269,7 @@ def _start_object_store(stack: Stack) -> ObjectStore:
     return ObjectStore(
         container=name,
         ip=address,
-        host_port=None if stack.sealed_network else _host_port(name, f"{S3_PORT}/tcp"),
+        host_port=None if serve_tls else _host_port(name, f"{S3_PORT}/tcp"),
         access_key=access_key,
         secret_key=secret_key,
         ca_path=stack.pki.ca_path if stack.pki else None,

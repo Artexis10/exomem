@@ -391,7 +391,7 @@ class Drill:
         store = self.stack.object_store
         client = boto3.client(
             "s3", endpoint_url=store.endpoint(from_host=True), aws_access_key_id=store.access_key,
-            aws_secret_access_key=store.secret_key, region_name="us-east-1",
+            aws_secret_access_key=store.secret_key, region_name="us-east-1", verify=str(store.ca_path),
             config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
         objects: dict[str, int] = {}
@@ -1524,6 +1524,7 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
         rendered_schema = run([sys.executable, str(renderer)], input_text=yaml.safe_dump_all(documents))
         documents = [doc for doc in yaml.safe_load_all(rendered_schema.stdout) if doc]
     report.overlays.append(platform.overlay_cellctl(documents))
+    report.overlays.append(platform.trust_storage_ca(stack, documents))
     report.adaptations.append(
         f"the chart is rendered with --api-versions {platform.SNAPSHOT_CLASS_API}, standing in for the second upgrade "
         "after which its VolumeSnapshotClass renders"
@@ -1612,7 +1613,9 @@ async def run_drill(args: argparse.Namespace) -> int:
             stack = infra.Stack(run_id=run_id, workdir=workdir, network=network, subnet=drill_cluster.SUBNET,
                                 k3s=None, postgres=None, object_store=None)  # type: ignore[arg-type]
             stack.postgres = infra._start_postgres(stack)
-            stack.object_store = infra._start_object_store(stack)
+            # Import Jobs accept only HTTPS transfer URLs, so storage serves TLS from the run CA, as in production.
+            stack.object_store = infra._start_object_store(stack, serve_tls=True)
+            cell_tag = build.trust_rehearsal_ca(cell_tag, stack.object_store.ca_path, workdir, run_id=run_id)
             cluster = drill_cluster.start_server(stack)
             cluster.agent_image = agent_image
             cellctl_image = build.load_into_k3s(stack.k3s.container, cellctl_tag)
