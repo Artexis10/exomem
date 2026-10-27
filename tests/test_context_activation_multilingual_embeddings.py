@@ -20,6 +20,8 @@ promoted is asserted.
 from __future__ import annotations
 
 import dataclasses
+import json
+import statistics
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,12 @@ from membench.utility.context_activation_multilingual import (  # noqa: E402
     multilingual_report,
     score_multilingual_case,
 )
+from test_latency_gate import (  # noqa: E402
+    SLICE_ADDED_MS_CEILING,
+    SLICE_ADDED_MS_TARGET,
+    _compiler_ms,
+    _paired_median_interval,
+)
 
 from exomem import (  # noqa: E402
     commands,
@@ -55,6 +63,7 @@ from exomem import (  # noqa: E402
     working_set_index,
     working_set_runtime,
 )
+from exomem.governance import principal  # noqa: E402
 
 pytestmark = [pytest.mark.embeddings, pytest.mark.timeout(3600)]
 
@@ -116,6 +125,8 @@ class Measured:
     incidental_carry: dict[str, tuple[str, ...]]
     #: Each case's `turn_slice` from the maps packet, semantic evidence on.
     slices: dict[str, dict]
+    #: The maps packet's time with the slice on minus off, one value per pair (`_slice_added_ms`).
+    slice_added_ms: list[float]
 
 
 _MEASURED: dict[str, Measured] = {}
@@ -168,6 +179,30 @@ def _turn_slices(root: Path, turns: list[tuple[str, str]], monkeypatch: pytest.M
     return slices
 
 
+def _slice_added_ms(root: Path, turns: list[str], monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The latency gate's paired measurement with the encoder loaded, where the slice's compile also
+    encodes the turn: for the owner, each turn's maps packet with the slice off and on, each from a cold
+    packet cache, in an order that alternates by pass so drift cancels. `LATENCY_PASSES` pairs per turn."""
+    differences: list[float] = []
+    with monkeypatch.context() as scope, principal.request_scope(principal.owner_principal(surface="library")):
+        scope.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+        scope.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        for setting in ("off", "on"):
+            scope.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+            commands.op_activate_context(root, turn=turns[0])  # warm each path once
+        for index in range(LATENCY_PASSES):
+            for turn in turns:
+                total: dict[str, float] = {}
+                for setting in ("off", "on") if index % 2 == 0 else ("on", "off"):
+                    scope.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+                    working_set_runtime.reset_caches_for_tests(packets_only=True)
+                    packet = commands.op_activate_context(root, turn=turn, include_timings=True)
+                    assert ("turn_slice" in packet) == (setting == "on"), packet.get("abstention")
+                    total[setting] = _compiler_ms(packet["timings"])
+                differences.append(total["on"] - total["off"])
+    return differences
+
+
 def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
     fingerprint, dim = _load_encoder(monkeypatch)
 
@@ -211,6 +246,7 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
 
     slices = _turn_slices(root, [(case.case_id, case.turn) for case in CASES], monkeypatch)
+    slice_added_ms = _slice_added_ms(root, [case.turn for case in CASES], monkeypatch)
 
     # The same vault with an ordinary note beside each named gold that shares
     # a phrase with its turn, so the retrieval carry names that note instead.
@@ -281,6 +317,7 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
         incidental,
         incidental_carry,
         slices,
+        slice_added_ms,
     )
 
 
@@ -428,6 +465,23 @@ def test_the_semantic_stage_meets_its_latency_bar(measured: Measured) -> None:
     ordered = sorted(measured.semantic_ms)
     p95 = ordered[min(len(ordered) - 1, max(0, -(-95 * len(ordered) // 100) - 1))]
     assert p95 <= SEMANTIC_STAGE_P95_MS, (p95, ordered[-5:])
+
+
+def test_the_turn_slice_adds_a_bounded_paired_cost_with_the_encoder_loaded(measured: Measured) -> None:
+    """The latency gate's bound on what the slice adds, on these turns with the real encoder loaded: the
+    upper end of the median paired difference's 95% interval is at most `SLICE_ADDED_MS_CEILING`. The
+    target is reported, never asserted."""
+    differences = measured.slice_added_ms
+    low, high = _paired_median_interval(differences)
+    report = {
+        "pairs": len(differences),
+        "median_added_ms": round(statistics.median(differences), 1),
+        "ci95_added_ms": [round(low, 1), round(high, 1)],
+        "target_ms": SLICE_ADDED_MS_TARGET,
+        "within_target": high <= SLICE_ADDED_MS_TARGET,
+    }
+    print("turn slice paired latency, encoder loaded " + json.dumps(report, sort_keys=True))
+    assert high <= SLICE_ADDED_MS_CEILING, report
 
 
 def test_the_english_set_keeps_its_v1_verdicts_with_semantic_evidence_on(measured: Measured) -> None:
