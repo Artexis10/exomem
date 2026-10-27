@@ -224,10 +224,11 @@ It decodes each window with the reference Whisper fallback: at most 224 tokens, 
 The speech entry of `media_models.json` holds these values with their source and a decoding revision, and the revision is part of the engine label.
 
 A 30-minute recording at 2 CPU takes longer than one 900-second job timeout.
-The engine writes an atomic progress record under the vault's derived state after each window.
-A later run of the same file, digest and engine label continues from the next window, with the recorded language; another engine label starts again.
+The engine writes an atomic progress record under the vault's derived state after each window, keyed by the file's vault path.
+A later run of the same path, content digest, window length and engine label continues from the next window, with the recorded language; any other record starts again.
+Removing the file discards its record through the deletion fan-out.
 The engine deletes the record when the transcript completes.
-The worker re-queues a stopped job, and a stop that advanced the record does not count toward the stop limit.
+Today every watchdog stop counts toward the stop limit, so a file that needs more than the stop limit times the job timeout ends over budget. The Cloud delivery work changes the worker: it re-queues a stopped job, and a stop that advanced the record does not count toward the stop limit.
 
 ### D7. Off until proven, and the disabled state
 

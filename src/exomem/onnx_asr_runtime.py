@@ -51,10 +51,19 @@ def audio_chunks(path: Path, sample_rate: int, chunk_samples: int) -> Iterator[n
 PROGRESS_FORMAT = 1
 
 
-def _progress_path(vault_root: Path, sha256: str) -> Path:
+def _progress_path(vault_root: Path, binary_rel: str) -> Path:
+    # Keyed by the file's vault path, so removing the file can discard its partial transcript.
     from . import state_paths
 
-    return state_paths.vault_state_dir(vault_root) / "media-progress" / "speech" / f"{sha256}.json"
+    name = hashlib.sha256(binary_rel.encode("utf-8")).hexdigest()
+    return state_paths.vault_state_dir(vault_root) / "media-progress" / "speech" / f"{name}.json"
+
+
+def _binary_rel(vault_root: Path, path: Path) -> str | None:
+    try:
+        return path.resolve().relative_to(vault_root.resolve()).as_posix()
+    except ValueError:
+        return None  # outside the vault: nothing could discard a record, so keep none
 
 
 def _read_progress(path: Path) -> dict | None:
@@ -81,15 +90,15 @@ def _write_progress(vault_root: Path, path: Path, record: dict) -> None:
         raise
 
 
-def progress_offset(vault_root: Path, sha256: str) -> int:
-    """Audio samples of this input already transcribed; only grows until the transcript completes."""
-    record = _read_progress(_progress_path(vault_root, sha256))
+def progress_offset(vault_root: Path, binary_rel: str) -> int:
+    """Audio samples of this vault file already transcribed; only grows until the transcript completes."""
+    record = _read_progress(_progress_path(vault_root, binary_rel))
     return 0 if record is None else int(record["next_offset"])
 
 
-def discard_progress(vault_root: Path, sha256: str) -> None:
-    """Forget a partial transcript, for a purged or retired speech job."""
-    _progress_path(vault_root, sha256).unlink(missing_ok=True)
+def discard_progress(vault_root: Path, binary_rel: str) -> None:
+    """Forget the partial transcript of a removed, purged or retired vault file."""
+    _progress_path(vault_root, binary_rel).unlink(missing_ok=True)
 
 
 def _file_sha256(path: Path) -> str:
@@ -216,6 +225,10 @@ class OnnxWhisperBackend:
         protocol = {self._start_token, int(generation["prev_sot_token_id"]), *map(int, generation["task_to_id"].values())}
         self._suppressed = np.asarray(sorted({*map(int, generation["suppress_tokens"]), *protocol}), dtype=np.int64)
         self._begin_suppressed = np.asarray(generation["begin_suppress_tokens"], dtype=np.int64)
+        policy = self.spec["decoding"]
+        # The prompt (start, language, task, no-timestamps) and the new tokens share the text context.
+        if not policy["temperatures"] or policy["max_new_tokens"] + 4 > int(generation["max_length"]):
+            raise ValueError("the speech registry's decoding policy does not fit the model")
         self._model, self._vad = model, vad
 
     def _step(self, encoding) -> Callable[[list[int], object], tuple[np.ndarray, object]]:
@@ -265,13 +278,15 @@ class OnnxWhisperBackend:
                 self._load()
                 rate = self.spec["sample_rate"]
                 chunk_samples = int(rate * self.spec["chunk_seconds"])
-                identity = _file_sha256(path) if vault_root is not None else None
-                progress = _progress_path(vault_root, identity) if identity is not None else None
+                binary_rel = _binary_rel(vault_root, path) if vault_root is not None else None
+                progress = _progress_path(vault_root, binary_rel) if binary_rel is not None else None
+                identity = _file_sha256(path) if progress is not None else None
                 record = _read_progress(progress) if progress is not None else None
                 if record is not None and (
                     record.get("format") != PROGRESS_FORMAT
                     or record.get("input_sha256") != identity
                     or record.get("engine") != label
+                    or record.get("chunk_samples") != chunk_samples
                 ):
                     record = None
                 done = [Segment(**segment) for segment in record["segments"]] if record else []
@@ -305,6 +320,7 @@ class OnnxWhisperBackend:
                     if progress is not None:
                         _write_progress(vault_root, progress, {
                             "format": PROGRESS_FORMAT, "input_sha256": identity, "engine": label,
+                            "chunk_samples": chunk_samples,
                             "language": language, "next_offset": offset,
                             "segments": [segment.__dict__ for segment in done],
                         })

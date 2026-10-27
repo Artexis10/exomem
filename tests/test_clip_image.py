@@ -32,6 +32,10 @@ def _photo(tmp_path, monkeypatch):
     return path
 
 
+#: Stored vectors predate the space record; they came from clip-ViT-B-32 at fp32.
+LEGACY = {"space": "openai/clip-vit-base-patch32", "width": "512", "precision": "fp32"}
+
+
 def _unit(index):
     vector = np.zeros(embeddings.CLIP_DIM, dtype=np.float32)
     vector[index] = 1
@@ -75,14 +79,14 @@ def test_the_first_image_write_records_its_space_and_writer(vault):
     index.upsert("Knowledge Base/Evidence/a.png", _unit(0), 1.0)
 
     recorded = index.space()
-    assert {key: recorded[key] for key in clip_index.SPACE_KEYS} == clip_index.legacy_space()
+    assert {key: recorded[key] for key in clip_index.SPACE_KEYS} == LEGACY
     assert recorded[f"artifact:{embeddings.clip_encoder_space()['artifact']}"] == "written"
 
 
 def test_a_sidecar_without_a_record_reads_as_the_legacy_space(vault):
     clip_index.ClipIndex(vault).upsert("Knowledge Base/Evidence/a.png", _unit(0), 1.0)
 
-    assert clip_index.ClipIndex(vault).space() == clip_index.legacy_space()
+    assert clip_index.ClipIndex(vault).space() == LEGACY
 
 
 def test_an_encoder_in_another_space_cannot_write_into_the_sidecar(vault):

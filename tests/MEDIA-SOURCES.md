@@ -26,7 +26,7 @@ It contains 78720 mono samples at 16000 Hz, for 4.92 seconds.
 `sample.mkv` contains that same audio as lossless PCM16 and five generated grey frames.
 PyAV 18.1.0 encoded the 64 by 64 pixel frames with the native CPU MPEG-4 encoder at one frame per second.
 The decoded video audio matches all 78720 WAV samples exactly.
-No model produced or selected the expected phrase in `media-samples/expected.json`.
+No model produced or selected the expected phrase in `fixtures/media-samples/expected.json`.
 That phrase is a contiguous substring of the publisher's transcript.
 
 | Fixture | Bytes | SHA-256 |
@@ -36,12 +36,12 @@ That phrase is a contiguous substring of the publisher's transcript.
 
 ## Image vector fixture
 
-`clip/photo.jpg` checks that the image tower keeps the stored vector space.
+`fixtures/clip/photo.jpg` checks that the image tower keeps the stored vector space.
 It is an integration fixture, not image-retrieval quality data.
 
 - Source: [File:Bicycle 02.jpg](https://commons.wikimedia.org/wiki/File:Bicycle_02.jpg) on Wikimedia Commons, under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
 - Derivation: the 1024-pixel Commons thumbnail was downscaled to 320 by 240 pixels with Lanczos and saved as JPEG quality 85.
 - Fixture SHA-256: `1a1ddebc7024ad83adb264b431b50be93455774c817c19c2a1dd4f1d42041900`.
 
-`clip/reference.json` holds the fixture's 512-dimensional vector from the sentence-transformers `clip-ViT-B-32` model on CPU, rounded to seven decimals.
+`fixtures/clip/reference.json` holds the fixture's 512-dimensional vector from the sentence-transformers `clip-ViT-B-32` model on CPU, rounded to seven decimals.
 The Cloud image gate requires its ONNX image tower to reproduce that vector at cosine 0.9999 or above.

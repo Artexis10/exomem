@@ -47,7 +47,7 @@ Tasks 3.1 and 3.2 keep today's `clip-ViT-B-32` image space, so stored image vect
 The multilingual query encoder of task 3.4 supplies multilingual retrieval in that space.
 The image tower ships as a pinned fp32 ONNX artifact of the same model. Torch-free lanes select it, and torch lanes keep sentence-transformers.
 Parity through the real `embed_image` on both lanes covered 33 images: photographs, alpha, greyscale, palette, CMYK, 16-bit, HEIC, extreme sizes and EXIF rotation. The minimum cosine was 0.99999985.
-On 2 CPU threads, a warm encode took a median of 108 ms, and the peak resident set was 600 MB, against 1068 MB for the torch lane.
+On 2 CPU threads, a warm encode took a median of 108 ms, and the peak resident set was 586 MiB, against 1043 MiB for the torch lane.
 The weights are one external-data file loaded with prepacking off, so cells can share its pages; task 5.2 measures that sharing.
 The Cloud image gate encodes a committed CC0 photograph offline and requires cosine 0.9999 against its recorded torch vector.
 Image tags keep the torch text tower, so they stay unavailable on torch-free lanes.

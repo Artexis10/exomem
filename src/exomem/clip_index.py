@@ -42,12 +42,9 @@ class ClipSpaceMismatch(ValueError):
     """An encoder in another vector space must not write into this sidecar."""
 
 
-def legacy_space() -> dict[str, str]:
-    """The space of rows written before the record existed: today's image model."""
-    from .media_models import model_spec
-
-    spec = model_spec("image")
-    return {"space": spec["image_space"], "width": str(spec["dimensions"]), "precision": spec["precision"]}
+#: The space of rows written before the record existed. It is a historical fact,
+#: like `recall_space.LEGACY_IDENTITY`, so it must not follow a registry change.
+LEGACY_SPACE = {"space": "openai/clip-vit-base-patch32", "width": "512", "precision": "fp32"}
 
 
 class _ClipCache(NamedTuple):
@@ -149,7 +146,7 @@ class ClipIndex:
         if recorded:
             current = {key: recorded.get(key) for key in SPACE_KEYS}
         elif conn.execute("SELECT 1 FROM images LIMIT 1").fetchone() is not None:
-            current = legacy_space()
+            current = dict(LEGACY_SPACE)
         else:
             current = claimed
         if current != claimed:
@@ -169,7 +166,7 @@ class ClipIndex:
             recorded = dict(conn.execute("SELECT key, value FROM space").fetchall()) if exists else {}
         finally:
             conn.close()
-        return recorded or legacy_space()
+        return recorded or dict(LEGACY_SPACE)
 
     @staticmethod
     def _migrate_add_frame_ts(conn: sqlite3.Connection) -> None:

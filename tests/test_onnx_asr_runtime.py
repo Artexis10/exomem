@@ -121,18 +121,26 @@ def _resumable_backend(monkeypatch, recognized, stop_after=None):
     return backend, window
 
 
-def test_a_stopped_transcript_resumes_after_its_last_finished_window(monkeypatch, vault, tmp_path):
+RECORDING = "Knowledge Base/Evidence/talk.ogg"
+
+
+def _recording(vault):
+    audio = vault / RECORDING
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"thirty minutes of speech")
+    return audio
+
+
+def test_a_stopped_transcript_resumes_after_its_last_finished_window(monkeypatch, vault):
     from exomem import onnx_asr_runtime
 
-    audio = tmp_path / "talk.ogg"
-    audio.write_bytes(b"thirty minutes of speech")
-    identity = onnx_asr_runtime._file_sha256(audio)
+    audio = _recording(vault)
     first = []
     backend, window = _resumable_backend(monkeypatch, first, stop_after=2)
     segments, _label = backend.transcribe(audio, vault_root=vault)
     with pytest.raises(_Stopped):
         list(segments)
-    assert onnx_asr_runtime.progress_offset(vault, identity) == 2 * window
+    assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 2 * window
 
     second = []
     backend, _window = _resumable_backend(monkeypatch, second)
@@ -140,19 +148,18 @@ def test_a_stopped_transcript_resumes_after_its_last_finished_window(monkeypatch
 
     assert [segment.text for segment in segments] == ["window 0", "window 1", "window 2"]
     assert second == [2]
-    assert onnx_asr_runtime.progress_offset(vault, identity) == 0
+    assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 0
 
 
-def test_progress_from_another_engine_revision_is_not_resumed(monkeypatch, vault, tmp_path):
+def test_progress_from_another_engine_revision_is_not_resumed(monkeypatch, vault):
     from exomem import onnx_asr_runtime
 
-    audio = tmp_path / "talk.ogg"
-    audio.write_bytes(b"thirty minutes of speech")
+    audio = _recording(vault)
     backend, window = _resumable_backend(monkeypatch, [], stop_after=1)
     segments, _label = backend.transcribe(audio, vault_root=vault)
     with pytest.raises(_Stopped):
         list(segments)
-    path = onnx_asr_runtime._progress_path(vault, onnx_asr_runtime._file_sha256(audio))
+    path = onnx_asr_runtime._progress_path(vault, RECORDING)
     record = json.loads(path.read_text())
     path.write_text(json.dumps({**record, "engine": "an earlier decoding revision"}))
 
@@ -162,3 +169,19 @@ def test_progress_from_another_engine_revision_is_not_resumed(monkeypatch, vault
 
     assert [segment.text for segment in segments] == ["window 0", "window 1", "window 2"]
     assert again == [0, 1, 2]
+
+
+def test_removing_a_recording_discards_its_partial_transcript(monkeypatch, vault):
+    from exomem import index_sync, onnx_asr_runtime
+
+    audio = _recording(vault)
+    backend, window = _resumable_backend(monkeypatch, [], stop_after=1)
+    segments, _label = backend.transcribe(audio, vault_root=vault)
+    with pytest.raises(_Stopped):
+        list(segments)
+    assert onnx_asr_runtime.progress_offset(vault, RECORDING) == window
+
+    audio.unlink()
+    index_sync.delete_after_remove(vault, [RECORDING])
+
+    assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 0

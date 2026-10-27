@@ -246,7 +246,7 @@ It extracts each fixture and checks the phrase in `expected.json`.
 A missing fixture or phrase fails the build, as does an installed CUDA wheel (`nvidia-*`) or PyTorch.
 
 Speech coverage includes a public WAV recording and an MKV video containing the same lossless audio.
-[Fixture provenance](../../tests/fixtures/MEDIA-SOURCES.md) records the source, licence and expected phrase lineage.
+[Fixture provenance](../../tests/MEDIA-SOURCES.md) records the source, licence and expected phrase lineage.
 These exposed integration fixtures prove offline audio and video extraction, not held-out speech quality.
 A separate offline load gate checks that the selected image query encoder returns one 512-dimensional vector.
 That gate does not claim that the Cloud image encoder or image-search rollout has passed acceptance.

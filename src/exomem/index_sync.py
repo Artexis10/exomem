@@ -2082,7 +2082,16 @@ def delete_after_remove(
     # idempotent). No-op (guarded inside clear_scene_frames) when the video never
     # had persisted frames.
     for rel in safe_paths:
-        if media_types.media_type_for(rel) != "video":
+        media_type = media_types.media_type_for(rel)
+        if media_type in {"audio", "video"}:
+            # A removed recording must not leave its partial transcript in vault state.
+            from . import onnx_asr_runtime
+
+            try:
+                onnx_asr_runtime.discard_progress(vault_root, rel)
+            except OSError:
+                log.warning("speech progress cleanup failed for %s", rel, exc_info=True)
+        if media_type != "video":
             continue
         try:
             scene_frames.clear_scene_frames(vault_root, vault_root / rel)

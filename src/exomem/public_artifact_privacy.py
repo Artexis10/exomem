@@ -278,13 +278,13 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
     *(
         BinaryProvenance(
             f"tests/fixtures/media-samples/{name}",
-            "public CC BY 4.0 speech fixture; source and derivative provenance in tests/fixtures/MEDIA-SOURCES.md",
+            "public CC BY 4.0 speech fixture; source and derivative provenance in tests/MEDIA-SOURCES.md",
         )
         for name in ("sample.wav", "sample.mkv")
     ),
     BinaryProvenance(
         "tests/fixtures/clip/photo.jpg",
-        "public CC0 photograph for the image-tower vector gate; provenance in tests/fixtures/MEDIA-SOURCES.md",
+        "public CC0 photograph for the image-tower vector gate; provenance in tests/MEDIA-SOURCES.md",
     ),
 )
 
