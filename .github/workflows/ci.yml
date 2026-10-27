@@ -1276,9 +1276,8 @@ jobs:
       - retrieval-latency
       - recall-latency-series
       - recall-latency-paired
-      - mcp-read-latency-plan
-      - mcp-read-latency-paired
-      - mcp-read-latency-aggregate
+      # The MCP read latency jobs report without gating until a full run completes inside its step
+      # budget: every allowance is still null, so they can fail only on their own breakage.
       - governance-projection-wire
       - governance-projection-wire-vector-cpu
       - semantic-write-latency

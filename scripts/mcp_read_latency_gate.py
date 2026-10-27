@@ -429,7 +429,10 @@ class Arm:
         self.client = Client(StreamableHttpTransport("http://127.0.0.1/mcp", headers=headers,
                                                      httpx_client_factory=factory), timeout=120)
         await self.client.__aenter__()
-        return {"ready_s": ready, "quiescent_s": await self.quiesce(limit=quiescence_limit)}
+        progress(f"arm-ready arm={self.name} ready_s={ready:.0f}")
+        quiescent = await self.quiesce(limit=quiescence_limit)
+        progress(f"arm-quiet arm={self.name} quiescent_s={quiescent:.0f}")
+        return {"ready_s": ready, "quiescent_s": quiescent}
 
     @staticmethod
     async def _port_open(port: int, process: subprocess.Popen) -> bool:
@@ -579,14 +582,18 @@ async def stop_arms(arms: dict[str, Arm]) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def progress(line: str) -> None:
+    """One stderr line per preparation step: a run that overruns its step budget still shows where the time went."""
+    print(line, file=sys.stderr, flush=True)
+
+
 async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
     started = time.monotonic()
     await arm.load_collections(fixture)
     loaded = time.monotonic()
     await arm.quiesce(limit=1800)
     # Fixture preparation is not part of the summary; one stderr line keeps its cost visible to the operator.
-    print(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}",
-          file=sys.stderr, flush=True)
+    progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}")
 
 
 async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, repeats: int) -> dict[str, Any]:
@@ -774,13 +781,16 @@ def run_paired(args: argparse.Namespace) -> dict:
     reduced = bool(args.max_cases or args.notes_pages)
     with scratch_directory(args.scratch) as temporary:
         scratch = Path(temporary)
+        began = time.monotonic()
         base_src, base_python = prepare_release(tag, scratch)
+        progress(f"release-prepared elapsed_s={time.monotonic() - began:.0f}")
         recall_profile = json.loads((RECALL_BENCHMARK / "profile.json").read_text())
         arms = build_arms({"head": scratch / "arms/head", "base": scratch / "arms/base"},
                           {"head": sys.executable, "base": base_python},
                           worker_settings(embeddings=args.notes_pages is None,
                                           passthrough=recall_profile["worker_environment"]))
         rels = prepare_notes(arms, base_src, base_python, notes_pages=args.notes_pages)
+        progress(f"notes-prepared elapsed_s={time.monotonic() - began:.0f}")
         fixture = gen_collection_fixture(profile)
         everything = gen_collection_cases(fixture, profile) + gen_note_cases(arms["head"].vault, rels, profile)
         cases, total = select_cases(everything, per_group=args.max_cases, shard=args.shard, shards=profile["shards"])
