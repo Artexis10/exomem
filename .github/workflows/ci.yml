@@ -722,6 +722,8 @@ jobs:
   mcp-read-latency-plan:
     name: MCP read latency plan
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -754,6 +756,8 @@ jobs:
   mcp-read-latency-paired:
     name: MCP read latency paired (shard ${{ matrix.shard }})
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
     needs: mcp-read-latency-plan
     # Keep this benchmark on the calibrated Ubuntu 24.04 runtime that the recall benchmark uses.
     runs-on: ubuntu-24.04
@@ -808,6 +812,8 @@ jobs:
   mcp-read-latency-aggregate:
     name: MCP read latency verdicts
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
     needs: [mcp-read-latency-plan, mcp-read-latency-paired]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
