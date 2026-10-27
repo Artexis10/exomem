@@ -489,8 +489,8 @@ def gen_note_cases(root: Path, rels: list[str], profile: dict) -> list[dict]:
     """Read, search and recall cases for pages drawn from the generated vault.
 
     The shared synthetic prose repeats across pages, so no query names one page.
-    Only the read case pins the exact page; the search and recall cases require
-    a non-empty ranked answer, which both arms must give for the same input.
+    The read case pins the exact page; the search case requires a non-empty ranked answer, and the
+    recall case requires the abstention that a title-only turn produces. Both arms must give the same.
     """
     from exomem import vault
 
@@ -501,10 +501,9 @@ def gen_note_cases(root: Path, rels: list[str], profile: dict) -> list[dict]:
     for rel in chosen:
         frontmatter, body, _ = vault.parse_frontmatter((root / rel).read_text(encoding="utf-8"))
         pages.append((rel, frontmatter["title"], " ".join(body.split("\n\n")[0].split()[: spec["passage_words"]])))
-    search_schema = {"type": "array", "minItems": 1,
-                     "items": {"type": "object", "required": ["path", "title"]}}
-    recall_schema = {"type": "object", "required": ["anchors"],
-                     "properties": {"anchors": {"type": "array", "minItems": 1}}}
+    search_schema = {"type": "object", "required": ["hits"],
+                     "properties": {"hits": {"type": "array", "minItems": 1,
+                                             "items": {"type": "object", "required": ["path", "title"]}}}}
     cases = []
     for number, (rel, title, _passage) in enumerate(pages[:size]):
         cases.append(_case("note-read", number, "read_memory", {"path": rel}, state_path=["path"], state=rel,
@@ -512,7 +511,13 @@ def gen_note_cases(root: Path, rels: list[str], profile: dict) -> list[dict]:
     for number, (_rel, _title, passage) in enumerate(pages[size:2 * size]):
         cases.append({"id": f"search-{number:02d}", "group": "search", "tool": "search_memory",
                       "arguments": {"query": passage}, "expected": {"response_schema": search_schema}})
-    for number, (_rel, title, passage) in enumerate(pages[2 * size:]):
+    # A turn that is only a page title carries no task, so recall_context abstains with an `unresolved` reason
+    # on every page. A turn with prose resolves on some pages and not on others, which no answer key can predict.
+    recall_schema = {"type": "object", "required": ["anchors", "abstention"],
+                     "properties": {"anchors": {"type": "array"},
+                                    "abstention": {"type": "object", "required": ["reason"]}}}
+    for number, (_rel, title, _passage) in enumerate(pages[2 * size:]):
         cases.append({"id": f"recall-{number:02d}", "group": "recall", "tool": "recall_context",
-                      "arguments": {"turn": f"{title}: {passage}"}, "expected": {"response_schema": recall_schema}})
+                      "arguments": {"turn": title},
+                      "expected": {"outcome": "abstained", "response_schema": recall_schema}})
     return cases
