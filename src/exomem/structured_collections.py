@@ -1544,10 +1544,15 @@ def ordered_keys_encode(manifest: CollectionManifest) -> bool:
 
 
 def item_key_contract(manifest: CollectionManifest) -> dict[str, Any]:
-    """What a collection reports about its item keys: the scheme and the bytes an index holds for one (bounds, not a scan)."""
+    """What a collection reports about its item keys: the scheme and, for a derived collection, the bytes an index
+    holds for one (bounds, not a scan). A collection that keeps its rows in the store holds the key as text, so it has no
+    byte length to report."""
     if manifest.item_key_scheme == item_keys.ORDERED_V1:
         return {"scheme": item_keys.ORDERED_V1, "stored_key_bytes": {"min": 1, "max": item_keys.MAX_KEY_BYTES}}
-    return {"scheme": item_keys.HASHED_V1, "stored_key_bytes": {"min": 16, "max": 16}}
+    contract: dict[str, Any] = {"scheme": item_keys.HASHED_V1}
+    if manifest.derived:
+        contract["stored_key_bytes"] = {"min": 16, "max": 16}
+    return contract
 
 
 def item_key_stored_bytes(manifest: CollectionManifest, key: str) -> int:
