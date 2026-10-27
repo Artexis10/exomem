@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 import threading
 import zlib
 from collections.abc import Callable, Iterator
@@ -42,6 +45,59 @@ def audio_chunks(path: Path, sample_rate: int, chunk_samples: int) -> Iterator[n
             fifo.write(decoded)
         while fifo.samples:
             yield fifo.read(min(fifo.samples, chunk_samples)).to_ndarray()[0]
+
+
+#: The progress record's own format; the engine label decides whether a record still applies.
+PROGRESS_FORMAT = 1
+
+
+def _progress_path(vault_root: Path, sha256: str) -> Path:
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / "media-progress" / "speech" / f"{sha256}.json"
+
+
+def _read_progress(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _write_progress(vault_root: Path, path: Path, record: dict) -> None:
+    from . import state_paths
+
+    state_paths.ensure_vault_state_dir(vault_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=".progress.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def progress_offset(vault_root: Path, sha256: str) -> int:
+    """Audio samples of this input already transcribed; only grows until the transcript completes."""
+    record = _read_progress(_progress_path(vault_root, sha256))
+    return 0 if record is None else int(record["next_offset"])
+
+
+def discard_progress(vault_root: Path, sha256: str) -> None:
+    """Forget a partial transcript, for a purged or retired speech job."""
+    _progress_path(vault_root, sha256).unlink(missing_ok=True)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(8 << 20):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -197,16 +253,37 @@ class OnnxWhisperBackend:
 
         return language, decode_with_fallback(decode, policy).text
 
-    def transcribe(self, path: Path) -> tuple[Iterator[Segment], str]:
+    def transcribe(self, path: Path, *, vault_root: Path | None = None) -> tuple[Iterator[Segment], str]:
+        """Transcribe in fixed windows; with a vault, a stopped run resumes from its last window."""
+        label = (
+            f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
+            f":decoding-{self.spec['decoding']['revision']}"
+        )
+
         def segments() -> Iterator[Segment]:
             with runtime_resources.model_execution():
                 self._load()
                 rate = self.spec["sample_rate"]
                 chunk_samples = int(rate * self.spec["chunk_seconds"])
+                identity = _file_sha256(path) if vault_root is not None else None
+                progress = _progress_path(vault_root, identity) if identity is not None else None
+                record = _read_progress(progress) if progress is not None else None
+                if record is not None and (
+                    record.get("format") != PROGRESS_FORMAT
+                    or record.get("input_sha256") != identity
+                    or record.get("engine") != label
+                ):
+                    record = None
+                done = [Segment(**segment) for segment in record["segments"]] if record else []
+                resume_at = int(record["next_offset"]) if record else 0
+                language = record["language"] if record else None
+                yield from done
                 offset = 0
-                language = None
                 for waveform in audio_chunks(path, rate, chunk_samples):
                     length = len(waveform)
+                    if offset + length <= resume_at:
+                        offset += length
+                        continue
                     # Normalize only VAD amplitude so quiet speech is not discarded;
                     # Whisper retains the waveform used in the quality comparison.
                     peak = float(np.max(np.abs(waveform)))
@@ -216,19 +293,24 @@ class OnnxWhisperBackend:
                     # Silero's 16 kHz input needs one hop and its context samples.
                     padded = np.pad(vad_waveform, (0, max(0, self.spec["vad_min_samples"] - length)))
                     detected = next(self._vad.segment_batch(padded[None], np.array([len(padded)]), rate))
-                    # The public Whisper adapter does not expose no-speech probability.
                     # VAD skips non-speech but leaves spoken chunks unchanged.
                     if next(detected, None) is not None:
                         # Like the local engine, one language serves the whole file.
                         language, text = self._recognize(waveform, language, seed=offset // chunk_samples)
                         if text.strip():
-                            yield Segment(offset / rate, (offset + length) / rate, text)
+                            segment = Segment(offset / rate, (offset + length) / rate, text)
+                            done.append(segment)
+                            yield segment
                     offset += length
+                    if progress is not None:
+                        _write_progress(vault_root, progress, {
+                            "format": PROGRESS_FORMAT, "input_sha256": identity, "engine": label,
+                            "language": language, "next_offset": offset,
+                            "segments": [segment.__dict__ for segment in done],
+                        })
+                if progress is not None:
+                    progress.unlink(missing_ok=True)
 
-        label = (
-            f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
-            f":decoding-{self.spec['decoding']['revision']}"
-        )
         return segments(), label
 
     def prewarm(self) -> None:
