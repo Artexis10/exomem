@@ -342,3 +342,37 @@ def test_a_field_a_later_release_wrote_neither_blocks_nor_vanishes_on_a_delta_sa
     assert saved["written_by"] == "a later release"
     assert saved["extensions"]["vault.from_later"] == later
     assert "vault.applies_to" in saved["extensions"]
+
+
+def test_a_delta_cannot_deprecate_into_a_saved_chain_without_a_survivor(vault: Path) -> None:
+    path = relation_registry.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "vault.applies_to": {
+                        "parent": "relates_to",
+                        "description": "A reviewed relation.",
+                        "aliases": ["applies_to"],
+                    },
+                    "vault.gone": {
+                        "parent": "relates_to",
+                        "description": "Gone.",
+                        "status": "deprecated",
+                        "replaced_by": "vault.missing",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid_replacement"):
+        _save(
+            vault,
+            {"deprecate": {"vault.applies_to": "vault.gone"}},
+            relation_registry.load_registry(vault).extension_hash,
+        )
+    assert relation_registry.load_registry(vault).definition("vault.applies_to").status == "active"

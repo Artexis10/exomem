@@ -1333,22 +1333,14 @@ def _replacement_closure(
                 terminal_key = current
                 break
             if not replacement:
-                findings.append(
-                    _finding(
-                        "invalid_replacement",
-                        f"extensions.{key}.replaced_by",
-                        "replacement chain must end in an active survivor",
-                        relation=key,
-                    )
-                )
                 break
             current = replacement
         if current in core:
             terminal_key = current
-        if terminal_key is None:
-            continue
-        terminal = core.get(terminal_key) or extensions.get(terminal_key)
-        if terminal is None or terminal.status != "active":
+        # Every key whose chain stops short, dangles or cycles carries its own
+        # finding, so a save that newly points a key at a broken chain is refused.
+        terminal = None if terminal_key is None else core.get(terminal_key) or extensions.get(terminal_key)
+        if terminal_key is None or terminal is None or terminal.status != "active":
             findings.append(
                 _finding(
                     "invalid_replacement",
