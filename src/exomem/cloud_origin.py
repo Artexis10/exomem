@@ -1,4 +1,4 @@
-"""Gateway-signed login origin for Cloud upload handoffs (bridge-cloud-agent-uploads).
+"""Gateway-signed login origin for Cloud upload handoffs (bridge-cloud-agent-uploads) and original downloads.
 
 A Cloud cell has no session store and no route to the control plane. The
 gateway therefore signs, on every forwarded request, which OAuth login sent
@@ -159,17 +159,29 @@ def _origin(claims: Mapping[str, Any]) -> Origin:
     return Origin(**{name: claims[name] for name in _ORIGIN_FIELDS})
 
 
-def verify_request(headers: Mapping[str, str], *, ticket: str | None = None) -> RequestOrigin | None:
+def verify_request(
+    headers: Mapping[str, str], *, ticket: str | None = None, download_path: str | None = None
+) -> RequestOrigin | None:
     """Verify the gateway's proof for this request, or None.
 
     An MCP request needs a proof for MCP and the route capsule for the same
-    login. An upload needs a proof that names the exact ticket it carries.
+    login. An upload needs a proof that names the exact ticket it carries. A
+    download needs a proof that names the exact path it requests; there is no
+    ticket, so each GET carries its own proof.
     """
+    extra = {"ticket_sha256"} if ticket is not None else {"target_sha256"} if download_path is not None else set()
     proof = _claims(headers.get(ORIGIN_HEADER), audience=_ORIGIN_AUDIENCE,
-                    fields=_PROOF_FIELDS | ({"ticket_sha256"} if ticket is not None else set()),
-                    lifetime=_PROOF_LIFETIME)
+                    fields=_PROOF_FIELDS | extra, lifetime=_PROOF_LIFETIME)
     if proof is None:
         return None
+    if download_path is not None:
+        try:
+            digest = hashlib.sha256(download_path.encode("utf-8")).hexdigest()
+        except UnicodeError:
+            return None
+        if proof["purpose"] != "download" or proof["target_sha256"] != digest:
+            return None
+        return RequestOrigin(_origin(proof), None)
     if ticket is not None:
         digest = hashlib.sha256(ticket.encode("ascii")).hexdigest()
         if proof["purpose"] != "upload" or proof["ticket_sha256"] != digest:
@@ -258,7 +270,7 @@ class CloudOriginMiddleware:
             return
         from starlette.datastructures import Headers
 
-        # The upload receiver verifies its own ticket-bound proof.
-        request_origin = None if scope.get("path") == "/upload" else verify_request(Headers(scope=scope))
+        # The upload and download receivers verify their own request-bound proofs.
+        request_origin = None if scope.get("path") in ("/upload", "/download") else verify_request(Headers(scope=scope))
         with bound(request_origin):
             await self.app(scope, receive, send)

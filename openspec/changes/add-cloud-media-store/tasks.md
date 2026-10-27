@@ -61,8 +61,8 @@
 
 ## 5. Gateway, uploads, imports and export (D8, D10)
 
-- [ ] 5.1 Substrate's change adds the signed-in download route with byte ranges, forwarded to the cell. Verify: Substrate tests show refusal without a session, and ranged playback of an evicted recording in rehearsal.
-- [ ] 5.2 Add `exomem cloud download` over OAuth with verify-then-rename. Verify: client tests show no file after a tampered, truncated or redirected download.
+- [ ] 5.1 Substrate's change adds the signed-in download route with byte ranges, forwarded to the cell. Verify: Substrate tests show refusal without a session, and ranged playback of an evicted recording in rehearsal. Agent half done: the cell serves `GET /download` behind a per-request gateway proof (D8), and the gateway's OAuth-authorized route is Substrate's. The browser signed-in link is still open.
+- [x] 5.2 Add `exomem cloud download` over OAuth with verify-then-rename. Verify: client tests show no file after a tampered, truncated or redirected download.
 - [ ] 5.3 Substrate's change proxies resumable uploads to the cell. Lift the Cloud exclusion of the upload routes by its recorded condition. Verify: Cloud surface tests, and a resumable upload in rehearsal.
 - [ ] 5.4 Add streaming import and split S2 admission into volume and store checks, amending S2's contract in its owning change. Verify: an import larger than the volume cap lands without the volume passing its cap.
 - [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.

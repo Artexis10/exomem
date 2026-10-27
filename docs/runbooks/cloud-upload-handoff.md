@@ -10,13 +10,18 @@ authorize a live rollout.
 
 ## What a configured cell does
 
-- It publishes `transfer_artifact`, for `hold=true` uploads only.
+- It publishes `transfer_artifact`: `hold=true` uploads, and `download` of a preserved original.
+  A download returns the descriptor and a `next_step` command, never a link or blob.
 - It serves one private `POST /upload` route. The route requires the cell bearer,
   then a gateway proof bound to the exact ticket, before it claims the ticket.
 - It refuses the route while `EXOMEM_CLOUD_READ_ONLY` is set, and leaves the
   ticket unspent.
-- It keeps every other Cloud exclusion. It serves no `/download`, REST or
-  resumable upload route.
+- It serves one private `GET /download?path=<vault path>` route. The route requires
+  the cell bearer, then a gateway proof with `purpose: "download"` bound to the exact
+  path, before it resolves anything. Each request, including each range request, has
+  its own proof; there is no ticket. It serves a single byte range, and hydrates an
+  evicted original through the media store first.
+- It keeps every other Cloud exclusion. It serves no REST or resumable upload route.
 
 ## Configuration
 
@@ -31,7 +36,8 @@ The cell never receives the private half.
 
 The platform chart and cellctl do not yet render this variable. Production
 activation adds that rendering for selected cells, the gateway's upload
-variables and an ingress rule for `POST /upload` to the gateway.
+variables and ingress rules for `POST /upload` and `GET /download` to the gateway.
+The `GET /download` rule sets an explicit 900 second timeout, as `POST /upload` does.
 
 ## Check a selected cell
 
@@ -39,6 +45,7 @@ variables and an ingress rule for `POST /upload` to the gateway.
 2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256=<digest>)`.
 3. Run `exomem attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
 4. Call `capture_source` with the returned file and the same digest; expect a stored receipt with that hash.
+5. Call `transfer_artifact(operation="download", artifact=<path>)`, run its `next_step` (`exomem cloud download '<path>' --out <dir>`); expect JSON with `path`, `bytes` and `sha256`, and a file whose SHA-256 matches.
 
 ## Undo
 

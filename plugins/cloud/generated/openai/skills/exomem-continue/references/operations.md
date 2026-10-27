@@ -658,8 +658,9 @@ Supply `expected_sha256` when a particular version is required. A prepared hando
 proves no consumption. The link delegates only the named artifact version until
 expiry; current session and disclosure checks still apply. A changed or withheld
 original requires a fresh authorized handoff. Large payloads use HTTPS before
-base64 encoding. Desktop/personal endpoints serve recovery; Cloud outbound delivery
-remains unavailable. Native attachment rendering in other clients remains unverified.
+base64 encoding. Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
+blob; run its `next_step`, `exomem cloud download '<path>'`, which fetches the exact
+original over the owner's sign-in and keeps it only if its size and SHA-256 match. Native attachment rendering in other clients remains unverified.
 
 Legacy automation can still omit `path` and use the returned token in an
 Authorization header with `download_url?path=...`. Broad legacy tokens remain

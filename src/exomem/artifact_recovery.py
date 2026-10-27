@@ -397,6 +397,15 @@ def complete_native_grant(grant: str) -> None:
     state.completed = True
 
 
+def describe(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:
+    """The descriptor of a readable original under the caller's current authority; it mints no delivery."""
+    from dataclasses import replace
+
+    who = replace(effective_principal(), administrative_ingress=False)
+    with stage(root, selected, who, expected_sha256=expected_sha256) as (_copied, descriptor):
+        return descriptor
+
+
 def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:
     root_key = signing_root()
     if root_key is None:

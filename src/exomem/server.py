@@ -40,7 +40,11 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
 )
 from .server_rest import register_rest_facade
 from .server_runtime import LocalRuntimeActivation, initialize_runtime
-from .server_transfer import register_cloud_upload_route, register_transfer_routes
+from .server_transfer import (
+    register_cloud_download_route,
+    register_cloud_upload_route,
+    register_transfer_routes,
+)
 from .server_transport import PrimeMcpSSEMiddleware
 
 log = logging.getLogger(__name__)
@@ -724,10 +728,11 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     upload_bridge = False
     if cloud:
         # Only MCP (`/mcp`), `/health` and `/health/ready` are registered
-        # (D1.5): REST (`/api/*`), `/download`, the personal `/upload` and the
+        # (D1.5): REST (`/api/*`), the personal `/download` and `/upload`, and the
         # OAuth metadata routes are never registered on a cloud cell. A cell
         # configured for gateway upload handoffs adds only the private ticket
-        # receiver (bridge-cloud-agent-uploads).
+        # receiver (bridge-cloud-agent-uploads) and the gateway-proved
+        # `/download` for exact originals.
         register_health_routes(mcp, on_liveness=runtime_activation.start)
         from . import cloud_origin
 
@@ -735,6 +740,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         upload_bridge = cloud_origin.enabled()
         if upload_bridge:
             register_cloud_upload_route(mcp, vault_root=runtime.vault_root, cell_bearer=auth)
+            register_cloud_download_route(mcp, vault_root=runtime.vault_root, cell_bearer=auth)
     else:
         register_asset_routes(
             mcp,
