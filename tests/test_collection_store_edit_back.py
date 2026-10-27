@@ -1084,50 +1084,99 @@ def test_a_views_tick_publishes_under_the_policy_it_finds_at_the_write(served, m
     assert not (root / relative).exists()
 
 
-def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served, monkeypatch):
-    """Defect: a busy service always takes the next request and never applies a settled saved view."""
-    from exomem import file_watcher
+def test_back_to_back_reads_never_wait_behind_due_maintenance(served, monkeypatch):
+    """Defect: a tick starts between the reads of a busy client, or after every request, or never
+    starts once the reads stop."""
+    from exomem import foreground_priority
+    from exomem.collection_store import runtime
+
+    server = runtime._server(served.root)
+    ticks, running = [], threading.Event()
+
+    def slow_tick(current):
+        running.set()
+        started = time.monotonic()
+        time.sleep(0.1)
+        ticks.append((started, time.monotonic()))
+        running.clear()
+        return 0.0
+
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", slow_tick)
+    monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 10.0)
+    until(lambda: ticks)  # the stand-in is due at once, so the first quiet gap runs it
+    with foreground_priority.foreground():  # a client between its calls: the gate stays shut
+        until(lambda: not running.is_set())
+        burst_start = time.monotonic()
+        for _ in range(30):
+            server.call(lambda: None, read_only=True, wake_maintenance=False)
+            time.sleep(0.005)
+        burst_end = time.monotonic()
+    assert [tick for tick in ticks if tick[0] < burst_end and burst_start < tick[1]] == []
+    until(lambda: ticks[-1][0] > burst_end)
+    assert ticks[-1][0] - burst_end < runtime.FOREGROUND_GRACE_SECONDS + 0.5
+
+
+@pytest.mark.parametrize("demand", ["queued_requests", "foreground_mark"])
+def test_continuous_demand_does_not_starve_a_notified_view_edit(served, monkeypatch, demand):
+    """Defect: a busy service never opens its maintenance gate and so never applies a settled saved view."""
+    from exomem import file_watcher, foreground_priority
     from exomem.collection_store import runtime
     from exomem.collection_store.writer import CollectionWriter
 
     root = served.root
     monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 0.2)
     server = runtime._server(root)
     until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
     apply_edit = CollectionWriter.apply_view_edit
 
     def edit_after_completed_publication_passes(writer, *args, **kwargs):
-        # A settled edit can follow a completed wake while the request queue remains busy.
+        # A settled edit can follow a completed wake while demand stays continuous.
         server._views_after, server._views_passes = None, 2
         return apply_edit(writer, *args, **kwargs)
 
     monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_after_completed_publication_passes)
     _, path = published_view(root, "Busy", count=1)
-    pumping = threading.Event()
-    pumping.set()
+    demanding, released = threading.Event(), threading.Event()
+    demanding.set()
     original_serve = server._serve
+    holder = None
+    marked = threading.Event()
 
     def keep_requests_queued(request):
         original_serve(request)
-        if pumping.is_set():
+        if demanding.is_set():
             with server._condition:
                 server._requests.append(runtime._Call(lambda: None, wake_maintenance=False))
                 server._condition.notify_all()
             time.sleep(0.005)
 
-    monkeypatch.setattr(server, "_serve", keep_requests_queued)
+    def hold_a_foreground_mark():
+        with foreground_priority.foreground():
+            marked.set()
+            released.wait(30)
+
+    if demand == "queued_requests":
+        monkeypatch.setattr(server, "_serve", keep_requests_queued)
+    else:
+        holder = threading.Thread(target=hold_a_foreground_mark)
+        holder.start()
+        assert marked.wait(10)
     try:
         server.call(lambda: None, wake_maintenance=False)
         path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 2"))
         file_watcher.FileWatcher(root)._record(path, deleted=False)
-        until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=6)
+        until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=8)
         until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?",
-                                (path.relative_to(root).as_posix(),)) == [("current",)], seconds=6)
+                                (path.relative_to(root).as_posix(),)) == [("current",)], seconds=8)
         assert b"count: 2" in path.read_bytes()
-        assert pumping.is_set()
+        assert demanding.is_set()
         assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_edit'") == [("view_edit",)]
     finally:
-        pumping.clear()
+        demanding.clear()
+        released.set()
+        if holder is not None:
+            holder.join(10)
 
 
 def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held(served):
@@ -1141,7 +1190,15 @@ def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is
     until(lambda: counted(root, "Served") == 7)
     edits = "SELECT operation,actor FROM txns WHERE operation='view_edit'"
     assert store_rows(root, edits) == [("view_edit", "owner:view-edit")]
-    until(lambda: owner(root, "read_memory", path=relative)["frontmatter"]["count"] == 7)
+    def page_count():
+        try:
+            return owner(root, "read_memory", path=relative)["frontmatter"]["count"]
+        except ValueError as error:
+            # The edit commits first and the re-render follows a quiet gap; until then the edited bytes answer as absent.
+            if "NOT_FOUND" not in str(error):
+                raise
+
+    until(lambda: page_count() == 7)
     rendered = path.read_bytes()
 
     def view_is_current():

@@ -793,6 +793,11 @@ VIEW_BATCH_PATHS = 16
 #: Longest run of edit-back windows in one checkout: it bounds how long that checkout's admission
 #: is reused and how long a publication waits for an idle instant.
 VIEW_SLICE_SECONDS = 0.05
+#: A tick never starts while a call is in flight or within this gap after one, so a call's
+#: response work does not share the GIL with a tick.
+FOREGROUND_GRACE_SECONDS = 0.05
+#: Under continuous demand a due tick still runs every 2 s, so due edit-back keeps bounded turns.
+MAINTENANCE_DEFER_SECONDS = 2.0
 # Bound watcher metadata independently of collection size; overflow requests a later census.
 _VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
@@ -1106,7 +1111,9 @@ class StoreServer:
     one batch at a time; each batch runs under its job's own bound principal, never the
     service's. As the in-process owner, it also advances building projections and rollups
     and publishes pending views, one bounded batch at a time. Between two requests it
-    runs one tick, the one that has waited longest. A request it cannot take within the
+    runs one tick, the one that has waited longest, once foreground work has been quiet for
+    ``FOREGROUND_GRACE_SECONDS``; a tick that has waited ``MAINTENANCE_DEFER_SECONDS`` runs
+    regardless, so continuous demand still leaves it a turn. A request it cannot take within the
     mutation timeout refuses as retryable, so a running batch never holds an
     acknowledgement past that timeout. A vault it cannot open refuses store-routed
     requests with the reason and retries; file collections never wait on it.
@@ -1120,6 +1127,7 @@ class StoreServer:
         self._retry_at = 0.0
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
+        self._served_at = 0.0  # when the store thread last finished a request
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._views_after = None  # where the current pass over pending views continues
@@ -1226,29 +1234,68 @@ class StoreServer:
         try:
             while not self._stopping():
                 # Routing demand can precede queue insertion; yield outside every checkout before checking the queue.
-                foreground_priority.yield_to_foreground()
+                # The wait ends where the most overdue tick starves, so the starvation bound holds under demand.
+                foreground_priority.yield_to_foreground(max_wait=self._yield_allowance(time.monotonic()))
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
                 if self._view_work_due(now):
                     self._ticks["views"] = min(self._ticks["views"], now)
-                due = min(self._ticks.values())
-                request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
+                name = min(self._ticks, key=self._ticks.get)
+                request = self._take(self._idle_wait(name, now))
                 if request is not None:
                     self._serve(request)
+                    served = self._served_at = time.monotonic()
                     if request.wake_maintenance:
                         # The request may have started a job, revised a declaration or left views pending.
-                        self._ticks = dict.fromkeys(self._ticks, 0.0)
+                        # A tick already overdue keeps its age: a stream of writes must not restart its starvation clock.
+                        self._ticks = {tick: min(due, served) for tick, due in self._ticks.items()}
                         self._views_after, self._views_passes = None, 0
-                    if self._view_work_due(time.monotonic()):
-                        # Saved views get one bounded turn even when requests never stop arriving.
+                    if self._view_work_due(served) and self._starved("views", served):
+                        # Saved views get one bounded turn per ``MAINTENANCE_DEFER_SECONDS`` even when requests never stop.
                         self._ticks["views"] = time.monotonic() + self._views_tick()
-                elif time.monotonic() >= due:
+                elif self._tick_may_start(name, time.monotonic()):
                     # One tick per turn, so a waiting request is taken between any two.
-                    name = min(self._ticks, key=self._ticks.get)
                     self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
+
+    def _starved(self, name, now):
+        """Whether a tick has been due for ``MAINTENANCE_DEFER_SECONDS`` without a quiet gap to run in."""
+        return now - self._ticks[name] >= MAINTENANCE_DEFER_SECONDS
+
+    def _tick_may_start(self, name, now):
+        """Whether the gate admits a due tick: foreground work has been quiet, or the tick starved.
+
+        It runs outside every checkout and boundary, and no foreground thread waits on it. Quiet follows
+        ``foreground_priority.bulk_free_since``, so a thread that awaits bulk work opens it after the gap,
+        and the gap also counts from the end of this thread's own last request. A lease handoff holds
+        back even a starved tick: the handoff drains the store first.
+        """
+        if now < self._ticks[name]:
+            return False
+        if self._starved(name, now) and not self.manager._store_handoff:
+            return True
+        free_since = foreground_priority.bulk_free_since()
+        return (free_since is not None and not self._aside()
+                and now - max(free_since, self._served_at) >= FOREGROUND_GRACE_SECONDS)
+
+    def _idle_wait(self, name, now):
+        """Seconds to wait for a request before the next look at the tick gate."""
+        due = self._ticks[name]
+        if due > now:
+            return min(due, now + IMPORT_IDLE_SECONDS) - now
+        if self._tick_may_start(name, now):
+            return 0.0
+        # Closed: look again after one gap, or where the tick starves if that is sooner. A starved
+        # tick that a handoff holds back still waits one gap, or this loop would spin during the handoff.
+        starves = due + MAINTENANCE_DEFER_SECONDS - now
+        return FOREGROUND_GRACE_SECONDS if starves <= 0 else min(FOREGROUND_GRACE_SECONDS, starves)
+
+    def _yield_allowance(self, now):
+        """How long the loop may wait for foreground work to end: until the most overdue tick starves."""
+        starves = min(self._ticks.values()) + MAINTENANCE_DEFER_SECONDS - now
+        return max(0.0, min(foreground_priority.MAX_YIELD_SECONDS, starves))
 
     def _take(self, timeout):
         with self._condition:
@@ -1578,6 +1625,10 @@ class StoreServer:
 
         The tick reads under one view of path placement and governance policy, opened per tick
         and never kept across two. Its store writes decide live (``_write``).
+
+        A tick that starts after a quiet gap (``_tick_may_start``) works as above. One that
+        ``MAINTENANCE_DEFER_SECONDS`` of demand starved runs a single bounded window and publishes
+        a single path, even beside a waiting request, so each pass still moves under continuous demand.
         """
         from ..governance import policy
 
@@ -1589,6 +1640,8 @@ class StoreServer:
         from . import capability, chain, edit_back
         from .preview import preview_store
 
+        # A starved tick runs one bounded turn whatever else is going on; any other yields at its next seam.
+        starved = self._starved("views", time.monotonic())
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
@@ -1633,7 +1686,7 @@ class StoreServer:
                     changes, dirty = [], False
                     # Each window still proves ownership and authorizes its own writes; only the
                     # checkout's admission is shared, and a waiting request ends the slice.
-                    while (wait <= 0 and not self._aside() and not self._stopping()
+                    while (wait <= 0 and not starved and not self._aside() and not self._stopping()
                            and time.monotonic() - started < VIEW_SLICE_SECONDS):
                         wait = self._edit_back.run(writer, now=time.monotonic(), mutate=mutate,
                                                    limit=VIEW_BATCH_PATHS)
@@ -1663,6 +1716,9 @@ class StoreServer:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
                     return min(wait, IMPORT_IDLE_SECONDS)
+            if not starved and self._aside():
+                # Leave the pass where it is: the next tick resumes it, and a starved one still publishes a path.
+                return 0.0
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 # Finish one path even under continuous demand; release its boundary before checking for readers.
                 for _ in range(VIEW_BATCH_PATHS):
