@@ -133,7 +133,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   A prepared handoff proves no consumption: verify the recovered bytes before
   claiming success. Native attachment rendering in other clients remains unverified.
   Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
-  blob: run its `next_step`, `exomem cloud download '<path>'`, which fetches the exact
+  blob: run its `next_step`, `exomem cloud download -- '<path>'`, which fetches the exact
   original over the owner's sign-in and keeps it only if its size and SHA-256 match.
   Notes and exports use their separate read and export paths.
 - **Media hits in `find` are first-class.** An extracted media sidecar carries

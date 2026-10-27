@@ -568,6 +568,8 @@ class _CloudOriginalDownloadResponse(Response):
         self.request_origin = request_origin
 
     async def __call__(self, scope, receive, send):
+        from starlette.datastructures import Headers
+
         from . import cloud_origin
 
         started = False
@@ -585,8 +587,9 @@ class _CloudOriginalDownloadResponse(Response):
                         "x-exomem-size": str(descriptor["size"]),
                         "content-disposition": "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe=""),
                     }
-                    if "," in dict(scope["headers"]).get(b"range", b"").decode("latin-1"):
-                        # One slice is the contract; a multipart answer is not offered.
+                    ranges = Headers(scope=scope).getlist("range")
+                    if len(ranges) > 1 or "," in "".join(ranges):
+                        # One slice is the contract; repeated Range headers or a multipart answer are not offered.
                         response = PlainTextResponse(status_code=416, headers={"content-range": f"bytes */{descriptor['size']}"})
                     else:
                         response = FileResponse(copied.private_path, media_type=descriptor["mime_type"],
@@ -613,7 +616,10 @@ class _CloudOriginalDownloadResponse(Response):
             if started:
                 raise
             # An evicted original whose store cannot supply it is retryable; anything else says nothing about the path.
-            if isinstance(error.__cause__, media_store.MediaStoreError):
+            if isinstance(error, artifact_recovery.RecoveryBusy):
+                refusal = JSONResponse({"code": "ORIGINAL_BUSY", "reason": "other downloads are in progress; retry shortly"},
+                    status_code=503, headers={**_RECOVERY_HEADERS, "retry-after": "5"})
+            elif isinstance(error.__cause__, media_store.MediaStoreError):
                 refusal = JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "the original is stored off this cell and the store is unreachable"},
                     status_code=503, headers=_RECOVERY_HEADERS)
             else:

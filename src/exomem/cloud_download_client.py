@@ -22,6 +22,8 @@ from .cloud_import_client import (
 )
 
 CHUNK_BYTES = 1 << 20
+# A refusal is a short JSON object; anything longer is not read.
+REFUSAL_BYTES = 64 * 1024
 _DISPOSITION_PREFIX = "attachment; filename*=utf-8''"
 
 
@@ -42,6 +44,29 @@ def _refusal(response: httpx2.Response, body: bytes) -> CloudDownloadError:
         code = None
     code = code or server_code(httpx2.Response(response.status_code, content=body))
     return CloudDownloadError(code, "the Cloud service refused the download")
+
+
+async def _read_refusal(response: httpx2.Response) -> bytes:
+    body = b""
+    async for chunk in response.aiter_bytes(CHUNK_BYTES):
+        body += chunk
+        if len(body) >= REFUSAL_BYTES:
+            return body[:REFUSAL_BYTES]
+    return body
+
+
+def _place(pending: Path, final: Path, *, overwrite: bool) -> None:
+    """Move the verified file into place; without `overwrite` an existing target is kept."""
+    if overwrite:
+        os.replace(pending, final)
+        return
+    try:
+        if os.name == "nt":
+            os.rename(pending, final)  # fails on an existing target
+        else:
+            os.link(pending, final)  # fails on an existing target; the pending name is removed by the caller
+    except FileExistsError:
+        raise CloudDownloadError("FILE_EXISTS", f"{final} already exists; use --overwrite to replace it") from None
 
 
 def _digest(value: str | None) -> str:
@@ -73,7 +98,9 @@ def _file_name(disposition: str, path: str) -> str:
     return name
 
 
-async def download_original(config: CloudImportClientConfig, path: str, out_dir: Path, *, api=None) -> dict:
+async def download_original(
+    config: CloudImportClientConfig, path: str, out_dir: Path, *, api=None, overwrite: bool = False
+) -> dict:
     """Stream the original to a private file in `out_dir`; keep it only if size and SHA-256 verify."""
     gateway = urlsplit(config.mcp_url)
     if gateway.scheme != "https" or not gateway.hostname or gateway.username or gateway.password:
@@ -94,7 +121,7 @@ async def download_original(config: CloudImportClientConfig, path: str, out_dir:
                 if response.is_redirect:
                     raise CloudDownloadError("DOWNLOAD_REDIRECTED", "the Cloud service redirected; refusing to follow it")
                 if response.status_code != 200:
-                    raise _refusal(response, await response.aread())
+                    raise _refusal(response, await _read_refusal(response))
                 sha256 = _digest(response.headers.get("x-exomem-sha256"))
                 size = _count(response.headers.get("x-exomem-size"), "SIZE_UNAVAILABLE")
                 if _count(response.headers.get("content-length"), "SIZE_UNAVAILABLE") != size:
@@ -114,7 +141,7 @@ async def download_original(config: CloudImportClientConfig, path: str, out_dir:
         if digest.hexdigest() != sha256:
             raise CloudDownloadError("DIGEST_MISMATCH", "the download does not match the original's recorded digest")
         final = out_dir / name
-        os.replace(pending, final)
+        _place(pending, final, overwrite=overwrite)
     finally:
         pending.unlink(missing_ok=True)
         if own_api:
@@ -128,11 +155,12 @@ def main(argv=None, *, api=None) -> int:
         description="Download one preserved original from your Cloud, verified against its recorded size and digest.")
     parser.add_argument("path", help="Vault-relative path of the preserved original.")
     parser.add_argument("--out", type=Path, default=Path("."), help="Folder that receives the file (default: current folder).")
+    parser.add_argument("--overwrite", action="store_true", help="Replace the file if it already exists.")
     add_endpoint_arguments(parser)
     args = parser.parse_args(argv)
     try:
         config = CloudImportClientConfig(args.mcp_url, args.api_base_url, args.oauth_client_id)
-        result = asyncio.run(download_original(config, args.path, args.out, api=api))
+        result = asyncio.run(download_original(config, args.path, args.out, api=api, overwrite=args.overwrite))
     except CloudDownloadError as error:
         print(json.dumps({"ok": False, "error": error.code, "message": error.message}))
         return 1

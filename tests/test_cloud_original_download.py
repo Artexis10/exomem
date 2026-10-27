@@ -122,6 +122,35 @@ def test_a_range_request_returns_the_slice_with_the_whole_files_identity(cell):
     assert past_end.headers["x-exomem-size"] == str(len(data))
 
 
+def test_a_busy_recovery_slot_answers_retryable_busy_not_not_found(cell):
+    from exomem import artifact_recovery
+
+    key, app, vault = cell
+    _, path = _preserved_original(vault)
+    held = [artifact_recovery._SLOTS.acquire(blocking=False) for _ in range(2)]
+    try:
+        response = _run(app, lambda client: _get(client, path, _headers(key, path)))
+    finally:
+        for taken in held:
+            if taken:
+                artifact_recovery._SLOTS.release()
+    assert response.status_code == 503 and response.json()["code"] == "ORIGINAL_BUSY"
+    assert response.headers["retry-after"]
+
+
+def test_repeated_range_headers_answer_416(cell):
+    key, app, vault = cell
+    _, path = _preserved_original(vault)
+    headers = [("range", "bytes=0-1"), ("range", "bytes=5-6")]
+
+    async def scenario(client):
+        request = client.build_request("GET", f"/download?path={quote(path, safe='')}",
+                                       headers=[*_headers(key, path).items(), *headers])
+        return await client.send(request)
+
+    assert _run(app, scenario).status_code == 416
+
+
 def test_a_path_that_is_not_a_readable_original_answers_not_found(cell):
     key, app, vault = cell
     (vault / "plain.md").write_text("# a note, not a preserved original\n")
@@ -153,7 +182,7 @@ def test_the_cloud_tool_returns_a_descriptor_and_a_command_but_no_link(cell):
     assert result["artifact"] == {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
                                   "file_name": "sample.txt", "mime_type": "text/plain",
                                   "mime_type_source": "filename"}
-    assert result["next_step"] == "exomem cloud download " + shlex.quote(path)
+    assert result["next_step"] == "exomem cloud download -- " + shlex.quote(path)
     assert "deliveries" not in result and "http" not in json.dumps(result)
 
 
@@ -221,12 +250,31 @@ def test_the_cli_leaves_no_file_after_a_bad_answer(tmp_path, response, code):
     assert list((tmp_path / "out").iterdir()) == []
 
 
+def test_the_cli_keeps_an_existing_file_unless_told_to_overwrite(tmp_path, capsys, monkeypatch):
+    from exomem.__main__ import main as exomem_main
+
+    real = cloud_download_client.download_original
+    monkeypatch.setattr(cloud_download_client, "download_original",
+                        lambda config, path, out, api=None, overwrite=False: real(config, path, out, api=_client_for(lambda r: _served()), overwrite=overwrite))
+    existing = tmp_path / "sample.txt"
+    existing.write_bytes(b"mine")
+    argv = ["cloud", "download", "--out", str(tmp_path),
+            "--mcp-url", "https://cloud.example/mcp", "--api-base-url", "https://cloud.example"]
+    argv_path = ["--", "Archive/sample.txt"]
+    assert exomem_main([*argv, *argv_path]) == 1
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal["error"] == "FILE_EXISTS" and str(existing) in refusal["message"]
+    assert existing.read_bytes() == b"mine" and [p.name for p in tmp_path.iterdir()] == ["sample.txt"]
+    assert exomem_main([*argv, "--overwrite", *argv_path]) == 0
+    assert existing.read_bytes() == DATA
+
+
 def test_the_cli_main_prints_json_and_is_wired_under_cloud(tmp_path, capsys, monkeypatch):
     from exomem.__main__ import main as exomem_main
 
     real = cloud_download_client.download_original
     monkeypatch.setattr(cloud_download_client, "download_original",
-                        lambda config, path, out, api=None: real(config, path, out, api=_client_for(lambda r: _served())))
+                        lambda config, path, out, api=None, overwrite=False: real(config, path, out, api=_client_for(lambda r: _served()), overwrite=overwrite))
     code = exomem_main(["cloud", "download", "Archive/sample.txt", "--out", str(tmp_path),
                         "--mcp-url", "https://cloud.example/mcp", "--api-base-url", "https://cloud.example"])
     assert code == 0

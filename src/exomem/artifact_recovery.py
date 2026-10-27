@@ -56,6 +56,10 @@ class RecoveryUnavailable(ValueError):
         )
 
 
+class RecoveryBusy(RecoveryUnavailable):
+    """Both private spools are in use. The slot is taken before any path is resolved, so this says nothing about a path."""
+
+
 class _CapabilityRedaction(logging.Filter):
     def filter(self, record):
         if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
@@ -262,8 +266,10 @@ def stage(
     byte_proofs: dict | None = None,
 ):
     """Own private storage for one request, including refusal and cancellation cleanup."""
-    if not who.resolved or not _SLOTS.acquire(blocking=False):
+    if not who.resolved:
         raise RecoveryUnavailable
+    if not _SLOTS.acquire(blocking=False):
+        raise RecoveryBusy
     try:
         from contextlib import ExitStack
 

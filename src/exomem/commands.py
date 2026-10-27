@@ -8675,7 +8675,7 @@ def op_transfer_artifact(
             "handoff_status": "handoff_prepared",
             "committed": False,
             "artifact": found,
-            "next_step": "exomem cloud download " + shlex.quote(found["path"]),
+            "next_step": "exomem cloud download -- " + shlex.quote(found["path"]),
         }
     if hold:
         if operation != "upload" or artifact is not None or expected_sha256 is None:

@@ -37,7 +37,8 @@ The cell never receives the private half.
 The platform chart and cellctl do not yet render this variable. Production
 activation adds that rendering for selected cells, the gateway's upload
 variables and ingress rules for `POST /upload` and `GET /download` to the gateway.
-The `GET /download` rule sets an explicit 900 second timeout, as `POST /upload` does.
+The edge rule for `GET /download` sets no timeout. The gateway bounds each download stream itself:
+an idle bound (default 60 seconds) and a total cap (default 900 seconds).
 
 ## Check a selected cell
 
@@ -45,7 +46,7 @@ The `GET /download` rule sets an explicit 900 second timeout, as `POST /upload` 
 2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256=<digest>)`.
 3. Run `exomem attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
 4. Call `capture_source` with the returned file and the same digest; expect a stored receipt with that hash.
-5. Call `transfer_artifact(operation="download", artifact=<path>)`, run its `next_step` (`exomem cloud download '<path>' --out <dir>`); expect JSON with `path`, `bytes` and `sha256`, and a file whose SHA-256 matches.
+5. Call `transfer_artifact(operation="download", artifact=<path>)`, run its `next_step` (`exomem cloud download -- '<path>'`, which writes to the current folder and refuses to replace an existing file unless given `--overwrite`); expect JSON with `path`, `bytes` and `sha256`, and a file whose SHA-256 matches.
 
 ## Undo
 
