@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -71,7 +72,27 @@ class OnnxWhisperBackend:
             "whisper", artifact.root, quantization=artifact.spec["artifact"]["quantization"], **runtime,
         )
         vad = onnx_asr.load_vad("silero", artifact.root / "vad", **runtime)
+        whisper = getattr(model, "asr", None)
+        # onnx-asr 0.12 detects the language on every call by an argmax over the
+        # whole vocabulary, which often yields a task token instead of a language.
+        # These private hooks pick one language per file instead; uv.lock pins the
+        # exact release and the image's speech gate runs them on a real recording.
+        if not all(hasattr(whisper, hook) for hook in ("_encode", "_decode", "_create_state")):
+            from .extract import ExtractionUnavailable
+
+            raise ExtractionUnavailable("the pinned speech adapter no longer exposes its decoder")
+        generation = json.loads((artifact.root / "generation_config.json").read_text(encoding="utf-8"))
+        self._start_token = int(generation["decoder_start_token_id"])
+        self._languages = {int(token_id): token.strip("<|>") for token, token_id in generation["lang_to_id"].items()}
         self._model, self._vad = model, vad
+
+    def _detect_language(self, waveform: np.ndarray) -> str:
+        """Choose this recording's language from the model's own language tokens."""
+        whisper = self._model.asr
+        encoding = whisper._encode(waveform[None], np.array([len(waveform)], dtype=np.int64))
+        logits, _ = whisper._decode(np.array([[self._start_token]], dtype=np.int64), whisper._create_state(), encoding)
+        candidates = np.fromiter(self._languages, dtype=np.int64)
+        return self._languages[int(candidates[np.argmax(logits[0, -1, candidates])])]
 
     def transcribe(self, path: Path) -> tuple[Iterator[Segment], str]:
         def segments() -> Iterator[Segment]:
@@ -80,6 +101,7 @@ class OnnxWhisperBackend:
                 rate = self.spec["sample_rate"]
                 chunk_samples = int(rate * self.spec["chunk_seconds"])
                 offset = 0
+                language = None
                 for waveform in audio_chunks(path, rate, chunk_samples):
                     length = len(waveform)
                     # Normalize only VAD amplitude so quiet speech is not discarded;
@@ -94,7 +116,9 @@ class OnnxWhisperBackend:
                     # The public Whisper adapter does not expose no-speech probability.
                     # VAD skips non-speech but leaves spoken chunks unchanged.
                     if next(detected, None) is not None:
-                        text = self._model.recognize(waveform, sample_rate=rate)
+                        # Like the local engine, one language serves the whole file.
+                        language = language or self._detect_language(waveform)
+                        text = self._model.recognize(waveform, sample_rate=rate, language=language)
                         if text.strip():
                             yield Segment(offset / rate, (offset + length) / rate, text)
                     offset += length
