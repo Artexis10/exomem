@@ -7620,6 +7620,9 @@ def page_filter_over(
     offered = admission_of(keep)
     # Read as the filter is built: the pin's own filter is built before the set exists, and decides what it holds.
     held = _proven_withheld() if withheld is None else withheld
+    # Read once with the filter, like `held`: a ranking decides every admitted page, and `is_tombstoned`
+    # stats the tombstone files again for each one.
+    tombstones = lifecycle.tombstoned_paths(root)
 
     def decide(rel_path: str, publish: bool = False) -> tuple[bool, bool]:
         rel = str(rel_path or "").strip()
@@ -7628,7 +7631,7 @@ def page_filter_over(
         # A page that left is no page to the check below, which would keep it.
         if rel in held:
             return False, False
-        if not lifecycle.is_tombstoned(root, rel):
+        if not lifecycle.is_tombstoned_in(tombstones, rel):
             try:
                 if not (root / rel).is_file():
                     return True, False
