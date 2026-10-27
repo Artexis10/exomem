@@ -387,11 +387,12 @@ def review(
 
     recovery = vocabulary_delivery.recover(vault_root) if continuation is None else None
     owner = VocabularyState(vault_root)
-    # Explicit review ranks the vault's carriers, whatever the family disposition says. A carrier
-    # item stays listed only while the ranking still offers it at that fingerprint.
+    # Explicit review ranks the vault's carriers, whatever the family disposition says, on every
+    # page, so the continuation pages through the whole offer. A carrier item stays listed only
+    # while the ranking still offers it at that fingerprint.
     ranked = (
         {work.fingerprint for work in topic_carrier_considerations.publish(vault_root)}
-        if continuation is None and state == "open" else None
+        if state == "open" else None
     )
     result = owner.page(
         limit=limit,

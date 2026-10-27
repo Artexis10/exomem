@@ -315,14 +315,6 @@ class ContextCatalogue:
         """Whether one full fold has stored every entry's tags since `entry_tags` was added."""
         return self._meta("entry_tags_filled") == "1"
 
-    def count_entries_under(self, folder: str) -> int:
-        """How many entries sit in `folder` (vault-relative) or below it, folders compared casefolded."""
-        conn = self._connect()
-        if conn is None:
-            return 0
-        prefix = f"{folder.casefold().rstrip('/')}/"
-        return sum(1 for (path,) in conn.execute("SELECT path FROM entries") if str(path).casefold().startswith(prefix))
-
     def freshness_stamp(self) -> str:
         return self._meta("freshness_key") or ""
 
@@ -364,32 +356,22 @@ class ContextCatalogue:
         conn = self._connect()
         return () if conn is None else _load(conn, kind=kind)
 
-    def entries_reached(self, kind: str, match: str, *, fold: bool = False) -> tuple[Entry, ...]:
-        """The entries one carrier reaches: a project key, a folder or a tag form.
-
-        A folder reaches its own entries and those below it. By default the folder is found by an indexed
-        range, spelled as the catalogue spells it, which is how a written page names its own folders.
-        `fold=True` compares folders casefolded, as a carrier does, by a scan of the paths.
-        Declarations come with the rows.
-        """
+    def reached_ids(self, kind: str, match: str) -> list[str]:
+        """The ids of the entries one carrier reaches: a project key, a folder (by `folder_reaches`) or a tag form."""
         conn = self._connect()
         if conn is None:
-            return ()
+            return []
         if kind == topic_carriers.KIND_PROJECT:
-            ids = [row[0] for row in conn.execute("SELECT entry_id FROM entry_projects WHERE project_key = ?", (match,))]
-        elif kind == topic_carriers.KIND_TAG:
-            ids = [row[0] for row in conn.execute("SELECT entry_id FROM entry_tags WHERE tag = ?", (match,))]
-        elif fold:
-            prefix = f"{kb_prefix()}{match.strip('/')}/".casefold()
-            ids = [row[0] for row in conn.execute("SELECT entry_id FROM entries") if row[0].casefold().startswith(prefix)]
-        else:
-            prefix = f"{kb_prefix()}{match.strip('/')}/"
-            ids = [
-                row[0] for row in conn.execute(
-                    "SELECT entry_id FROM entries WHERE path >= ? AND path < ?", (prefix, prefix[:-1] + "0")
-                )
-            ]
-        return _load(conn, ids=ids)
+            return [row[0] for row in conn.execute("SELECT entry_id FROM entry_projects WHERE project_key = ?", (match,))]
+        if kind == topic_carriers.KIND_TAG:
+            return [row[0] for row in conn.execute("SELECT entry_id FROM entry_tags WHERE tag = ?", (match,))]
+        folder = topic_carriers.fold_folder(match)
+        return [entry_id for entry_id, path in conn.execute("SELECT entry_id, path FROM entries") if folder_reaches(folder, path)]
+
+    def entries_reached(self, kind: str, match: str) -> tuple[Entry, ...]:
+        """The entries one carrier reaches, with their declarations."""
+        conn = self._connect()
+        return () if conn is None else _load(conn, ids=self.reached_ids(kind, match))
 
     def membership_edges_of(self, ids: Iterable[str]) -> dict[str, tuple[str, ...]]:
         """`membership_edges` for the named entries only."""
@@ -462,7 +444,6 @@ class ContextCatalogue:
         by_folder = {carrier.folder_parts: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_FOLDER)}
         by_tag = {carrier.match: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_TAG)}
         hits = dict.fromkeys(carrier_topics, 0)
-        kb = kb_prefix()
         project_topics: dict[str, vocabulary_resolution.TopicResolution] = {}
 
         def of_project(key: str) -> vocabulary_resolution.TopicResolution:
@@ -483,7 +464,7 @@ class ContextCatalogue:
                 if key in by_project:
                     reached.append(by_project[key])
             # An entry sits in its own folder and every folder above it, so each folder carrier on that path files it.
-            folder = tuple(part.casefold() for part in entry.path.removeprefix(kb).split("/")[:-1]) if entry.path.startswith(kb) else ()
+            folder = folder_of(entry.path)
             reached.extend(by_folder[folder[:depth]] for depth in range(1, len(folder) + 1) if folder[:depth] in by_folder)
             reached.extend(by_tag[tag] for tag in entry.tags if tag in by_tag)
             for carrier in reached:
@@ -574,15 +555,15 @@ class ContextCatalogue:
         declared = [carrier for carrier in topic_carriers.load(self.vault_root).carriers if carrier.active]
         unknown = [carrier for carrier in declared if carrier.kind == topic_carriers.KIND_TAG and not filled]
         known = [carrier for carrier in declared if carrier not in unknown]
+        hit = [carrier for carrier in known if joined.carrier_hits.get(carrier.key, 0)]
+        # A carrier files entries only when it matches some and at least one of its topics resolves.
+        filing = [carrier for carrier in hit if len(carrier.topics) > len(joined.unresolved_carriers.get(carrier.key, ()))]
+        # The four buckets partition `declared`.
         return {
             "declared": len(declared),
-            # A carrier files entries only when it matches some and at least one of its topics resolves.
-            "filing": sum(
-                1 for carrier in known
-                if joined.carrier_hits.get(carrier.key, 0)
-                and len(carrier.topics) > len(joined.unresolved_carriers.get(carrier.key, ()))
-            ),
-            "dangling": sum(1 for carrier in known if not joined.carrier_hits.get(carrier.key, 0)),
+            "filing": len(filing),
+            "no_resolved_topic": len(hit) - len(filing),
+            "dangling": len(known) - len(hit),
             "unknown": len(unknown),
         }
 
@@ -1153,14 +1134,32 @@ def page_projects(frontmatter: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(find_corpus.all_projects(dict(frontmatter)))
 
 
+def _folder_segments(path: str) -> list[str]:
+    """The folders an entry sits in below the knowledge base, top down, spelled as its path spells them.
+
+    The one rule for folder reach: a folder carrier reaches exactly the entries whose segments start with its own.
+    """
+    kb = kb_prefix()
+    return path.removeprefix(kb).split("/")[:-1] if path.startswith(kb) else []
+
+
+def folder_of(path: str) -> tuple[str, ...]:
+    """An entry's folder segments casefolded, as a folder carrier compares them."""
+    return tuple(part.casefold() for part in _folder_segments(path))
+
+
+def folder_reaches(folder: tuple[str, ...], path: str) -> bool:
+    """Whether a folder carrier with these casefolded segments reaches the entry at `path`."""
+    return bool(folder) and folder_of(path)[: len(folder)] == folder
+
+
 def carrier_keys(path: str, *, projects: Iterable[str], tags: Iterable[str]) -> list[tuple[str, str]]:
     """Every carrier a page reaches as `(kind, match)`: each project key, each folder from the top down, each tag.
 
     The folders are spelled as the path spells them. Whether a carrier may carry a topic is the registry's rule, not this.
     """
     found = [(topic_carriers.KIND_PROJECT, key) for key in projects]
-    kb = kb_prefix()
-    segments = path.removeprefix(kb).split("/")[:-1] if path.startswith(kb) else []
+    segments = _folder_segments(path)
     found.extend((topic_carriers.KIND_FOLDER, "/".join(segments[:depth])) for depth in range(1, len(segments) + 1))
     found.extend((topic_carriers.KIND_TAG, tag) for tag in tags)
     return found
@@ -1387,7 +1386,10 @@ def ensure_unlisted(
                     return UNAVAILABLE, None, False
         return READY, catalogue, index_stale
     if not _managed():
-        if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and not catalogue.pending():
+        if (
+            freshness_stamp and catalogue.freshness_stamp() == freshness_stamp
+            and not catalogue.pending() and catalogue.tags_filled()
+        ):
             return READY, catalogue, index_stale
         with _inline_lock(root.absolute()):
             result = catalogue.update(freshness_stamp=freshness_stamp or None, fill_tags=True)

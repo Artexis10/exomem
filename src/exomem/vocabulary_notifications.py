@@ -136,6 +136,20 @@ def reconcile_legacy(vault_root: Path) -> dict[str, int]:
     return {"imported": imported, "dropped": dropped}
 
 
+def may_offer(vault_root: Path, family: str, signal: str) -> bool:
+    """Whether `take_advisory` could reserve a notice of this family now, asked before a producer computes one.
+
+    A read: a resolved caller, no retained legacy notice and every composed disposition normal.
+    """
+    if not effective_principal().resolved:
+        return False
+    payload = review_state.ReviewStateStore(vault_root).load()
+    return not payload["vocabulary"]["notifications"] and all(
+        review_state.disposition_for(name, payload=payload) == "normal"
+        for name in review_families(family, signal)
+    )
+
+
 def take_advisory(vault_root: Path, items: Sequence[WorkItem]) -> dict[str, Any] | None:
     """Observe one bounded provider page and durably reserve at most one notice.
 

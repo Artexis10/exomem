@@ -5,16 +5,19 @@ reads a consideration and saves a carrier through `schema_memory`, a plain regis
 producer is owner-only because its evidence aggregates the whole vault and only the owner saves.
 
 Two entry points keep the write path cheap. `after_write` reads the written page's own
-carriers and counts only those with indexed catalogue queries. `rank` walks every entry, so it
-serves explicit review and `inspect` only.
+carriers and serves their counts from a briefly cached recount. `rank` walks every entry, so it
+serves explicit review only.
 """
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from . import (
@@ -26,6 +29,7 @@ from . import (
     source_taxonomy,
     topic_carriers,
     vault,
+    vocabulary_notifications,
     vocabulary_resolution,
 )
 from .governance import egress
@@ -33,7 +37,7 @@ from .governance.policy import DISCLOSURE_MAX
 from .governance.principal import effective_principal
 from .governance.raw_protection import is_owner
 from .vocabulary import registry
-from .vocabulary_workflow import WorkItem, family_descriptor, make_item
+from .vocabulary_workflow import WorkItem, make_item
 
 FAMILY = "topic-carrier/v1"
 SIGNAL = "topic-carrier"
@@ -45,9 +49,16 @@ MIN_ENTRIES = 3
 SAMPLE_ENTRIES = 8
 TOP_TAGS = 10
 SOURCE_SAMPLE = 16
-RANK_LIMIT = 8
+#: Most carriers one explicit review publishes; review pages through them with its continuation.
+OFFER_LIMIT = 64
 MAX_DOMAINS = 40
 TEXT_CHARS = 160
+#: Seconds one carrier's count serves the write path. Recounting a 2,500-entry folder on every
+#: write cost about 260 ms, and an offer moves only by a power-of-two bucket, so writes read a
+#: briefly cached count. A registry edit, such as a declaration, invalidates it at once.
+COUNT_TTL_SECONDS = 120.0
+_COUNTS: dict[tuple[str, str], tuple[float, str, Candidate | None, frozenset[str]]] = {}
+_COUNTS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +129,7 @@ class _Eligible:
             return match in self.keys
         if kind == topic_carriers.KIND_TAG:
             return self.tags_filled
-        folded = tuple(part.casefold() for part in PurePosixPath(match).parts)
+        folded = topic_carriers.fold_folder(match)
         if folded not in self._folders:
             self._folders[folded] = topic_carriers.protection(self.protected, folded) is None
         return self._folders[folded]
@@ -142,53 +153,110 @@ def _unfiled(
     return {entry.entry_id for entry in entries if not joined.topics.get(entry.entry_id)}, joined, edges
 
 
+def _count(
+    catalogue: context_catalogue.ContextCatalogue, kind: str, match: str
+) -> tuple[Candidate | None, frozenset[str]]:
+    """A carrier as it stands now and the ids of its unfiled entries, or None when it is not offered."""
+    rows = catalogue.entries_reached(kind, match)
+    if len(rows) < MIN_ENTRIES:
+        return None, frozenset()
+    unfiled, _joined, _edges = _unfiled(catalogue, rows)
+    open_ids = frozenset(entry.entry_id for entry in rows if entry.entry_id in unfiled)
+    return (Candidate(kind, match, len(rows), len(open_ids)) if open_ids else None), open_ids
+
+
+def _count_basis(vault_root: Path) -> str:
+    """The registries a count depends on; a change to any of them recounts."""
+    from . import homes
+
+    return json.dumps([registry_hashes(vault_root), homes.load(vault_root).content_hash])
+
+
+def _cached_count(
+    vault_root: Path, catalogue: context_catalogue.ContextCatalogue, kind: str, match: str, basis: str
+) -> tuple[Candidate | None, frozenset[str]]:
+    key = (str(Path(vault_root).resolve()), ":".join(topic_carriers.identity_of(kind, match)))
+    now = time.monotonic()
+    with _COUNTS_LOCK:
+        cached = _COUNTS.get(key)
+    if cached is not None and now - cached[0] < COUNT_TTL_SECONDS and cached[1] == basis:
+        return cached[2], cached[3]
+    found, open_ids = _count(catalogue, kind, match)
+    with _COUNTS_LOCK:
+        _COUNTS[key] = (now, basis, found, open_ids)
+    return found, open_ids
+
+
+def clear_cache() -> None:
+    with _COUNTS_LOCK:
+        _COUNTS.clear()
+
+
+def _without_covered_folders(
+    candidates: list[Candidate], open_ids: dict[str, frozenset[str]]
+) -> list[Candidate]:
+    """Drop a folder whose unfiled entries are exactly those of one offered folder below it: the child names them better."""
+    folders = [candidate for candidate in candidates if candidate.kind == topic_carriers.KIND_FOLDER]
+    parts = {candidate.identity: topic_carriers.fold_folder(candidate.match) for candidate in folders}
+
+    def covered(parent: Candidate) -> bool:
+        mine = parts[parent.identity]
+        return any(
+            len(parts[child.identity]) > len(mine)
+            and parts[child.identity][: len(mine)] == mine
+            and open_ids[child.identity] == open_ids[parent.identity]
+            for child in folders
+        )
+
+    return [candidate for candidate in candidates if candidate.kind != topic_carriers.KIND_FOLDER or not covered(candidate)]
+
+
 def after_write(vault_root: Path, path: str) -> WorkItem | None:
     """The most useful consideration among the written page's own carriers, or None.
 
-    Reads the page and counts its few carriers with indexed lookups. Never ranks the vault.
+    Asks first whether a notice could be taken at all, skips carriers already declared, and reads
+    each remaining carrier's count from a briefly cached recount. Never ranks the vault.
     """
-    if not permitted(vault_root):
+    root = Path(vault_root)
+    if not permitted(root) or not vocabulary_notifications.may_offer(root, FAMILY, SIGNAL):
         return None
-    catalogue = _catalogue(vault_root)
+    catalogue = _catalogue(root)
     if catalogue is None:
         return None
     try:
-        absolute, rel = vault.resolve_under_vault(vault_root, path)
+        absolute, rel = vault.resolve_under_vault(root, path)
         from . import find_corpus
 
-        page = find_corpus.CACHE.get(absolute, Path(vault_root))
+        page = find_corpus.CACHE.get(absolute, root)
         if page is None or not isinstance(page.frontmatter, dict):
             return None
-        eligible = _Eligible.load(Path(vault_root), catalogue)
-        found = [
-            (kind, match)
+        eligible = _Eligible.load(root, catalogue)
+        declared = {
+            topic_carriers.identity_of(carrier.kind, carrier.match)
+            for carrier in topic_carriers.load(root).carriers
+            if carrier.active and carrier.topics
+        }
+        basis = _count_basis(root)
+        counted = [
+            _cached_count(root, catalogue, kind, match, basis)
             for kind, match in context_catalogue.carrier_keys(
                 rel,
                 projects=tuple(sorted(context_catalogue.page_projects(page.frontmatter))),
                 tags=context_catalogue.page_tags(page.frontmatter),
             )
-            if eligible.carries(kind, match)
+            if eligible.carries(kind, match) and topic_carriers.identity_of(kind, match) not in declared
         ]
-        reached = {(kind, match): catalogue.entries_reached(kind, match) for kind, match in found}
-        reached = {key: rows for key, rows in reached.items() if len(rows) >= MIN_ENTRIES}
-        if not reached:
-            return None
-        union = {entry.entry_id: entry for rows in reached.values() for entry in rows}
-        unfiled, _joined, _edges = _unfiled(catalogue, tuple(union[key] for key in sorted(union)))
-        candidates = [
-            Candidate(kind, match, len(rows), sum(1 for entry in rows if entry.entry_id in unfiled))
-            for (kind, match), rows in reached.items()
-        ]
-        candidates = [candidate for candidate in candidates if candidate.unfiled]
+        open_ids = {found.identity: ids for found, ids in counted if found is not None}
+        candidates = _without_covered_folders([found for found, _ids in counted if found is not None], open_ids)
         if not candidates:
             return None
-        return item(Path(vault_root), min(candidates, key=lambda candidate: candidate.rank_key))
+        return item(root, min(candidates, key=lambda candidate: candidate.rank_key))
     finally:
         catalogue.close()
 
 
-def rank(vault_root: Path, *, limit: int = RANK_LIMIT) -> list[Candidate]:
-    """The carriers that would file the most unfiled entries, across the vault. Explicit review only."""
+def rank(vault_root: Path) -> list[Candidate]:
+    """The carriers that would file the most unfiled entries, across the vault, best first. Explicit review only."""
     if not permitted(vault_root):
         return []
     catalogue = _catalogue(vault_root)
@@ -199,23 +267,27 @@ def rank(vault_root: Path, *, limit: int = RANK_LIMIT) -> list[Candidate]:
         joined = catalogue.memberships(entries)
         eligible = _Eligible.load(Path(vault_root), catalogue)
         totals: Counter[tuple[str, str]] = Counter()
-        unfiled: Counter[tuple[str, str]] = Counter()
+        open_ids: dict[tuple[str, str], set[str]] = {}
         spelling: dict[tuple[str, str], str] = {}
         for entry in entries:
             open_entry = not joined.topics.get(entry.entry_id)
             for kind, match in _entry_carriers(entry):
                 if not eligible.carries(kind, match):
                     continue
-                key = (kind, match if kind == topic_carriers.KIND_PROJECT else match.casefold())
+                key = topic_carriers.identity_of(kind, match)
                 spelling[key] = min(spelling.get(key, match), match)
                 totals[key] += 1
-                unfiled[key] += open_entry
+                if open_entry:
+                    open_ids.setdefault(key, set()).add(entry.entry_id)
         candidates = [
-            Candidate(key[0], spelling[key], totals[key], unfiled[key])
+            Candidate(key[0], spelling[key], totals[key], len(open_ids[key]))
             for key in totals
-            if totals[key] >= MIN_ENTRIES and unfiled[key]
+            if totals[key] >= MIN_ENTRIES and key in open_ids
         ]
-        return sorted(candidates, key=lambda candidate: candidate.rank_key)[:limit]
+        offered = _without_covered_folders(
+            candidates, {":".join(key): frozenset(ids) for key, ids in open_ids.items()}
+        )
+        return sorted(offered, key=lambda candidate: candidate.rank_key)
     finally:
         catalogue.close()
 
@@ -232,21 +304,10 @@ def current(vault_root: Path, identity: str) -> tuple[Candidate, ...]:
         eligible = _Eligible.load(Path(vault_root), catalogue)
         if not eligible.carries(kind, match):
             return ()
-        rows = _reach(catalogue, kind, match)
-        if len(rows) < MIN_ENTRIES:
-            return ()
-        unfiled, _joined, _edges = _unfiled(catalogue, rows)
-        count = sum(1 for entry in rows if entry.entry_id in unfiled)
-        return (Candidate(kind, match, len(rows), count),) if count else ()
+        found, _open = _count(catalogue, kind, match)
+        return () if found is None else (found,)
     finally:
         catalogue.close()
-
-
-def _reach(
-    catalogue: context_catalogue.ContextCatalogue, kind: str, match: str
-) -> tuple[context_catalogue.Entry, ...]:
-    """The entries of a carrier named by its identity, whose folder and tag are casefolded."""
-    return catalogue.entries_reached(kind, match, fold=True)
 
 
 def registry_hashes(vault_root: Path) -> dict[str, str]:
@@ -316,10 +377,27 @@ def _registry_collisions(vault_root: Path, tag: str) -> list[str]:
     return held
 
 
-def _source_targets(raw: str) -> list[str]:
-    """The pages a `sources` value names: its wikilink targets, else the value read as a path."""
-    links = [match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip() for match in vault.find_body_wikilinks(raw)]
-    return [target for target in links if target] or [raw.strip()]
+def _source_pages(vault_root: Path, sample: tuple[context_catalogue.Entry, ...]) -> list[str]:
+    """The vault-relative pages the sampled entries cite, resolved as wikilinks resolve, at most `SOURCE_SAMPLE`."""
+    from . import find_results
+
+    resolver: list[vault.WikilinkResolver] = []
+
+    def factory() -> vault.WikilinkResolver:
+        if not resolver:
+            resolver.append(vault.WikilinkResolver(vault_root))
+        return resolver[0]
+
+    pages: list[str] = []
+    for entry in sample:
+        for raw in entry.sources:
+            # A `sources` value is a wikilink, or a bare target read the same way.
+            for target in find_results.wikilink_targets(raw) or (raw,):
+                canonical, warning = vault.normalize_wikilink(target, vault_root, resolver_factory=factory)
+                name = f"{canonical.split('#', 1)[0]}.md"
+                if warning is None and canonical and name not in pages and len(pages) < SOURCE_SAMPLE:
+                    pages.append(name)
+    return pages
 
 
 def _source_domains(vault_root: Path, sample: tuple[context_catalogue.Entry, ...], taxonomy: Any) -> dict[str, int]:
@@ -327,26 +405,19 @@ def _source_domains(vault_root: Path, sample: tuple[context_catalogue.Entry, ...
     from . import find_corpus
 
     counts: Counter[str] = Counter()
-    seen: set[str] = set()
-    for entry in sample:
-        for raw in entry.sources:
-            for target in _source_targets(raw):
-                name = target if target.endswith(".md") else f"{target}.md"
-                if name in seen or len(seen) >= SOURCE_SAMPLE:
-                    continue
-                seen.add(name)
-                try:
-                    absolute, rel = vault.resolve_under_vault(vault_root, name)
-                except (vault.VaultPathError, OSError, ValueError):
-                    continue
-                if egress.release_level_for(vault_root, rel) != DISCLOSURE_MAX:
-                    continue
-                page = find_corpus.CACHE.get(absolute, Path(vault_root))
-                declared = page.frontmatter.get("domain") if page is not None and isinstance(page.frontmatter, dict) else None
-                for value in declared if isinstance(declared, list) else [declared]:
-                    if isinstance(value, str) and value.strip():
-                        resolved = vocabulary_resolution.resolve_topics(taxonomy, (value,)).resolved
-                        counts[resolved[0] if resolved else value.strip()] += 1
+    for name in _source_pages(vault_root, sample):
+        try:
+            absolute, rel = vault.resolve_under_vault(vault_root, name)
+        except (vault.VaultPathError, OSError, ValueError):
+            continue
+        if egress.release_level_for(vault_root, rel) != DISCLOSURE_MAX:
+            continue
+        page = find_corpus.CACHE.get(absolute, Path(vault_root))
+        declared = page.frontmatter.get("domain") if page is not None and isinstance(page.frontmatter, dict) else None
+        for value in declared if isinstance(declared, list) else [declared]:
+            if isinstance(value, str) and value.strip():
+                resolved = vocabulary_resolution.resolve_topics(taxonomy, (value,)).resolved
+                counts[resolved[0] if resolved else value.strip()] += 1
     return dict(sorted(counts.items()))
 
 
@@ -361,7 +432,7 @@ def evidence(vault_root: Path, identity: str) -> dict[str, Any]:
     if catalogue is None:
         raise ValueError("VOCABULARY_EVIDENCE_UNAVAILABLE: the context catalogue is still building")
     try:
-        rows = _reach(catalogue, candidate.kind, candidate.match)
+        rows = catalogue.entries_reached(candidate.kind, candidate.match)
         unfiled, joined, edges = _unfiled(catalogue, rows)
         open_rows = tuple(entry for entry in rows if entry.entry_id in unfiled)
         sample = open_rows[:SAMPLE_ENTRIES]
@@ -370,7 +441,7 @@ def evidence(vault_root: Path, identity: str) -> dict[str, Any]:
         declared = next(
             (
                 carrier for carrier in topic_carriers.load(root).carriers
-                if carrier.active and topic_carriers.identity_of(carrier.kind, carrier.match) == topic_carriers.identity_of(candidate.kind, candidate.match)
+                if carrier.active and ":".join(topic_carriers.identity_of(carrier.kind, carrier.match)) == candidate.identity
             ),
             None,
         )
@@ -422,7 +493,7 @@ def evidence(vault_root: Path, identity: str) -> dict[str, Any]:
         catalogue.close()
 
 
-def publish(vault_root: Path, *, limit: int = RANK_LIMIT) -> list[WorkItem]:
+def publish(vault_root: Path, *, limit: int = OFFER_LIMIT) -> list[WorkItem]:
     """Rank the vault's carriers and record each item for review, leaving out those a person deferred.
 
     Empty for a caller that may not see them. An item reads as deferred only at its exact fingerprint,
@@ -432,22 +503,10 @@ def publish(vault_root: Path, *, limit: int = RANK_LIMIT) -> list[WorkItem]:
 
     store = VocabularyState(Path(vault_root))
     offered = []
-    for candidate in rank(vault_root, limit=limit):
+    for candidate in rank(vault_root):
+        if len(offered) >= limit:
+            break
         work = item(Path(vault_root), candidate)
         if store.observe(work)["state"] != "deferred":
             offered.append(work)
     return offered
-
-
-def summary(items: Iterable[WorkItem]) -> list[dict[str, Any]]:
-    """Each item as `inspect` lists it: a route to its evidence, not the evidence."""
-    return [
-        {
-            "ref": work.ref,
-            "fingerprint": work.fingerprint,
-            "carrier": work.logical_identity,
-            "context_route": {"tool": "review_item_context", "ref": work.ref},
-            "decisions": sorted(family_descriptor(work.family).allowed_decisions),
-        }
-        for work in items
-    ]
