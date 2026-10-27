@@ -164,35 +164,57 @@ A Cloud cell MAY add one caption per image, written by a pinned-weight, frozen c
 
 ### Requirement: The Cloud speech model is selected by the shared rule with speech terms
 
-The Cloud speech engine and model SHALL be selected under the selection rule of the `shared-model-runtime` capability, with these terms fixed before any measurement:
+The initial Cloud speech default SHALL use the pinned Whisper large-v3-turbo int8 ONNX artifact in the media model registry. It SHALL detect languages automatically and publish transcripts through the existing ingest worker without an agent or a per-file request. Its declared coverage SHALL include the publisher's 100 language tokens. Japanese, English and Estonian SHALL verify quality, not limit supported languages.
 
-1. Each language in the deployment's required speech language set SHALL be scored with its own metric: word error rate for a language written with spaces between words, and character error rate for a language written without them.
-2. Candidates SHALL be compared on the same published benchmark wherever one covers them all.
-3. When a published result is missing for any candidate in a required language, every candidate SHALL be measured for that language on the full FLEURS test split. That language SHALL be judged on those measurements only, and a measurement SHALL never be compared with a published result. Each difference from the best candidate SHALL be reported with its 95% bootstrap confidence interval.
-4. The CPU speed measure SHALL be the int8 real-time factor at pinned CPU threads on the cell's hardware. The sanity check SHALL be ten utterances per required language.
-5. The rule SHALL pick the lowest-memory candidate whose error rate is within 2.0 points of the best candidate in every required language. On a measured language, a candidate SHALL pass only when the upper end of its interval is within 2.0 points. Shareable weights SHALL count once per node.
-6. Routing by language SHALL be allowed only when no single candidate passes, and only when the routed candidates together stay under 1.5 GB.
+The initial selection record SHALL separate diagnostic quality, conversion agreement, declared coverage, failures and unfinished comparisons. Initial delivery SHALL NOT wait for the full FLEURS comparison or the wider quality survey. Those measurements SHALL remain explicit upgrade work. Eligibility screening SHALL check redistribution terms and automatic offline operation. An eligibility exclusion SHALL NOT be reported as a measured quality failure.
 
-#### Scenario: The lightest candidate within the bound wins
+A later model or language-routing switch SHALL follow the shared model rule and a frozen comparison protocol:
 
-- **WHEN** two candidates are within 2.0 points of the best error rate in every required language
-- **THEN** the candidate with the lower measured memory is chosen
+1. Use WER for verification languages with word boundaries and CER for Japanese.
+2. Compare every arm on the same source cases and normalization.
+3. Report per-case differences and 95% confidence intervals clustered by source sentence.
+4. Confirm the switch once on untouched source units reserved before generation.
+5. Keep each verification language's upper loss bound within 2.0 percentage points of the best candidate.
+6. Prefer broader coverage among candidates that meet quality and cell resource bounds, then lower private memory.
+7. Show that any routing layer improves results through an ablation against its component engines.
 
-#### Scenario: A missing published result means every candidate is measured
+Language sets, mappings and thresholds SHALL remain deployment data. Wider quality measurements SHALL distinguish attempted languages, completed cases, failures and measured quality across at least 100 languages. Declared coverage SHALL NOT imply equal quality in every language.
 
-- **WHEN** one candidate has no published result for a required language
-- **THEN** every candidate is measured for that language on the full FLEURS test split
-- **AND** no candidate's published result for that language enters the comparison
+#### Scenario: Ingest produces a transcript automatically
 
-#### Scenario: Routing is a fallback, not a preference
+- **WHEN** speech is enabled and a supported audio or video file is ingested
+- **THEN** the existing worker creates its transcript without an agent or another request
+- **AND** the worker uses the pinned offline default and automatic language detection
 
-- **WHEN** one candidate passes the error bound in every required language
-- **THEN** speech is not routed by language
+#### Scenario: A later switch keeps the quality bound
 
-#### Scenario: A broken conversion is caught
+- **WHEN** a candidate replaces the default model or adds language routing
+- **THEN** its frozen comparison and fresh confirmation meet the 2.0-point bound
+- **AND** any routing layer has a useful ablation
 
-- **WHEN** a candidate's int8 or ONNX conversion fails the ten-utterance sanity check in any required language
-- **THEN** that candidate is not selected
+#### Scenario: Silent input does not fabricate a transcript
+
+- **WHEN** the activity detector finds no speech in a decoded chunk
+- **THEN** that chunk adds no transcript text
+- **AND** the completed artifact uses the existing silent-media outcome
+
+#### Scenario: A repeating window is decoded again
+
+- **WHEN** a window's decode exceeds the registry's compression-ratio threshold or falls below its log-probability threshold
+- **THEN** the engine decodes that window again at the next registry temperature
+- **AND** the transcript keeps the first attempt that meets both thresholds, or else the most probable plausible attempt
+
+#### Scenario: A long recording continues after a stop
+
+- **WHEN** a speech job stops after some windows complete, and the same engine processes the same file again
+- **THEN** transcription continues from the first unfinished window, in the language detected before the stop
+- **AND** the completed transcript equals the transcript of a run without the stop
+- **AND** a run by another engine label starts from the first window
+
+#### Scenario: A removed recording leaves no partial transcript
+
+- **WHEN** a recording with a partial transcript is removed from the vault
+- **THEN** the deletion fan-out discards its progress record
 
 ### Requirement: Each Cloud engine is off by default and turns on after acceptance in a canary cell
 
