@@ -3592,7 +3592,8 @@ class _Sample:
             key = collections.derived_item_key(self.manifest, values)
         except collections.CollectionError:
             return  # a row whose natural-key value has the wrong type is already a type conflict
-        if key is not None:
+        # Only a derived collection stores its key as bytes; a store collection keeps the text spelling.
+        if key is not None and self.manifest.derived:
             self.key_bytes.append(collections.item_key_stored_bytes(self.manifest, key))
 
     def findings(self) -> list[dict[str, Any]]:

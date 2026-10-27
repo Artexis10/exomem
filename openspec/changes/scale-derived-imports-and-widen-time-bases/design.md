@@ -61,6 +61,10 @@ natural-key field cannot read, filter or sort by `item_key` on an `ordered-v1` c
 the key is withheld like the field. Such a principal still receives rows in natural-key
 order among ties and by default, because the key stays the index tiebreak. That reveals
 relative order, never a value. A location field never enters an ordered key at all.
+The cost falls on such a principal: on an `ordered-v1` collection it loses row identity (no
+select, filter or sort by key) that `hashed-v1` gives it. An owner, and a principal that sees
+every natural-key field, keeps it. A cursor pads an ordered boundary key to its 512-character
+limit, so the cursor's length reveals nothing about the key.
 
 Rejected alternatives:
 

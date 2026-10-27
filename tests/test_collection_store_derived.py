@@ -656,6 +656,35 @@ def test_a_recipient_who_cannot_see_a_natural_key_field_cannot_read_it_back_thro
     assert [row["item_key"] for row in ask(owner_principal(), **reached["sort"], select=["item_key"])["rows"]] == owner_keys
 
 
+
+def test_a_recipient_pages_past_long_ordered_keys_with_cursors_of_one_length(derived):
+    """Defect: an ordered key over the cursor's old 128-character boundary refuses the next page, and a
+    cursor's length tells a recipient how long the hidden natural key is."""
+    from test_collection_field_admission import GUEST
+
+    from exomem.query_engine import route
+
+    devices = ["u", "unit-" + "y" * 20, "unit-" + "z" * 60, "unit-" + "w" * 100]
+    members = {}
+    for n, device in enumerate(devices):
+        day = f"2026-11-0{n + 1}"
+        members[f"samples/{day}.json"] = {**samples((day, at(day, ("08:00", 1), ("09:00", 2)))), "device": device}
+    writer, job = derived("long-keys", members, text=TEXT.replace("natural_key: [series, at]", "natural_key: [device, at]"))
+    assert finish(writer, job)["state"] == "complete"
+    rows, cursor, lengths = [], None, set()
+    while True:
+        with request_scope(GUEST):
+            page = route.run(writer, DERIVED, {"version": 1, "select": ["series"],
+                                               "page": {"limit": 1, **({"after": cursor} if cursor else {})}},
+                             facade_profile="records")
+        rows += page["rows"]
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+        lengths.add(len(cursor))
+    assert len(rows) == 8
+    assert len(lengths) == 1
+
 def test_the_derived_connection_caps_its_wal_at_the_journal_size_limit(derived):
     """Defect: the derived file's connection loses the limit, so a large import leaves its whole WAL on disk,
     hundreds of megabytes beside the rows."""
