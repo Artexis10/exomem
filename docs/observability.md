@@ -482,8 +482,13 @@ write's. Two knobs, neither changed by default:
 `lease_acquired` logs at DEBUG, because a governed write batch grants the writer
 lease thousands of times an hour. `lease_reclaimed`, `lease_renew_rejected`,
 `lease_idle_released` and `lease_released` stay at INFO. A mutation-lock hold
-from a command or lifecycle boundary keeps its INFO audit pair; the reserved
-and background holds are already DEBUG and counted by `mutation_lock_hold_summary`.
+from a command or lifecycle boundary keeps its INFO audit pair. A reserved-state
+or machine-frequency hold (`background`, `graph`, `derived-worker`) logs at DEBUG
+when its acquire waited less than one poll interval (25 ms by default) and its
+hold took less than 250 ms; `mutation_lock_hold_summary` counts these. A hold
+that waited, took 250 ms or more, ran overdue or was refused logs at INFO or
+higher. A boundary with no declared holder kind, such as `unknown`, also keeps
+its INFO pair.
 
 Two log lines close loops the spans cannot: `lexical deferred upsert retry
 completed paths=… outcome=…` says what became of a lexical upsert the

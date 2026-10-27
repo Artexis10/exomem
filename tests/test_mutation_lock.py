@@ -1838,28 +1838,33 @@ def test_attributable_command_holds_stay_at_info(
 
 
 def test_a_slow_reserved_state_hold_stays_visible_at_info(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A reserved-state hold that is NOT sub-millisecond is still interesting.
+    """A reserved-state hold of 250ms or more is still interesting.
 
     The demotion is measurement-driven, not a blanket per-kind mute: the same
-    holder class that floods when it is trivial must report itself when it
+    holder class that floods when it is routine must report itself when it
     starts costing real time, because that is the shape of a boundary problem.
     """
+    clock = [100.0]
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _reserved_state_hold(coordinator):
-            time.sleep(0.05)
+            clock[0] += 0.3
 
     [released] = _events(caplog, "mutation_lock_released")
     assert released.levelno == logging.INFO, (
         "a slow reserved-state hold was demoted to DEBUG — the quieting swallowed "
         "the very signal a boundary diagnosis reads"
     )
-    assert released.fields["hold_ms"] >= mutation_lock_module._QUIET_HOLD_MS
     # The INFO release row must be self-sufficient: it carries the wait as well
     # as the hold, because its paired acquire row may legitimately be DEBUG.
     assert isinstance(released.fields["wait_ms"], float)
@@ -2104,7 +2109,7 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     # over it on a loaded runner (measured 5.13ms and 10.59ms), which made the
     # discriminator a wall clock.  Lifting the band out of reach removes the
     # clock: the escalation is then the only arm that can raise this row.
-    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
+    monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 60_000.0)
     coordinator = VaultMutationCoordinator(
         tmp_path / "state", vault, long_holder_seconds=0.001
     )
@@ -2126,7 +2131,7 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     # The hold has to stay inside the band for the escalation to be the thing
     # under test.  The row carries its own measurement, so this still fails
     # loudly if the lifted band is ever removed or undercut.
-    assert released.fields["hold_ms"] < mutation_lock_module._QUIET_HOLD_MS, (
+    assert released.fields["hold_ms"] < mutation_lock_module._BACKGROUND_QUIET_HOLD_MS, (
         "the hold outran the quiet band; the release row reached INFO through "
         "the slow-hold arm, not through the overdue escalation"
     )
@@ -2192,18 +2197,15 @@ def test_boundary_metrics_fire_on_every_hold_including_the_quiet_ones(
 # whole suite still green.  These four assert the real values.
 
 
-def test_the_shipped_hold_threshold_is_small_enough_to_matter(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_a_reserved_state_hold_is_demoted_below_250ms_and_loud_from_250ms(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A hold just above the shipped constant is INFO; a routine one is DEBUG.
-
-    Deliberately tight.  A generous margin here is what let a 100x-too-large
-    threshold survive: 50ms against a 5ms bar passes just as happily against a
-    10-second bar.  10ms against 5ms does not.
-    """
-    assert mutation_lock_module._QUIET_HOLD_MS <= 10.0, (
-        "the hold threshold has drifted upward; measured uncontended holds are "
-        "sub-millisecond, so anything above ~10ms starts hiding real signal"
+    """An uncontended 20ms store-identity hold is DEBUG; 250ms is INFO."""
+    clock = [100.0]
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
     )
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -2211,13 +2213,13 @@ def test_the_shipped_hold_threshold_is_small_enough_to_matter(
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _reserved_state_hold(coordinator):
-            time.sleep(mutation_lock_module._QUIET_HOLD_MS / 1000.0 * 2.0)
+            clock[0] += 0.02
+        with _reserved_state_hold(coordinator):
+            clock[0] += 0.25
 
-    [released] = _events(caplog, "mutation_lock_released")
-    assert released.levelno == logging.INFO, (
-        f"a hold of {released.fields['hold_ms']}ms was demoted while the "
-        f"threshold is {mutation_lock_module._QUIET_HOLD_MS}ms"
-    )
+    routine, slow = _events(caplog, "mutation_lock_released")
+    assert routine.levelno == logging.DEBUG
+    assert slow.levelno == logging.INFO
 
 
 def test_a_genuinely_routine_hold_is_still_demoted(
@@ -2434,7 +2436,6 @@ def test_routine_background_holds_fold_into_one_info_summary(
     # past 5ms or an acquire past one poll, which is correctly loud in production,
     # so widen both thresholds here to keep every hold routine.
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault, poll_interval_seconds=60.0)
-    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
     monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 60_000.0)
     monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
     mutation_lock_module._reset_hold_summary()

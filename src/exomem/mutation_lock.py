@@ -62,13 +62,12 @@ _STATUS_TIMEOUT_SECONDS = 0.25
 # Deriving it keeps the two in step if the interval is ever tuned, and it puts
 # the visible band at 25ms by default instead of a number picked by hand.
 #
-# The hold side has no such derivation, so it is a constant -- but a small one.
-# Measured over 5,000 uncontended reserved-state holds on a loaded box, one
-# exceeded 1ms and none exceeded 5ms, so 5ms costs nothing in volume while
-# leaving a 5ms hold (roughly 10x the uncontended median) visible.  An earlier
-# 100ms pair demoted the entire band below it, which hid a 55ms contended
-# acquire -- exactly the signal these thresholds exist to preserve.
-_QUIET_HOLD_MS = 5.0
+# The hold side has no such derivation, so it is a constant. A reserved-state
+# hold and a machine-frequency hold share it: on a production-size vault,
+# uncontended store-identity holds of 5-250ms are routine, and a 5ms bound wrote
+# thousands of INFO rows in half an hour. An earlier 100ms pair demoted the
+# entire band below it, which hid a 55ms contended acquire -- but the acquire
+# bound above, not this one, is what keeps contention visible.
 # Background boundaries publish a holder sidecar but run at machine frequency
 # beside ordinary traffic: graph drains, derived-receipt proofs, watcher
 # freshness, media commits. Their acquire/release pairs rotated the service log
@@ -167,24 +166,22 @@ def _boundary_event_level(
       still reports itself.  An acquire that waited longer than
       `poll_interval_seconds` went round the retry loop at least once, which is
       the cheapest honest definition of contention this code can measure.
-    * the hold was short, so a slow hold still reports itself.
+    * the hold was under `_BACKGROUND_QUIET_HOLD_MS` (250ms), so a slow hold
+      still reports itself. On a production-size vault, uncontended
+      store-identity holds of 5-250ms are routine.
 
     A machine-frequency background kind (`_MACHINE_HOLDER_KINDS`) publishes a
-    sidecar too, but is judged like the reserved class against the longer
-    `_BACKGROUND_QUIET_HOLD_MS`. Any other kind, known or not, keeps its INFO
-    pair.
+    sidecar too, but is judged like the reserved class. Any other kind, known or
+    not, keeps its INFO pair.
 
     Anything else is INFO.  `hold_ms` is `None` at acquire time, where the wait
     is the only thing measured yet.
     """
-    quiet_hold_ms = _QUIET_HOLD_MS
-    if publish_holder_metadata:
-        if holder_kind not in _MACHINE_HOLDER_KINDS:
-            return logging.INFO
-        quiet_hold_ms = _BACKGROUND_QUIET_HOLD_MS
+    if publish_holder_metadata and holder_kind not in _MACHINE_HOLDER_KINDS:
+        return logging.INFO
     if wait_ms >= poll_interval_seconds * 1000.0:
         return logging.INFO
-    if hold_ms is not None and hold_ms >= quiet_hold_ms:
+    if hold_ms is not None and hold_ms >= _BACKGROUND_QUIET_HOLD_MS:
         return logging.INFO
     return logging.DEBUG
 
