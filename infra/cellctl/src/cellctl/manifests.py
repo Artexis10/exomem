@@ -15,6 +15,9 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from .backup_source import VAULT_CHECK_COMMAND
 from .storage_config import LEGACY_CLASS
 
@@ -92,6 +95,19 @@ def check_artifact_broker_url(endpoint: str) -> None:
         valid = False
     if not valid:
         raise ValueError("artifact broker endpoint must be literal RFC1918 IPv4 HTTP on port 8767")
+
+
+def check_upload_public_key(pem: str) -> None:
+    """The cell refuses to start on a malformed upload key, so refuse it here first.
+    Like the cell, accept only an Ed25519 public key PEM, and never echo the value."""
+    if not pem:
+        return
+    try:
+        key = serialization.load_pem_public_key(pem.strip().encode("ascii"))
+    except (ValueError, TypeError, UnicodeError):
+        key = None
+    if not isinstance(key, Ed25519PublicKey):
+        raise ValueError("cell upload public key must be an Ed25519 public key PEM")
 
 
 @dataclass(frozen=True)
@@ -188,12 +204,16 @@ class CellManifestSpec:
     # otherwise-0.0.0.0/0 rule to object storage on 443.
     job_egress_except: tuple[str, ...] = ()
     artifact_broker_url: str = ""
+    # The PEM public half of the gateway's artifact signing pair, or "" for a cell
+    # that does not serve the upload handoff. Public material, so it renders as a value.
+    upload_public_key: str = ""
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
 
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
+        check_upload_public_key(self.upload_public_key)
 
     @property
     def namespace(self) -> str:
@@ -598,6 +618,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": "EXOMEM_CLOUD_READ_ONLY", "value": "1"})
     if spec.artifact_broker_url:
         env.append({"name": "EXOMEM_CLOUD_ARTIFACT_BROKER_URL", "value": spec.artifact_broker_url})
+    if spec.upload_public_key:
+        env.append({"name": "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY", "value": spec.upload_public_key})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": "/data/vault"},

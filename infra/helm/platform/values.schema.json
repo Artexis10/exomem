@@ -300,6 +300,7 @@
           "required": ["enabled"],
           "properties": {"enabled": {"type": "boolean"}}
         },
+        "uploadCellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}},
         "artifactSigningKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "artifactSigningKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "image": {"type": "string"},
