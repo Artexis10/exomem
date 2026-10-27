@@ -7749,10 +7749,14 @@ def normalize_wikilink(
     paths. Bare names use `resolver` or lazily call `resolver_factory`.
     """
     def _seen(no_ext: str) -> bool:
-        # A resolver key keeps an uppercase `.MD`; it already names the page.
+        # The resolver strips one lowercase `.md`, so a key ending in `.md` may name
+        # `x.MD` (the key itself) or `x.md.md`; see it only when both spellings are seen.
         if visible is None:
             return True
-        return visible(no_ext if no_ext.lower().endswith(".md") else f"{no_ext}.md")
+        seen = visible(f"{no_ext}.md")
+        if no_ext.lower().endswith(".md"):
+            seen = seen and visible(no_ext)
+        return seen
 
     def _matches(values: list[str] | None) -> list[str] | None:
         if values is None or visible is None:

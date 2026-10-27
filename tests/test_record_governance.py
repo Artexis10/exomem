@@ -3674,6 +3674,28 @@ def test_a_restricted_writers_link_ignores_a_withheld_vault_root_page(tmp_path: 
     assert normalized(with_root) == normalized(without_root) == ("Knowledge Base/Notes/Target", None)
 
 
+def test_a_restricted_writers_title_link_ignores_a_hidden_double_extension_page(tmp_path: Path) -> None:
+    """A hidden `plan.md.md` titled like the link leaves a writer's body as without it.
+
+    Its resolver key is `plan.md`. Asking visibility about `plan.md`, a path that names
+    no page, counted the hidden page as visible and rewrote the link to its folder.
+    """
+    with_page = tmp_path / "with-page"
+    without_page = tmp_path / "without-page"
+    for root in (with_page, without_page):
+        _write_md(root, "Knowledge Base/Notes/Public/Other.md", "# Other\n")
+        _write_l6_rule(root, ceiling=6, paths="Records/**")
+        _write_l0_rule(root, name="secret", paths="Evidence/**")
+    _write_md(with_page, "Knowledge Base/Evidence/plan.md.md", "---\ntitle: Secret Plan\n---\nwithheld")
+
+    def normalized(root: Path) -> tuple[str, int]:
+        with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+            body, warnings = vault.normalize_body_wikilinks("See [[Secret Plan]].", root)
+        return body, len(warnings)
+
+    assert normalized(with_page) == normalized(without_page) == ("See [[Secret Plan]].", 1)
+
+
 def test_a_title_link_query_answers_while_pending_custody_is_unreadable(
     tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
