@@ -18,7 +18,7 @@ env:
   # interpreter (tests/test_collection_store_s1_gate.py fails without it).
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
   # The newest release one store schema back; move it to the next one with each schema bump.
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.127.5"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
