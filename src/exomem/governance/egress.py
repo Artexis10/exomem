@@ -7670,7 +7670,8 @@ class ReaderView:
     from the compile, as in a vault without it. A unit whose removal the guard
     reports (a notice level) stays in the compile, and the guard removes and
     marks it in the served packet. Verdicts are kept for the request, so a unit
-    two lanes read is decided once.
+    two lanes read is decided once. Page verdicts are kept too: the request's
+    admission decides every catalogue page, and the lanes after it ask again.
     """
 
     def __init__(
@@ -7689,9 +7690,14 @@ class ReaderView:
         # Profiles admit a unit by its own source and ref; mentions cannot change their view.
         self._unit_identity_only = unit_identity_only
         self._verdicts: dict[str, str] = {}
+        # Pinned for the request, like the held set and tombstones its filter reads once.
+        self._page_verdicts: dict[str, bool] = {}
 
     def __call__(self, rel_path: str) -> bool:
-        return self._pages(rel_path)
+        verdict = self._page_verdicts.get(rel_path)
+        if verdict is None:
+            verdict = self._page_verdicts[rel_path] = bool(self._pages(rel_path))
+        return verdict
 
     @property
     def admission(self) -> Admission | None:
