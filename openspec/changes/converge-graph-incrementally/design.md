@@ -520,3 +520,39 @@ A pass checks the ticket's run-stable refusals before it prepares a behind build
 acknowledgement to keep, an unscoped mark, a moved policy, and registry history that
 no longer reaches its lineage. Found only at the ticket, each started a whole new
 publication attempt. With the check first, the pass re-targets within its own budget.
+
+## Addendum: background callers stop at queued
+
+A sandbox measurement of ordinary governed writes found whole-vault passes on threads
+that no caller waits on. The file watcher's echo of a governed create, a receipt replay
+of a moved page, and barrier recovery behind queued receipts each ran one. A
+whole-vault pass on a large vault runs for minutes, and the next interactive write
+contends with it for the graph.
+
+One rule now applies at each door: a caller that nobody waits on for a converged graph
+stops at queued. Whole-vault work stays only for an unknown scope or a declared rebuild
+disposition. The rule reuses the existing predicates and adds no new proof.
+
+- The join waiver also lets a caller defer, and the watcher's flush and reconcile run
+  inside it. Only a caller under a response boundary skips starting registered work, so
+  a background caller still starts a registered rebuild without joining it.
+- A deferring caller never runs a whole-vault pass on its own thread. Without a
+  checkpoint, its queued paths go to the drain, and a rebuild disposition advances the
+  full marker. A marker that cannot be written is paid inline, so the debt is never lost.
+- A graph_sync acknowledgement that equals the dispatch's checkpoint routes a deferring
+  caller to the incremental path. The match is exact: an acknowledgement at a later
+  generation proves no lineage for this checkpoint, and the genesis gate keeps its
+  rebuild.
+- The watcher marks no external change for a fan-out whose repair is owned: a standing
+  marker, or a batch whose dispatch registered a rebuild or queued every graph input.
+  It asks the predicate that `full_upsert_succeeded` already used. Such a mark only
+  fenced later writes, and an unscoped one sent each of them to a whole-vault rebuild.
+- Barrier recovery declines while per-path receipts are queued and no marker stands. A
+  queue that did not shrink no longer releases recovery. A queue that cannot drain still
+  reaches the whole-vault route through the stall escalation, and a standing barrier no
+  longer resets that count.
+
+Two doors keep their previous behaviour. A standalone library caller still converges,
+because its contract is a converged graph. A request without derived custody that writes
+no graph input still converges a standing marker, because the explicit
+fast-acknowledgement rollback restores that synchronous path.

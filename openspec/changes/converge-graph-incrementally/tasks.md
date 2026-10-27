@@ -521,3 +521,73 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   admission-flipped manifest test retired its receipt with the old rule for pages recall
   does not admit. Scoped suites (the 10.3 set): 62 modules, 1930 passed, 26 skipped,
   0 failed.
+
+## 11. Background callers stop at queued
+
+- [x] 11.1 Red tests: watcher echo of a create, receipt replay of a moved page,
+  acknowledged generation behind a withdrawn marker, owned watcher repair, barrier
+  with queued work: each runs no whole-vault pass. A standalone caller in the
+  acknowledged state still converges. Evidence, each red on the base:
+  `test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue` (the
+  echo rebuilt the vault),
+  `test_a_background_replay_of_a_page_edited_since_its_drain_stops_at_queued` (the
+  replay rebuilt the vault),
+  `test_a_background_dispatch_behind_a_covering_acknowledgement_stops_at_queued`
+  (the dispatch rebuilt the vault),
+  `test_a_fan_out_whose_repair_is_owned_marks_nothing` for a queued receipt and for
+  a standing marker (the watcher marked an owned repair as unknown), and
+  `test_a_barrier_behind_queued_repair_waits_for_the_queue` unmarked and with a
+  scoped mark (recovery rebuilt the vault, or queued whole-vault debt). The
+  standalone companion,
+  `test_a_standalone_dispatch_behind_a_covering_acknowledgement_still_converges`,
+  passes on the base and on this change.
+- [x] 11.2 Callers inside the join waiver may defer; only callers under a response
+  boundary skip starting registered work. `_caller_can_carry_pending` is the waiver
+  or a pending boundary, and `_caller_has_pending_boundary` alone decides whether
+  the refresh starts registered work and whether the dispatch joins it. The inline
+  marker convergence in `index_sync.upsert_after_write` defers for waiver callers
+  only: a request without derived-batch custody keeps the synchronous path that an
+  explicit `EXOMEM_FAST_DURABLE_ACK` rollback restores, as
+  `test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled`
+  requires. Open: `test_writes_after_a_worker_replacement_stay_incremental` fails on
+  this rule. Its writes are library calls with no request, so they keep the
+  standalone contract. On the base the watcher paid the first edit's whole-vault
+  pass before the first write; now the watcher stops at queued and that write pays
+  it. The test needs a ruling on its premise before it changes.
+- [x] 11.3 A deferring caller never runs a whole-vault pass on its thread; a rebuild
+  disposition becomes the full marker. Without a checkpoint,
+  `_leave_rebuild_to_the_drain` advances the full marker; a receipted parent handoff
+  keeps its own durable full receipt; a marker that cannot be written leaves the
+  pass to the caller. With a checkpoint the caller registers the pass, and the
+  boundary or the background thread starts it. Evidence: the watcher-echo and
+  background-replay tests in 11.1.
+- [x] 11.4 A covering acknowledgement routes a deferring caller to the incremental
+  path. The predecessor probe reports `graph_sync_acknowledgement_covers` when the
+  stored acknowledgement is exactly this checkpoint, and the dispatch logs `graph
+  dispatch routed a covering acknowledgement to incremental repair`. A standalone
+  caller still rebuilds. Evidence: the covering-acknowledgement pair in 11.1.
+- [x] 11.5 The watcher marks nothing when the queue or a marker owns its repair.
+  `index_sync.graph_repair_is_owned` also owns a no-checkpoint
+  `graph_repair_queued_for_drain` outcome, and the watcher logs that the repair is
+  already owned. Evidence: `test_a_fan_out_whose_repair_is_owned_marks_nothing`.
+  Two existing tests changed with this rule. The live-acknowledgement watcher test
+  drains the queue after the flush before it asserts convergence. The re-arm test
+  is now `test_a_standing_whole_vault_marker_owns_the_watcher_rearm`, because a
+  standing marker owns the repair the old test re-armed.
+- [x] 11.6 Barrier recovery declines while per-path receipts are queued.
+  `recovery_decline_reason` returns `queue_owns_repair` first when receipts are
+  queued and no marker stands. The drain asks for whole-vault debt behind a barrier
+  only on an external-epoch decline, and the stall count resets only on a full
+  marker. Evidence: `test_a_barrier_behind_queued_repair_waits_for_the_queue`, and
+  the stall-ladder test with a barrier, red on the base. Scoped suites on this
+  change: graph write, queue, replay, availability, join, drain and decline modules,
+  336 passed, 3 skipped, 2 failed (the 11.2 open test, and the covered-gap live
+  test, which also fails on the base); 16 related modules, 473 passed; file watcher,
+  freshness liveness, watcher publication intent and index_sync modules, 182
+  passed; graph-reading and
+  write-path modules, 1064 passed, 18 skipped, 15 failed. Of those 15, one is the
+  rollback test named in 11.2, which passes after that rule. Thirteen are the
+  lifecycle replay driver's environment checks, which fail on the base the same
+  way. The last reads the installed CLI's help and passes on a rerun on both trees.
+- [ ] 11.7 Sandbox A/B (orchestrator): zero whole-vault passes per ordinary governed
+  write on the real managed worker with its watcher on; drift 0.
