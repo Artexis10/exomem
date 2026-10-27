@@ -589,6 +589,26 @@ def test_a_large_summary_census_reads_actual_files_without_generating_or_visitin
     assert store.connection.execute("SELECT count(*) FROM items WHERE view_path IS NOT NULL").fetchone() == (0,)
 
 
+def test_one_window_reads_an_open_collection_beside_a_fenced_one(store, monkeypatch):
+    """Defect: a closed route fence on one collection decides for every collection in its window."""
+    from test_collection_store_summary import summary_text
+
+    fenced = "88888888-8888-4888-8888-888888888888"
+    create(store)
+    daily = summary_text(manifest_text().replace(CID, fenced).replace("title: Work", "title: Daily"))
+    store.create_collection(manifest_path().replace("Work", "Daily"), daily, why="create", scaffold=False)
+    store.reconcile_views()
+    paths = {row[0] for row in store.connection.execute("SELECT path FROM projection_state WHERE kind='manifest'")}
+    assert len(paths) == 2
+
+    def read_collections():
+        return {found.projection["collection_id"] for found in edit_back.observe(store, force=paths)}
+
+    assert read_collections() == {CID, fenced}
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.RECORDS_SUMMARY_V1})
+    assert read_collections() == {CID}
+
+
 def test_an_invalid_save_is_held_once_and_stays_in_place(store):
     """Defect: one invalid save gives a second hold on the next reconcile pass, or loses its bytes."""
     _, path = appended(store, count=1)
@@ -1003,6 +1023,65 @@ def test_pending_view_publication_yields_to_a_waiting_query(served, monkeypatch)
     assert not reader.is_alive()
     until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state='pending'") == [(0,)])
     assert store_rows(root, "SELECT txn_id FROM txns ORDER BY txn_id") == before
+
+
+def test_a_views_tick_publishes_under_the_policy_it_finds_at_the_write(served, monkeypatch):
+    """Defect: a tick publishes a view on the policy it read at its start, after the policy withheld
+    the collection, or keeps its start-of-tick policy for the next tick."""
+    from test_governance_egress import write_broken_policy
+
+    from exomem.collection_store import history, runtime
+    from exomem.collection_store.writer import CollectionWriter
+
+    root = served.root
+    published_view(root, "Settled", count=1)
+    release = threading.Event()
+    ticked = threading.Event()
+    tick = runtime.StoreServer._views_tick
+
+    def one_tick_per_release(current):
+        if not release.is_set():
+            return 0.05
+        release.clear()
+        try:
+            return tick(current)
+        finally:
+            ticked.set()
+
+    def run_one_tick():
+        ticked.clear()
+        release.set()
+        assert ticked.wait(10), "the views tick did not run"
+
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", one_tick_per_release)
+    run_one_tick()  # a tick under the allowing policy records its history release inputs
+    receipt = owner(root, "record_memory", action="append", collection=CID,
+                    item={"title": "Withheld", "count": 1}, why="capture")
+    relative = receipt["affected_paths"][0]
+    assert store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("pending",)]
+    inputs, invalidate = history.release_inputs, CollectionWriter.invalidate_history_pages
+    withheld, invalidations = threading.Event(), []
+
+    def withhold_after_the_tick_read_its_policy(vault_root):
+        found = inputs(vault_root)
+        if not withheld.is_set():
+            withheld.set()
+            write_broken_policy(vault_root)  # a blocked policy withholds every collection from the writer
+        return found
+
+    def counted_invalidation(writer):
+        invalidations.append(withheld.is_set())
+        return invalidate(writer)
+
+    monkeypatch.setattr(history, "release_inputs", withhold_after_the_tick_read_its_policy)
+    monkeypatch.setattr(CollectionWriter, "invalidate_history_pages", counted_invalidation)
+    run_one_tick()
+    assert withheld.is_set() and invalidations == []  # this tick still compares the policy it read first
+    assert store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("pending",)]
+    assert not (root / relative).exists()
+    run_one_tick()  # the next tick reads the new policy, so it queues the history pages
+    assert invalidations == [True]
+    assert not (root / relative).exists()
 
 
 def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served, monkeypatch):
