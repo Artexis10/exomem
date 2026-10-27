@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Never
 
-from .. import __version__, archive_members, records, vault
+from .. import __version__, archive_members, item_keys, records, vault
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
@@ -271,6 +271,18 @@ def _mapping_invalid(at: str, reason: str, *, expected: Any = None, allowed: Any
         allowed=allowed,
         repair="declare each target field from a source path; preview shows the source shape",
     )
+
+
+def _ordered_location_keys(writer, manifest, request: _Request) -> list[str]:
+    """The natural-key fields this import's mapping would classify as location on an ordered-v1 collection.
+
+    An ordered item key spells its natural key, so such a field would put a location into the key's public name.
+    """
+    if not (manifest.derived and manifest.item_key_scheme == item_keys.ORDERED_V1):
+        return []
+    from .field_admission import location_key_fields
+
+    return location_key_fields(writer.connection, manifest, pending=((request.mapping, request.format),))
 
 
 class _Lost(Exception):
@@ -2851,9 +2863,7 @@ def _derived_items(
             continue
         if key is None:
             at = row.after
-            key = collections.inferred_item_key(
-                manifest.collection_id, f"\0member\0{shas[at['member']]}\0{at['member_row'] - 1}"
-            )
+            key = collections.member_position_item_key(manifest, shas[at["member"]], at["member_row"] - 1)
         items.append((index, key, stored))
     return items, refused
 
@@ -3170,6 +3180,8 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
         if request.reimport is not None and request.members is None:
             _invalid("import_request.reimport", "reimport applies to an export's members", expected="members")
         plan = compile_mapping(request.mapping, manifest, request.format)
+        if located := _ordered_location_keys(writer, manifest, request):
+            _mapping_invalid("mapping.coverage", derived_rows.location_key_reason(located))
         if not writer._operation.field_plan(manifest).owner:
             from .field_admission import UNRESOLVED, mapping_classes
 
@@ -3375,6 +3387,7 @@ class _Sample:
         self.present: set[str] = set()
         self.absent: dict[str, int] = {}
         self.truncated = {"fields": False, "nested": False, "time_fields": False}
+        self.key_bytes: list[int] = []
 
     def _note(self, section: str, found: dict, path: str, value: Any, *, add: bool = False) -> None:
         """Record one path under the same bound for every shape section."""
@@ -3448,6 +3461,12 @@ class _Sample:
                 collections.validate_field_value(target, value, self.manifest.schema.fields[target])
             except collections.CollectionError:
                 self.conflicts.setdefault(target, set()).add(_json_type(value))
+        try:
+            key = collections.derived_item_key(self.manifest, values)
+        except collections.CollectionError:
+            return  # a row whose natural-key value has the wrong type is already a type conflict
+        if key is not None:
+            self.key_bytes.append(collections.item_key_stored_bytes(self.manifest, key))
 
     def findings(self) -> list[dict[str, Any]]:
         found = []
@@ -3501,6 +3520,9 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             try:
                 plan = compile_mapping(request.mapping, manifest, request.format)
                 rows = plan.rows
+                if located := _ordered_location_keys(writer, manifest, request):
+                    findings.append({"code": "IMPORT_MAPPING_INVALID", "at": "mapping.coverage",
+                                     "reason": derived_rows.location_key_reason(located), "retryable": False})
             except collections.CollectionError as error:
                 findings.append({"code": error.code, **error.details})
         if request.format == "json-document" and rows is None:
@@ -3595,6 +3617,13 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         "identity": {
             "natural_key": list(manifest.schema.natural_key),
             "mapped": None if produced is None else set(manifest.schema.natural_key) <= produced,
+            "item_keys": {
+                **collections.item_key_contract(manifest),
+                # Computed from the sampled rows' mapped values: a row that lacks a natural-key value has no key here.
+                "sampled_key_bytes": (
+                    {"rows": len(sample.key_bytes), "min": min(sample.key_bytes), "max": max(sample.key_bytes)}
+                    if sample.key_bytes else None),
+            },
         },
         "target": {
             "fields": {name: spec.type for name, spec in manifest.schema.fields.items()},

@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import asdict, replace
 
-from .. import capabilities
+from .. import capabilities, item_keys
 from . import cursors, reductions, runtime, typed_rows, validation
 from .runtime import QueryError, QueryLimits
 
@@ -148,7 +148,21 @@ def contract() -> dict:
                 {"action": "query", "collection": "<collection>", "query": {"version": VERSION}}),
             "grammar": {"tool": "schema_memory",
                         "args": {"subject": "query-engine", "operation": "inspect", "name": "collections"}},
-            "modes": list(validation.MODES), "execution_profiles": list(validation.PROFILES)}
+            "modes": list(validation.MODES), "execution_profiles": list(validation.PROFILES),
+            "item_keys": {
+                "default_order": (
+                    "A query with no order_by returns rows by item_key ascending. On a collection with "
+                    f"{item_keys.ORDERED_V1} keys that is the lowest natural keys first; on {item_keys.HASHED_V1} "
+                    "keys it is a stable order with no meaning."),
+                "scheme": (
+                    f"A new derived collection takes {item_keys.ORDERED_V1} unless a natural-key field is a "
+                    f"location or has no ordered encoding; every other collection keeps {item_keys.HASHED_V1}. "
+                    f"An {item_keys.ORDERED_V1} item key is 1 to {item_keys.MAX_KEY_BYTES} bytes, spelled as "
+                    f"2 to {item_keys.MAX_KEY_BYTES * 8 // 5} characters; a {item_keys.HASHED_V1} key is a "
+                    "16-byte UUID. inspect reports the scheme and the byte lengths as contract.item_keys."),
+                "key_range": (
+                    f"On an {item_keys.ORDERED_V1} collection, a key range bound must be the exact spelling "
+                    "of an item key (lowercase base32hex); an equality that no key spells matches no row.")}}
 
 
 def chapter(name: str | None) -> dict:

@@ -56,6 +56,7 @@ from .query_indexes import ProjectionPlan
 
 FILENAME = "collections-derived.sqlite"
 COLLECTION_DERIVED = "COLLECTION_DERIVED"
+_JOURNAL_SIZE_LIMIT = 64 << 20  # bytes: 64 MiB
 QUERY_REBUILDING = "QUERY_REBUILDING"
 REBUILD_MISMATCH = "DERIVED_REBUILD_MISMATCH"
 SOURCE_MISSING = "DERIVED_SOURCE_MISSING"
@@ -168,6 +169,28 @@ def field_change_refused(current, proposed) -> collections.CollectionError | Non
          "migration": "Create a NEW derived collection with the new fields and import the export into it. "
                       "This collection, its import log and its sources stay as they are."},
     )
+
+
+def location_key_reason(names) -> str:
+    """Why an ordered-v1 collection refuses a location natural-key field."""
+    return (f"the item key of an ordered-v1 collection spells its natural key, so natural-key fields {sorted(names)} "
+            "cannot be location-classified")
+
+
+def ordered_key_refused(location, encodes: bool) -> collections.CollectionError | None:
+    """A revise that would leave an ordered-v1 collection a natural key its keys cannot carry, or None.
+
+    ``location`` names the natural-key fields the resolver classifies as location; ``encodes`` says whether
+    every natural-key field has an ordered-v1 encoding. Either way the collection's keys would stop being its rows' identity.
+    """
+    if not location and encodes:
+        return None
+    reason = location_key_reason(location) if location else "every natural-key field of an ordered-v1 collection needs an ordered-v1 encoding"
+    return collections.CollectionError(
+        COLLECTION_DERIVED, reason,
+        {"location_key_fields": sorted(location), "keys_encode": encodes,
+         "migration": "Create a NEW derived collection with the changed fields and import the export into it. "
+                      "This collection, its import log and its sources stay as they are."})
 
 
 def _json(value: Any) -> str:
@@ -342,6 +365,8 @@ class Store:
                 conn.execute("PRAGMA journal_mode=WAL")
                 # Every state this file can lose by a power cut is one reconcile repairs.
                 conn.execute("PRAGMA synchronous=NORMAL")
+                # A long import can grow the WAL by hundreds of megabytes; a finished checkpoint truncates it to this.
+                conn.execute(f"PRAGMA journal_size_limit={_JOURNAL_SIZE_LIMIT}")
                 if conn.execute("PRAGMA user_version").fetchone()[0] != LAYOUT and conn.execute(
                         "SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is not None:
                     raise sqlite3.DatabaseError("the derived file has another layout")

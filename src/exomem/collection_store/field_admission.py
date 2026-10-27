@@ -185,12 +185,29 @@ def mapping_classes(mapping, manifest, fmt):
             for path, value in mapped.items()}
 
 
+def _bound_mappings(conn, manifest):
+    """The ``(declared mapping, format)`` of every import job the collection has bound."""
+    bound = (json.loads(encoded)["mapping"] for (encoded,) in conn.execute(
+        "SELECT binding_json FROM import_jobs WHERE collection_id=?", (manifest.collection_id,)))
+    return [(mapping["declared"], mapping["format"]) for mapping in bound]
+
+
+def location_key_fields(conn, manifest, pending=()):
+    """The natural-key fields that the manifest, or any one import of the collection or in ``pending``, classifies as location.
+
+    Each declaration counts alone, because another import's missing coverage resolves a field to unresolved
+    and would hide a location that this one declares. Missing coverage on its own is not a location.
+    """
+    declarations = [*_bound_mappings(conn, manifest), *pending]
+    found = set()
+    for authority in (_mapping_authority([], manifest), *(_mapping_authority([each], manifest) for each in declarations)):
+        found.update(name for name in manifest.schema.natural_key if _dependency(manifest, *authority, name) == "location")
+    return [name for name in manifest.schema.natural_key if name in found]
+
+
 def canonical_basis(conn, manifest):
-    jobs, declarations = [], set()
-    for (encoded,) in conn.execute("SELECT binding_json FROM import_jobs WHERE collection_id=?", (manifest.collection_id,)):
-        mapping = json.loads(encoded)["mapping"]
-        declarations.add(_json([mapping["format"], mapping["declared"]]))
-        jobs.append((mapping["declared"], mapping["format"]))
+    jobs = _bound_mappings(conn, manifest)
+    declarations = {_json([fmt, declared]) for declared, fmt in jobs}
     mappings, inferred = _mapping_authority(jobs, manifest)
     store_id = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     declaration = {name: _spec(spec) for name, spec in manifest.schema.fields.items()}

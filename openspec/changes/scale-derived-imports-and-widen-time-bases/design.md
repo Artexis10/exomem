@@ -20,7 +20,7 @@ tail. Each natural-key field becomes one component, in declared order:
 
 | Part | Encoding |
 |---|---|
-| Presence | `0x01` for a value, `0xFF` for null, so nulls sort last |
+| Presence | `0x01` for a value, `0x02` for null, so nulls sort last; null is not `0xFF`, because `0xFF` follows `0x00` inside a string and two natural keys could then encode alike |
 | `date` | 24-bit big-endian offset-binary days since 1970-01-01 |
 | `datetime` | 64-bit big-endian offset-binary UTC microseconds, then 2 bytes: the offset in minutes plus 32768 |
 | `integer` | the FoundationDB tuple-layer integer encoding |
