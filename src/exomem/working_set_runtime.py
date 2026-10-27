@@ -2467,6 +2467,7 @@ def serve(
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
     lexical_admission=None,
+    reader=None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -2487,7 +2488,10 @@ def serve(
     (ruling S5-1).
 
     `lexical_admission` is the request's lexical pass's `query_context`
-    (`lexical_evidence`), handed to the compile's dependence check.
+    (`lexical_evidence`), handed to the compile's dependence check and carry.
+    `reader` is a restricted caller's `egress.ReaderView` that the request
+    already built after its checkpoint pin; without it the reader's view is
+    built here.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
@@ -2499,7 +2503,7 @@ def serve(
 
     # `None` for the owner, whose flags stay vault-wide; a restricted reader's
     # flags count only the lag in pages it may see (`view_lag`).
-    view = egress.visible_page_filter(root, purpose=purpose)
+    view = reader if reader is not None else egress.visible_page_filter(root, purpose=purpose)
     with working_set._span(timings, "working_set.index"):
         state, index, stale = ensure_index(
             root,
@@ -2718,6 +2722,7 @@ def serve(
             trigger=trigger,
             _intent_resolution=intent_resolution,
             lexical_admission=lexical_admission,
+            reader=reader,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

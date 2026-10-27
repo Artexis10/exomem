@@ -6927,7 +6927,7 @@ def _compile_guarded_activation(
     conversation: working_set_conversation_module.Conversation | None = None,
     intent_resolution: dict[str, Any] | None = None,
     read_thread: Callable[[], _ThreadRead] | None = None,
-    rank_on_admission: bool = False,
+    caller: context_views_module.CallerView | None = None,
 ) -> _CompiledActivation:
     """Lexical evidence, release plane, `serve`, then the terminal guard: the
     one compile both packet shapes read their anchors from.
@@ -6939,10 +6939,14 @@ def _compile_guarded_activation(
     that has no thread (the turn slice of a maps packet) passes none and gets
     an anchor-free compile of the turn's own words.
 
-    `rank_on_admission` (the turn slice) gives a restricted reader's lexical
-    pass and dependence check the statistics of the pages it admits, so a
-    withheld page moves no term choice or rank. The anchors packet still ranks
-    on the catalogue's statistics; the owner does in both."""
+    `caller` is the turn slice's caller view, the map's. The compile then
+    decides pages through its release filter, so a verdict the map reached is
+    reused, and builds one reader view after the checkpoint pin for the rest
+    of the compile. A restricted reader's lexical pass, dependence check and
+    carry share one admission over that view, so a withheld page moves no term
+    choice or rank. The anchors packet passes none: it builds its views itself
+    and ranks its lexical pass on the catalogue's statistics, as the owner does
+    in both."""
 
     def stopped(*args: Any, **kwargs: Any) -> _CompiledActivation:
         return _CompiledActivation(abstain(*args, **kwargs), False)
@@ -6971,7 +6975,10 @@ def _compile_guarded_activation(
         lexical_selection: dict[str, int] = {}
         with find_types.timing_span(timings, "working_set.lexical"):
             # `None` for the owner, whose lexical state stays vault-wide.
-            reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
+            if caller is None:
+                reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
+            else:
+                reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             # The one checkpoint every lexical read of this request uses: the lexical
             # lane, the dependence check and the role lanes (through the snapshot).
             lexical_checkpoint = (
@@ -6979,16 +6986,12 @@ def _compile_guarded_activation(
                 if evidence.snapshot
                 else None
             )
-            # Over a view built after the pin, so the pages the pin proved withheld are not admitted either.
-            lexical_admission = (
-                working_set_runtime_module.request_admission(
-                    vault_root,
-                    egress_module.visible_page_filter(vault_root, purpose=purpose),
-                    lifecycle_statuses_module.Basis(vault_root),
-                )
-                if rank_on_admission and reader_view is not None
-                else None
-            )
+            # Built after the pin, so the pages the pin proved withheld are rejected too.
+            slice_reader = lexical_admission = status_basis = None
+            if caller is not None and caller.visible is not None:
+                slice_reader = egress_module.reader_view(vault_root, purpose=purpose, keep=caller.visible)
+                status_basis = lifecycle_statuses_module.Basis(vault_root)
+                lexical_admission = working_set_runtime_module.request_admission(vault_root, slice_reader, status_basis)
             if anchor and trigger == "user_turn":
                 hits, lexical_state = [], "agent_choice"
             else:
@@ -7080,6 +7083,8 @@ def _compile_guarded_activation(
         trigger=trigger,
         intent_resolution=intent_resolution,
         lexical_admission=lexical_admission,
+        reader=slice_reader,
+        status_basis=status_basis,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -7416,8 +7421,9 @@ def _op_activate_context_body(
         if working_set_module.budget_exhausted("working_set.catalogue"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
 
-        def slice_leads() -> context_views_module.TurnLeads:
-            """What the turn's own words reached: the guarded anchors compile, run for the user turn alone.
+        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
+            """What the turn's own words reached: the guarded anchors compile, run for the user turn alone,
+            over the map's caller view.
 
             It carries no thread and no `anchor`, and mints, learns and records nothing: the map's
             continuity token encodes no anchor. A stage it cannot run is a state of the slice.
@@ -7426,7 +7432,7 @@ def _op_activate_context_body(
                 return context_views_module.TurnLeads(context_views_module.SLICE_EMPTY)
             # The resolver weighs a name against every anchor it is given, so a restricted caller is given
             # only the anchors it may see: a withheld namesake must not turn a visible anchor into a question.
-            reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
+            reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
             compiled = _compile_guarded_activation(
                 vault_root,
@@ -7443,7 +7449,7 @@ def _op_activate_context_body(
                     evidence_stamp=evidence_stamp,
                 ),
                 abstain=_abstain,
-                rank_on_admission=True,
+                caller=caller,
             )
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
             return context_views_module.turn_leads(compiled.packet)

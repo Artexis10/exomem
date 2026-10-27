@@ -4024,6 +4024,7 @@ def _compile_packet(
     trigger: str = "user_turn",
     _intent_resolution: dict[str, Any] | None = None,
     lexical_admission: Any = None,
+    reader: Any = None,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -4039,7 +4040,8 @@ def _compile_packet(
     out, it is read here. `attribution` is the caller's derived session and
     workspace keys (ruling S5-1) and `marks` the served threads the caller may
     see, both for the ranking only. `lexical_admission` is the admission that
-    the request's first lexical pass ranked on (`working_set_runtime.serve`).
+    the request's first lexical pass ranked on, and `reader` the view it was
+    built over (`working_set_runtime.serve`); the carry then reuses both.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     task_refresh = trigger == "task_refresh"
@@ -4096,7 +4098,7 @@ def _compile_packet(
     # may already be a caller-supplied released view
     # (`working_set_runtime.serve`); narrowing it again is a no-op for that
     # caller and the only guard for a direct one.
-    visible = _reader_view(root, purpose)
+    visible = reader if reader is not None else _reader_view(root, purpose)
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live
@@ -4677,7 +4679,7 @@ def _compile_packet(
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         from . import working_set_runtime
 
-        query_context = working_set_runtime.request_admission(root, visible, status_basis)
+        query_context = working_set_runtime.request_admission(root, visible, status_basis, lexical_admission)
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,
@@ -5008,6 +5010,7 @@ def _compile_packet(
             visible=visible,
             retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
+            query_context=lexical_admission,
         )
         if beside_anchors:
             items = (*items, *beside_items)
@@ -5057,6 +5060,7 @@ def _named_beside(
     visible: Callable[[str], bool] | None = None,
     retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> tuple[
     tuple[dict[str, Any], ...],
     tuple[LaneItem, ...],
@@ -5076,7 +5080,8 @@ def _named_beside(
 
     Soft: an exhausted budget leaves the resolved material intact. A page the
     lanes read nothing off retains its coverage. Carry lenses use only the
-    packet's remaining role slots.
+    packet's remaining role slots. `query_context` is the request's admission
+    over `visible` and `status_basis`, when it holds one.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     consumed: set[str] = set()
@@ -5099,6 +5104,7 @@ def _named_beside(
         contacts=contacts,
         visible=visible,
         status_basis=status_basis,
+        query_context=query_context,
     )
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:

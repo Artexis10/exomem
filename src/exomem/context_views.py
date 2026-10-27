@@ -989,14 +989,14 @@ def map_packet_chars(block: Mapping[str, Any]) -> int:
 def activation_packet(
     vault_root: Path, max_chars: int, *, purpose: str | None = None,
     generation: Mapping[str, Any], timings: find_types.FindTimings | None = None,
-    turn_leads: Callable[[], TurnLeads] | None = None,
+    turn_leads: Callable[[CallerView], TurnLeads] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
     `turn_leads` turns the turn slice on: it holds back `TURN_SLICE_SHARE` of the budget for the slice
-    (so the map is the same on every turn), and it is called once, after the map is compiled, for what
-    the turn's words reached. A fault in it, or no room for a line, sets the slice's state and never
-    changes the map.
+    (so the map is the same on every turn), and it is called once, after the map is compiled, with the
+    map's caller view, for what the turn's words reached. A fault in it, or no room for a line, sets the
+    slice's state and never changes the map.
     """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
@@ -1006,7 +1006,7 @@ def activation_packet(
 
 def _activation_packet(
     root: Path, max_chars: int, purpose: str | None, generation: Mapping[str, Any],
-    timings: find_types.FindTimings | None, turn_leads: Callable[[], TurnLeads] | None = None,
+    timings: find_types.FindTimings | None, turn_leads: Callable[[CallerView], TurnLeads] | None = None,
 ) -> dict[str, Any]:
     with find_types.timing_span(timings, "working_set.catalogue"):
         prepared = _prepare(root, MAP_REF, None, purpose, str(generation.get("freshness_key") or ""))
@@ -1195,7 +1195,7 @@ def packet_chars(map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | 
 
 
 def _turn_slice(
-    prepared: _Prepared, turn_leads: Callable[[], TurnLeads], *, limit: int, reserve: int,
+    prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, limit: int, reserve: int,
     timings: find_types.FindTimings | None,
 ) -> dict[str, Any]:
     """The turn slice for this caller, in the `reserve` that the map left. It never raises and never touches the map."""
@@ -1203,7 +1203,8 @@ def _turn_slice(
     extras: dict[str, dict[str, Any]] = {}
     states: dict[str, dict[str, Any]] = {}
     try:
-        leads = turn_leads()
+        # The map's view: its release filter has already decided every page the map admitted.
+        leads = turn_leads(prepared.caller)
         state, evidence = leads.state, leads.evidence
         if state == READY:
             with find_types.timing_span(timings, "working_set.turn_slice"):

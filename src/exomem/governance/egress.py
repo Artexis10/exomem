@@ -7749,12 +7749,17 @@ def reader_view(
     purpose: str | None = None,
     unit_identity_only: bool = False,
     withheld: frozenset[str] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> ReaderView | None:
     """The caller's `ReaderView`, or `None` when nothing is withheld from it
     (`visible_page_filter`: the owner, or no bound caller). `withheld` is its
-    argument of the same name."""
-    pages = visible_page_filter(
-        vault_root, principal=principal, purpose=purpose, withheld=withheld
+    argument of the same name. `keep` is a restricted caller's release
+    decision that the request already built (`page_filter_over`), so its
+    verdicts are reused."""
+    pages = (
+        visible_page_filter(vault_root, principal=principal, purpose=purpose, withheld=withheld)
+        if keep is None
+        else page_filter_over(vault_root, keep, withheld=withheld)
     )
     if pages is None:
         return None
