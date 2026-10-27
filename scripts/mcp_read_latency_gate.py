@@ -294,7 +294,8 @@ async def main():
 asyncio.run(main())
 """
 
-INIT_VAULT = "import sys; from pathlib import Path; from exomem import init; init.init_vault(Path(sys.argv[1]))"
+INIT_VAULT = ("import sys; from pathlib import Path; from exomem import init; "
+              "init.init_vault(Path(sys.argv[1]), force=sys.argv[2:] == ['overlay'])")
 
 #: The runner's own settings never reach an arm: its keys, tokens and service settings stay out.
 _HOST_PREFIXES = ("EXOMEM_", "KB_MCP_", "FASTMCP_", "GITHUB_")
@@ -365,8 +366,9 @@ class Arm:
             raise MeasurementRefused("arm-command-failed", phase="arm-setup") from error
         return done.stdout.strip()
 
-    def init_vault(self) -> None:
-        self.run_python(INIT_VAULT, str(self.vault))
+    def init_vault(self, *, overlay: bool = False) -> None:
+        """Lay down the starter scaffold; `overlay` adds it beside pages already written and keeps them."""
+        self.run_python(INIT_VAULT, str(self.vault), *(("overlay",) if overlay else ()))
 
     async def start(self, *, quiescence_limit: float) -> dict[str, float]:
         """Start the coordinator and the worker, join the worker as a local client and wait for quiet."""
@@ -680,20 +682,24 @@ def prepare_notes(arms: dict[str, Arm], base_src: Path, base_python: Path, *, no
 
     head, base = arms["head"], arms["base"]
     recall_profile = json.loads((RECALL_BENCHMARK / "profile.json").read_text())
-    head.init_vault()
     if notes_pages is None:
         import recall_latency_gate as recall
 
         if len(os.sched_getaffinity(0)) < recall.REFERENCE["reference_cpus"]:
             raise MeasurementRefused("two-cpu-reference-unavailable", phase="reference-preparation")
+        # The recall worker checks the stored corpus against its reference profile before it serves, and
+        # the scaffold's navigation pages carry semantic units that no vector covers. So each arm is seeded
+        # into an empty vault, as the recall gate seeds its own, and the scaffold is laid beside it after.
         head_inputs = seed_reference_notes(head, ROOT, None, recall, recall_profile)
         rels = json.loads((head.vault / "reference-corpus.json").read_text())
-        base.init_vault()
         copy_notes(rels, head.vault, base.vault)
         base_inputs = seed_reference_notes(base, base_src, base_python, recall, recall_profile)
         if any(head_inputs[key] != base_inputs[key] for key in ("corpus", "encoder_digest", "encoder_identity")):
             raise MeasurementRefused("paired-reference-inputs-differ", phase="reference-preparation")
+        head.init_vault(overlay=True)
+        base.init_vault(overlay=True)
         return rels
+    head.init_vault()
     recall_profile["pages"] = notes_pages
     words, _digest = reference_source(recall_profile, RECALL_BENCHMARK)
     rels = gen_reference_vault(head.vault, recall_profile, words)
