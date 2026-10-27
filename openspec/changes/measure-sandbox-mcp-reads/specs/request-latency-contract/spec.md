@@ -154,3 +154,58 @@ The reference SHALL set a p95 target of 100 ms for the six collection-store grou
 - **WHEN** the contract moves from `request-latency-v4` to `request-latency-v5`
 - **THEN** every earlier bar and reference line is byte-identical
 - **AND** the new reference and bar are the only additions
+
+### Requirement: A paired gate compares the working tree with the latest release on managed workers
+
+A paired runner SHALL time the MCP reads of the working tree and of the latest release through each arm's own managed worker, over the worker's socket boundary. Each arm SHALL own its interpreter, vault, state root, lease coordinator and worker. The runner SHALL time through `measure_call`, so assertions, profiling and statistics stay outside the timer. The inactive worker SHALL stay stopped while the other is timed. The first arm SHALL alternate, and one unmeasured warm-up SHALL precede the measured repeats of each case.
+
+A generated public fixture SHALL define the cases: collections for Records and for Planning with skewed row counts, legacy trackers, and note, search and recall cases. A profile file SHALL drive the generator, and its SHA-256 SHALL equal the contract's fixture profile digest once the contract sets one. Values constrained by a registry SHALL come from the shipped vocabulary packs at run time. Each arm SHALL load the collections through its own change tools before timing. A report SHALL bind the profile digest, the digest of all generated cases, the release tag and its commit.
+
+For each gating group, the runner SHALL take the median over the repeats of the paired difference (head minus base) per case. It SHALL take the mean of the case medians, with a Student-t interval whose per-tail confidence is corrected for the whole family: the number of gating groups in the contract SHALL be the size of the family. A lower bound above the allowance SHALL fail the group. An upper bound at or below the allowance SHALL demonstrate it. Any other interval SHALL be inconclusive: it SHALL raise a visible warning and SHALL pass. List groups SHALL be reported and SHALL NOT gate. While an allowance is null the runner SHALL report the intervals and SHALL state that no allowance is set, and SHALL NOT invent one.
+
+A broken instrument SHALL fail the run: a failed case, a missing pair, a group below the contract's case floor, a missing or undeclared group, a shard that did not report, or a contract digest that differs between fragments or from the working tree. A reduced run SHALL state that it is reduced and SHALL NOT report a pass.
+
+The runner SHALL refuse to time an arm in two cases, each with a closed reason. It SHALL refuse an arm whose vault state directory was created during the run, because state is keyed by the vault path and a new path starts cold. It SHALL refuse an arm when any derived collection in its derived store is not ready, because the store retries a rebuilding collection under the writer lease and adds a tail to unrelated calls. It SHALL refuse an arm that does not become quiet.
+
+The same runner SHALL accept a private prepared vault, its cases and two fixed arm roots outside the repository. It SHALL report each store group's head p95 against the configured target as meets or misses, and the host CPU pressure at the start and at the end of the run. Private inputs SHALL NOT enter the repository, the tests or CI.
+
+#### Scenario: A group slower than its allowance fails
+
+- **GIVEN** a gating group with an allowance and an interval whose lower bound is above it
+- **WHEN** the fragments are joined
+- **THEN** the group fails and the run fails
+
+#### Scenario: An interval that straddles the allowance warns and passes
+
+- **GIVEN** a gating group whose interval contains the allowance
+- **WHEN** the fragments are joined
+- **THEN** the group is inconclusive, with a warning
+- **AND** the run passes
+
+#### Scenario: No allowance is set
+
+- **GIVEN** a gating group whose allowance is null
+- **WHEN** the fragments are joined
+- **THEN** the summary reports the interval and states that no allowance is set
+- **AND** it reports no verdict number
+
+#### Scenario: A missing pair breaks the instrument
+
+- **WHEN** a case has fewer paired repeats than the contract requires
+- **THEN** the run fails with a missing pair, whatever the other intervals say
+
+#### Scenario: A derived collection is rebuilding
+
+- **WHEN** an arm's derived store holds a collection that is not ready
+- **THEN** the runner refuses to time that arm and reports a closed reason
+
+#### Scenario: An arm's state is created during the run
+
+- **WHEN** the vault state directory of an arm did not exist before its timed start
+- **THEN** the runner refuses to time that arm and reports a closed reason
+
+#### Scenario: A private store group misses its target
+
+- **WHEN** a private run measures a store group whose head p95 exceeds the configured target
+- **THEN** the summary reports that group as missing its target
+- **AND** it records the CPU pressure at the start and at the end of the run
