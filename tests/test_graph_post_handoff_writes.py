@@ -1772,6 +1772,7 @@ from test_graph_post_handoff_writes import (  # noqa: E402
     _seed_live_freshness,
 )
 
+import exomem.server  # noqa: F401 - a serving worker has loaded its MCP surface before its first write
 from exomem import deferred_index, epistemic_graph, file_watcher, freshness  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 
