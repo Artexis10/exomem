@@ -549,18 +549,22 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   only: a request without derived-batch custody keeps the synchronous path that an
   explicit `EXOMEM_FAST_DURABLE_ACK` rollback restores, as
   `test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled`
-  requires. Open: `test_writes_after_a_worker_replacement_stay_incremental` fails on
-  this rule. Its writes are library calls with no request, so they keep the
-  standalone contract. On the base the watcher paid the first edit's whole-vault
-  pass before the first write; now the watcher stops at queued and that write pays
-  it. The test needs a ruling on its premise before it changes.
-- [x] 11.3 A deferring caller never runs a whole-vault pass on its thread; a rebuild
+  requires.
+- [ ] 11.3 A deferring caller never runs a whole-vault pass on its thread; a rebuild
   disposition becomes the full marker. Without a checkpoint,
   `_leave_rebuild_to_the_drain` advances the full marker; a receipted parent handoff
   keeps its own durable full receipt; a marker that cannot be written leaves the
   pass to the caller. With a checkpoint the caller registers the pass, and the
   boundary or the background thread starts it. Evidence: the watcher-echo and
-  background-replay tests in 11.1.
+  background-replay tests in 11.1. **Open, needs a ruling.** The post-handoff
+  governed writes now run inside a mutation request, as production writes do.
+  `test_writes_after_a_worker_replacement_stay_incremental` then fails on the
+  checkpointed case: the first write meets `recall_delta_incomplete` while the
+  watcher's full marker stands, and it registers a second whole-vault pass. On the
+  base the watcher paid that pass before the first write. A probe that queued the
+  paths and extended the standing marker instead cleared that door, and the next
+  write then registered through the dispatch's `graph_sync_acknowledgement_absent`
+  door. Both doors need one rule for a standing marker.
 - [x] 11.4 A covering acknowledgement routes a deferring caller to the incremental
   path. The predecessor probe reports `graph_sync_acknowledgement_covers` when the
   stored acknowledgement is exactly this checkpoint, and the dispatch logs `graph
@@ -581,7 +585,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   marker. Evidence: `test_a_barrier_behind_queued_repair_waits_for_the_queue`, and
   the stall-ladder test with a barrier, red on the base. Scoped suites on this
   change: graph write, queue, replay, availability, join, drain and decline modules,
-  336 passed, 3 skipped, 2 failed (the 11.2 open test, and the covered-gap live
+  336 passed, 3 skipped, 2 failed (the 11.3 open test, and the covered-gap live
   test, which also fails on the base); 16 related modules, 473 passed; file watcher,
   freshness liveness, watcher publication intent and index_sync modules, 182
   passed; graph-reading and
