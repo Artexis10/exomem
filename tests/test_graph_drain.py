@@ -437,19 +437,25 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
 
 
-@pytest.mark.parametrize("readable_for", [0.0, 400.0])
+@pytest.mark.parametrize(
+    ("readable_for", "barrier"),
+    [(0.0, False), (400.0, False), (0.0, True)],
+    ids=["unreadable", "readable_first", "behind_a_barrier"],
+)
 def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_the_ladder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable_for: float
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable_for: float, barrier: bool
 ) -> None:
     """A queue that never drains still converges, but not inside a write storm.
 
-    The availability arm stays out while receipts are queued, because the queue
-    owns that repair. A queue that can never drain would then leave the graph
-    unreadable forever, so the loop asks for a whole-vault rebuild once queued
-    work has been stuck behind an unreadable graph for the whole backoff
-    ladder. Write signals cut each backoff wait short, so the bound is wall
-    time, not a count of passes: a burst of transient refusals must not buy a
-    whole-vault pass. Time the graph stayed readable does not count either.
+    The availability arm and barrier recovery stay out while receipts are
+    queued, because the queue owns that repair. A queue that can never drain
+    would then leave the graph unreadable forever, so the loop asks for a
+    whole-vault rebuild once queued work has been stuck behind an unreadable
+    graph for the whole backoff ladder. Write signals cut each backoff wait
+    short, so the bound is wall time, not a count of passes: a burst of
+    transient refusals must not buy a whole-vault pass. Time the graph stayed
+    readable does not count either. A standing barrier does not reset the
+    count, or a queue stuck behind one would never escalate.
 
     Simulated time: each wait returns at the next write signal, 0.2 s apart,
     or at its own timeout when that comes first.
@@ -483,6 +489,10 @@ def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_
         graph_drain, "_availability_pending", lambda _root: now[0] >= unreadable_from
     )
     monkeypatch.setattr(graph_drain, "_work_once", lambda _root: 0)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: barrier)
+    # A barrier holds each pass like whole-vault work, and per-path work drains
+    # on every wake of that hold. This queue never drains.
+    monkeypatch.setattr(graph_drain, "_drain_once", lambda _root: 0)
     requests: list[float] = []
     # The requested marker stands from then on, as the real one does.
     monkeypatch.setattr(graph_drain, "_marker_pending", lambda _root: bool(requests))

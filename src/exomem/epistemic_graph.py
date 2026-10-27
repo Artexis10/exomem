@@ -1140,6 +1140,7 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
 
 
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
+RECOVERY_DECLINE_QUEUE_OWNS_REPAIR = "queue_owns_repair"
 RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
 RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
 RECOVERY_DECLINE_NO_SIDECAR = "no_sidecar"
@@ -1164,9 +1165,18 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     published analyses of this incident named the wrong mechanism before one
     measured it" -- so the reason is now a value a caller can log and a test can
     assert, rather than something to be inferred from an absence.
+
+    Queued per-path receipts with no whole-vault marker come first: the queue
+    owns that repair, and the drain that empties it publishes and clears the
+    barrier. Recovery behind it ran a whole-vault pass for work already queued,
+    and an external mark on the queued paths turned it into whole-vault debt. A
+    queue that cannot drain reaches the whole-vault route through the drain's
+    stall escalation instead.
     """
     from . import freshness
 
+    if _graph_receipts_own_repair(vault_root):
+        return RECOVERY_DECLINE_QUEUE_OWNS_REPAIR
     if freshness.external_pending(vault_root):
         return RECOVERY_DECLINE_EXTERNAL_PENDING
     if not graph_enabled():
@@ -1182,6 +1192,21 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
         # costs nothing but the delay.
         return RECOVERY_DECLINE_PUBLICATION_REFUSED
     return None
+
+
+def _graph_receipts_own_repair(vault_root: Path) -> bool:
+    """Whether per-path receipts are queued and no whole-vault marker stands.
+
+    An unreadable queue reads as empty, which leaves recovery to the reasons
+    after this one.
+    """
+    try:
+        return (
+            deferred_index.graph_queue_age(vault_root)[0] > 0
+            and deferred_index.graph_full_rebuild_pending(vault_root) is None
+        )
+    except Exception:  # noqa: BLE001 - an unreadable queue owns no repair
+        return False
 
 
 def _note_recovery_decline(vault_root: Path, reason: str | None) -> None:

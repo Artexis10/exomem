@@ -253,17 +253,6 @@ def _queue_pending(vault_root: Path) -> bool:
         return False
 
 
-def _queue_depth(vault_root: Path) -> int:
-    """How many graph receipts are queued; 0 when unreadable. Never raises."""
-    from . import deferred_index
-
-    try:
-        return deferred_index.graph_queue_age(vault_root)[0]
-    except Exception:  # noqa: BLE001 - an unreadable queue must not kill the worker
-        log.debug("graph drain: queue depth unreadable", exc_info=True)
-        return 0
-
-
 def _requeue_quarantined(vault_root: Path) -> None:
     """Queue quarantined pages that changed or are due a slow retry. Never raises.
 
@@ -464,43 +453,39 @@ def _work_once(vault_root: Path) -> int:
     no pass -- a busy boundary, an unavailable epoch -- does not hold recovery
     back.
 
-    Recovery also waits while the queue converges: a drain that shrank the
-    queue and left some of it is mid-repair, and the drain that empties it
-    publishes and clears the barrier. A behind publication's repair set drains
-    that way, batch by batch. A queue that did not shrink -- no progress, or
-    writes queueing as fast as it drains -- does not hold recovery back.
+    Recovery also waits while per-path receipts are queued and no marker
+    stands (`epistemic_graph.recovery_decline_reason`): the queue owns that
+    repair, and the drain that empties it publishes and clears the barrier. A
+    behind publication's repair set drains that way, batch by batch. A queue
+    that cannot drain reaches the whole-vault route only through the stall
+    escalation in `_run_owned`.
     """
     from . import epistemic_graph
 
     processed = 0
     attempted = False
-    converging = False
     if _queue_pending(vault_root):
-        depth = _queue_depth(vault_root)
         with epistemic_graph.observe_full_marker_dispatches() as dispatches:
             processed = _drain_once(vault_root)
         attempted = any(result.whole_vault_attempted for result in dispatches)
-        converging = 0 < _queue_depth(vault_root) < depth
-    if attempted or converging:
+    if attempted:
         return processed
     if _barrier_pending(vault_root):
         if _recover_once(vault_root):
             processed += 1
-        else:
-            from . import epistemic_graph, freshness
-
-            # A barrier with an unpublished external epoch has no bounded
-            # receipt coverage to recover from.  The ordinary recovery refuses
-            # it correctly; route that unknown scope through the existing
-            # guarded full-marker convergence instead of leaving the barrier
-            # to retry a refusal forever.  A recent publication refusal keeps
-            # its established backoff rather than spending another rebuild.
-            if (
-                freshness.external_pending(vault_root)
-                and not epistemic_graph.publication_refusal_active(vault_root)
-                and _request_full_rebuild(vault_root, cause="barrier_external_epoch")
-            ):
-                processed += 1
+        # A barrier with an unpublished external epoch and no queued receipt
+        # has no bounded coverage to recover from. The ordinary recovery
+        # refuses it correctly; route that unknown scope through the existing
+        # guarded full-marker convergence instead of leaving the barrier to
+        # retry a refusal forever. A recent publication refusal keeps its
+        # established backoff rather than spending another rebuild.
+        elif (
+            epistemic_graph.recovery_decline_reason(vault_root)
+            == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
+            and not epistemic_graph.publication_refusal_active(vault_root)
+            and _request_full_rebuild(vault_root, cause="barrier_external_epoch")
+        ):
+            processed += 1
     elif not _queue_pending(vault_root) and _availability_pending(vault_root):
         # Only where there is no barrier: with one standing, repair is the
         # cheaper and more specific answer, and it is the one that knows how to
@@ -667,14 +652,16 @@ def _run_owned(vault_root: Path) -> None:
                 # rebuild already in flight, or a write landing mid-pass -- is
                 # retried on the backoff alone, never on a write's signal.
                 not_before = now + backoff
-            # The availability arm stays out while receipts are queued, so a
-            # queue that can never drain -- an epoch that never admits per-path
-            # repair, a refusal that persists -- would leave the graph
-            # unreadable for good. Once per-path work has been stuck behind an
-            # unreadable graph for the whole backoff ladder, hand it to the
-            # whole-vault route. Only that time counts: a readable graph, an
-            # empty queue or a whole-vault attempt starts the count again.
-            if whole_vault or not (
+            # The availability arm and barrier recovery both stay out while
+            # receipts are queued, so a queue that can never drain -- an epoch
+            # that never admits per-path repair, a refusal that persists --
+            # would leave the graph unreadable for good. Once per-path work has
+            # been stuck behind an unreadable graph for the whole backoff
+            # ladder, hand it to the whole-vault route. Only that time counts:
+            # a readable graph, an empty queue or a standing marker, whose
+            # convergence is the whole-vault attempt, starts the count again. A
+            # barrier does not: recovery declines behind queued receipts.
+            if _marker_pending(vault_root) or not (
                 _queue_pending(vault_root) and _availability_pending(vault_root)
             ):
                 stalled_since = None
