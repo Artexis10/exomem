@@ -100,23 +100,30 @@ def test_suppressed_tokens_never_decode_and_begin_suppression_applies_only_at_th
 
 
 def test_timestamp_rules_turn_text_first_and_a_backward_timestamp_into_a_valid_sequence():
-    decoded = _decode(_scripted([3, TS + 1, 4, TS, 5, TS, END]))
+    choices = [3, 4, TS, END]  # text first, then a closing timestamp below the opening one
+
+    def step(tokens, state):
+        logits = np.full(VOCAB, -20.0)
+        logits[TS + 1:] = 0.0  # a mild lean to the later timestamps, which the rules leave open
+        logits[choices[min(len(tokens) - 1, len(choices) - 1)]] = 10.0
+        return logits, state
+
+    decoded = _decode(step)
 
     stamps = [token for token in decoded.tokens if token >= TS]
     assert decoded.tokens[0] >= TS
-    assert stamps == sorted(stamps)
+    assert len(stamps) == 2 and stamps[0] < stamps[1]
 
 
 WINDOW = 30 * RATE
 STEP = int(RATE * 0.02)
 
 
-def _plan(tokens, *, speech=(), more_audio=True):
+def _plan(tokens, *, speech=()):
     from exomem.onnx_asr_runtime import plan_window
 
     return plan_window(
-        tokens, timestamp_begin=TS, window_samples=WINDOW, rate=RATE, speech=list(speech), more_audio=more_audio,
-        policy=POLICY,
+        tokens, timestamp_begin=TS, window_samples=WINDOW, rate=RATE, speech=list(speech), policy=POLICY,
     )
 
 
@@ -124,7 +131,7 @@ def test_a_window_that_ends_early_keeps_the_speech_that_follows_its_content():
     # [0.0] words [10.0]: one timestamp ends the decode while speech runs on to the window's end.
     plan = _plan([TS, 1, 2, TS + 500], speech=[(0, WINDOW)])
 
-    assert plan.content_end == 500 * STEP
+    assert plan.closed_end == 500 * STEP
     assert plan.seek == 500 * STEP
 
 
@@ -134,10 +141,24 @@ def test_a_window_that_ends_early_with_no_speech_after_it_seeks_the_whole_window
     assert plan.seek == WINDOW
 
 
-def test_the_last_window_seeks_to_its_end_whatever_speech_remains():
-    plan = _plan([TS, 1, 2, TS + 500], speech=[(0, WINDOW)], more_audio=False)
+def test_the_last_window_re_decodes_trailing_speech_like_any_other():
+    # A recording of 25 s that closes at 10 s with speech to 25 s: the 15 s tail is decoded again.
+    plan = _plan([TS, 1, 2, TS + 500], speech=[(0, 25 * RATE)])
+
+    assert plan.seek == 500 * STEP
+
+
+def test_a_decode_that_ends_on_text_never_re_decodes_what_it_emitted():
+    # Only an opening timestamp, then text: nothing closed, so the window is not seeked back to 1 s.
+    plan = _plan([TS + 50, 1, 2, 3], speech=[(5 * RATE, WINDOW)])
 
     assert plan.seek == WINDOW
+
+
+def test_a_closing_timestamp_before_the_minimum_seek_seeks_by_the_minimum():
+    plan = _plan([TS, 1, TS + 20], speech=[(0, WINDOW)])
+
+    assert plan.seek == int(POLICY["min_seek_s"] * RATE)
 
 
 def test_an_unfinished_segment_is_dropped_and_the_seek_stops_at_the_last_complete_timestamp():

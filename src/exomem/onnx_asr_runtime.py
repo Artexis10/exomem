@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import threading
@@ -223,7 +224,8 @@ class TimedTokens:
 class WindowSplit:
     segments: tuple[TimedTokens, ...]
     seek: int
-    content_end: int
+    #: End of the last closed segment when the decode ended on a closing timestamp, else None.
+    closed_end: int | None
 
 
 def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, window_samples: int, rate: int) -> WindowSplit:
@@ -241,8 +243,9 @@ def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, w
     cuts = [index + 1 for index in range(len(tokens) - 1) if is_stamp[index] and is_stamp[index + 1]]
     if not cuts:
         stamps = [token for token in tokens if token >= timestamp_begin]
-        content_end = sample(stamps[-1]) if stamps and stamps[-1] != timestamp_begin else window_samples
-        return WindowSplit((TimedTokens(0, content_end, tuple(t for t in tokens if t < timestamp_begin)),), window_samples, content_end)
+        end = sample(stamps[-1]) if stamps and stamps[-1] != timestamp_begin else window_samples
+        closed_end = sample(tokens[-1]) if single_ending else None
+        return WindowSplit((TimedTokens(0, end, tuple(t for t in tokens if t < timestamp_begin)),), window_samples, closed_end)
     if single_ending:
         cuts.append(len(tokens))
     segments, previous = [], 0
@@ -250,23 +253,23 @@ def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, w
         segments.append(timed(list(tokens[previous:cut])))
         previous = cut
     content_end = sample(tokens[previous - 1])
-    return WindowSplit(tuple(segments), window_samples if single_ending else content_end, content_end)
+    return WindowSplit(tuple(segments), window_samples if single_ending else content_end, content_end if single_ending else None)
 
 
 def plan_window(
     tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, window_samples: int, rate: int,
-    speech: list[tuple[int, int]], more_audio: bool, policy: dict,
+    speech: list[tuple[int, int]], policy: dict,
 ) -> WindowSplit:
-    """Split a window, then keep speech the decode left behind: seek to the content's end instead of the window's."""
+    """Split a window; after a closing timestamp, seek to the last closed segment's end if speech runs on past it."""
     split = split_window(tokens, timestamp_begin=timestamp_begin, window_samples=window_samples, rate=rate)
     min_seek = int(policy["min_seek_s"] * rate)
     seek = split.seek
-    if seek == window_samples and more_audio and split.content_end >= min_seek:
-        left_behind = sum(max(0, end - max(start, split.content_end)) for start, end in speech)
+    if split.closed_end is not None:
+        left_behind = sum(max(0, end - max(start, split.closed_end)) for start, end in speech)
         if left_behind >= policy["trailing_speech_s"] * rate:
-            seek = split.content_end
+            seek = split.closed_end
     # Never seek by less than min_seek, so a window that decodes nothing still moves on.
-    return WindowSplit(split.segments, min(max(seek, min_seek), window_samples), split.content_end)
+    return WindowSplit(split.segments, min(max(seek, min_seek), window_samples), split.closed_end)
 
 
 def decode_with_fallback(decode: Callable[[float], Decoded], policy: dict) -> Decoded:
@@ -297,10 +300,10 @@ class _SeekBuffer:
             self._samples = self._samples[drop:]
             self._start += drop
 
-    def window(self, seek: int, length: int) -> tuple[np.ndarray, bool]:
-        """The window at `seek` and whether audio follows it; reads one sample past it to know."""
+    def window(self, seek: int, length: int) -> np.ndarray:
+        """The window of up to `length` samples at `seek`."""
         self._drop_before(seek)
-        while len(self._samples) < seek - self._start + length + 1 and not self._ended:
+        while len(self._samples) < seek - self._start + length and not self._ended:
             chunk = next(self._chunks, None)
             if chunk is None:
                 self._ended = True
@@ -308,7 +311,7 @@ class _SeekBuffer:
             self._samples = np.concatenate([self._samples, chunk])
             self._drop_before(seek)
         begin = seek - self._start
-        return self._samples[begin:begin + length], len(self._samples) > begin + length
+        return self._samples[begin:begin + length]
 
 
 class OnnxWhisperBackend:
@@ -361,7 +364,10 @@ class OnnxWhisperBackend:
         # The prompt (start, language, task) and the new tokens share the text context.
         if (
             not policy["temperatures"] or policy["max_new_tokens"] + 3 > int(generation["max_length"])
-            or any(isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 for value in seek_seconds)
+            or any(
+                isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0
+                for value in seek_seconds
+            )
         ):
             raise ValueError("the speech registry's decoding policy does not fit the model")
         self._model, self._vad = model, vad
@@ -431,7 +437,7 @@ class OnnxWhisperBackend:
                 yield from done
                 samples = _SeekBuffer(audio_chunks(path, rate, chunk_samples))
                 while True:
-                    window, more_audio = samples.window(seek, chunk_samples)
+                    window = samples.window(seek, chunk_samples)
                     length = len(window)
                     if not length:
                         break
@@ -451,12 +457,13 @@ class OnnxWhisperBackend:
                         language, tokens = self._recognize(window, language, seed=seek)
                         plan = plan_window(
                             tokens, timestamp_begin=self._timestamp_begin, window_samples=length, rate=rate,
-                            speech=speech, more_audio=more_audio, policy=self.spec["decoding"],
+                            speech=speech, policy=self.spec["decoding"],
                         )
                         advance = plan.seek
                         for timed in plan.segments:
                             text = self._text(list(timed.tokens)).strip() if timed.tokens else ""
-                            if text:
+                            # An instantaneous segment carries no span; Whisper's transcribe drops it.
+                            if text and timed.end > timed.start:
                                 segment = Segment((seek + timed.start) / rate, (seek + timed.end) / rate, text)
                                 done.append(segment)
                                 yield segment

@@ -226,11 +226,14 @@ Greedy decoding had no loop guard, so a repeating window ran to its 448-token ca
 On those readings, 14 of 60 English windows and 13 of 60 Japanese windows looped.
 The engine therefore detects the language once per file, from the language tokens that the pinned generation config declares.
 It decodes each window with the reference Whisper fallback: at most 224 tokens, retried at higher temperatures when the compression ratio exceeds 2.4 or the mean log-probability falls below -1.0.
-The speech entry of `media_models.json` holds these values with their source and a decoding revision, and the revision is part of the engine label.
+The engine decodes with timestamp tokens under Whisper's `ApplyTimestampRules` and seeks through the audio as Whisper does, not in fixed 30-second windows.
+After a single closing timestamp, if Silero finds at least `trailing_speech_s` of speech past the last closed segment, the next window starts at that segment's end, on the last window too.
+A decode that ends on text never triggers this, since the text is already emitted. Every window moves on by at least `min_seek_s`, so the loop ends.
+The speech entry of `media_models.json` holds these values, including both thresholds, with their source and decoding revision 2, and the revision is part of the engine label.
 
 A 30-minute recording at 2 CPU takes longer than one 900-second job timeout.
 The engine writes an atomic progress record under the vault's derived state after each window, keyed by the file's vault path.
-A later run of the same path, content digest, window length and engine label continues from the next window, with the recorded language; any other record starts again.
+A later run of the same path, content digest, window length and engine label continues from the recorded seek, with the recorded language; any other record starts again.
 Removing the file discards its record through the deletion fan-out.
 The engine deletes the record when the transcript completes.
 The worker re-queues a stopped speech job. A timeout, pressure or hard-limit stop that advanced the record does not count toward the stop limit, and a stop without progress counts as before.
