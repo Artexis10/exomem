@@ -1,0 +1,205 @@
+{
+  "image": {
+    "model": "sentence-transformers/clip-ViT-B-32",
+    "precision": "fp32",
+    "graph_file": "model.onnx",
+    "preprocessor_file": "preprocessor_config.json",
+    "input_name": "pixel_values",
+    "output_name": "image_embeds",
+    "dimensions": 512,
+    "image_space": "openai/clip-vit-base-patch32",
+    "metadata_files": [
+      "preprocessor_config.json",
+      "config.json",
+      "LICENSES.txt"
+    ],
+    "source": {
+      "license_sources": [
+        "https://raw.githubusercontent.com/openai/CLIP/b1c4b6be5871f1b94359ba55901627f29ecc9ae9/LICENSE"
+      ]
+    },
+    "recipe": {
+      "version": 1,
+      "script": "scripts/build-media-artifacts.py",
+      "pipeline": "vision tower plus visual projection exported at opset 17 from the pinned safetensors; external data with1024byte threshold; consumer preprocessing and L2 normalization"
+    },
+    "artifact": {
+      "revision": "327ab6726d33c0e22f920c83f2ff9e4bd38ca37f",
+      "source": [],
+      "quantization": "fp32",
+      "file_format": "onnx-external-data",
+      "digest": "40ced2760dd2d02b06ba11b5b72646efd8320269ab23b7433a53777c191d45b0",
+      "asset_digest": "06472c253f7849304a8e8838a74b5d40e71dc341d18c544cdf8067818c95e9a3",
+      "files": [
+        "model.onnx",
+        "model.onnx.data",
+        "preprocessor_config.json",
+        "config.json",
+        "source.json",
+        "LICENSES.txt"
+      ]
+    },
+    "source_files": {
+      "model.safetensors": "99d28a652e6ec46629ab7047a0ac82c69b1fe11e0ce672c43af65d3a9a3fc05d",
+      "config.json": "f77ab2f54a03090c5dcac397670c254c39cd7a311611cafb5a79de3b07cd13ff",
+      "preprocessor_config.json": "910e70b3956ac9879ebc90b22fb3bc8a75b6a0677814500101a4c072bd7857bd",
+      "LICENSES.txt": "4f89241cdfff298df93a6775d6b351e10de37e3bdecb4267ececaaf3c876a587"
+    }
+  },
+  "image-query": {
+    "model": "sentence-transformers/clip-ViT-B-32-multilingual-v1",
+    "precision": "fp32",
+    "graph_file": "model.onnx",
+    "tokenizer_file": "tokenizer.json",
+    "tokenizer_config_file": "tokenizer_config.json",
+    "max_tokens": 128,
+    "output_name": "sentence_embedding",
+    "dimensions": 512,
+    "image_space": "openai/clip-vit-base-patch32",
+    "metadata_files": [
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "sentence_bert_config.json",
+      "LICENSES.txt"
+    ],
+    "source": {
+      "license_sources": [
+        "https://www.apache.org/licenses/LICENSE-2.0.txt"
+      ]
+    },
+    "recipe": {
+      "version": 1,
+      "script": "scripts/build-media-artifacts.py",
+      "pipeline": "published transformer, masked mean, original linear projection; consumer L2 normalization"
+    },
+    "artifact": {
+      "revision": "58edf8cada9e398793dca955574a48cbb7f18be2",
+      "source": [],
+      "quantization": "fp32",
+      "file_format": "onnx-external-data",
+      "digest": "2dc32efeb03dc161b8daebec96a9df297f92b3177b1f8856bdaef61ef037a8cc",
+      "asset_digest": "ab7392d7b818fcee6790925c90a6d15aa73a5d518cb01459e101663444f4e5d1",
+      "files": [
+        "model.onnx",
+        "model.onnx.data",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "sentence_bert_config.json",
+        "source.json",
+        "LICENSES.txt"
+      ]
+    },
+    "source_files": {
+      "onnx/model.onnx": "ca09969eb6e0f36fb1622654d1b47ac2025f576794f48b249a50b78d4b70373f",
+      "2_Dense/model.safetensors": "d12568dc7300970a4d3dbb49068ad16cd89b99840b74b026f8e48071e9414f74",
+      "2_Dense/config.json": "48f4dfaf605a6c2869cd200970e54911c6c15053781d2bdcf3e81e89e77662ed",
+      "1_Pooling/config.json": "a37f83ada23e7887be6b88f4998927dbeac0038af301553c7cd5461413bf1a56",
+      "sentence_bert_config.json": "70f4448f31320443fe3557cacea5abf2dcc4915dda8c80646bec9f3bb0aa5a1f",
+      "tokenizer.json": "5b4e1a8171c81dfd666ae40265b9530c6e0b3d53923fe8ac493dcc84229adf81",
+      "config.json": "edc12f518bfc445dedfe8a7c58374ea659525e0b6e67814686bd6cd57f90f8b3",
+      "modules.json": "f83ea5d68ac85ec15f650b350f0dc37b03d63abd60442f518e14c06f479beee6",
+      "tokenizer_config.json": "8f66d0ad85be46afc77e0bbf48312cff326ddb9e7290926df96a8228d69a814e",
+      "LICENSES.txt": "3929a14bb34028be48f2a34994178d34e30a27bdd567acfae744c85b72500d50"
+    },
+    "external_files": {
+      "model.onnx": "49f84ba764e4977a271b604d716a9a40491630c317cce0c345276be4c7aa4174",
+      "weights.data": "a1795e99f200f5e80a8b0aa103fafde3814a25e1de6f1a52dec4018b644a9ca8"
+    }
+  },
+  "speech": {
+    "model": "onnx-community/whisper-large-v3-turbo",
+    "precision": "int8",
+    "sample_rate": 16000,
+    "chunk_seconds": 30,
+    "vad_min_samples": 576,
+    "decoding": {
+      "revision": 1,
+      "source": "openai/whisper v20250625 transcribe.py and decoding.py defaults",
+      "max_new_tokens": 224,
+      "temperatures": [
+        0.0,
+        0.2,
+        0.4,
+        0.6,
+        0.8,
+        1.0
+      ],
+      "compression_ratio_threshold": 2.4,
+      "logprob_threshold": -1.0
+    },
+    "metadata_files": [
+      "config.json",
+      "vocab.json",
+      "added_tokens.json",
+      "generation_config.json",
+      "preprocessor_config.json",
+      "LICENSES.txt"
+    ],
+    "graphs": [
+      "onnx/encoder_model_int8.onnx",
+      "onnx/decoder_model_merged_int8.onnx"
+    ],
+    "source": {
+      "vad": {
+        "repository": "istupakov/silero-vad-onnx",
+        "revision": "b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6",
+        "license": "MIT",
+        "files": {
+          "silero_vad_16k_op15.onnx": "7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49",
+          "config.json": "1094039d370c82889582ba739a3d1caac5754c8b3a17a66a534200c9f72086e2"
+        },
+        "graph_file": "silero_vad_16k_op15.onnx"
+      },
+      "license_sources": [
+        "https://raw.githubusercontent.com/openai/whisper/v20250625/LICENSE",
+        "https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/LICENSE.txt"
+      ]
+    },
+    "recipe": {
+      "version": 2,
+      "script": "scripts/build-media-artifacts.py",
+      "pipeline": "external data with 1024-byte threshold; upstream int8 weights unchanged; decoder constants folded at ONNX Runtime basic level into file-backed initializers; fp32 Silero VAD",
+      "offline_optimized": ["onnx/decoder_model_merged_int8.onnx"]
+    },
+    "artifact": {
+      "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
+      "source": [],
+      "quantization": "int8",
+      "file_format": "onnx-external-data",
+      "digest": "34b91be0730d62f43110f993586d0171fa4a920a1063899f3799c55f76a4dfab",
+      "asset_digest": "36255d00220a6e22d5dee169e48f9e73d7bfd1163968238464bf89831023e94a",
+      "files": [
+        "onnx/encoder_model_int8.onnx",
+        "onnx/encoder_model_int8.data",
+        "onnx/decoder_model_merged_int8.onnx",
+        "onnx/decoder_model_merged_int8.data",
+        "config.json",
+        "vocab.json",
+        "added_tokens.json",
+        "generation_config.json",
+        "preprocessor_config.json",
+        "vad/silero_vad.onnx",
+        "vad/silero_vad.data",
+        "vad/config.json",
+        "source.json",
+        "LICENSES.txt"
+      ]
+    },
+    "source_files": {
+      "onnx/encoder_model_int8.onnx": "e44c0d5cfcc6ad283011602a738fa28dfa1ad7f7540c9503205479072a9cc1ef",
+      "onnx/decoder_model_merged_int8.onnx": "61481bd3be3a445d5a4b9070e8f8b2c6cc4fbbbbdc9f0e7ed048a132b8b84e0d",
+      "config.json": "35cd83669f75bc2867f3b3a4461850392d5e308cd6ea951c3700539883c28df1",
+      "generation_config.json": "16f95291d2f47c944d3c2b19390bba7965666555c1ea2a0bdc850d1fab45612f",
+      "vocab.json": "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387",
+      "added_tokens.json": "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0",
+      "preprocessor_config.json": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+      "LICENSES.txt": "2c8c9bc758a833b08655ca6521828a23c86d360a8ac36d14508141a0c9a21561"
+    },
+    "external_files": {
+      "onnx/decoder_model_merged_int8.data": "5a24aa0161cc7af3a10743d8904fc59a89e9efd70b3c8bf7a7609c16764377c3",
+      "onnx/decoder_model_merged_int8.onnx": "9f89ea00782fda903d7c1d7c9bb109f44e7275e077a399271caef40c2b21c37d",
+      "onnx/encoder_model_int8.data": "27723bcf27c9c56197fde4e8495bd1ce09ed0ae95fb6c9a4695471a9101c2965",
+      "onnx/encoder_model_int8.onnx": "d0878abfe4a5e338eb62f5bc79d306bdcb6dae2de9f404cc32a5bc913fb7ec39"
+    }
+  }
+}

@@ -130,6 +130,8 @@ nli = [
 # CUDA wheel. System dep NOT pip-installable: the Tesseract binary and its models.
 media-cpu = [
     "exomem[image-codecs]",  # images are decoded and normalised for Tesseract
+    "onnx-asr[cpu]==0.12.0",  # pinned Whisper adapter and CPU execution provider
+    "av>=11,<19",  # bounded audio/video decoding; also compatible with faster-whisper
     "pymupdf>=1.24",
     # docx/xlsx/pptx/html/epub → markdown (Microsoft MarkItDown, MIT). The per-format extras
     # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
