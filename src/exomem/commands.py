@@ -2103,7 +2103,7 @@ def op_bootstrap(
                 "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
-                    "args": {"operation": "upload"},
+                    "args": {"operation": "upload", "hold": True, "expected_sha256": "<sha256>"},
                     "endpoint": "/upload",
                     "when": "the client cannot supply file handles",
                 },
@@ -2249,8 +2249,11 @@ def op_bootstrap(
             {
                 "goal": "preserve binaries when the client cannot supply file handles",
                 "call": (
-                    "transfer_artifact(operation='upload') then POST multipart bytes to /upload; "
-                    "success requires stored_path, size, and hash"
+                    "transfer_artifact(operation='upload', lane='source', hold=true, "
+                    "expected_sha256='<sha256>'), then `exomem attach <file> --handoff-file "
+                    "<json> --root <dir>` or the same multipart POST to upload_url, then "
+                    "capture_source(files=[<returned file>], expected_sha256=...); "
+                    "success requires its receipt"
                 ),
             },
         ]
@@ -8196,8 +8199,9 @@ def op_capture_source(
     """Save Source text or original files.
 
     Never retype originals: use files, or transfer_artifact(upload, lane=source,
-    hold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.
-    Cloud needs handles; stdio needs HTTP MCP. source_kind is required.
+    hold=true, expected_sha256=...) then exomem attach --handoff-file or the same
+    POST on HTTP MCP. A Cloud cell without transfer_artifact needs handles; stdio
+    needs HTTP MCP. source_kind is required.
 
     Args:
         content: Authored text, or supply files.
@@ -8608,8 +8612,9 @@ def op_preserve_artifacts(
     """Preserve client file handles as append-only Evidence.
 
     Attachments or single-use exomem attach handles; else
-    transfer_artifact(operation="upload") then /upload. Keep the original,
-    not only a transcription. No model-visible base64.
+    transfer_artifact(upload, hold=true, expected_sha256=...) then exomem attach
+    --handoff-file or POST /upload. Keep the original, not only a transcription.
+    No model-visible base64.
     Per handle: stored, already_stored (exact bytes present; no write), or failed.
     Lost replies replay on retry.
 
@@ -8650,8 +8655,9 @@ def op_transfer_artifact(
 ) -> dict:
     """Prepare an original upload or download; a handoff does not prove custody.
 
-    Upload: hold=true with expected_sha256, then exomem attach --handoff-file.
-    Capture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.
+    Upload: hold=true with expected_sha256, then exomem attach --handoff-file or
+    the same multipart POST to upload_url. Capture the returned handle.
+    Download: supply artifact; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.

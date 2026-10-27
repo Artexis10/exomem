@@ -21,6 +21,27 @@ Handoffs expire within fifteen minutes and permit one upload. The byte limit is 
 The issuing authorization must remain active. Another session cannot redeem its held file.
 After an upload loses its reply, obtain a fresh handoff; the unused hold expires.
 
+## Sandbox clients
+
+A chat client with a code sandbox and no local `exomem` install can use the same handoff on a personal server or on Exomem Cloud.
+This covers claude.ai, Claude desktop chat and Cowork. It needs the user's opt-in: code execution on, and the Exomem host allowed for network access.
+It needs no user token.
+
+1. Compute the file's SHA-256 in the sandbox, for example with `sha256sum original.txt`; retain the digest.
+2. Call `transfer_artifact` with `operation="upload"`, `lane="source"`, `hold=true` and `expected_sha256`; receive a handoff.
+3. Save the returned handoff JSON to `handoff.json` in the sandbox; keep its token private.
+4. Run `pip install exomem`, then `exomem attach original.txt --handoff-file handoff.json --root .`; receive a held file handle.
+5. If the sandbox cannot run that command, send the fallback request below instead; receive the same reply.
+6. Call `capture_source` with the returned `file` in `files`, a title, source kind and digest; receive the custody receipt.
+
+The fallback request is one multipart `POST` to the handoff's `upload_url`.
+It carries the header `Authorization: Bearer <token>` and the form fields `file`, `hold=1` and `lane` (the handoff's lane).
+Do not add other fields such as `scope` or `category`; the service refuses them. An installed CLI that predates `--handoff-file` needs the fallback request.
+Check the reply before step 6: `state` is `held`, and `hash` and `size` match the file.
+
+The client sets its own attachment cap: 30 MB per file in claude.ai and Claude desktop chat. Cowork reads files from disk.
+The handoff's byte limit applies as well. A pasted inline image never reaches the sandbox.
+
 ## Other clients
 
 Existing client file handles work with `capture_source(files=[...], expected_sha256=...)`, including Cloud handles.

@@ -542,7 +542,11 @@ cannot be undone.
   whole batch. A successful response contains the stored path, `size`, and
   `hash`; never treat an upload token as proof that bytes landed.
 
-- **Without file handles (including Claude web):** (1) call **`transfer_artifact(operation="upload")`** →
+- **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
+  `operation-routing.md` ("A shared file that is evidence"). It needs no user token
+  and works on Exomem Cloud, which accepts no other upload, and on a personal server.
+
+- **Without file handles, on a personal server:** (1) call **`transfer_artifact(operation="upload")`** →
   a short-lived `{token, ttl_seconds, upload_url}`; (2) only where the runtime
   holding the file can reach `upload_url`, multipart-POST each attached file with `Authorization: Bearer
   <token>` and form fields `file` / `scope` / `category` (optional `filename`,
