@@ -412,6 +412,8 @@ class MediaEdge:
                     await self._drop(intent)
             finally:
                 self._resolving.discard(intent.id)
+        if self.intents:
+            log.warning("write intents stay pending, by cell: %s", self.pending_by_cell())
 
     async def _recovery_loop(self) -> None:
         while True:
@@ -603,7 +605,9 @@ class MediaEdge:
                 raise Reply(503, _UNAVAILABLE)
             await response.json(200, {"generation": settled})
         elif path == PENDING_PATH and method == "GET":
-            await response.json(200, {"pending": self.pending_by_cell()})
+            # Every pod the policy admits may ask, so the answer names no cell. The recovery pass
+            # logs the pending writes by cell for the operator.
+            await response.json(200, {"pending": len(self.intents)})
         elif path.startswith(OBJECTS_PATH):
             await self._object(scope, receive, response, headers)
         else:

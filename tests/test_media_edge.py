@@ -191,12 +191,13 @@ def test_no_hide_list_or_delete_route_exists(harness: Harness, method: str, path
     assert harness.fake.calls == []
 
 
-def test_a_restart_keeps_an_uncertain_write_open_until_the_late_write_lands(harness: Harness):
+def test_a_restart_keeps_an_uncertain_write_open_until_the_late_write_lands(
+        harness: Harness, caplog: pytest.LogCaptureFixture):
     data = b"a write the provider has not applied yet"
     harness.fake.lose("upload_file", "late", then_outage=True)
     assert harness.put(data).status_code == 503
     pending = asyncio.run(harness._plain(PENDING_PATH, harness.edge))
-    assert pending.json() == {"pending": {CELL_A: 1}}
+    assert pending.json() == {"pending": 1}
 
     harness.publish(2, {CELL_A: 1, CELL_B: 1})
     assert harness.generation() == 1
@@ -204,13 +205,32 @@ def test_a_restart_keeps_an_uncertain_write_open_until_the_late_write_lands(harn
     assert harness.generation(restarted) == 1
 
     harness.fake.outage = False
+    caplog.clear()
     asyncio.run(restarted.recover_pending())
     assert harness.generation(restarted) == 1  # the provider has no such version, which proves nothing
+    # No provider error names the cell on this pass; the pending report must.
+    assert any(CELL_A in record.getMessage() and CELL_B not in record.getMessage()
+               for record in caplog.records if record.levelname == "WARNING")
 
     harness.fake.land_late()
     asyncio.run(restarted.recover_pending())
     assert harness.generation(restarted) == 2
     assert harness.fake.names() == [f"cells/{CELL_A}/{name_of(data)}"]
+
+
+def test_a_recovery_head_after_the_provider_authorization_expired_still_settles_the_write(harness: Harness):
+    # B2 authorizations expire. A HEAD that gave up on the first 401 would hold the drain open.
+    data = b"a write whose reply was lost"
+    harness.fake.lose("upload_file", "late")
+    assert harness.put(data).status_code == 503
+    harness.publish(2, {CELL_A: 1, CELL_B: 1})
+    harness.fake.land_late()
+    harness.fake.expire_authorization()
+
+    asyncio.run(harness.edge.recover_pending())
+
+    assert harness.generation() == 2
+    assert asyncio.run(harness._plain(PENDING_PATH, harness.edge)).json() == {"pending": 0}
 
 
 def test_a_missing_head_after_a_lost_request_keeps_the_write_open(harness: Harness):
@@ -231,7 +251,7 @@ def test_a_lost_upload_reply_recovers_the_exact_version(tmp_path: Path, size: in
     assert response.json()["version"] == harness.fake.version_of(f"cells/{CELL_A}/{name_of(data)}")
     assert harness.fake.names() == [f"cells/{CELL_A}/{name_of(data)}"]
     assert harness.generation() == 1
-    assert asyncio.run(harness._plain(PENDING_PATH, harness.edge)).json() == {"pending": {}}
+    assert asyncio.run(harness._plain(PENDING_PATH, harness.edge)).json() == {"pending": 0}
 
 
 def test_an_unsettled_upload_holds_its_name_while_other_cells_keep_working(harness: Harness):

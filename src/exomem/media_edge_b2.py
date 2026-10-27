@@ -199,14 +199,20 @@ class B2:
             return FileInfo(str(payload["fileId"]), str(payload["fileName"]), int(payload["contentLength"]),
                             str(payload["action"]), dict(payload.get("fileInfo") or {}))
 
-    async def head_name(self, key: str) -> FileInfo | None:
-        """The newest version of a name, by the provider's download-by-name HEAD."""
+    async def _head(self, key: str) -> httpx.Response:
         session = await self._authorized()
         url = f"{session.download_url}/file/{session.bucket_name}/{quote(key, safe='/')}"
         try:
-            response = await self._client.head(url, headers={"Authorization": session.token})
+            return await self._client.head(url, headers={"Authorization": session.token})
         except httpx.HTTPError as error:
             raise ProviderUncertain("the provider HEAD failed") from error
+
+    async def head_name(self, key: str) -> FileInfo | None:
+        """The newest version of a name, by the provider's download-by-name HEAD."""
+        response = await self._head(key)
+        if response.status_code == 401:
+            self._session = None  # the authorization expired; ask once more
+            response = await self._head(key)
         if response.status_code == 404:
             return None
         if response.status_code != 200:

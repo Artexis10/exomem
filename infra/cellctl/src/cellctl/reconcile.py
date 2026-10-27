@@ -455,6 +455,9 @@ class ClusterConfig:
     media_engine_fleet_default: tuple[str, ...] = ()
     # add-cloud-media-store D4-D6: the media edge's settings; None leaves every cell as before.
     media_edge: MediaEdgeConfig | None = None
+    # Whether the schema has the media key columns. run_loop observes it on each connect; it is
+    # never configured.
+    media_key_columns: bool = False
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -503,6 +506,13 @@ class ClusterConfig:
             or len(set(default)) != len(default)
         ):
             raise ValueError("a media engine fleet default is a list of unique lower-case engine names")
+
+    @property
+    def reads_media_keys(self) -> bool:
+        """Whether cellctl reads and retires the media key columns. The edge requires them. Without
+        the edge they are still read where they exist: a cell taken off the edge keeps its store
+        identity, and a deleted cell still loses its bundle."""
+        return self.media_edge is not None or self.media_key_columns
 
     def workload_for_cell(self, cell_id: str) -> tuple[ResourceSettings, dict]:
         if cell_id in self.dedicated_cell_ids:
@@ -688,10 +698,13 @@ async def _resolve_media_bundle(connection: asyncpg.Connection, current: CellRow
         raise ValueError("incomplete media key state")
     if current.media_key_wrapped is None:
         raw, version = mint_bundle(), CONTENT_KEY_VERSION
-        await db.write_observed(connection, current.cell_id, {
+        # The row lock already serializes minting; the guard keeps a bundle from ever being replaced.
+        won = await db.try_write_once_group(connection, current.cell_id, {
             "media_key_wrapped": wrap_bundle(root, raw, cell_id=current.cell_id),
             "media_key_version": version,
-        })
+        }, first_column="media_key_wrapped")
+        if not won:
+            raise ValueError("the media key bundle changed while it was minted")
     else:
         version = current.media_key_version
         raw = unwrap_bundle(root, current.media_key_wrapped, cell_id=current.cell_id, key_version=version)
@@ -722,7 +735,7 @@ async def _resolve_secret_material(
 
     media_material: dict[str, object] = {}
     async with connection.transaction():
-        current = await db.lock_cell(connection, row.cell_id)
+        current = await db.lock_cell(connection, row.cell_id, media_keys=media)
         if current.desired_state == "deleted" or current.content_keys_retired_at is not None:
             raise ValueError("content keys are retired")
         if ((current.cell_root_key_wrapped is None) != (current.cell_root_key_version is None)
@@ -975,6 +988,8 @@ def _compute_render_digest(
             "max_object_bytes": edge.max_object_bytes,
             "policy": dict(edge.store_policy),
         }
+    elif _media_store_retained(cluster_config, row):
+        material["media_store_retained"] = True
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on
         # a Hetzner volume keeps the digest it had before local storage.
@@ -1224,6 +1239,14 @@ def _log_orphan_namespaces(cluster: ClusterGateway, rows: list[CellRow], now: da
             logger.warning("cellctl: orphan namespace %s is labelled for cell %s, which has no row; left in place", namespace, cell_id)
 
 
+def _media_store_retained(cluster_config: ClusterConfig, row: CellRow) -> bool:
+    """A live cell that holds a media key bundle but that the edge does not serve. It keeps its
+    store identity, disabled: without it the runtime would read every evicted original as deleted."""
+    edge = cluster_config.media_edge
+    served = edge is not None and edge.selects(row.cell_id)
+    return row.desired_state != "deleted" and row.media_key_wrapped is not None and not served
+
+
 def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
     """The credential version the edge admits for this cell; None when the edge does not serve it."""
     edge = cluster_config.media_edge
@@ -1296,7 +1319,7 @@ async def reconcile_once(
     memory = memory if memory is not None else LoopMemory()
 
     # Database-only retirement runs before Kubernetes or provider availability can delay it.
-    await db.retire_content_keys(connection, now)
+    await db.retire_content_keys(connection, now, media_keys=cluster_config.reads_media_keys)
 
     # D4 self-check: without cellctl's own admission confinement in place,
     # its ClusterRole is close to cluster-admin. Do nothing this pass rather
@@ -1321,7 +1344,7 @@ async def reconcile_once(
         # Close the old domain before inventory/workloads. An earlier redemption
         # must commit before this barrier, so it is included in the inventory.
         await db.write_capacity_snapshot(connection, capacities={}, observed_at=now)
-    rows = await db.select_all_rows(connection)
+    rows = await db.select_all_rows(connection, media_keys=cluster_config.reads_media_keys)
     committed = frozenset(row.cell_id for row in rows if not (
         row.desired_state == "deleted" and row.observed_state == "deleted"
         and row.observed_generation == row.generation))
@@ -2049,7 +2072,8 @@ async def _reconcile_row(
             # Persist the successful report before cleanup can remove its Pod; C5 makes it immutable.
             await db.write_import(connection, item.import_id, {"staged_files": counts[0], "staged_bytes": counts[1]})
         if decision.finalize_import:
-            current = await db.finalize_import(connection, row.cell_id, item.import_id)
+            current = await db.finalize_import(
+                connection, row.cell_id, item.import_id, media_keys=cluster_config.reads_media_keys)
             if current is None:
                 return False  # Rearmed discard, lifecycle or a newer observation wins; reread next pass.
             row = dataclass_replace(current, hold_kind=None, hold_started_at=None, last_error_code=None)
@@ -2248,6 +2272,8 @@ async def _reconcile_row(
                 "media_max_object_bytes": edge.max_object_bytes,
                 "media_store_policy": dict(edge.store_policy),
             }
+        elif _media_store_retained(cluster_config, row):
+            media_fields = {"media_store_retained": True}
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
@@ -2621,6 +2647,19 @@ async def _sleep_or_stop(stop: asyncio.Event | None, seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
 
 
+class MediaKeyColumnsMissing(RuntimeError):
+    """The media edge is configured, but the schema has no column to hold a cell's media key bundle."""
+
+
+async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_config: ClusterConfig) -> ClusterConfig:
+    present = await db.has_media_key_columns(connection)
+    if cluster_config.media_edge is not None and not present:
+        raise MediaKeyColumnsMissing(
+            "the media edge is configured, but exomem_cloud_cells has no media key columns: apply Substrate "
+            f"migration {db.MEDIA_KEY_MIGRATION} and its grants, or turn the media edge off")
+    return dataclass_replace(cluster_config, media_key_columns=present)
+
+
 async def run_loop(
     dsn: str,
     cluster: ClusterGateway,
@@ -2664,7 +2703,11 @@ async def run_loop(
                     connection.add_termination_listener(lambda *_args, w=woken: w.set())
                     if not await db.try_advisory_lock(connection):
                         raise RuntimeError("cellctl advisory lock is held by another writer")
+                    cluster_config = await _observe_media_key_columns(connection, cluster_config)
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
+                except MediaKeyColumnsMissing:
+                    # A deploy-order fault, not an outage: stop, so the rollout fails where it started.
+                    raise
                 except Exception as error:  # noqa: BLE001
                     logger.error("cellctl failed to (re)connect to the database: %s", _describe_error(error))
                     if connection is not None:

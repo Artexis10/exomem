@@ -3146,11 +3146,11 @@ async def test_selected_cutover_reads_inventory_after_prior_admission_and_promot
     original = db.select_all_rows
     inventoried = []
 
-    async def inventory(connection):
+    async def inventory(connection, **options):
         # The first selected pass must retire every old positive row before
         # obtaining the migration inventory, including a redemption in flight.
         assert await connection.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 0
-        rows = await original(connection)
+        rows = await original(connection, **options)
         inventoried.extend(row.cell_id for row in rows)
         return rows
 

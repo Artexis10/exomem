@@ -202,6 +202,8 @@ async def _create_cell_db(server: PostgresServer) -> str:
         await owner_connection.execute(import_test_sql(FIXTURES))
         await owner_connection.execute(export_test_sql(FIXTURES))
         await owner_connection.execute(grants_sql)
+        # Mirrors Substrate migration 0081 (media key columns) and its grants stanza, which the
+        # pinned Substrate commit does not have yet. It must follow the grants, which revoke.
         await owner_connection.execute(media_key_test_sql(FIXTURES))
     finally:
         await owner_connection.close()

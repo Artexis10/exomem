@@ -41,9 +41,6 @@ OBSERVED_COLUMNS = (
     "backup_key_version",
     "cell_root_key_wrapped",
     "cell_root_key_version",
-    # add-cloud-media-store D5: the media key bundle, wrapped under the cell root.
-    "media_key_wrapped",
-    "media_key_version",
     "content_keys_retired_at",
     "last_live_key_destroyed_at",
     "key_retention_sources",
@@ -71,6 +68,12 @@ OBSERVED_COLUMNS = (
     "import_limits",
 )
 
+# add-cloud-media-store D5, Substrate migration 0081: the media key bundle, wrapped under
+# the cell root. Kept apart from the columns above, so a cellctl whose schema predates the
+# migration can still read and retire every cell: each call that reads or writes them says so.
+MEDIA_KEY_COLUMNS = ("media_key_wrapped", "media_key_version")
+MEDIA_KEY_MIGRATION = "0081_exomem_cloud_media_keys"
+
 ROLLOUT_COLUMNS = ("paused", "error_code", "held_cell_id", "last_good_image")
 
 CELL_COLUMNS = (
@@ -84,6 +87,9 @@ CELL_COLUMNS = (
     *OBSERVED_COLUMNS,
     "created_at",
 )
+
+# The columns cellctl writes. A media key write reaches the server only on a schema that has them.
+WRITABLE_COLUMNS = (*OBSERVED_COLUMNS, *MEDIA_KEY_COLUMNS)
 
 NOTIFY_CHANNEL = "exomem_cloud_cells"
 
@@ -112,19 +118,33 @@ async def connect(dsn: str) -> asyncpg.Connection:
     )
 
 
+def _cell_columns(media_keys: bool) -> str:
+    return ", ".join((*CELL_COLUMNS, *MEDIA_KEY_COLUMNS) if media_keys else CELL_COLUMNS)
+
+
 def _row_from_record(record: asyncpg.Record) -> CellRow:
     values = {column: record[column] for column in CELL_COLUMNS}
+    # A read without the media key columns leaves them at the row's default, None.
+    values.update({column: record[column] for column in MEDIA_KEY_COLUMNS if column in record})
     if isinstance(values["import_limits"], str):
         values["import_limits"] = json.loads(values["import_limits"])
     return CellRow(**values)
+
+
+async def has_media_key_columns(connection: asyncpg.Connection) -> bool:
+    """Whether the schema cellctl runs against has the media key columns of migration 0081."""
+    present = await connection.fetchval(
+        "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = 'exomem_cloud_cells' AND column_name = ANY($1::text[])", list(MEDIA_KEY_COLUMNS))
+    return present == len(MEDIA_KEY_COLUMNS)
 
 
 def _rollout_from_record(record: asyncpg.Record) -> RolloutRow:
     return RolloutRow(**{column: record[column] for column in ROLLOUT_COLUMNS})
 
 
-async def select_all_rows(connection: asyncpg.Connection) -> list[CellRow]:
-    records = await connection.fetch(f"SELECT {', '.join(CELL_COLUMNS)} FROM exomem_cloud_cells")
+async def select_all_rows(connection: asyncpg.Connection, *, media_keys: bool = False) -> list[CellRow]:
+    records = await connection.fetch(f"SELECT {_cell_columns(media_keys)} FROM exomem_cloud_cells")
     rows = []
     for record in records:
         row = _row_from_record(record)
@@ -144,25 +164,26 @@ async def read_rollout(connection: asyncpg.Connection) -> RolloutRow:
     return _rollout_from_record(record)
 
 
-async def lock_cell(connection: asyncpg.Connection, cell_id: str) -> CellRow:
+async def lock_cell(connection: asyncpg.Connection, cell_id: str, *, media_keys: bool = False) -> CellRow:
     """Serialize key conversion with deletion and competing controller retries."""
     record = await connection.fetchrow(
-        f"SELECT {', '.join(CELL_COLUMNS)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id)
+        f"SELECT {_cell_columns(media_keys)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id)
     if record is None:
         raise ValueError("cell no longer exists")
     return _row_from_record(record)
 
 
-async def retire_content_keys(connection: asyncpg.Connection, now: datetime) -> None:
-    """Retire decryption material before any provider cleanup can block."""
+async def retire_content_keys(connection: asyncpg.Connection, now: datetime, *, media_keys: bool = False) -> None:
+    """Retire decryption material before any provider cleanup can block. With `media_keys`,
+    the media key bundle too; a schema without its columns holds no bundle to retire."""
+    media_set = "media_key_wrapped=NULL, media_key_version=NULL, " if media_keys else ""
+    media_held = " OR media_key_wrapped IS NOT NULL" if media_keys else ""
     await connection.execute(
         "UPDATE exomem_cloud_cells SET cell_root_key_wrapped=NULL, cell_root_key_version=NULL, "
-        "backup_key_wrapped=NULL, backup_key_version=NULL, "
-        "media_key_wrapped=NULL, media_key_version=NULL, "
+        f"backup_key_wrapped=NULL, backup_key_version=NULL, {media_set}"
         "content_keys_retired_at=COALESCE(content_keys_retired_at,$1) "
         "WHERE desired_state='deleted' AND (content_keys_retired_at IS NULL "
-        "OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL "
-        "OR media_key_wrapped IS NOT NULL)", now)
+        f"OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL{media_held})", now)
 
 
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:
@@ -189,7 +210,7 @@ async def write_observed(
 ) -> None:
     if not updates:
         return
-    unknown = set(updates) - set(OBSERVED_COLUMNS)
+    unknown = set(updates) - set(WRITABLE_COLUMNS)
     if unknown:
         raise ValueError(f"not an observed column: {sorted(unknown)}")
     updates = {key: json.dumps(value) if key == "import_limits" and value is not None else value
@@ -237,7 +258,7 @@ async def try_write_once(
     loss and uses the value that is already stored.
     """
 
-    if column not in OBSERVED_COLUMNS:
+    if column not in WRITABLE_COLUMNS:
         raise ValueError(f"not an observed column: {column}")
     result = await connection.execute(
         f"UPDATE exomem_cloud_cells SET {column} = $2 WHERE cell_id = $1 AND {column} IS NULL",
@@ -261,7 +282,7 @@ async def try_write_once_group(
 
     if first_column not in columns:
         raise ValueError(f"first_column {first_column!r} must be one of {sorted(columns)}")
-    unknown = set(columns) - set(OBSERVED_COLUMNS)
+    unknown = set(columns) - set(WRITABLE_COLUMNS)
     if unknown:
         raise ValueError(f"not an observed column: {sorted(unknown)}")
     assignments, values = _assignments(columns, start=2)
@@ -288,7 +309,7 @@ async def try_replace_group(
 
     if match_column not in columns:
         raise ValueError(f"match_column {match_column!r} must be one of {sorted(columns)}")
-    unknown = set(columns) - set(OBSERVED_COLUMNS)
+    unknown = set(columns) - set(WRITABLE_COLUMNS)
     if unknown:
         raise ValueError(f"not an observed column: {sorted(unknown)}")
     assignments, values = _assignments(columns, start=3)
@@ -398,13 +419,15 @@ async def write_import(connection: asyncpg.Connection, import_id: str, updates: 
                              uuid.UUID(import_id), *parameters)
 
 
-async def finalize_import(connection: asyncpg.Connection, cell_id: str, import_id: str) -> CellRow | None:
+async def finalize_import(
+    connection: asyncpg.Connection, cell_id: str, import_id: str, *, media_keys: bool = False
+) -> CellRow | None:
     """Publish cleanup completion and release admission under the API's C1-first row lock."""
     import uuid
 
     async with connection.transaction():
         record = await connection.fetchrow(
-            f"SELECT {', '.join(CELL_COLUMNS)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id,
+            f"SELECT {_cell_columns(media_keys)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id,
         )
         if record is None or record["desired_state"] == "deleted" or record["hold_kind"] not in (None, "import"):
             return None

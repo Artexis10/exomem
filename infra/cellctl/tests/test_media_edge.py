@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import json
@@ -21,7 +22,13 @@ from cellctl.manifests import MEDIA_STORE_CONFIG_KEY, namespace_name
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
-from .test_reconcile import FakeClusterGateway, _cluster_config, _secrets_config, _seed_cell
+from .test_reconcile import (
+    FakeClusterGateway,
+    _cluster_config,
+    _converged_cell,
+    _secrets_config,
+    _seed_cell,
+)
 
 CANARY = "aaaaaaaaaaaaaaaa"
 OTHER = "bbbbbbbbbbbbbbbb"
@@ -266,7 +273,7 @@ class Fleet:
             now=now, memory=self.memory)
 
     async def rows(self) -> dict[str, object]:
-        return {row.cell_id: row for row in await db.select_all_rows(self.connection)}
+        return {row.cell_id: row for row in await db.select_all_rows(self.connection, media_keys=True)}
 
     async def close(self) -> None:
         await self.connection.close()
@@ -426,3 +433,81 @@ async def test_a_selected_cell_waits_when_the_active_set_cannot_be_published(cel
         assert "media-edge-credential" in fleet.cluster.secret(CANARY)
     finally:
         await fleet.close()
+
+
+@pytest.mark.parametrize("taken_off", ["removed from the selection", "edge turned off"])
+async def test_a_cell_taken_off_the_edge_keeps_its_store_disabled_with_no_credential_or_egress(cell_db, taken_off) -> None:
+    # Without its store identity the runtime reads every evicted original as deleted, and its
+    # reconcile then removes their derived data.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        assert "media-edge-credential" in fleet.cluster.secret(CANARY)
+        if taken_off == "removed from the selection":
+            fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
+                cell_ids=(), signing_key=fleet.config.media_edge.signing_key))
+        else:
+            # The chart's mediaEdge.enabled=false: no edge settings, on a schema that has the columns.
+            fleet.config = dataclasses.replace(fleet.config, media_edge=None, media_key_columns=True)
+        await fleet.run(NOW + timedelta(minutes=5))
+
+        namespace = namespace_name(CANARY)
+        secret = fleet.cluster.secret(CANARY)
+        pod = fleet.cluster.applied[(namespace, "StatefulSet", "cell")]["spec"]["template"]["spec"]
+        env = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}
+        mounted = [v["secret"]["items"] for v in pod["volumes"] if v["name"] == "media"]
+        policy = fleet.cluster.applied[(namespace, "NetworkPolicy", "runtime-ingress")]
+
+        assert json.loads(secret.get(MEDIA_STORE_CONFIG_KEY, b"null")) == {"vaults": {"/data/vault": {
+            "store": f"media-edge:{CANARY}", "enabled": False, "adapter": "media-edge"}}}
+        assert not {"media-edge-credential", "media-age-identity", "media-name-key"} & secret.keys()
+        assert env.get("EXOMEM_MEDIA_STORE_CONFIG") == "/run/exomem/media/store.json"
+        assert not {"EXOMEM_MEDIA_EDGE_URL", "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"} & env.keys()
+        assert mounted == [[{"key": MEDIA_STORE_CONFIG_KEY, "path": "store.json"}]]
+        assert policy["spec"]["egress"] == []
+        assert (await fleet.rows())[CANARY].media_key_wrapped is not None
+    finally:
+        await fleet.close()
+
+
+async def _drop_media_key_columns(cell_db) -> None:
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await owner.execute("ALTER TABLE exomem_cloud_cells DROP COLUMN media_key_wrapped, DROP COLUMN media_key_version")
+    finally:
+        await owner.close()
+
+
+async def test_with_the_edge_off_a_schema_without_the_media_key_columns_still_serves_and_retires_cells(cell_db) -> None:
+    # A Substrate that predates migration 0081 must not stop cellctl while the edge is off.
+    await _drop_media_key_columns(cell_db)
+    await _seed_cell(cell_db, CANARY, CANARY)
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    cluster, b2 = FakeClusterGateway(), FakeB2()
+    try:
+        config = await reconcile._observe_media_key_columns(connection, _cluster_config())
+        assert config.reads_media_keys is False
+        await _converged_cell(connection, cluster, b2, NOW)
+        assert (await db.select_all_rows(connection))[0].cell_root_key_wrapped is not None
+
+        await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(),
+                                       config, now=NOW + timedelta(minutes=1))
+        retired = (await db.select_all_rows(connection))[0]
+        assert retired.cell_root_key_wrapped is retired.backup_key_wrapped is None
+        assert retired.content_keys_retired_at is not None
+    finally:
+        await app.close()
+        await connection.close()
+
+
+async def test_with_the_edge_on_cellctl_stops_at_startup_on_a_schema_without_the_media_key_columns(cell_db, tmp_path) -> None:
+    # Retrying would leave the fleet unreconciled behind a log line; stopping fails the rollout.
+    await _drop_media_key_columns(cell_db)
+    config = dataclasses.replace(_cluster_config(), media_edge=_edge())
+
+    with pytest.raises(reconcile.MediaKeyColumnsMissing, match="migration 0081_exomem_cloud_media_keys"):
+        await asyncio.wait_for(reconcile.run_loop(
+            cell_db.dsn(role="exomem_cellctl"), EdgeCluster(), FakeB2(), FakeHetznerVolumeProvider(),
+            _secrets_config(), config, heartbeat_path=str(tmp_path / "heartbeat")), timeout=20)

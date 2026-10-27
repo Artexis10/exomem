@@ -32,6 +32,7 @@ class FakeB2:
         self._lost: dict[str, tuple[str, bool]] = {}  # endpoint -> (mode, whether an outage follows)
         self._parked: dict[str, dict] = {}
         self._counter = 0
+        self.account_token, self._expired = "token-account", 0
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -44,6 +45,11 @@ class FakeB2:
         """
         assert mode in {"reply", "request", "late"}
         self._lost[endpoint] = (mode, then_outage)
+
+    def expire_authorization(self) -> None:
+        """End the current account authorization, as B2 does after its lifetime."""
+        self._expired += 1
+        self.account_token = f"token-account-{self._expired}"
 
     def land_late(self) -> None:
         """Apply every parked write, as a slow provider would."""
@@ -84,7 +90,7 @@ class FakeB2:
         url = request.url
         if url.path.endswith("/b2_authorize_account"):
             return "authorize", self._authorize(request)
-        if request.headers.get("authorization", "") != "token-account" and url.host != "up000.fake-b2.test":
+        if request.headers.get("authorization", "") != self.account_token and url.host != "up000.fake-b2.test":
             return "unauthorized", self._json(401, {"code": "bad_auth_token"})
         if url.host == "up000.fake-b2.test":
             return await self._upload(request)
@@ -108,7 +114,7 @@ class FakeB2:
                 storage |= {"bucketId": None, "bucketName": None, "allowed": {"buckets": [bucket]}}
             else:
                 storage |= {"bucketId": None, "bucketName": None}
-            return self._json(200, {"accountId": "account", "authorizationToken": "token-account",
+            return self._json(200, {"accountId": "account", "authorizationToken": self.account_token,
                                     "apiInfo": {"storageApi": storage}})
         return self._json(401, {"code": "unauthorized"})
 

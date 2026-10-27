@@ -235,6 +235,10 @@ class CellManifestSpec:
     media_max_object_bytes: int = 0
     # Operator-set eviction and hydration settings the runtime reads from the same file.
     media_store_policy: dict[str, bool | int | float] = field(default_factory=dict)
+    # A cell that holds a media key bundle but that the edge does not serve. It keeps its store
+    # identity, disabled, so its evicted originals still read as evicted, never as deleted. It
+    # gets no credential, no key and no egress to the edge.
+    media_store_retained: bool = False
 
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
@@ -244,6 +248,13 @@ class CellManifestSpec:
             and len(self.media_name_key) == 32 and self.media_key_version > 0 and self.media_max_object_bytes > 0
         ):
             raise ValueError("a media edge cell needs its credential, key bundle, key version and object bound")
+        if self.media_edge_url and self.media_store_retained:
+            raise ValueError("a cell the media edge serves does not also retain a disabled store")
+
+    @property
+    def media_store(self) -> bool:
+        """Whether the cell's runtime gets a media store configuration, served or retained."""
+        return bool(self.media_edge_url) or self.media_store_retained
 
     @property
     def namespace(self) -> str:
@@ -455,6 +466,10 @@ def _b64(value: str) -> str:
 def _media_store_config(spec: CellManifestSpec) -> str:
     """The file #2140's runtime reads: one store per vault, keyed by the vault's path.
     The store identity is per cell, so a reference restored into another cell counts as none."""
+    if spec.media_store_retained:
+        # Offload, eviction and hydration are off; the identity alone keeps evicted originals evicted.
+        store: dict[str, object] = {"store": f"media-edge:{spec.cell_id}", "enabled": False, "adapter": MEDIA_ADAPTER}
+        return json.dumps({"vaults": {CELL_VAULT_PATH: store}}, sort_keys=True, separators=(",", ":"))
     store = {
         **spec.media_store_policy,
         "store": f"media-edge:{spec.cell_id}",
@@ -488,6 +503,8 @@ def render_secret(spec: CellManifestSpec) -> dict:
             MEDIA_NAME_KEY_KEY: base64.b64encode(spec.media_name_key).decode("ascii"),
             MEDIA_STORE_CONFIG_KEY: _b64(_media_store_config(spec)),
         })
+    elif spec.media_store_retained:
+        data[MEDIA_STORE_CONFIG_KEY] = _b64(_media_store_config(spec))
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -683,9 +700,10 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": "EXOMEM_CLOUD_READ_ONLY", "value": "1"})
     if spec.artifact_broker_url:
         env.append({"name": "EXOMEM_CLOUD_ARTIFACT_BROKER_URL", "value": spec.artifact_broker_url})
+    if spec.media_store:
+        env.append({"name": MEDIA_STORE_CONFIG_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_STORE_CONFIG_KEY]}"})
     if spec.media_edge_url:
         env.extend([
-            {"name": MEDIA_STORE_CONFIG_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_STORE_CONFIG_KEY]}"},
             {"name": MEDIA_EDGE_URL_ENV, "value": spec.media_edge_url},
             {"name": MEDIA_EDGE_CREDENTIAL_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_CREDENTIAL_KEY]}"},
         ])
@@ -724,20 +742,22 @@ def _init_env(spec: CellManifestSpec) -> list[dict]:
 
 
 def _media_mounts(spec: CellManifestSpec) -> list[dict]:
-    return [{"name": MEDIA_VOLUME, "mountPath": MEDIA_DIR, "readOnly": True}] if spec.media_edge_url else []
+    return [{"name": MEDIA_VOLUME, "mountPath": MEDIA_DIR, "readOnly": True}] if spec.media_store else []
 
 
 def _media_volumes(spec: CellManifestSpec) -> list[dict]:
     """Only the media keys of the cell's Secret, never its bearer or backup keys. The keys are
-    required: a cell that has lost its store identity must not start and read evicted originals as deleted."""
-    if not spec.media_edge_url:
+    required: a cell that has lost its store identity must not start and read evicted originals as deleted.
+    A retained store mounts its configuration alone."""
+    if not spec.media_store:
         return []
+    files = MEDIA_FILES if spec.media_edge_url else {MEDIA_STORE_CONFIG_KEY: MEDIA_FILES[MEDIA_STORE_CONFIG_KEY]}
     return [{
         "name": MEDIA_VOLUME,
         "secret": {
             "secretName": spec.secret_name,
             "defaultMode": 0o440,
-            "items": [{"key": key, "path": path} for key, path in MEDIA_FILES.items()],
+            "items": [{"key": key, "path": path} for key, path in files.items()],
         },
     }]
 

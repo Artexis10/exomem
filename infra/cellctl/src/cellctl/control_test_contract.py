@@ -60,6 +60,6 @@ def media_key_test_sql(fixtures: Path) -> str:
     """The media key columns and cellctl's grant on them, run after the pinned grants.
 
     The pinned grants script revokes every earlier grant on the cell table, so this must follow it.
-    Stand-in for a Substrate migration that has not shipped.
+    It mirrors Substrate migration 0081 and its grants stanza until the pin reaches a commit with both.
     """
     return (fixtures / "exomem_cloud_media_keys.sql").read_text(encoding="utf-8")
