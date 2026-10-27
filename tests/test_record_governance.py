@@ -3,11 +3,13 @@ from __future__ import annotations
 import datetime
 import inspect
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import _drain_background_threads
 from record_fixtures import (
     copy_dataset_fixture,
     copy_vehicle_maintenance_fixture,
@@ -18,6 +20,7 @@ from record_fixtures import (
 from record_presentation_fixtures import manifest_text
 
 from exomem import (
+    freshness,
     memory_refs,
     plan_progress,
     planning,
@@ -25,8 +28,10 @@ from exomem import (
     record_governance,
     record_memory,
     records,
+    semantic_contract,
     vault,
 )
+from exomem import note as note_module
 from exomem import structured_collections as collections
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
@@ -3407,3 +3412,263 @@ def test_a_hold_into_a_withheld_directory_soft_fails_to_the_original_refusal(
     assert "held" not in caught.value.details
     assert caught.value.details["warnings"]
     assert not held_directory.exists()
+
+
+# --------------------------------------------------------------------------
+# Link projection from the published corpus
+# --------------------------------------------------------------------------
+
+
+def _write_md(root: Path, relative: str, text: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _vehicle_manifest(root: Path) -> collections.CollectionManifest:
+    fixture = copy_vehicle_maintenance_fixture(root)
+    return collections.load_manifest(root, fixture / "_collection.md")
+
+
+def _project_asset(
+    root: Path, manifest: collections.CollectionManifest, value: str
+) -> dict[str, object]:
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        return record_governance._project_links(root, manifest, {"asset": value})
+
+
+def _publish_corpus(root: Path) -> None:
+    freshness.rebaseline(root)
+    semantic_contract.build_corpus_context(root)
+
+
+def _count_vault_walks(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record the whole-vault Markdown walks that the calling thread makes from now on.
+
+    A write starts background workers that walk the vault too; only a walk on the
+    request thread is a walk made by the query under test.
+    """
+    walks: list[Path] = []
+    real = vault.walk_vault_md
+    request_thread = threading.get_ident()
+
+    def counted(root: Path):
+        if threading.get_ident() == request_thread:
+            walks.append(Path(root))
+        return real(root)
+
+    monkeypatch.setattr(vault, "walk_vault_md", counted)
+    return walks
+
+
+def _cold_then_published(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    value: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], dict[str, object], list[Path]]:
+    """Project `value` before any corpus is published, then again after publication.
+
+    Returns both results and the vault walks made by the second projection.
+    """
+    cold = _project_asset(root, manifest, value)
+    _publish_corpus(root)
+    walks = _count_vault_walks(monkeypatch)
+    return cold, _project_asset(root, manifest, value), walks
+
+
+def test_a_hidden_stem_twin_does_not_change_a_link_over_the_published_corpus(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uniqueness of a stem is decided over the pages the reader may see."""
+    manifest = _vehicle_manifest(tmp_path)
+    _write_md(tmp_path, "Knowledge Base/Notes/Public/Target.md", "# Public\n")
+    _write_md(tmp_path, "Knowledge Base/Evidence/Target.md", "# Withheld\n")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+
+    cold, published, walks = _cold_then_published(tmp_path, manifest, "[[Target]]", monkeypatch)
+
+    assert cold == published == {"asset": "[[Target]]"}
+    assert walks == []
+
+
+def test_a_hidden_title_twin_does_not_change_a_link_over_the_published_corpus(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uniqueness of a title is decided over the pages the reader may see."""
+    manifest = _vehicle_manifest(tmp_path)
+    _write_md(tmp_path, "Knowledge Base/Notes/Public/alpha.md", "---\ntitle: Target\n---\npublic")
+    _write_md(tmp_path, "Knowledge Base/Evidence/beta.md", "---\ntitle: Target\n---\nwithheld")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+
+    cold, published, walks = _cold_then_published(tmp_path, manifest, "[[Target]]", monkeypatch)
+
+    assert cold == published == {"asset": "[[Target]]"}
+    assert walks == []
+
+
+def test_a_hidden_vault_root_page_does_not_hijack_a_link_over_the_published_corpus(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A withheld vault-root `Target.md` leaves `[[Target]]` as it is without that page.
+
+    The published name index holds the root page beside the Knowledge Base pages.
+    """
+    manifest = _vehicle_manifest(tmp_path)
+    _write_md(tmp_path, "Knowledge Base/Notes/Target.md", "# Public\n")
+    _write_md(tmp_path, "Target.md", "# Withheld\n")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Target.md")
+
+    cold, published, walks = _cold_then_published(tmp_path, manifest, "[[Target]]", monkeypatch)
+
+    assert cold == published == {"asset": "[[Target]]"}
+    assert walks == []
+
+
+def test_memory_references_are_decided_over_the_owners_the_reader_may_see(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hidden twin of an id changes nothing; two visible twins stay ambiguous.
+
+    Counting owners before filtering by visibility would withhold the first id and
+    would tell the reader that a hidden page shares it.
+    """
+    manifest = _vehicle_manifest(tmp_path)
+    hidden_twin = memory_refs.new_id()
+    visible_twins = memory_refs.new_id()
+    for relative, identity in (
+        ("Notes/Public/shown.md", hidden_twin),
+        ("Evidence/withheld.md", hidden_twin),
+        ("Notes/Public/first.md", visible_twins),
+        ("Notes/Public/second.md", visible_twins),
+    ):
+        _write_md(tmp_path, f"Knowledge Base/{relative}", f"---\nexomem_id: {identity}\n---\nbody")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+    kept = memory_refs.memory_ref(hidden_twin)
+    ambiguous = memory_refs.memory_ref(visible_twins)
+
+    cold_kept = _project_asset(tmp_path, manifest, kept)
+    cold_ambiguous = _project_asset(tmp_path, manifest, ambiguous)
+    _publish_corpus(tmp_path)
+    walks = _count_vault_walks(monkeypatch)
+    published_kept = _project_asset(tmp_path, manifest, kept)
+    published_ambiguous = _project_asset(tmp_path, manifest, ambiguous)
+
+    assert cold_kept == published_kept == {"asset": kept}
+    assert cold_ambiguous == published_ambiguous == {}
+    assert walks == []
+
+
+def test_a_vault_over_the_walk_cap_keeps_its_links_once_the_corpus_is_published(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The walk cap bounds the cost of a walk; a published corpus needs no walk.
+
+    A vault with more Markdown files than the cap withheld every bare title and every
+    memory reference, because the only index was the capped walk.
+    """
+    manifest = _vehicle_manifest(tmp_path)
+    identity = memory_refs.new_id()
+    _write_md(tmp_path, "Knowledge Base/Notes/Public/Target.md", f"---\nexomem_id: {identity}\n---\nbody")
+    _write_md(tmp_path, "Knowledge Base/Notes/Public/Other.md", "# Other\n")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    monkeypatch.setattr(record_governance, "_PUBLIC_LINK_INDEX_RAW_CANDIDATES", 1)
+    reference = memory_refs.memory_ref(identity)
+
+    assert _project_asset(tmp_path, manifest, "[[Target]]") == {}
+    assert _project_asset(tmp_path, manifest, reference) == {}
+
+    _publish_corpus(tmp_path)
+    walks = _count_vault_walks(monkeypatch)
+
+    assert _project_asset(tmp_path, manifest, "[[Target]]") == {"asset": "[[Target]]"}
+    assert _project_asset(tmp_path, manifest, reference) == {"asset": reference}
+    assert walks == []
+
+
+def test_a_page_written_through_the_service_resolves_on_the_next_query_without_a_walk(
+    vault: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write publishes the corpus before it acknowledges, so the next link resolves."""
+    manifest = _vehicle_manifest(vault)
+    _write_l6_rule(vault, ceiling=6, paths="Records/**")
+    _publish_corpus(vault)
+    created = note_module.note(
+        vault,
+        content="# Freshly Written\n\nBody.\n",
+        note_type="insight",
+        title="Freshly Written",
+        status="draft",
+        today=datetime.date(2026, 7, 9),
+    )
+    # The write's background workers may hold the corpus lock, and a query that cannot
+    # take it walks instead. Wait for them so that the query below reads what the write
+    # itself published.
+    _drain_background_threads()
+    walks = _count_vault_walks(monkeypatch)
+
+    assert _project_asset(vault, manifest, "[[Freshly Written]]") == {"asset": "[[Freshly Written]]"}
+    assert _project_asset(vault, manifest, created.ref) == {"asset": created.ref}
+    assert walks == []
+
+
+def test_a_memory_reference_to_a_page_edited_outside_is_withheld_until_publication(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until the watcher publishes an outside edit, the old owner no longer holds its id.
+
+    The last published generation still lists the page under its old id. Resolving
+    from it would point a record at a page that no longer carries that identity.
+    """
+    manifest = _vehicle_manifest(tmp_path)
+    old_id = memory_refs.new_id()
+    new_id = memory_refs.new_id()
+    relative = "Knowledge Base/Notes/Public/moving.md"
+    _write_md(tmp_path, relative, f"---\nexomem_id: {old_id}\n---\nbody")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _publish_corpus(tmp_path)
+    walks = _count_vault_walks(monkeypatch)
+    old_ref = memory_refs.memory_ref(old_id)
+    new_ref = memory_refs.memory_ref(new_id)
+    assert _project_asset(tmp_path, manifest, old_ref) == {"asset": old_ref}
+
+    page = tmp_path / relative
+    page.write_text(f"---\nexomem_id: {new_id}\n---\nbody", encoding="utf-8")
+    epoch = freshness.mark_external_pending(tmp_path, paths=[page])
+    pending = _project_asset(tmp_path, manifest, old_ref)
+
+    semantic_contract.publish_corpus_files_changed(tmp_path, changed=[page])
+    freshness.clear_external_pending(tmp_path, through=epoch)
+
+    assert pending == {}
+    assert _project_asset(tmp_path, manifest, new_ref) == {"asset": new_ref}
+    assert _project_asset(tmp_path, manifest, old_ref) == {}
+    assert walks == []
+
+
+def test_a_restricted_writers_link_ignores_a_withheld_vault_root_page(tmp_path: Path) -> None:
+    """A writer's `[[Target]]` normalizes as in a vault without the withheld root page.
+
+    The name index holds the root page's key beside the Knowledge Base keys. Matching
+    on it sent the link to `Knowledge Base/Target`, a page that does not exist, and so
+    told the writer that a withheld page shares the name.
+    """
+    with_root = tmp_path / "with-root"
+    without_root = tmp_path / "without-root"
+    for root in (with_root, without_root):
+        _write_md(root, "Knowledge Base/Notes/Target.md", "# Public\n")
+        _write_l6_rule(root, ceiling=6, paths="Records/**")
+        _write_l0_rule(root, name="secret", paths="Target.md")
+    _write_md(with_root, "Target.md", "# Withheld\n")
+
+    def normalized(root: Path) -> tuple[str, str | None]:
+        with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+            return vault.normalize_wikilink(
+                "[[Target]]", root, visible=vault.writer_link_visibility(root)
+            )
+
+    assert normalized(with_root) == normalized(without_root) == ("Knowledge Base/Notes/Target", None)

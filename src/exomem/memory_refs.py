@@ -950,6 +950,47 @@ def paths_for_optional_references_read_only(
     }
 
 
+def reference_owner_lookup(
+    vault_root: Path,
+    owners: Mapping[str, tuple[str, ...]],
+    *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]],
+) -> Callable[[str], tuple[str, ...] | None]:
+    """Resolve identities against `owners` with pending custody applied, writing nothing.
+
+    `owners` is identity -> every page holding it, from an identity projection the
+    caller borrowed. The returned function answers one identity: every page holding
+    it once committed-but-unpublished custody is applied, or None when pending
+    identity is unknown and the answer cannot be trusted. It never raises
+    `RetrievalIndexWarming`, and it never looks at the sidecar or scans the vault.
+
+    The pending projection is read once, here, not per identity. `admit_pending_paths`
+    keeps the pending paths the caller cannot prove hidden, as in
+    `paths_for_ids_read_only`; an unknown identity on a page the caller may see leaves
+    every identity unanswered.
+    """
+    from .find import RetrievalIndexWarming
+
+    root = Path(vault_root)
+    projection = _pending_reference_projection(root)
+    if projection is not None and projection.blocked_paths:
+        projection = replace(
+            projection,
+            blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
+        )
+
+    def owners_of(identity: str) -> tuple[str, ...] | None:
+        held = owners.get(identity, ())
+        if projection is None:
+            return held
+        try:
+            return tuple(_apply_pending_identity(root, identity, list(held), projection=projection))
+        except RetrievalIndexWarming:
+            return None
+
+    return owners_of
+
+
 @dataclass(frozen=True)
 class _ReferenceOwnerView:
     owners: Mapping[str, tuple[str, ...]]

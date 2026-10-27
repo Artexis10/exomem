@@ -7792,9 +7792,11 @@ def normalize_wikilink(
         if contains(candidate) and _seen(candidate):
             return candidate + anchor, None
 
-    # 2. KB-stripped match (target looks like KB-relative).
-    kb_match = contains(kb_prefix() + cleaned) if targeted else cleaned in resolver.kb_stripped
-    if kb_match and _seen(kb_prefix() + cleaned):
+    # 2. KB-relative match (target looks like KB-relative). The KB page itself must
+    # exist: `kb_stripped` also holds the keys of pages outside the Knowledge Base,
+    # so a hidden vault-root page named like the target would pass a membership test
+    # on it and then be judged by `_seen` on a path that is not in the vault.
+    if contains(kb_prefix() + cleaned) and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
