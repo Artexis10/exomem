@@ -854,6 +854,7 @@ def assemble_pack(
     graph_enrich_reserve_seconds: float = 0.0,
     timings: find_module.FindTimings | None = None,
     purpose: str | None = None,
+    strip_for: Callable[[str], tuple[Any, ...]] | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -866,6 +867,9 @@ def assemble_pack(
     packed; what was packed stays a prefix of the full pack, in `find` order,
     and `truncation` names `DEADLINE_TRUNCATION`. Reporting stays the caller's
     job so this function keeps no side effect of its own.
+
+    `strip_for` is the request's `egress.release_strip_resolver`, which `annotate_pack` must share so both
+    decide a page once; without one this builds its own.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
@@ -905,7 +909,8 @@ def assemble_pack(
     # the strip sees only whole identities, so every value of such a page that would be cut is
     # withheld whole. Each page's own release decision says so, for every page this pack builds text
     # from (hit, correction counterpart and neighbour); `annotate_pack` asks the same by page path.
-    strip_for = egress.release_strip_resolver(vault_root, purpose=purpose)
+    if strip_for is None:
+        strip_for = egress.release_strip_resolver(vault_root, purpose=purpose)
 
     def under_strip(rel_path: str) -> bool:
         return bool(strip_for(rel_path))
@@ -1045,10 +1050,9 @@ def assemble_pack(
             parent, dropped_provenance = _parent_context(
                 page, semantic_states[page.rel_path].parent_ref, whole=whole
             )
-            if page.rel_path not in original_paths:
-                # A page that only a correction brought in keeps the parent that its bundle was
-                # projected with. A page that a hit selected keeps its own, whatever a bundle holds.
-                parent = correction_parents.get(page.rel_path, parent)
+            # The bundle parent is the only one that went through the reader view, and `admit_counterpart`
+            # built it with the page's own whole-value rule, so it serves every page that hosts a counterpart.
+            parent = correction_parents.get(page.rel_path, parent)
             plans.append(
                 _UnitPackPlan(
                     page=page,

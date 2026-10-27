@@ -1340,6 +1340,23 @@ def test_a_deep_pack_in_an_ungoverned_vault_keeps_the_source_trail_and_trims_a_l
     assert _TRAIL_LINK in decision["excerpt"]
 
 
+def _publish_graph(vault: Path) -> None:
+    """Counterpart discovery reads the published graph, so publish it as a running service would."""
+    freshness.seed(
+        vault, "vault", ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(vault))
+    )
+    freshness.seed(
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(vault / "Knowledge Base")),
+    )
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    find_module.evict_resolver_caches(vault)
+    find_module.recall_resolver_snapshot(
+        vault, expected_checkpoint=freshness.live_recall_checkpoint(vault, "vault")
+    )
+
+
 def test_a_correction_counterpart_on_a_page_under_a_release_strip_carries_no_source_trail(
     vault: Path,
 ) -> None:
@@ -1357,26 +1374,41 @@ def test_a_correction_counterpart_on_a_page_under_a_release_strip_carries_no_sou
         bridge_suffix=f"{_DECISION_HEAD}- relations: supports: [[{BRIDGE_PATH.removesuffix('.md')}#capacity]]\n\n"
         f"{_lead_in(context_pack._DEFAULT_UNIT_CHARS)}{_TRAIL_LINK} shows.\n",
     )
-    # Counterpart discovery reads the published graph, so publish it as a running service would.
-    freshness.seed(
-        vault, "vault", ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(vault))
-    )
-    freshness.seed(
-        vault,
-        "kb",
-        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(vault / "Knowledge Base")),
-    )
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    find_module.evict_resolver_caches(vault)
-    find_module.recall_resolver_snapshot(
-        vault, expected_checkpoint=freshness.live_recall_checkpoint(vault, "vault")
-    )
+    _publish_graph(vault)
 
     found = _ask_as_guest(vault, result_level="unit")
 
     pack = found["pack"]
     units = pack["semantic_units"][BRIDGE_PATH]["units"]
     assert pack["correction_context"] == "available"
+    assert [unit["relation"] for unit in units if "corrects" in unit] == ["supports"]
+    _assert_stem_absent(found)
+
+
+def test_a_page_that_hosts_a_correction_counterpart_shows_no_link_to_a_withheld_page(
+    vault: Path,
+) -> None:
+    # No bridge is involved: an ordinary page lists a source that the guest may not see, and its
+    # decision unit supports its own observation, so the pack admits a counterpart on the same page.
+    ordinary = "Knowledge Base/Notes/Insights/ordinary-capacity.md"
+    _write_bridge_fixture(vault, approval=False, source_path=_TRAIL_PATH)
+    (vault / ordinary).write_text(
+        "---\ntype: insight\nexomem_id: 00000000-0000-4000-8000-000000000401\n"
+        "title: Ordinary capacity\nstatus: active\ncreated: 2026-07-28\nupdated: 2026-07-28\n"
+        f"sources:\n  - '{_TRAIL_LINK}'\ntags: [planning]\n---\n\n"
+        "# Ordinary capacity\n\n"
+        "## Observations\n"
+        "- [constraint] Do not assume unlimited evening capacity #planning ^capacity\n"
+        f"{_DECISION_HEAD}- relations: supports: [[{ordinary.removesuffix('.md')}#capacity]]\n\n"
+        "Cap the evening load.\n",
+        encoding="utf-8",
+    )
+    _publish_graph(vault)
+
+    found = _ask_as_guest(vault, result_level="unit")
+
+    pack = found["pack"]
+    units = pack["semantic_units"][ordinary]["units"]
     assert [unit["relation"] for unit in units if "corrects" in unit] == ["supports"]
     _assert_stem_absent(found)
 

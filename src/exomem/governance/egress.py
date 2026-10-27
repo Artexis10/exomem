@@ -1585,11 +1585,10 @@ def _strip_bridge_pack_page(
 
 
 def annotate_pack(
-    vault_root: Path,
     pack: dict[str, Any] | None,
     release: AnnotatedHits,
     *,
-    purpose: str | None = None,
+    strip_for: Callable[[str], tuple[bridges.StripIdentity, ...]],
 ) -> dict[str, Any] | None:
     """Carry governance context in the pack header, never sub-notice content.
 
@@ -1598,12 +1597,12 @@ def annotate_pack(
     pack derives from the graph — neighbours, contradictions, claims — since
     those walk edges out of permitted pages and can land on a withheld one.
     A page released under a bridge approval also loses its source trail here,
-    decided from that page's own release decision, whether a hit, a correction
-    counterpart or a neighbour brought it into the pack.
+    decided from that page's own release decision (`strip_for`, the request's
+    `release_strip_resolver`, shared with `assemble_pack`), whether a hit, a
+    correction counterpart or a neighbour brought it into the pack.
     """
     if pack is None:
         return None
-    strip_for = release_strip_resolver(vault_root, purpose=purpose)
     keyed_by_path = (pack.get("claims"), pack.get("semantic_units"), pack.get("semantic_blocks"))
     for path in sorted({key for section in keyed_by_path if isinstance(section, dict) for key in section}):
         if identities := strip_for(path):
@@ -6807,14 +6806,21 @@ def release_strip_resolver(
     agree on which pages are bridges without sharing a list of paths.
 
     It answers `()` for a page that cannot be decided and for every page of a blocked policy or an
-    unresolved caller, because none of those is released, and for every page of an open vault, which
-    has nothing to strip. Policy and caller are read once; each path is decided once.
+    unresolved caller, because none of those is released, and for every page of an open vault or of an
+    owner call, which have nothing to strip. Policy and caller are read once; each path is decided once.
+    One request builds one resolver and hands it to every pack stage, so they cannot disagree.
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
-    # An open vault has no release plane to strip under, and a pack asks this for every page it holds.
-    if policy.blocked or not who.resolved or _file_policy_empty(vault_root, policy):
+    # An open vault has no release plane to strip under, and a release cannot name the owner as its
+    # audience, so the owner's decision never carries a strip; a pack asks this for every page it holds.
+    if (
+        policy.blocked
+        or not who.resolved
+        or who.audience_id == OWNER_AUDIENCE
+        or _file_policy_empty(vault_root, policy)
+    ):
         return lambda _rel_path: ()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     grants_hash = _grants_hash(policy)

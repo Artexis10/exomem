@@ -235,11 +235,14 @@ def _embedded_identity_patterns(
     aliases: tuple[str, ...],
 ) -> tuple[re.Pattern[str], ...]:
     """Compile Unicode-aware decoded-token matchers once per strip operation."""
-    # An alias is an approved identity, not a word list. Its whitespace runs match any whitespace run
-    # (see `_reference_key`), so a builder that collapsed the text cannot hide the identity.
+    # An alias is an approved identity, not a word list. Its whitespace runs match any run of
+    # whitespace within a line (see `_reference_key`), so a builder that collapsed the text cannot hide
+    # the identity, and a multi-word alias does not match across a line break.
     return tuple(
         re.compile(
-            r"(?<!\w)" + r"\s+".join(re.escape(part) for part in alias.split()) + r"(?!\w)",
+            r"(?<!\w)"
+            + r"[^\S\r\n]+".join(re.escape(part) for part in alias.split())
+            + r"(?!\w)",
             re.IGNORECASE,
         )
         for alias in aliases
