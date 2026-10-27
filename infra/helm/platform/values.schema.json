@@ -299,7 +299,7 @@
         "poolMiB": {"type": "integer", "minimum": 1},
         "queueSeconds": {"type": "integer", "minimum": 30},
         "maxJobSeconds": {"type": "integer", "minimum": 1},
-        "leaseMarginSeconds": {"type": "integer", "minimum": 1},
+        "leaseMarginSeconds": {"type": "integer", "minimum": 15},
         "resources": {
           "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
           "properties": {"requests": {"type": "object"}, "limits": {"type": "object"}}

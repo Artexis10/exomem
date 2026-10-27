@@ -12,6 +12,7 @@ from test_media_slot_lease import (
     SMALL,
     A,
     B,
+    C,
     Clock,
     _config,
     _listening,
@@ -40,7 +41,6 @@ def test_a_cell_holds_a_slot_until_it_releases_and_the_next_cell_then_gets_it(le
     first, second = SlotClient(lease, A), SlotClient(lease, B)
 
     assert _ask(first, BIG) is True
-    assert _ask(first, BIG) is True  # still the same slot, no second request
     assert _ask(second, BIG) is False  # waiting in the queue
     assert _ask(second, BIG) is False
     first.release()
@@ -72,3 +72,18 @@ def test_a_new_worker_of_a_cell_that_still_has_an_entry_waits_for_it_to_end(leas
     assert _ask(SlotClient(lease, A), BIG) is True  # a worker that then died
     restarted = SlotClient(lease, A)
     assert _ask(restarted, BIG) is False  # the service refuses a second entry
+
+
+def test_a_cell_that_asks_again_after_its_grant_starts_a_fresh_lease(lease) -> None:
+    """A second ask after a grant means the cell never received the grant reply.
+
+    That lease began before the cell's child, so the child could outlive it while the next
+    cell's grant shared the pool. The service drops it and the cell queues afresh.
+    """
+    first, second, third = SlotClient(lease, A), SlotClient(lease, B), SlotClient(lease, C)
+    assert _ask(first, BIG) is True  # say the cell never received this reply
+
+    assert _ask(first, BIG) is False  # the service drops the grant the cell never learned of
+    assert _ask(second, BIG) is True  # so the pool is free for the next cell
+    assert _ask(first, BIG) is False  # and the first cell waits behind it with a new request
+    assert _ask(third, BIG) is False

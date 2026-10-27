@@ -1647,19 +1647,21 @@ class MediaWorker:
         finally:
             child = self._child
             if child is not None and child.poll() is None:
-                with contextlib.suppress(OSError):
-                    child.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    child.wait(timeout=5)
-                if brakes:
-                    # The child's tools share its session and keep their memory until they are
-                    # killed, and the node slot goes back to another cell next.
+                if brakes and self._slot is not None:
+                    # The node slot goes back to another cell next, and the child's tools share
+                    # its session and keep their memory until killed. Kill the group while its
+                    # leader is still unreaped, so the group ID cannot belong to another process.
                     with contextlib.suppress(OSError):
                         os.killpg(child.pid, signal.SIGKILL)
                     with contextlib.suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=5)
                     if child.returncode is not None:
                         _reap_group(child.pid)
+                else:
+                    with contextlib.suppress(OSError):
+                        child.terminate()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=5)
             self._child = None
             self._release_slot()
 

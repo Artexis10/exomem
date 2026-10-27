@@ -180,6 +180,14 @@ class SlotLedger:
         now = self._clock()
         self._settle(now)
         entry = self._owned(cell, lease)
+        if entry.collected:
+            # A cell starts its child on the grant and never polls again, so this poll means
+            # the grant reply was lost. Drop the entry: the next grant starts a fresh lease
+            # instead of one that began before the child.
+            del self._entries[cell]
+            log.info("media slot of %s dropped: polled after its grant", cell)
+            self._settle(now)
+            raise Refused(404, "SLOT_UNKNOWN", "no such slot for this cell")
         entry.seen = now
         self._settle(now)
         return self._slot(entry, now)
