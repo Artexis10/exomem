@@ -1,10 +1,11 @@
-"""Offline Whisper transcription through the maintained ONNX ASR adapter."""
+"""Offline Whisper transcription: the ONNX ASR adapter's model with Whisper's long-form guards."""
 
 from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterator
+import zlib
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,75 @@ def audio_chunks(path: Path, sample_rate: int, chunk_samples: int) -> Iterator[n
             yield fifo.read(min(fifo.samples, chunk_samples)).to_ndarray()[0]
 
 
+@dataclass(frozen=True)
+class Decoded:
+    tokens: tuple[int, ...]
+    text: str
+    avg_logprob: float
+    compression_ratio: float
+
+
+def compression_ratio(text: str) -> float:
+    """Whisper's repetition signal: UTF-8 bytes over their zlib-compressed size."""
+    data = text.encode("utf-8")
+    return len(data) / len(zlib.compress(data)) if data else 0.0
+
+
+def decode_window(
+    step: Callable[[list[int], object], tuple[np.ndarray, object]],
+    prompt: list[int],
+    *,
+    policy: dict,
+    suppressed: np.ndarray,
+    begin_suppressed: np.ndarray,
+    end_token: int,
+    detokenize: Callable[[list[int]], str],
+    temperature: float,
+    rng: np.random.Generator,
+) -> Decoded:
+    """Decode one window greedily, or by sampling above zero temperature, within the token cap."""
+    tokens = list(prompt)
+    generated: list[int] = []
+    state = None
+    logprob_sum = 0.0
+    for index in range(policy["max_new_tokens"]):
+        logits, state = step(tokens, state)
+        logits = np.asarray(logits, dtype=np.float64).copy()
+        logits[suppressed] = -np.inf
+        if index == 0:
+            logits[begin_suppressed] = -np.inf
+        peak = np.max(logits)
+        logprobs = logits - (peak + np.log(np.sum(np.exp(logits - peak))))
+        if temperature == 0:
+            token = int(np.argmax(logits))
+        else:
+            weights = np.exp((logits - peak) / temperature)
+            token = int(rng.choice(logits.size, p=weights / weights.sum()))
+        logprob_sum += float(logprobs[token])
+        if token == end_token:
+            break
+        generated.append(token)
+        tokens.append(token)
+        # Stop a repetition loop as soon as it shows; the fallback decides what survives.
+        if compression_ratio(detokenize(generated)) > policy["compression_ratio_threshold"]:
+            break
+    text = detokenize(generated)
+    return Decoded(tuple(generated), text, logprob_sum / (len(generated) + 1), compression_ratio(text))
+
+
+def decode_with_fallback(decode: Callable[[float], Decoded], policy: dict) -> Decoded:
+    """Whisper's temperature fallback: accept the first attempt that is neither repetitive nor improbable."""
+    threshold = policy["compression_ratio_threshold"]
+    attempts = []
+    for temperature in policy["temperatures"]:
+        result = decode(temperature)
+        if result.compression_ratio <= threshold and result.avg_logprob >= policy["logprob_threshold"]:
+            return result
+        attempts.append(result)
+    plausible = [attempt for attempt in attempts if attempt.compression_ratio <= threshold] or attempts
+    return max(plausible, key=lambda attempt: attempt.avg_logprob)
+
+
 class OnnxWhisperBackend:
     def __init__(self) -> None:
         self.spec = media_models.model_spec("speech")
@@ -73,26 +143,59 @@ class OnnxWhisperBackend:
         )
         vad = onnx_asr.load_vad("silero", artifact.root / "vad", **runtime)
         whisper = getattr(model, "asr", None)
-        # onnx-asr 0.12 detects the language on every call by an argmax over the
-        # whole vocabulary, which often yields a task token instead of a language.
-        # These private hooks pick one language per file instead; uv.lock pins the
-        # exact release and the image's speech gate runs them on a real recording.
-        if not all(hasattr(whisper, hook) for hook in ("_encode", "_decode", "_create_state")):
+        # onnx-asr 0.12 decodes Whisper greedily to 448 tokens with no repetition
+        # guard, and detects the language on every call by an argmax over the whole
+        # vocabulary, which often yields a task token. Its model's private hooks run
+        # Whisper's published long-form guards here instead; uv.lock pins the exact
+        # release and the image's speech gate runs them on a real recording.
+        if not all(hasattr(whisper, hook) for hook in ("_encode", "_decode", "_create_state", "_decode_tokens")):
             from .extract import ExtractionUnavailable
 
             raise ExtractionUnavailable("the pinned speech adapter no longer exposes its decoder")
         generation = json.loads((artifact.root / "generation_config.json").read_text(encoding="utf-8"))
         self._start_token = int(generation["decoder_start_token_id"])
-        self._languages = {int(token_id): token.strip("<|>") for token, token_id in generation["lang_to_id"].items()}
+        self._end_token = int(generation["eos_token_id"])
+        self._prompt_tokens = (int(generation["task_to_id"]["transcribe"]), int(generation["no_timestamps_token_id"]))
+        self._languages = {int(token_id): token for token, token_id in generation["lang_to_id"].items()}
+        protocol = {self._start_token, int(generation["prev_sot_token_id"]), *map(int, generation["task_to_id"].values())}
+        self._suppressed = np.asarray(sorted({*map(int, generation["suppress_tokens"]), *protocol}), dtype=np.int64)
+        self._begin_suppressed = np.asarray(generation["begin_suppress_tokens"], dtype=np.int64)
         self._model, self._vad = model, vad
 
-    def _detect_language(self, waveform: np.ndarray) -> str:
-        """Choose this recording's language from the model's own language tokens."""
+    def _step(self, encoding) -> Callable[[list[int], object], tuple[np.ndarray, object]]:
+        whisper = self._model.asr
+
+        def step(tokens: list[int], state: object) -> tuple[np.ndarray, object]:
+            state = whisper._create_state() if state is None else state
+            logits, state = whisper._decode(np.asarray([tokens], dtype=np.int64), state, encoding)
+            return logits[0, -1], state
+
+        return step
+
+    def _detect_language(self, encoding) -> int:
+        """Choose this recording's language token from the model's own language tokens."""
+        logits, _ = self._step(encoding)([self._start_token], None)
+        candidates = np.fromiter(self._languages, dtype=np.int64)
+        return int(candidates[np.argmax(logits[candidates])])
+
+    def _recognize(self, waveform: np.ndarray, language: int | None, seed: int) -> tuple[int, str]:
         whisper = self._model.asr
         encoding = whisper._encode(waveform[None], np.array([len(waveform)], dtype=np.int64))
-        logits, _ = whisper._decode(np.array([[self._start_token]], dtype=np.int64), whisper._create_state(), encoding)
-        candidates = np.fromiter(self._languages, dtype=np.int64)
-        return self._languages[int(candidates[np.argmax(logits[0, -1, candidates])])]
+        language = language or self._detect_language(encoding)
+        policy = self.spec["decoding"]
+        rng = np.random.default_rng(seed)
+
+        def detokenize(tokens: list[int]) -> str:
+            return whisper._decode_tokens(np.asarray(tokens, dtype=np.int64)).text
+
+        def decode(temperature: float) -> Decoded:
+            return decode_window(
+                self._step(encoding), [self._start_token, language, *self._prompt_tokens], policy=policy,
+                suppressed=self._suppressed, begin_suppressed=self._begin_suppressed, end_token=self._end_token,
+                detokenize=detokenize, temperature=temperature, rng=rng,
+            )
+
+        return language, decode_with_fallback(decode, policy).text
 
     def transcribe(self, path: Path) -> tuple[Iterator[Segment], str]:
         def segments() -> Iterator[Segment]:
@@ -117,13 +220,15 @@ class OnnxWhisperBackend:
                     # VAD skips non-speech but leaves spoken chunks unchanged.
                     if next(detected, None) is not None:
                         # Like the local engine, one language serves the whole file.
-                        language = language or self._detect_language(waveform)
-                        text = self._model.recognize(waveform, sample_rate=rate, language=language)
+                        language, text = self._recognize(waveform, language, seed=offset // chunk_samples)
                         if text.strip():
                             yield Segment(offset / rate, (offset + length) / rate, text)
                     offset += length
 
-        label = f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
+        label = (
+            f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
+            f":decoding-{self.spec['decoding']['revision']}"
+        )
         return segments(), label
 
     def prewarm(self) -> None:

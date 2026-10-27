@@ -112,6 +112,21 @@
     "sample_rate": 16000,
     "chunk_seconds": 30,
     "vad_min_samples": 576,
+    "decoding": {
+      "revision": 1,
+      "source": "openai/whisper v20250625 transcribe.py and decoding.py defaults",
+      "max_new_tokens": 224,
+      "temperatures": [
+        0.0,
+        0.2,
+        0.4,
+        0.6,
+        0.8,
+        1.0
+      ],
+      "compression_ratio_threshold": 2.4,
+      "logprob_threshold": -1.0
+    },
     "metadata_files": [
       "config.json",
       "vocab.json",
