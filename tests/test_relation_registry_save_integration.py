@@ -316,3 +316,29 @@ def test_a_delta_save_leaves_every_untouched_entry_as_it_was_saved(vault: Path) 
     saved = yaml.safe_load(path.read_text(encoding="utf-8"))["extensions"]
     assert saved["vault.keeps_bytes"] == untouched
     assert saved["vault.applies_to"]["aliases"] == ["applies_to"]
+
+
+def test_a_field_a_later_release_wrote_neither_blocks_nor_vanishes_on_a_delta_save(
+    vault: Path,
+) -> None:
+    path = relation_registry.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    later = {
+        "parent": "used_for",
+        "description": "Carries a field this release does not know.",
+        "endpoints": {"subject": "entity:*"},
+    }
+    path.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "written_by": "a later release",
+             "extensions": {"vault.from_later": later}}
+        ),
+        encoding="utf-8",
+    )
+
+    _save(vault, _delta(), relation_registry.load_registry(vault).extension_hash)
+
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert saved["written_by"] == "a later release"
+    assert saved["extensions"]["vault.from_later"] == later
+    assert "vault.applies_to" in saved["extensions"]

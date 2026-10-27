@@ -1071,8 +1071,9 @@ def relation_registry_merge_base(
     """The saved overlay a relation delta merges into.
 
     Each entry the delta names takes its rendered form, which the merge's
-    immutability check compares against. Every other entry keeps the fields it
-    was saved with, so a save never rewrites an entry it did not touch.
+    immutability check compares against; a named entry the registry could not
+    parse is dropped, so the delta replaces it. Every other entry keeps the
+    fields it was saved with.
     """
     document = relation_registry.saved_document(vault_root)
     rendered = relation_registry_proposal(registry)["extensions"]
@@ -1081,10 +1082,12 @@ def relation_registry_merge_base(
         for keyed in (delta.values() if isinstance(delta, dict) else ())
         if isinstance(keyed, dict)
         for key in keyed
-        if key in rendered
     }
     for key in named:
-        document["extensions"][key] = rendered[key]
+        if key in rendered:
+            document["extensions"][key] = rendered[key]
+        else:
+            document["extensions"].pop(key, None)
     return document
 
 
