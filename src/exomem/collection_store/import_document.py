@@ -1,8 +1,10 @@
 """Rows of one streamed JSON document along a declared row path (OpenSpec bring-in-large-exports §3).
 
 A ``json-document`` import names a row path such as ``days[].samples[]``: each ``[]``
-crosses an array, and each element of the last one is a row. ``ijson`` events drive a
-walk down that spine. Declared ancestor fields, of the document or of an element the
+crosses an array, and each element of the last one is a row. A path that ends at a name
+(``days[].summary``) takes the object there, one row for each element of the last array
+crossed, and ``$`` takes the whole document as one row. ``ijson`` events drive a walk
+down that spine. Declared ancestor fields, of the document or of an element the
 path crosses, are captured as they stream past, so they must come before the spine
 array: one that comes after it is reported as a late ancestor. Only one row and the
 captured ancestors are held at a time, so memory does not grow with the document.
@@ -18,6 +20,7 @@ import ijson
 
 _BOM = b"\xef\xbb\xbf"
 _LATE = "IMPORT_ANCESTOR_LATE"
+_NOT_OBJECT = "IMPORT_ROW_NOT_OBJECT"
 _TOO_LARGE = "IMPORT_ROW_TOO_LARGE"
 _TOO_DEEP = "IMPORT_ROW_TOO_DEEP"
 # nosemgrep: ep-word-set -- ijson's basic_parse fixes these container event names.
@@ -65,7 +68,8 @@ class Rows:
 
     Scope 0 is the document and scope n the current element of the nth crossed array;
     ``wanted[n]`` maps each declared key path within scope n to the mapping location
-    that names it. ``exact`` reads with the slower parser that holds integers of any size.
+    that names it. With ``object_rows`` the last route ends at the row's object instead of
+    at an array of rows. ``exact`` reads with the slower parser that holds integers of any size.
     """
 
     def __init__(
@@ -76,14 +80,17 @@ class Rows:
         *,
         row_bytes: int,
         depth: int,
+        object_rows: bool = False,
         exact: bool = False,
     ) -> None:
         parse = _EXACT.basic_parse if exact else ijson.basic_parse
         self.events = parse(_Unmarked(handle), use_float=True)
         self.routes, self.wanted = routes, wanted
         self.row_bytes, self.depth = row_bytes, depth
+        self.object_rows = object_rows
         self.scopes: list[dict] = [{} for _ in routes]
         self.arrays = 0
+        self.element = 0  # the place, in its array, of the element that the walk is in
 
     def __iter__(self) -> Iterator[Found]:
         try:
@@ -99,6 +106,9 @@ class Rows:
         Returns whether the walk reached the spine array.
         """
         if not route:
+            if self.object_rows and level + 1 == len(self.routes):
+                yield self._object(event, value)
+                return True
             if event != "start_array":
                 self._skip(event)
                 return False
@@ -125,14 +135,26 @@ class Rows:
             else:
                 yield from self._capture(event, value, level, beneath, here)
 
+    def _object(self, event, value) -> Found:
+        """The row at the end of the row path: its object, or the refusal when the value is not one."""
+        if event != "start_map":
+            self._skip(event)
+            return Found(index=self.element, error=(_NOT_OBJECT, "mapping.rows"))
+        built, error, size = self._build(event, value)
+        if error is not None:
+            return Found(index=self.element, error=(error, "mapping.rows"), size=size)
+        return Found(built, self.element, tuple(self.scopes), self.arrays, size=size)
+
     def _array(self, level: int) -> Iterator[Found]:
-        rows = level + 1 == len(self.routes)
-        if rows:
-            self.arrays += 1
+        innermost = level + 1 == len(self.routes) - (1 if self.object_rows else 0)
+        rows = innermost and not self.object_rows
+        if innermost:
+            self.arrays += 1  # one series for an order-based fold: the rows of this array, or their parents
         index = 0
         for event, value in self.events:
             if event == "end_array":
                 return
+            self.element = index
             if rows:
                 built, error, size = self._build(event, value)
                 if error is not None:

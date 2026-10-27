@@ -113,7 +113,7 @@ def _mapping_sources(mapping, manifest, fmt):
             if spec.items is not None:
                 descendants(target, source, spec.items)
 
-    from .import_time import basis_paths
+    from .import_time import TIME_TARGETS, basis_paths
 
     for target, source in mapping.get("fields", {}).items():
         if isinstance(source, dict) and "const" in source:
@@ -123,7 +123,7 @@ def _mapping_sources(mapping, manifest, fmt):
     time_mapping = mapping.get("time") or {}
     # All time outputs share the declared source dependencies, an interval read from the source included.
     time_sources = tuple(source_path(path) for basis in time_mapping.get("from", []) for path in basis_paths(basis))
-    time_targets = tuple((time_mapping[key],) for key in ("instant", "offset", "local_date") if time_mapping.get(key))
+    time_targets = tuple((time_mapping[key],) for key in TIME_TARGETS if time_mapping.get(key))
     links = fields + [(target, source, manifest.schema.fields.get(target[0]))
                       for target in time_targets for source in time_sources]
     protected = {path for path, declaration in coverage.items() if declaration["classification"] == "location"}
