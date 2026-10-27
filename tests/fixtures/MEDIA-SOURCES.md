@@ -33,3 +33,15 @@ That phrase is a contiguous substring of the publisher's transcript.
 |---|---:|---|
 | `sample.wav` | 157484 | `c8b37e1bd791f59dd3f3584ae71e40badc3ab9cce9329523ecc0f95c3705c53f` |
 | `sample.mkv` | 158879 | `e8734145296706cc1fb296d1a9d95e94c49d00e7d640346b5c7957b48f8fa1f9` |
+
+## Image vector fixture
+
+`clip/photo.jpg` checks that the image tower keeps the stored vector space.
+It is an integration fixture, not image-retrieval quality data.
+
+- Source: [File:Bicycle 02.jpg](https://commons.wikimedia.org/wiki/File:Bicycle_02.jpg) on Wikimedia Commons, under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+- Derivation: the 1024-pixel Commons thumbnail was downscaled to 320 by 240 pixels with Lanczos and saved as JPEG quality 85.
+- Fixture SHA-256: `1a1ddebc7024ad83adb264b431b50be93455774c817c19c2a1dd4f1d42041900`.
+
+`clip/reference.json` holds the fixture's 512-dimensional vector from the sentence-transformers `clip-ViT-B-32` model on CPU, rounded to seven decimals.
+The Cloud image gate requires its ONNX image tower to reproduce that vector at cosine 0.9999 or above.

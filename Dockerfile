@@ -361,10 +361,20 @@ ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
 # New media artifacts only fetch their pinned publication; a cell never builds them.
 RUN HF_HUB_OFFLINE=0 python -c "\
 from exomem.media_models import ensure_media_model; \
-ensure_media_model('image-query'); ensure_media_model('speech')"
+ensure_media_model('image'); ensure_media_model('image-query'); ensure_media_model('speech')"
 RUN --network=none python -c "\
 from exomem.clip_query import OnnxClipQueryEncoder; \
 assert OnnxClipQueryEncoder().encode(['offline query gate']).shape == (1, 512)"
+# The image tower must keep the stored vector space: with networking off, it
+# reproduces the sentence-transformers vector of a committed photograph.
+RUN --network=none \
+    --mount=type=bind,source=tests/fixtures/clip,target=/clip-gate \
+    python -c "\
+import json, numpy as np; from pathlib import Path; from exomem import embeddings; \
+ref = np.asarray(json.loads(Path('/clip-gate/reference.json').read_text())['vector'], dtype=np.float32); \
+vec = embeddings.embed_image(Path('/clip-gate/photo.jpg')); \
+assert type(embeddings._CLIP_MODEL).__name__ == 'OnnxClipImageEncoder'; \
+assert float(vec @ (ref / np.linalg.norm(ref))) >= 0.9999"
 # The support proof: with networking off, extract a real sample of every format
 # the image serves and find its phrase. A format that fails is not shipped.
 RUN --network=none \
@@ -390,9 +400,9 @@ RUN --network=none \
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
 #
-# EXOMEM_DISABLE_CLIP: image extraction remains unavailable without an image tower.
-# The separate multilingual query artifact can read existing imported image vectors.
-# Keep the existing switch default until the image engine's own acceptance passes.
+# EXOMEM_DISABLE_CLIP: the image carries the ONNX image tower and the multilingual
+# query tower. Image search stays off by default; a cell turns it on after the image
+# engine's own acceptance passes.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
     EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
     EXOMEM_RECALL_MODEL=BAAI/bge-m3 \

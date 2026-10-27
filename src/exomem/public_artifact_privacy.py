@@ -282,6 +282,10 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
         )
         for name in ("sample.wav", "sample.mkv")
     ),
+    BinaryProvenance(
+        "tests/fixtures/clip/photo.jpg",
+        "public CC0 photograph for the image-tower vector gate; provenance in tests/fixtures/MEDIA-SOURCES.md",
+    ),
 )
 
 #: Named in every refusal, because this gate historically only ran on Linux

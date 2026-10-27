@@ -16,6 +16,8 @@ def isolated_clip_models(monkeypatch):
 
 
 def test_multilingual_query_and_calibrated_tags_keep_separate_towers(monkeypatch):
+    # Tags exist only where the torch lane serves CLIP's original text tower.
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "torch")
     queries = []
     tags = []
     query_vector = np.zeros(embeddings.CLIP_DIM, dtype=np.float32)

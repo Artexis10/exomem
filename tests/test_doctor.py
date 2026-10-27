@@ -1069,10 +1069,10 @@ def test_warm_exits_zero_when_only_the_withheld_torch_models_are_unavailable(
 ) -> None:
     """#480: `warm` exited 1 on a successful `embeddings-onnx` run.
 
-    The bi-encoder — the only model that lane can serve — loads fine. The
-    reranker and CLIP raise ImportError because `embeddings-onnx` withholds
-    sentence-transformers by design, which is the documented trade-off, not a
-    failure. Reporting it as one also called the install "lean".
+    The bi-encoder and the ONNX CLIP towers load fine. The reranker raises
+    ImportError because `embeddings-onnx` withholds sentence-transformers by
+    design, which is the documented trade-off, not a failure. Reporting it as
+    one also called the install "lean".
     """
     from exomem import embeddings as embeddings_module
 
@@ -1085,7 +1085,7 @@ def test_warm_exits_zero_when_only_the_withheld_torch_models_are_unavailable(
 
     monkeypatch.setattr(embeddings_module, "get_model", lambda: object())
     monkeypatch.setattr(embeddings_module, "get_reranker", _no_sentence_transformers)
-    monkeypatch.setattr(embeddings_module, "get_clip_model", _no_sentence_transformers)
+    monkeypatch.setattr(embeddings_module, "get_clip_model", lambda: object())
     monkeypatch.setattr(embeddings_module, "get_clip_query_model", lambda: object())
     monkeypatch.setattr(embeddings_module, "clip_enabled", lambda: True)
 
