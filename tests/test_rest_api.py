@@ -222,6 +222,7 @@ def test_rest_openapi_disabled_without_key(vault, monkeypatch: pytest.MonkeyPatc
     assert r.status_code == 503, r.text
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_rest_command_timer_covers_response_construction_and_ingress_exclusions(
     vault, monkeypatch
 ) -> None:
@@ -257,6 +258,7 @@ def test_rest_command_timer_covers_response_construction_and_ingress_exclusions(
     assert leaf["observed"] == 1 and leaf["abstentions"] == 1
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_rest_observation_failure_preserves_the_response(vault, monkeypatch) -> None:
     from exomem import latency_watch
 

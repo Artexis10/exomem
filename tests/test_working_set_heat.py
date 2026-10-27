@@ -1063,6 +1063,7 @@ def test_a_citation_records_a_cite_event(vault) -> None:
     ]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_admitted_pick_records_a_pick_and_a_refused_pick_records_nothing(
     carry_vault,
 ) -> None:

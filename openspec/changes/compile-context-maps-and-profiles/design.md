@@ -87,9 +87,9 @@ The catalogue, map, domain maps and profiles are computed over the caller's view
 
 The map and any slice share the request's `max_chars` cap. Pulls have their own budget per answer. Overflow becomes bounded, paginated refs, never cut claims.
 
-### D10. The `anchors` mode stays until a frozen evaluation decides
+### D10. The `maps` mode is the default and `anchors` is the rollback
 
-The process setting `EXOMEM_ACTIVATION_PACKET` selects `anchors` (default) or `maps`. Requirements that cover read-only operation, governance, freshness, latency and surface parity bind both modes; anchor resolution and the anchors packet shape bind `anchors` mode only. The default changes only through the frozen evaluation below and the normal release line; the setting is the undo.
+The process setting `EXOMEM_ACTIVATION_PACKET` selects `maps` (default) or `anchors`. An absent or invalid value selects `maps`. Requirements that cover read-only operation, governance, freshness, latency and surface parity bind both modes; anchor resolution and the anchors packet shape bind `anchors` mode only. The operator ruled the default (amendment 12). It reaches users through the normal release line, and the frozen evaluation below does not gate it. `EXOMEM_ACTIVATION_PACKET=anchors` in the service environment is the one-line rollback.
 
 ### D11. The catalogue contract
 
@@ -113,7 +113,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 
 ### Decision and arms
 
-- **Decision.** Change the default of `EXOMEM_ACTIVATION_PACKET` from `anchors` to `maps`, or keep `anchors`.
+- **Decision.** Whether `maps` should stay the default of `EXOMEM_ACTIVATION_PACKET` or give way to `anchors`. Amendment 12 sets the default to `maps` by operator ruling, so this decision measures the choice and gates nothing.
 - **Arms.** Three arms. For each arm, the full text the actor sees is frozen with a hash: the server instructions, the tool descriptions, the client instructions and the hook output format. The server instructions and tool descriptions are the shipped text and are the same for every arm, because they feed the surface digest; the arms differ only in their client instructions, their push and their tool filter.
 
   | Arm | Server mode | Pushed at each user turn | Tools | Client instruction lines |
@@ -204,13 +204,13 @@ This protocol is frozen before any held-out generation. A later change is a numb
 - **Power.**
   - Rule 1 is pooled: M must beat A on the held-out cases that expect memory, that is, the miss cases in their groups plus the ordinary turns that expect memory, in their groups. The miss stratum was selected for A's failure, so it inflates M − A; the report gives each stratum separately, with its share of the pool. The held-out miss stratum is too small for a one-sided sign-flip test at 0.025 on its own, which is why rule 1 pools; the freeze commit records its size. The power step below sizes rule 1 as it sizes rules 2 and 3: simulate each stratum at its own M − A measured on development data, capped at +0.5, with the measured spread, record both effects, and grow the ordinary stratum from the reserve first. Development evidence puts M − A above +0.5 at retrieval level (+0.67) and M − P close to zero.
   - Rules 2 and 3: the largest acceptable loss is policy, fixed now: δ is at most 0.15 for both rules. Before freeze, on the build that will be frozen, measure the per-case spread between repeats of all three arms on the development ordinary turns and miss cases. Simulate equal arms with that spread: M and A on held-out ordinary turns for rule 2, and M and P on held-out miss cases and ordinary turns pooled for rule 3. For each rule, raise the held-out size first, and raise δ above 0.10, up to 0.15, only when the available turns cannot reach an 80% pass rate for equal arms. Rule 1 has no δ: only its size grows. The power step also simulates rule 3's calls test with the development call counts and records its pass rate. The freeze commit records the spread, the sizes, each rule's δ and the simulated pass rates. If a rule is still short of 80% at the cap with every available turn, the sampling window widens once, by its own length, toward the past, before freeze. Only sessions that start in the added span and pass the frame are drawn; they are deduplicated against every existing row, shuffled with seed 20261023 and appended to the reserve, and no existing row moves. The new turns go through the key and vault steps 2 to 6, the state digests are rebuilt, and the freeze commit records the reserve size before and after. If the rule is still short, the run goes ahead, the freeze commit records its simulated pass rate, and a failure of that rule reads as inconclusive, not as harm; the default stays `anchors`.
-- **Rule.** Switch only when all of these hold:
+- **Rule.** Report whether all of these hold. Before amendment 12 they were the switch rule; they no longer gate the default:
   1. On held-out cases that expect memory (miss cases and ordinary turns), M beats A.
   2. On held-out ordinary turns, M is non-inferior to A within rule 2's δ, as the power step sets it.
   3. M pays over P on held-out miss cases and ordinary turns together. Either M beats P on the primary measure, or both of these hold: M is non-inferior to P within rule 3's δ, as the power step sets it, and M beats P on Exomem calls per case under the same test. M's calls include the `recall_context` call that fetches its map.
   4. On no-memory cases, M contaminates no more cases than A does, plus at most one.
   5. M loses no synthetic positive case that A passes in a majority of its repeats. M loses a case when it fails that case in a majority of its own repeats.
-- **Expected outcome.** Because M pays one `recall_context` call per user turn that P does not, rule 3 most likely passes, if at all, through the primary measure. If P beats A and M does not pay over P, the default stays `anchors`, and the report proposes a follow-up change for pull-first instructions without the map.
+- **Expected outcome.** Because M pays one `recall_context` call per user turn that P does not, rule 3 most likely passes, if at all, through the primary measure. If P beats A and M does not pay over P, the report proposes a follow-up change for pull-first instructions without the map.
 - **Chain checks.** Before judging, check the snapshot digest and the removals (recounted per source and per linked session, with every restored `updated` value), each arm's captured inputs against its frozen hashes, every case present in the outputs with failures named, and the judge inputs against the captured inputs. After judging, check the unblinding key against the item ids and recompute the scores from the raw verdicts.
 
 ### Amendments
@@ -310,6 +310,25 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - Later ordinary-answer acceptance may use independently keyed, source-derived development questions when an original turn is unavailable. Such cases use `kind: authored_development` and the separate `workflow_dev` split. They are neither sampled ordinary turns nor original-incident replays. The report identifies missing originals, reused source groups and surviving source evidence before generation.
    - Authored workflow checks use the same arms, actors, budgets and blind judge view. Their case results remain separate from switch rules, power estimates and held-out strata. They cannot establish a default switch. The existing intersection, removal, sweep and source-survival checks apply before their generation.
    - This clarifies preparation and development acceptance only. It does not change a switch rule, tolerance, held-out case or frozen sampling stratum.
+
+12. **Amendment 12 (2026-10-27, before any held-out generation).** The operator ruled that `maps` becomes the default packet mode:
+   - `maps` becomes the default in the next ordinary release. An absent or invalid `EXOMEM_ACTIVATION_PACKET` selects `maps`.
+   - `anchors` stays an accepted value. `EXOMEM_ACTIVATION_PACKET=anchors` in the service environment, with a restart, restores the earlier packet. This is the rollback. Both modes keep their own behaviour: an empty turn abstains in `anchors` mode and serves a map in `maps` mode.
+   - The frozen evaluation no longer decides the default. Its decision and rule sections now describe what the evaluation measures and gate nothing.
+   - Development rounds continue. They find and fix gaps in `maps` mode with the same cases, arms and development splits.
+   - The held-out split stays sealed and unread. It is available for one later unbiased measure. That measure is not a switch gate, and no result of it changes the default by itself.
+   - The default changes by operator decision, not by a measured gain. No release note or document may present it as one.
+   - The default flip keeps two behaviours of the `anchors` path that a `maps` packet would otherwise lose without notice: the `episode_due` advisory rides on a `maps` packet, and the call ledger records a `maps` packet's released-item count as unknown, never zero.
+   - One capability stays `anchors` only: `relevant_due_refs` associates a due item with a resolved anchor, a served unit parent or a current-state source, and a map carries none of these. A `maps` packet therefore omits that advice, as "Activation associates one relevant due candidate with current material" already requires for an empty association. This loss is a known gap of `maps` mode. A later round designs turn-relevant content for the `maps` packet, which covers this advice.
+   - A default user also loses these `anchors`-only capabilities, listed as known gaps for the next rounds:
+     - continuity carry across turns;
+     - learning and learned aliases;
+     - `recent_context`;
+     - partial-name and band anchors;
+     - `agent_pick`;
+     - units and semantic evidence;
+     - the `anchor` argument.
+   - This changes the default and the role of the evaluation only. It does not change the cases, groups, keys, arms, scoring rule, tolerances, the freeze requirement before the held-out run, the governance and egress behaviour of either mode, or the `anchors` packet.
 
 ### Ready before held-out generation
 

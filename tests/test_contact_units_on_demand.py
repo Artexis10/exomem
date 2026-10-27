@@ -138,6 +138,7 @@ def test_an_override_cannot_set_or_change_a_roles_intent(vault: Path) -> None:
     assert any(f["code"] == "unknown_field" for f in registry.findings)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_turn_about_the_person_without_contact_intent_gets_no_contact_units(
     vault: Path,
 ) -> None:
@@ -173,6 +174,7 @@ def test_the_reviews_probe_turns_get_no_contact_units_end_to_end(vault: Path, tu
     assert not any("555-0142" in t or "Example Lane" in t for t in _unit_texts(packet))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("turn", [
     "What is Maren Holt's phone number?",
     "Can I call Maren Holt?",

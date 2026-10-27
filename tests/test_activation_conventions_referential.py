@@ -273,6 +273,7 @@ def test_a_cue_change_changes_only_the_turn_digest() -> None:
     assert stopword.turn_hash == shipped.turn_hash
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_cue_change_wipes_no_sidecar_and_strands_no_token(heat_vault: Path) -> None:
     _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
     first = commands.op_activate_context(heat_vault, turn="weiter")
@@ -296,6 +297,7 @@ def test_a_cue_change_wipes_no_sidecar_and_strands_no_token(heat_vault: Path) ->
     assert index.token() == sidecar_token
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_packet_cache_key_carries_the_turn_digest(heat_vault: Path) -> None:
     """Deliberately no cache reset between the two calls: the key alone must
     turn the second request into a miss."""
@@ -315,6 +317,7 @@ def test_the_packet_cache_key_carries_the_turn_digest(heat_vault: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_learned_cue_never_answers_a_turn_that_names_an_anchor(heat_vault: Path) -> None:
     """The recency exception and nothing wider: a learned cue joins only the
     cue set inside the referential test. A turn that also names an anchor has

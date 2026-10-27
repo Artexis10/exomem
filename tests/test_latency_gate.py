@@ -828,6 +828,7 @@ def measure_conversation_gate(vault: Path) -> dict:
     }
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.timeout(600)
 def test_a_maximum_size_conversation_stays_within_the_stage_and_warm_p95_budgets(
     tmp_path: Path, model_free
@@ -846,6 +847,7 @@ def test_a_maximum_size_conversation_stays_within_the_stage_and_warm_p95_budgets
     assert measured["warm_activation_with_conversation_p95_ms"] <= CEIL_WARM_ACTIVATION_P95_MS, measured
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.timeout(300)
 def test_working_set_compiler_with_an_upkeep_item_stays_bounded(
     tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
@@ -1087,6 +1089,7 @@ def _measure_unresolved_carry(vault: Path) -> list[float]:
     return samples
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.timeout(600)
 def test_unresolved_carry_does_not_scale_with_the_corpus(tmp_path: Path, model_free) -> None:
     from synth_vault import gen_entity_overlay
@@ -1183,6 +1186,7 @@ def _measure_referential_working_set(vault: Path) -> tuple[float, dict]:
     return statistics.median(samples), packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.timeout(900)
 def test_referential_working_set_stays_under_ceiling_with_a_full_ring(
     tmp_path: Path, model_free

@@ -173,6 +173,9 @@ def _packet_publications(packet: Any) -> set[str] | None:
     # Pointers do not carry their producer's authored-page/canonical-item basis.
     if packet.get("pointers"):
         return None
+    # A map block lists catalogue entries without a per-page basis: the count stays unknown, never zero.
+    if "map" in packet:
+        return None
     paths: set[str] = set()
     # These are packet schema blocks, not customer-defined roles or meanings.
     for block in ("anchors", "related", "recent_context", "current_state", "units"):

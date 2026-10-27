@@ -44,6 +44,7 @@ def _write_anchor_page(vault_root: Path) -> None:
     )
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_end_to_end_on_a_vault_with_no_products_or_systems_folder(
     tmp_path: Path, bare_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

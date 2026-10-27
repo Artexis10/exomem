@@ -8,6 +8,9 @@ from test_working_set_index import _seed_structure, _write
 
 from exomem import commands, lexstore, working_set_index, working_set_runtime
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 
 def test_clock_digits_do_not_carry_an_unrelated_measurement_note(vault: Path) -> None:
     _seed_structure(vault)
