@@ -550,21 +550,28 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   explicit `EXOMEM_FAST_DURABLE_ACK` rollback restores, as
   `test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled`
   requires.
-- [ ] 11.3 A deferring caller never runs a whole-vault pass on its thread; a rebuild
+- [x] 11.3 A deferring caller never runs a whole-vault pass on its thread; a rebuild
   disposition becomes the full marker. Without a checkpoint,
   `_leave_rebuild_to_the_drain` advances the full marker; a receipted parent handoff
   keeps its own durable full receipt; a marker that cannot be written leaves the
   pass to the caller. With a checkpoint the caller registers the pass, and the
-  boundary or the background thread starts it. Evidence: the watcher-echo and
-  background-replay tests in 11.1. **Open, needs a ruling.** The post-handoff
-  governed writes now run inside a mutation request, as production writes do.
-  `test_writes_after_a_worker_replacement_stay_incremental` then fails on the
-  checkpointed case: the first write meets `recall_delta_incomplete` while the
-  watcher's full marker stands, and it registers a second whole-vault pass. On the
-  base the watcher paid that pass before the first write. A probe that queued the
-  paths and extended the standing marker instead cleared that door, and the next
-  write then registered through the dispatch's `graph_sync_acknowledgement_absent`
-  door. Both doors need one rule for a standing marker.
+  boundary or the background thread starts it. A standing full marker owns the
+  whole-vault pass for a caller that may stop at queued. `_standing_marker_owns_the_pass`
+  decides this at the refresh fallback for a rebuild disposition and at the
+  dispatch's unproven-predecessor door. There the caller queues its paths at its
+  generation, advances the marker over that generation and reports
+  `graph_repair_queued`. With no standing marker, or when the enqueue or the marker
+  advance fails, it registers as before. The drain pays a standing marker after its
+  quiet window, and that publication retires the marker and acknowledges the
+  checkpoint it sampled. Evidence: the watcher-echo and background-replay tests in
+  11.1. `test_writes_after_a_worker_replacement_stay_incremental` now runs its writes
+  inside a mutation request. Before the rule it failed three of three serial runs on
+  a deferral without queue coverage. After the rule no write registered a pass in
+  three serial runs. One serial run and the parallel suite run missed the 1.0 s
+  median bound, at 1.11 s and 1.07 s; the base misses that bound the same way on this
+  host.
+  `test_a_request_behind_a_standing_marker_registers_when_its_paths_cannot_be_queued`
+  covers the failed enqueue.
 - [x] 11.4 A covering acknowledgement routes a deferring caller to the incremental
   path. The predecessor probe reports `graph_sync_acknowledgement_covers` when the
   stored acknowledgement is exactly this checkpoint, and the dispatch logs `graph
@@ -585,8 +592,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   marker. Evidence: `test_a_barrier_behind_queued_repair_waits_for_the_queue`, and
   the stall-ladder test with a barrier, red on the base. Scoped suites on this
   change: graph write, queue, replay, availability, join, drain and decline modules,
-  336 passed, 3 skipped, 2 failed (the 11.3 open test, and the covered-gap live
-  test, which also fails on the base); 16 related modules, 473 passed; file watcher,
+  336 passed, 3 skipped, 2 failed (the worker-replacement test that 11.3 closes, and
+  the covered-gap live test, which also fails on the base); 16 related modules, 473 passed; file watcher,
   freshness liveness, watcher publication intent and index_sync modules, 182
   passed; graph-reading and
   write-path modules, 1064 passed, 18 skipped, 15 failed. Of those 15, one is the

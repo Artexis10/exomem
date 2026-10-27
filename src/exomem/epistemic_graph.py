@@ -210,7 +210,8 @@ def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCovera
 #: value of writing them down is that they stay few. A caller that may stop at
 #: queued never runs that pass on its own thread: without a checkpoint it
 #: advances the full marker (`_leave_rebuild_to_the_drain`), and with one it
-#: registers the pass.
+#: registers the pass, unless a standing full marker already owes it
+#: (`_standing_marker_owns_the_pass`).
 _FALLBACK_DISPOSITIONS = {
     "path_outside_vault": "defer",
     "path_unreadable": "defer",
@@ -6407,6 +6408,17 @@ class EpistemicGraphIndex:
                 deferred = defer(reason)
                 if deferred is not None:
                     return deferred
+            elif graph_checkpoint is not None and _standing_marker_owns_the_pass(
+                self.vault_root, self._mutation_coordinator
+            ):
+                # The pass this reason asks for is already owed. Queue this
+                # write's paths at its generation and advance the marker over
+                # it; a failed enqueue or marker write still registers below.
+                deferred = defer(reason)
+                if deferred is not None and self._leave_rebuild_to_the_drain(
+                    graph_checkpoint, durable_before_rebuild=False
+                ):
+                    return deferred
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
@@ -10213,6 +10225,24 @@ def _caller_can_carry_pending(
     )
 
 
+def _standing_marker_owns_the_pass(
+    vault_root: Path,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether a standing full marker already owes the pass this caller would register.
+
+    A standing full marker records whole-vault debt that the graph drain pays
+    once, and its publication retires the marker and acknowledges the
+    checkpoint it sampled. A caller that may stop at queued therefore queues
+    its own paths, advances the marker over its generation and registers no
+    second pass. A standalone caller still registers and joins, and an
+    unreadable marker is not a standing one.
+    """
+    return deferred_index.graph_full_rebuild_pending(
+        vault_root
+    ) is not None and _caller_can_carry_pending(vault_root, mutation_coordinator)
+
+
 def _caller_has_pending_boundary(
     vault_root: Path,
     mutation_coordinator: mutation_lock.VaultMutationCoordinator,
@@ -10590,6 +10620,31 @@ def upsert_after_write(
                 and not covered_gap
                 and not acknowledged_here
             ):
+                if (
+                    _standing_marker_owns_the_pass(vault_root, mutation_coordinator)
+                    and index._queue_graph_repair(
+                        {
+                            rel
+                            for path in (*written_paths, *created)
+                            if (rel := _vault_rel(vault_root, Path(path))) is not None
+                        },
+                        reason=predecessor_state,
+                        graph_checkpoint=required,
+                    )
+                    and index._leave_rebuild_to_the_drain(
+                        required, durable_before_rebuild=False
+                    )
+                ):
+                    # Availability is already withdrawn on this branch. A
+                    # failed enqueue or marker write registers below.
+                    log.info(
+                        "graph dispatch left an unproven predecessor to the standing "
+                        "full marker reason=%s external_pending=%s generation=%s",
+                        predecessor_state,
+                        freshness.external_pending(vault_root),
+                        required.generation,
+                    )
+                    return GraphDispatchResult("deferred", "graph_repair_queued", required)
                 # #576 F3, applied to the gate the incremental table does not
                 # cover. `fallback()` logs which of the nine bail-out reasons
                 # fired; this door precedes `refresh_paths` entirely, so

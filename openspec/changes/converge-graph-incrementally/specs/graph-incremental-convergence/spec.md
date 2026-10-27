@@ -392,6 +392,13 @@ dispatch's checkpoint, SHALL route a deferring caller to the incremental path ra
 to a whole-vault rebuild. A standalone caller in that state still registers and joins the
 rebuild.
 
+A standing full marker owns the whole-vault pass for a caller that may stop at queued.
+When such a caller meets a whole-vault fallback or an unproven predecessor while the
+marker stands, it SHALL queue its own paths at its generation, advance the marker over
+that generation, and report a queued-repair code. It SHALL NOT register a second pass.
+With no standing marker, or when the enqueue or the marker advance fails, the caller
+registers the pass as before.
+
 The file watcher SHALL NOT mark a graph fan-out that it could not complete as an external
 change when that repair is already owned: a whole-vault marker stands, or the batch's own
 dispatch registered a rebuild or left every graph input of the batch on the queue. Such a
@@ -410,6 +417,13 @@ watcher still marks the whole vault.
   dispatch's checkpoint
 - **THEN** a deferring caller takes the incremental path and registers no rebuild
 - **AND** a standalone caller in the same state still converges through a rebuild
+
+#### Scenario: A write behind a standing full marker registers no second pass
+
+- **WHEN** a mutation request needs a whole-vault pass while a full-rebuild marker stands
+- **THEN** its paths are queued at its generation and the marker covers that generation
+- **AND** the request reports a queued-repair code and registers no rebuild
+- **AND** a request whose paths cannot be queued still registers the pass
 
 #### Scenario: An owned fan-out repair is not marked as an external change
 

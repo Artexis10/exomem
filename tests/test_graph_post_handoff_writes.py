@@ -1516,6 +1516,52 @@ def test_an_unreadable_predecessor_is_queued_repair_not_a_lineage_gap(
     assert {result.outcome for result in outcomes} == {"deferred"}
 
 
+def test_a_request_behind_a_standing_marker_registers_when_its_paths_cannot_be_queued(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: a standing marker owns the pass only for paths the queue holds.
+
+    A request whose predecessor cannot be proven leaves the whole-vault pass to
+    a standing full marker once its own paths are queued. When that enqueue
+    fails, nothing durable records this write's repair, so the request still
+    registers the pass.
+    """
+    root = handoff_vault
+    _a_standing_marker_owns_the_repair(root)
+    EpistemicGraphIndex(root).withdraw_availability()
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_state",
+        lambda inner_self, checkpoint: "graph_sync_acknowledgement_absent",
+        raising=True,
+    )
+    enqueue_attempts: list[str] = []
+
+    def failing_enqueue(inner_self: EpistemicGraphIndex, scope: set[str], **kwargs: object):
+        enqueue_attempts.append(str(kwargs["reason"]))
+        return False
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_queue_graph_repair", failing_enqueue, raising=True)
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
+    _governed_write(root, root / GENERATED / "generated-note-0006.md", "behind a marker")
+
+    assert enqueue_attempts == ["graph_sync_acknowledgement_absent"], (
+        "the request never tried to leave its pass to the standing marker"
+    )
+    assert [result.code for result in outcomes] == ["graph_rebuild_registered"], (
+        f"an unqueued write behind a marker did not register: {[r.code for r in outcomes]}"
+    )
+
+
 def test_a_cold_resolver_is_queued_repair_not_a_whole_vault_rebuild(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

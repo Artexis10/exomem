@@ -551,6 +551,11 @@ disposition. The rule reuses the existing predicates and adds no new proof.
   queue that did not shrink no longer releases recovery. A queue that cannot drain still
   reaches the whole-vault route through the stall escalation, and a standing barrier no
   longer resets that count.
+- A standing full marker owns the whole-vault pass for a caller that may stop at queued.
+  The marker already records the debt, and the drain pays it once. A caller that meets
+  a rebuild disposition or an unproven predecessor behind it queues its own paths at its
+  generation and advances the marker over that generation. It registers no second pass.
+  A failed enqueue or marker write still registers.
 
 Two doors keep their previous behaviour. A standalone library caller still converges,
 because its contract is a converged graph. A request without derived custody that writes

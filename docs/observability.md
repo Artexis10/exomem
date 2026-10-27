@@ -119,6 +119,12 @@ which:
   marker is withdrawn. The watcher's echo of a write that a drain already
   repaired is the usual source. A background caller, such as the watcher, queues
   the paths and reports `graph_repair_queued`. No whole-vault pass runs.
+- `graph dispatch left an unproven predecessor to the standing full marker reason=…`
+  — the sidecar's acknowledgement is not this checkpoint's predecessor, but a full
+  marker already owes the whole-vault pass. A request or a background caller queues
+  its paths, advances the marker over its generation and reports
+  `graph_repair_queued`. The drain pays the marker once. The first writes after a
+  worker replacement usually take this route.
 - `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
   `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
   is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`
