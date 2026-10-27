@@ -7,6 +7,7 @@ not mutation-terminal authority and contains no canonical content or arguments.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import sqlite3
@@ -15,9 +16,11 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from . import deferred_index
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION: Final = 1
 _MAX_BATCH_ID = 128
@@ -2210,6 +2213,35 @@ def read_advisory_result(
         return None
 
 
+def advisory_result_lapsed(
+    vault_root: Path,
+    ref: str | None,
+    *,
+    now: float | None = None,
+) -> bool:
+    """True when the advisory result is gone or past both its deadlines.
+
+    `read_advisory_result` hides an expired row and also folds a store error
+    into None, so it cannot tell a lapsed advisory from a transient fault. This
+    reads the row itself and lets a store error raise, so only a result that
+    is provably missing or expired settles its optional component.
+    """
+    result_id = None if ref is None else _parse_advisory_ref(ref)
+    if result_id is None:
+        return True
+    observed_at = _timestamp(now)
+    connection = _connect_receipt_read(vault_root)
+    try:
+        row = connection.execute(
+            "SELECT retention_deadline, terminal_replay_until "
+            "FROM write_advisory_results WHERE result_id = ?",
+            (result_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return row is None or (float(row[0]) < observed_at and float(row[1]) < observed_at)
+
+
 def publish_advisory_result(
     vault_root: Path,
     claimed_status: DerivedComponentStatus,
@@ -2466,6 +2498,39 @@ def _record_recovery_failure(
         connection.close()
 
 
+def _record_batch_recovery_failure(
+    vault_root: Path,
+    batch_id: str,
+    *,
+    failure_code: str,
+    failed_at: float,
+) -> None:
+    """Record a failure of recovering the whole batch, leaving its components untouched.
+
+    Recovery proves and publishes one batch; none of its steps belongs to one
+    component. Bumping `updated_at` rotates the batch behind later ones, which
+    is the order recovery selects by.
+    """
+    if failure_code not in _RETRYABLE_FAILURE_CODES:
+        raise ValueError("recovery failure code is not closed")
+    connection = deferred_index._connect(vault_root, create=True)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                "UPDATE derived_batches SET updated_at = ?, failure_code = ? "
+                "WHERE batch_id = ? AND state IN "
+                "('prepared', 'ready', 'reconcile_required')",
+                (failed_at, failure_code, batch_id),
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def recover_prepared_batches(
     vault_root: Path,
     *,
@@ -2604,9 +2669,14 @@ def recover_prepared_batches(
                     vault_root, batch_id, failure_code="generation_changed",
                     failed_at=observed_at,
                 )
-        except Exception:  # noqa: BLE001 - callback failure stays durable and bounded
+        except Exception as error:  # noqa: BLE001 - callback failure stays durable and bounded
+            log.warning(
+                "derived batch recovery failed (%s: %s)",
+                type(error).__name__,
+                error,
+            )
             try:
-                _record_recovery_failure(
+                _record_batch_recovery_failure(
                     vault_root,
                     batch_id,
                     failure_code="handler_unavailable",
@@ -3005,6 +3075,125 @@ def retry_component(
         connection.close()
 
 
+def _complete_batch_if_settled(
+    connection: sqlite3.Connection, batch_id: str, *, now: float
+) -> bool:
+    """Complete a ready batch with no outstanding component; report whether it did."""
+    outstanding = int(
+        connection.execute(
+            "SELECT count(*) FROM derived_batch_components WHERE "
+            "batch_id = ? AND state NOT IN ('completed', 'not_required')",
+            (batch_id,),
+        ).fetchone()[0]
+    )
+    if outstanding:
+        return False
+    return bool(
+        connection.execute(
+            "UPDATE derived_batches SET state = 'completed', "
+            "updated_at = ? WHERE batch_id = ? AND state = 'ready'",
+            (now, batch_id),
+        ).rowcount
+    )
+
+
+def settle_component_not_required(
+    vault_root: Path,
+    status: DerivedComponentStatus,
+    *,
+    now: float | None = None,
+) -> Literal["batch_completed", "settled", "stale"]:
+    """Settle one exact claim as `not_required`, for an optional component that no longer applies.
+
+    The component never retries again. Its successors are promoted and the
+    batch completes when nothing else is outstanding, as for a completion.
+    """
+    settled_at = _timestamp(now)
+    connection = deferred_index._connect(vault_root, create=True)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            changed = connection.execute(
+                "UPDATE derived_batch_components SET state = 'not_required', "
+                "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
+                "updated_at = ? WHERE batch_id = ? AND component = ? "
+                "AND revision = ? AND lease_revision = ? "
+                "AND state = 'claimed' AND claim_owner = ? "
+                "AND EXISTS (SELECT 1 FROM derived_batches WHERE batch_id = ? "
+                "AND state = 'ready')",
+                (
+                    settled_at,
+                    status.batch_id,
+                    status.component.value,
+                    status.revision,
+                    status.lease_revision,
+                    status.claim_owner,
+                    status.batch_id,
+                ),
+            ).rowcount
+            batch_completed = False
+            if changed:
+                _promote_ready_components(connection, status.batch_id, now=settled_at)
+                batch_completed = _complete_batch_if_settled(
+                    connection, status.batch_id, now=settled_at
+                )
+        except Exception:
+            connection.rollback()
+            raise
+        connection.commit()
+    finally:
+        connection.close()
+    if not changed:
+        return "stale"
+    return "batch_completed" if batch_completed else "settled"
+
+
+def settle_context_catalogue_before(
+    vault_root: Path, *, before: float, now: float | None = None
+) -> tuple[str, ...]:
+    """Complete every unclaimed catalogue obligation of a batch proven before `before`.
+
+    The catalogue pass diffs the whole vault, so one success covers each copy
+    of the obligation whose batch had already committed when it began. Returns
+    the batches this completed.
+    """
+    settled_at = _timestamp(now)
+    connection = deferred_index._connect(vault_root, create=True)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            batch_ids = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT c.batch_id FROM derived_batch_components AS c "
+                    "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
+                    "WHERE c.component = 'context_catalogue' AND b.state = 'ready' "
+                    "AND c.state IN ('prepared', 'ready', 'retryable') "
+                    "AND b.created_at <= ?",
+                    (float(before),),
+                ).fetchall()
+            )
+            completed: list[str] = []
+            for batch_id in batch_ids:
+                connection.execute(
+                    "UPDATE derived_batch_components SET state = 'completed', "
+                    "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
+                    "updated_at = ? WHERE batch_id = ? "
+                    "AND component = 'context_catalogue' "
+                    "AND state IN ('prepared', 'ready', 'retryable')",
+                    (settled_at, batch_id),
+                )
+                if _complete_batch_if_settled(connection, batch_id, now=settled_at):
+                    completed.append(batch_id)
+        except Exception:
+            connection.rollback()
+            raise
+        connection.commit()
+        return tuple(completed)
+    finally:
+        connection.close()
+
+
 def defer_component(
     vault_root: Path,
     status: DerivedComponentStatus,
@@ -3126,19 +3315,9 @@ def complete_component(
                         status.batch_id,
                         now=completed_at,
                     )
-                    outstanding = int(
-                        connection.execute(
-                            "SELECT count(*) FROM derived_batch_components WHERE "
-                            "batch_id = ? AND state NOT IN ('completed', 'not_required')",
-                            (status.batch_id,),
-                        ).fetchone()[0]
+                    _complete_batch_if_settled(
+                        connection, status.batch_id, now=completed_at
                     )
-                    if not outstanding:
-                        connection.execute(
-                            "UPDATE derived_batches SET state = 'completed', "
-                            "updated_at = ? WHERE batch_id = ? AND state = 'ready'",
-                            (completed_at, status.batch_id),
-                        )
             except Exception:
                 connection.rollback()
                 raise
