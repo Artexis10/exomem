@@ -884,7 +884,8 @@ def blocking_reason(
     rendered = "; ".join(blocking_finding_text(item) for item in shown)
     omitted = len(findings) - len(shown)
     if omitted:
-        rendered += f"; +{omitted} more ({VALIDATE_FORM} returns the full set)"
+        validate_form = _OPERATION_VALIDATE_FORMS.get(result.operation, VALIDATE_FORM)
+        rendered += f"; +{omitted} more ({validate_form} returns the full set)"
     return f"{prefix}: {rendered}"
 
 
