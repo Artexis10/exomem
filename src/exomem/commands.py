@@ -7423,16 +7423,10 @@ def _op_activate_context_body(
                     evidence_token=evidence_token,
                     evidence_stamp=evidence_stamp,
                 ),
-                abstain=lambda reason, *, budget_caused=False, **_: {"reason": reason, "budget_caused": budget_caused},
+                abstain=_abstain,
             )
-            if compiled.served:
-                return context_views_module.turn_leads(compiled.packet)
-            # A withheld packet reads as a turn that reached nothing, so the slice says nothing about what was withheld.
-            if compiled.packet["budget_caused"]:
-                return context_views_module.TurnLeads(context_views_module.SLICE_SKIPPED)
-            if compiled.packet["reason"] == activation_result_module.WITHHELD:
-                return context_views_module.TurnLeads(context_views_module.SLICE_EMPTY)
-            return context_views_module.TurnLeads(working_set_runtime_module.UNAVAILABLE)
+            # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
+            return context_views_module.turn_leads(compiled.packet)
 
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.

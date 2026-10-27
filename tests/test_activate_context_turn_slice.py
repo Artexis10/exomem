@@ -187,13 +187,73 @@ def test_a_slice_that_cannot_be_built_keeps_the_map(vault: Path, monkeypatch: py
     assert failed["budget"]["used_chars"] == context_views.map_packet_chars(failed["map"])
 
 
+def test_a_compile_that_abstains_inside_serve_is_an_unavailable_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`serve` answers a failed compile with an abstained packet; the slice reports the fault, not a turn that reached nothing."""
+    _structured(vault)
+    expected = _activate(vault, turn=IRRELEVANT_TURN)
+    _cold()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the compile failed")
+
+    monkeypatch.setattr(working_set, "compile_packet", broken)
+    failed = _activate(vault, turn=SLED_TURN)
+    assert failed["turn_slice"]["state"] == "unavailable" and failed["turn_slice"]["items"] == []
+    assert failed["map"] == expected["map"]
+
+
+def test_a_slice_that_a_warming_band_left_empty_says_so(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compile's evidence states ride on the slice, so an empty slice from a warming encoder is not a silent `empty`."""
+    _structured(vault)
+    monkeypatch.setattr(working_set, "signature_evidence", lambda index, turn: ({}, "warming", None))
+    block = _activate(vault, turn=IRRELEVANT_TURN)["turn_slice"]
+    assert block["state"] == "empty"
+    assert block["semantic_evidence"] == "warming" and block["lexical_evidence"] == "available"
+
+
+def test_a_compile_that_runs_out_of_budget_inside_serve_is_a_skipped_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage inside the compile that the request budget cannot start skips the slice, as a stage before it does."""
+    from exomem import request_budget
+
+    _structured(vault)
+    expected = _activate(vault, turn=IRRELEVANT_TURN)
+    _cold()
+
+    def exhausted(*args, **kwargs):
+        # What `budget_exhausted` does at a compile stage boundary: record the skip, then stop.
+        request_budget.current().note_skipped("working_set.semantic")
+        raise working_set.BudgetExhausted("working_set.semantic")
+
+    monkeypatch.setattr(working_set, "compile_packet", exhausted)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        skipped = _activate(vault, turn=SLED_TURN)
+    finally:
+        request_budget.reset_current(token)
+    assert skipped["turn_slice"]["state"] == "skipped" and skipped["turn_slice"]["items"] == []
+    assert skipped["map"] == expected["map"]
+
+
 def test_a_slice_that_runs_out_of_budget_is_skipped_and_keeps_the_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import request_budget
+
     _structured(vault)
     expected = _activate(vault, turn=IRRELEVANT_TURN)
     _cold()
     exhausted = working_set.budget_exhausted
-    monkeypatch.setattr(working_set, "budget_exhausted", lambda stage, *a, **k: stage == "working_set.release" or exhausted(stage, *a, **k))
-    skipped = _activate(vault, turn=SLED_TURN)
+
+    def release_exhausted(stage, *args, **kwargs):
+        if stage != "working_set.release":
+            return exhausted(stage, *args, **kwargs)
+        request_budget.current().note_skipped(stage)
+        return True
+
+    monkeypatch.setattr(working_set, "budget_exhausted", release_exhausted)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        skipped = _activate(vault, turn=SLED_TURN)
+    finally:
+        request_budget.reset_current(token)
     assert skipped["turn_slice"]["state"] == "skipped" and skipped["turn_slice"]["items"] == []
     assert skipped["map"] == expected["map"]
 

@@ -54,7 +54,7 @@ from . import (
     working_set_resolve,
     working_set_state,
 )
-from .activation_result import INDEX_WARMING
+from .activation_result import AMBIGUOUS, INDEX_WARMING, UNRESOLVED, WITHHELD
 from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
@@ -1095,10 +1095,15 @@ class Lead:
 
 @dataclass(frozen=True, slots=True)
 class TurnLeads:
-    """What the turn reached: `READY` with its leads, `SLICE_EMPTY` with none, or why there is no answer."""
+    """What the turn reached: `READY` with its leads, `SLICE_EMPTY` with none, or why there is no answer.
+
+    `evidence` holds the compile's own evidence states (`lexical_evidence`, `semantic_evidence`) as its
+    packet reported them, so a slice that is empty because a lane was warming says so.
+    """
 
     state: str
     leads: tuple[Lead, ...] = ()
+    evidence: tuple[tuple[str, str], ...] = ()
 
 
 def _lead_ref(item: Mapping[str, Any]) -> str:
@@ -1111,12 +1116,32 @@ def _lead_evidence(item: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(kind for kind in working_set_resolve.EVIDENCE_KINDS if kind in named)
 
 
+#: The abstentions that answer the turn itself, so their packet is read for leads like a served one.
+_TURN_ANSWERS = frozenset({UNRESOLVED, AMBIGUOUS, WITHHELD})
+
+
 def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
-    """The leads of a guarded anchors packet: its anchors, the senses of an ambiguous turn and its related pages.
+    """What the slice reads off one guarded anchors compile, served or abstained: the one place its outcome
+    becomes a slice state.
+
+    A served packet, and an abstention that answers the turn (nothing reached, a question between senses,
+    everything withheld), give their leads: anchors, the senses of an ambiguous turn and related pages. A
+    withheld packet so reads as a turn that reached nothing, and the slice says nothing about what was
+    withheld. An abstention that the request budget caused (it carries `request_budget`) is `skipped`; any
+    other one (a fault, a warming index, evidence that changed under the compile) is `unavailable`.
 
     `recent_context` is turn-independent and is never a lead. An anchor that is one sense of an ambiguous
     turn is listed as `ambiguous` whatever its own status. Strongest match first, the compile's order within one.
     """
+    generation = packet.get("generation")
+    evidence = tuple(
+        (name, str(generation[name]))
+        for name in ("lexical_evidence", "semantic_evidence")  # nosemgrep: ep-word-set -- The packet's two evidence-state fields.
+        if isinstance(generation, Mapping) and generation.get(name)
+    )
+    abstention = packet.get("abstention")
+    if packet.get("abstained") and (not isinstance(abstention, Mapping) or abstention.get("reason") not in _TURN_ANSWERS):
+        return TurnLeads(SLICE_SKIPPED if "request_budget" in packet else UNAVAILABLE, (), evidence)
     senses = {
         _lead_ref(item) for item in packet.get("ambiguity") or () if isinstance(item, Mapping)
     }
@@ -1137,7 +1162,7 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
         if isinstance(item, Mapping):
             add(item, "related")
     leads = tuple(sorted(found.values(), key=lambda lead: MATCHES.index(lead.match)))
-    return TurnLeads(READY if leads else SLICE_EMPTY, leads)
+    return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence)
 
 
 def slice_item_line(item: Mapping[str, Any]) -> str:
@@ -1174,12 +1199,12 @@ def _turn_slice(
     timings: find_types.FindTimings | None,
 ) -> dict[str, Any]:
     """The turn slice for this caller, in the `reserve` that the map left. It never raises and never touches the map."""
-    state, chosen, overflow = UNAVAILABLE, [], 0
+    state, chosen, overflow, evidence = UNAVAILABLE, [], 0, ()
     extras: dict[str, dict[str, Any]] = {}
     states: dict[str, dict[str, Any]] = {}
     try:
         leads = turn_leads()
-        state = leads.state
+        state, evidence = leads.state, leads.evidence
         if state == READY:
             with find_types.timing_span(timings, "working_set.turn_slice"):
                 rows, extras = _slice_rows(prepared, leads)
@@ -1196,9 +1221,11 @@ def _turn_slice(
         block["description"] = SLICE_DESCRIPTION
         if overflow:
             block["overflow"] = overflow
+    # The compile's evidence states, so a slice that a warming lane left empty is not a silent `empty`.
+    block.update(evidence)
     # The record's key: the content this slice serves, so the same content is the same generation.
     block["generation"] = _digest(json.dumps(
-        [state, [[row.digest(), shown[row.entry_id], states.get(row.entry_id)] for row in chosen], overflow],
+        [state, [[row.digest(), shown[row.entry_id], states.get(row.entry_id)] for row in chosen], overflow, evidence],
         sort_keys=True,
     ))
     view = View(SLICE_REF, READY, block["generation"], False, tuple(chosen), None, states)
