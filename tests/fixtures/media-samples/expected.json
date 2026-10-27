@@ -9,6 +9,7 @@
  "sample.epub": "the cartographer of salt marshes",
  "sample.html": "midnight bakery opening hours",
  "sample.ics": "beekeeping guild assembly",
+ "sample.mkv": "emergency court ruling",
  "sample.odp": "tidal observatory briefing",
  "sample.ods": "barley harvest tally",
  "sample.odt": "heron census at the northern marsh",
@@ -16,5 +17,6 @@
  "sample.pptx": "glacier orchard roadmap",
  "sample.rtf": "amber lighthouse keeper journal",
  "sample.txt": "pine resin storage notes",
+ "sample.wav": "emergency court ruling",
  "sample.xlsx": "lantern oil inventory"
 }

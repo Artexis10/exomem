@@ -33,6 +33,9 @@ from exomem import (
     writer_lease,
 )
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 BENCHMARKS_DIR = Path(__file__).resolve().parents[1] / "benchmarks"
 if str(BENCHMARKS_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARKS_DIR))

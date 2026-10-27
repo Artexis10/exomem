@@ -1,17 +1,18 @@
 """Cached preview operations and real replica handoff share one lifetime."""
 
+import os
 import shutil
 import sqlite3
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 import pytest
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
-from exomem import held_fs
+from exomem import held_fs, state_paths
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection, replica, schema, views
+from exomem.collection_store import capability, connection, replica, schema, views
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.runtime import CollectionStoreRuntime
 from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
@@ -1200,3 +1201,195 @@ def test_a_schema_cut_after_the_operations_grant_fences_the_store_write(coordina
                               item={"title": "Late"}, item_key=KEY, why="after the cut")
     assert fenced.value.code == "WRITER_FENCED"
     assert runtime.sample_head().commit_seq == committed
+
+
+# The reader pool: the serving handle lends read-only connections, so each test first shows that a
+# second lend returns the same connection, then breaks the one thing that would make that unsafe.
+
+@pytest.fixture
+def handle(tmp_path):
+    with connection.open_writer(tmp_path / "collections.sqlite", lease_check=lambda: True) as writer:
+        yield writer
+
+
+def _write_probe(handle, value):
+    with handle.transaction() as conn:
+        conn.execute("INSERT OR REPLACE INTO store_meta(key, value) VALUES('probe', ?)", (value,))
+
+
+def _read_probe(conn):
+    row = conn.execute("SELECT value FROM store_meta WHERE key='probe'").fetchone()
+    return None if row is None else row[0]
+
+
+def test_a_head_sample_sees_the_commit_made_after_an_earlier_sample_returned_its_reader(runtime):
+    """A sample opens a transaction on its reader; returning the reader must not carry that snapshot."""
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    pool = runtime.reader_pool()
+    first = runtime.sample_head()
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID, item={"title": "One"}, item_key=KEY, why="capture")
+    with pool.lend(head=True, current=False) as warm:
+        pass
+    assert runtime.sample_head().commit_seq == first.commit_seq + 1
+    with pool.lend(head=True, current=False) as again:
+        assert again is warm
+
+
+def test_a_reader_returned_with_a_half_read_cursor_is_not_lent_again(handle):
+    """A half-read cursor pins its snapshot while the reader reports no transaction, so the next lend would read stale."""
+    pool = handle.readers
+    _write_probe(handle, "one")
+    with pool.lend(head=False, current=True) as warm:
+        pass
+    with pool.lend(head=False, current=True) as lent:
+        assert lent is warm
+        cursor = lent.execute("SELECT key FROM store_meta")  # the borrower keeps it past the lend
+        cursor.fetchone()
+    _write_probe(handle, "two")
+    with pool.lend(head=False, current=True) as next_lend:
+        assert next_lend is not lent
+        assert _read_probe(next_lend) == "two"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses to replace a store file that a connection has open")
+def test_a_pooled_reader_does_not_serve_a_store_file_that_was_replaced(runtime, tmp_path):
+    _create(runtime)
+    pool = runtime.reader_pool()
+    runtime.sample_head()
+    with pool.lend(head=True, current=False) as warm:
+        pass
+    with pool.lend(head=True, current=False) as again:
+        assert again is warm
+    donor = tmp_path / "donor.sqlite"
+    connection.open_writer(donor, lease_check=lambda: True).close()
+    with closing(sqlite3.connect(runtime.path)) as raw:
+        raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    os.replace(donor, runtime.path)
+    with pytest.raises(connection.CollectionStoreError, match="IDENTITY_CHANGED"):
+        runtime.sample_head()
+
+
+def test_retiring_the_handle_leaves_no_reader_open_on_the_store(runtime):
+    _create(runtime)
+    pool = runtime.reader_pool()
+    with pool.lend(head=True, current=False) as warm:
+        pass
+    with pool.lend(head=True, current=False) as again:
+        assert again is warm
+    assert runtime.retire_idle_handle()
+    with closing(sqlite3.connect(runtime.path, timeout=0)) as raw:
+        assert raw.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+    assert not runtime.path.with_name(runtime.path.name + "-wal").exists()
+
+
+def test_closing_the_handle_during_a_lend_lets_the_read_finish_and_closes_that_reader_after(handle):
+    pool = handle.readers
+    with pool.lend(head=False, current=True) as warm:
+        pass
+    lent, release, outcome = threading.Event(), threading.Event(), {}
+
+    def borrow():
+        try:
+            with pool.lend(head=False, current=True) as reader:
+                outcome["pooled"] = reader is warm
+                lent.set()
+                assert release.wait(5)
+                outcome["count"] = reader.execute("SELECT COUNT(*) FROM store_meta").fetchone()[0]
+                outcome["reader"] = reader
+        except BaseException as error:  # noqa: BLE001 - hand the failure to the asserting thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=borrow)
+    thread.start()
+    assert lent.wait(5)
+    handle.close()
+    release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert "error" not in outcome, outcome
+    assert outcome["pooled"] and outcome["count"] > 0
+    with pytest.raises(sqlite3.ProgrammingError):
+        outcome["reader"].execute("SELECT 1")
+    with pool.lend(head=False, current=True) as after:
+        assert after is not outcome["reader"]
+
+
+def test_a_nested_lend_gets_another_reader_and_leaves_the_outer_snapshot_alone(handle):
+    pool = handle.readers
+    _write_probe(handle, "one")
+    with pool.lend(head=False, current=True) as warm:
+        pass
+    with pool.lend(head=False, current=True) as outer:
+        assert outer is warm
+        outer.execute("BEGIN")
+        assert _read_probe(outer) == "one"
+        _write_probe(handle, "two")
+        with pool.lend(head=False, current=True) as inner:
+            assert inner is not outer
+            assert _read_probe(inner) == "two"
+        assert _read_probe(outer) == "one"
+
+
+def test_a_warm_reader_refuses_a_store_that_now_records_a_newer_schema(handle):
+    pool = handle.readers
+    with pool.lend(head=True, current=False) as warm:
+        pass
+    with pool.lend(head=True, current=False) as again:
+        assert again is warm
+    with closing(sqlite3.connect(handle.path)) as raw:
+        raw.execute("UPDATE store_meta SET value=? WHERE key=?",
+                    (str(schema.SCHEMA_VERSION + 1), schema.META_SCHEMA_VERSION))
+        raw.commit()
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        with pool.lend(head=True, current=False):
+            pytest.fail("a lend served a store that records a newer schema")
+
+
+def test_a_warm_reader_refuses_a_current_lend_but_serves_a_head_lend_while_the_store_awaits_migration(
+        handle, monkeypatch):
+    pool = handle.readers
+    with pool.lend(head=False, current=True):
+        pass
+    with pool.lend(head=True, current=False) as head:
+        pass
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION + 1)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_PENDING"):
+        with pool.lend(head=False, current=True):
+            pytest.fail("a current lend served a store that awaits its writer's migration")
+    with pool.lend(head=True, current=False) as served:
+        assert served is head
+
+
+def test_a_disable_committed_while_the_checkout_borrows_refuses_it_from_a_warm_reader(runtime, monkeypatch):
+    """The checkout rechecks the rollback after it borrows; a reader that answered the first check must not answer again."""
+    _create(runtime)
+    pool = runtime.reader_pool()
+    with pool.lend(head=True, current=False) as warm:
+        pass
+    borrow = runtime.manager._collection_store_checkout
+
+    @contextmanager
+    def disabled_while_borrowing():
+        with closing(sqlite3.connect(runtime.path)) as raw:
+            raw.execute("INSERT OR IGNORE INTO store_meta(key, value) VALUES(?, '1')", (capability.DISABLED_KEY,))
+            raw.commit()
+        with borrow() as borrowed:
+            yield borrowed
+
+    monkeypatch.setattr(runtime.manager, "_collection_store_checkout", disabled_while_borrowing)
+    with state_paths.resolution_scope(), pytest.raises(connection.CollectionStoreError, match="DISABLED"):
+        with runtime.checkout():
+            pytest.fail("a checkout began after the vault's rollback")
+    with pool.lend(head=True, current=False) as again:
+        assert again is warm
+
+
+def test_only_the_cached_writers_own_store_gets_its_pool(runtime, tmp_path):
+    assert runtime.reader_pool() is None
+    _create(runtime)
+    assert runtime.reader_pool() is runtime._handle.readers
+    assert runtime.reader_pool(runtime.path) is runtime._handle.readers
+    assert runtime.reader_pool(tmp_path / "another.sqlite") is None

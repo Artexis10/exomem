@@ -136,6 +136,7 @@ def test_a_repeated_unit_keeps_its_own_qualifications(qualification: dict) -> No
     assert served["lifecycle"] == qualified.lifecycle
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_activation_keeps_a_repeated_claims_verdict_and_own_date(vault: Path) -> None:
     """Repeating a judged claim in the introduction must not erase its qualification."""
     page = vault / KILN

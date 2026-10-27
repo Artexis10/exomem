@@ -1106,6 +1106,7 @@ def test_activation_observation_uses_the_final_postfilter(
     assert row["activation_result"]["reason"] == "withheld"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_real_activation_exhaustion_and_useful_partial_have_distinct_rows(
     vault, ledger_dir, activation_owner, monkeypatch
 ):

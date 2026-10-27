@@ -1096,6 +1096,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # unset there. The `vault` fixture sets it explicitly for tests that want
     # one, and autouse setup runs first, so that setenv still wins.
     monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
+    # The suite serves the shipped packet mode (`maps`). An exported rollback setting must not
+    # decide it; a test or module that exercises `anchors` opts in with `anchors_packet` below.
+    monkeypatch.delenv("EXOMEM_ACTIVATION_PACKET", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.
@@ -1122,6 +1125,12 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # synchronous by default and let its focused recovery tests opt back into
     # the real background path.
     monkeypatch.setenv("EXOMEM_SYNC_DUE_STATE_WARM", "1")
+
+
+@pytest.fixture
+def anchors_packet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve the rollback `anchors` packet. Use as `pytestmark = pytest.mark.usefixtures("anchors_packet")`."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
 
 
 @pytest.fixture

@@ -25,6 +25,7 @@ release manifest hashes), and nothing here ships in the wheel or sdist.
 | `membench/utility/` | seeded paired action episodes, isolated native actors, downstream utility/harm and lifecycle cost accounting |
 | `epistemic/` | the pre-registered Epistemic State Bench: frozen family/assertion registry, neutral snapshot schema, projectors, scenario fixtures, and the agent-driven journeys |
 | `membench/runner.py`, `cli.py`, `run.py` | immutable run dirs, failures kept in denominators; CLI launcher |
+| `recall_parity/` | paired local-vs-Cloud recall instrument: seeded sampler, MCP-over-HTTP capture, blinded judge packet, paired nDCG scorer with bootstrap CI |
 | `corpus/schema/` | committed JSON-Schemas (drift-gated) |
 | `corpus/generated/`, `runs/`, `private/` | **gitignored**: generated corpora, run artifacts, local founder-regression fixtures |
 
@@ -173,6 +174,63 @@ Sequence 3 was acknowledged on 2026-08-30, so a run may back a comparative
 claim; the family is declared expected-partial on the current runtime — the
 next slice's falsification target. Runs recorded while the receipt was pending
 remain evidence about the harness and that runtime, as their manifests say.
+
+## Cloud-vs-local recall parity (`recall_parity/`)
+
+A paired instrument: the same real queries go through the same MCP-over-HTTP
+client to two Exomem endpoints, and a blind judge grades the pooled results.
+An arm is an endpoint, a URL plus the **name** of the environment variable that
+holds its bearer token. A token is never printed, logged or written. Every
+artifact goes under one private directory that is in no git work tree, or that
+git itself reports ignored (for example the git-ignored `benchmarks/private/`);
+the real queries must never enter the repository, tests or logs.
+
+```
+export LOCAL_TOKEN=... CLOUD_TOKEN=...   # in your shell, never on the command line
+P=~/exomem-parity-private
+V=/path/to/source-vault   # read only; the judge's view of every document comes from it
+PYTHONPATH=benchmarks uv run python -m recall_parity sample --private-dir $P --queries /path/to/queries.jsonl --seed 1
+PYTHONPATH=benchmarks uv run python -m recall_parity capture --private-dir $P --run tuning --split tuning --arm local URL_A LOCAL_TOKEN --arm cloud URL_B CLOUD_TOKEN
+PYTHONPATH=benchmarks uv run python -m recall_parity packet --private-dir $P --run tuning --vault $V
+PYTHONPATH=benchmarks uv run python -m recall_parity score --private-dir $P --run tuning --judgments $P/judgments.jsonl --baseline local --candidate cloud
+```
+
+- `sample` reads `queries.jsonl` files as `query_log` writes them, drops
+  queries by structure only (failed outcome, under `--min-chars`, default 2, no letter or
+  digit, duplicate after case and whitespace folding), and draws a seeded
+  tuning and held-out split before any arm runs. Each drop is counted in
+  `sample/sample-manifest.json`.
+- `capture` calls one tool (`search_memory`, `limit` 10, `detail` `full`) on
+  both arms with fixed arguments and records ranked paths, snippets,
+  client-side latency and any error; the run manifest names the tool, the
+  arguments, the arm URLs, the seed and the split sizes. A failed call stays in
+  every denominator. Discarded warm-up calls send one fixed neutral query, never a
+  sampled one, and the manifest records it. Run the `tuning` split first and
+  `heldout` once.
+- `packet` pools both arms' top 10 per query into `runs/<run>/judge/packet.jsonl`:
+  an opaque pair id, the query, the path, the title and a body slice, shuffled.
+  A document both arms returned is one pair. Title and body are read from the
+  `--vault` directory, never from an arm's answer, so both arms' copies of a
+  document look the same: the frontmatter `title` (else the file name) and the
+  first 1,500 characters of the body after its frontmatter. The vault is opened
+  for reading only, and a result path that leaves it (absolute, `..` or a
+  symlink out) stops the step. A path the vault lacks is shown with `missing`
+  set and counted in `key/packet-manifest.json`, with the count per arm that
+  returned it. The arm key is `key/arm-key.json`. Give the judge only
+  `judge/packet.jsonl`, never `capture/` or `key/`.
+- `score` reads one `{"pair_id": ..., "grade": 0|1|2}` per line from the judge.
+  It reports per-query nDCG@10 per arm, the paired difference (candidate minus
+  baseline), a seeded percentile bootstrap 95% interval over queries (10,000
+  resamples) and latency p50 and p95. Unjudged pairs, errors and cases with no
+  relevant result are counted in `coverage`, never scored as 0 silently. Each
+  pair needs exactly one adjudicated grade: a pair with two different grades,
+  as when judge files are concatenated, is dropped and counted as unjudged.
+  Keep the judgments file inside the private directory.
+
+The grading rubric comes from the evaluator, not from this package. The pass
+rule is applied by the reader: for the nDCG@10 difference (Cloud minus local),
+the lower 95% bound must be at least -0.05. `tests/test_membench_parity_e2e.py`
+runs the four commands against two in-process servers over invented queries.
 
 ## Degradation modes (recorded, never silent)
 

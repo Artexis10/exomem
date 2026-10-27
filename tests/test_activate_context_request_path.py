@@ -96,6 +96,7 @@ def _seed_live_recall(root: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_freshness_current_state_and_guard_spans_are_registered(
     activation_vault: Path,
 ) -> None:
@@ -139,6 +140,7 @@ def test_a_disabled_abstention_still_returns_its_timings(
     assert "timings" in packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_unresolved_abstention_still_returns_its_timings(
     activation_vault: Path,
 ) -> None:
@@ -318,6 +320,7 @@ def test_managed_cold_start_abstains_warming_even_with_a_ready_anchor_index(
     assert working_set_runtime._PACKET_CACHE == {}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_managed_never_live_and_not_seed_pending_falls_through_to_cold_walk(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -338,6 +341,7 @@ def test_managed_never_live_and_not_seed_pending_falls_through_to_cold_walk(
     assert "working_set.freshness" in packet["timings"]["stages"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_offline_activation_is_unchanged_by_the_require_live_recall_rule(
     activation_vault: Path,
 ) -> None:
@@ -466,6 +470,7 @@ def test_activation_returns_promptly_on_an_already_expired_budget(
     assert packet["budget"] == {"limit_chars": 4000, "used_chars": 0}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_normal_budget_leaves_activation_unchanged(
     activation_vault: Path, bind_budget
 ) -> None:
@@ -491,6 +496,7 @@ def test_an_unrelated_abstention_does_not_claim_a_borrowed_budget_omission(
     assert request_budget.current() is budget
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
 @pytest.mark.parametrize("headroom", [0.05, 1.2])
 def test_relevant_due_advice_respects_the_fixed_request_deadline(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch, headroom: float,
@@ -677,6 +683,7 @@ def test_budget_exhausted_after_freshness_skips_readiness_onward(
     assert packet["request_budget"]["skipped"] == ["working_set.readiness"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_budget_exhausted_after_resolve_skips_roles_onward(
     activation_vault: Path, countdown_budget, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -749,6 +756,7 @@ def test_budget_exhausted_after_resolve_skips_roles_onward(
     assert packet["request_budget"]["skipped"] == ["working_set.roles"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_budget_exhausted_between_two_role_lanes_discards_the_first_lanes_work(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -827,6 +835,7 @@ def test_the_stage_reserve_blocks_a_stage_with_positive_but_insufficient_remaini
     assert packet["request_budget"]["skipped"] == ["working_set.freshness"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_budget_skip_inside_compile_packet_logs_info_without_a_traceback(
     activation_vault: Path, countdown_budget, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -862,6 +871,7 @@ def test_a_budget_skip_inside_compile_packet_logs_info_without_a_traceback(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_pre_bound_budget_is_used_unchanged_not_replaced(
     activation_vault: Path, bind_budget
 ) -> None:
@@ -877,6 +887,7 @@ def test_a_pre_bound_budget_is_used_unchanged_not_replaced(
     assert budget.skipped == []
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_unmanaged_runtime_never_binds_a_door_budget(
     activation_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -907,6 +918,7 @@ def test_unmanaged_runtime_never_binds_a_door_budget(
     assert request_budget.current() is None
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_no_bound_budget_still_gates_a_boundary_via_the_door_budget(
     activation_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -956,6 +968,7 @@ def test_no_bound_budget_still_gates_a_boundary_via_the_door_budget(
     assert request_budget.current() is None
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_door_bound_budget_is_restored_after_an_exception(
     activation_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -999,6 +1012,7 @@ def carried_vault(activation_vault: Path) -> Path:
     return activation_vault
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_turn_naming_no_anchor_is_served_that_notes_units(
     carried_vault: Path, budget_free
 ) -> None:
@@ -1028,6 +1042,7 @@ def test_a_turn_naming_no_anchor_is_served_that_notes_units(
     assert working_set_runtime.decode_continuity(packet["continuity"])["refs"] == [CARRY_PAGE]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("fail_role", [False, True])
 def test_managed_activation_selects_around_encoding_and_restores_the_caller_scope(
     carried_vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, budget_free,
@@ -1126,6 +1141,7 @@ def test_managed_activation_selects_around_encoding_and_restores_the_caller_scop
         assert {unit["provenance"]["path"] for unit in packet["units"]} == {CARRY_PAGE}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_named_anchor_still_wins_through_the_whole_door(
     carried_vault: Path, budget_free
 ) -> None:
@@ -1157,6 +1173,7 @@ def test_a_named_anchor_still_wins_through_the_whole_door(
     assert not packet.get("ambiguity")
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_first_activation_after_an_edit_serves_current_units_before_its_own_refresh(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
 ) -> None:
@@ -1263,6 +1280,7 @@ def test_first_activation_after_an_edit_serves_current_units_before_its_own_refr
     assert any(unit["text"] == "Never exceed 275 kg." for unit in current["units"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_independent_publication_still_withdraws_compiled_units_without_a_privacy_oracle(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
 ) -> None:
