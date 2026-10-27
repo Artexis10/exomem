@@ -77,6 +77,8 @@ Skipping keeps every declaration `inferred` and in effect; it stays listed for l
 review. A hand-written `domain` on a project key is read as `reviewed` and never rewritten.
 A refusal names its reason (unresolved or rejected topic, a type folder); fix it from
 the finding instead of retrying the same save.
+A page that no carrier reaches joins a topic through its own `topics` field. A page's
+`domain` field names a source's subject or an experiment's folder and files no topic.
 
 ## Revert without rewriting pages
 
