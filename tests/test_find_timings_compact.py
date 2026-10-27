@@ -2,6 +2,7 @@
 
 Default behavior must stay byte-identical: no envelope, full hit dicts with
 excerpts. Timings are opt-in via `include_timings`, compact via `detail`.
+A compact hit keeps a short excerpt and drops the ranking signals.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import pytest
 
 from exomem import commands, lexstore, query_log
 from exomem import find as find_module
+from exomem.find_types import Hit
+from exomem.governance import egress
 
 
 def test_default_find_shape_unchanged(vault: Path) -> None:
@@ -93,14 +96,29 @@ def test_keyword_mode_timings(vault: Path) -> None:
     assert "keyword" in out["timings"]["stages"]
 
 
-def test_compact_detail_omits_excerpt_and_signals(vault: Path) -> None:
+def test_compact_detail_carries_the_excerpt_and_omits_signals(vault: Path) -> None:
     full = commands.op_find(vault, query="metabolism")
     compact = commands.op_find(vault, query="metabolism", detail="compact")
     assert [h["path"] for h in compact] == [h["path"] for h in full]
-    for h in compact:
-        assert "excerpt" not in h
+    for h, f in zip(compact, full, strict=True):
+        assert h["excerpt"] == f["excerpt"]
         assert "signals" not in h
         assert h["path"] and "title" in h and "updated" in h and "type" in h
+
+
+def test_compact_excerpt_is_cut_at_a_word_boundary() -> None:
+    text = " ".join(["wordwordword"] * 60)
+    hit = Hit(path="Notes/a.md", type="insight", scope=None, title="A", updated="2026-01-01", excerpt=text)
+
+    full = egress.project(hit, egress.LEVEL_FULL)
+    compact = egress.project(hit, egress.LEVEL_FULL, compact=True)
+
+    assert full is not None and compact is not None
+    assert full["excerpt"] == text
+    assert compact["excerpt"].endswith(" …")
+    kept = compact["excerpt"].removesuffix(" …")
+    assert len(kept) <= egress.COMPACT_HIT_EXCERPT_MAX
+    assert text.startswith(kept) and text[len(kept)] == " "
 
 
 def test_compact_preserves_lifecycle_fields(vault: Path) -> None:
@@ -115,7 +133,7 @@ def test_compact_preserves_lifecycle_fields(vault: Path) -> None:
 def test_compact_composes_with_pack(vault: Path) -> None:
     out = commands.op_find(vault, query="metabolism", detail="compact", pack=True)
     assert set(out) == {"hits", "pack"}
-    assert all("excerpt" not in h for h in out["hits"])
+    assert all("signals" not in h for h in out["hits"])
 
 
 def test_invalid_detail_rejected(vault: Path) -> None:
@@ -127,7 +145,8 @@ def test_hit_compact_dict_direct(vault: Path) -> None:
     hits = find_module.find(vault, query="metabolism")
     assert hits
     c = hits[0].as_compact_dict()
-    assert "excerpt" not in c and "signals" not in c
+    assert "signals" not in c
+    assert c["excerpt"] == hits[0].excerpt
     assert c["path"] == hits[0].path
 
 

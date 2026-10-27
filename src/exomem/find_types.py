@@ -404,6 +404,9 @@ class Hit:
             "title": self.title,
             "updated": self.updated,
         }
+        # Whole here; `egress.project` cuts it to COMPACT_HIT_EXCERPT_MAX after release stripping.
+        if self.excerpt:
+            out["excerpt"] = self.excerpt
         if self.graph_provenance is not None:
             out["graph"] = self.graph_provenance.as_dict()
         if self.relation_match is not None:

@@ -2682,10 +2682,11 @@ def op_find(
         detail: Result verbosity. "full" (default) keeps the current hit
             shape including `excerpt` and `signals`. "compact" returns the
             SAME ranked hits as token-cheap routing stubs — path, title,
-            type, scope, updated, plus lifecycle/media/outside_kb markers
-            when present — omitting `excerpt` and `signals`. Use compact
-            for cheap proactive recall, then `get` a chosen page (or rerun
-            with detail="full") when you need the why.
+            type, scope, updated, a short `excerpt` when the hit has one,
+            plus lifecycle/media/outside_kb markers when present —
+            omitting `signals`. Use compact for cheap proactive recall,
+            then `get` a chosen page (or rerun with detail="full") when you
+            need the why.
         include_timings: When true (off by default), the return becomes an
             envelope {"hits": [...], "timings": {...}} (with pack=true the
             envelope also carries "pack"). `timings` reports total_ms,
@@ -2728,7 +2729,7 @@ def op_find(
         groups bounded citable units under one parent context; `semantic_blocks`
         is a bounded compatibility projection from those same rich units.
         With detail="compact": each hit is the routing stub described under
-        `detail` (no excerpt/signals) — same paths, same order.
+        `detail` (a short `excerpt`, no signals) — same paths, same order.
         With include_timings on: {"hits": [...], ["pack": {...},]
         "timings": {total_ms, unattributed_ms, cache, stages}}.
         Right after a server start, while models are still warming in the

@@ -753,6 +753,11 @@ assert LEVEL_NONE == DISCLOSURE_MIN and LEVEL_FULL == DISCLOSURE_MAX
 # Per-level field allow-lists (D3)
 # ---------------------------------------------------------------------------
 
+#: Characters of page text a compact hit excerpt keeps; a cut adds the " …" marker after them.
+#: The page builders already cut near 220 characters (`find_results`), so this clips only an
+#: outlier and bounds the compact payload at a few hundred bytes per hit.
+COMPACT_HIT_EXCERPT_MAX = 240
+
 # A find hit is inherently an excerpt shape, so L5 and L6 share a field set;
 # the ladder distinction between them bites on `get`/`read_memory`, where L5 is
 # a bounded excerpt of a body L6 returns whole (see `annotate_page`).
@@ -1506,6 +1511,14 @@ def project(
     out = _strip_withheld_provenance(out, withheld_paths)
     if decision is not None and decision.release_strip:
         out = bridges.strip_provenance(out, decision.release_strip)
+    if compact and resolved_kind == "hit" and "excerpt" in out:
+        # Cut AFTER every strip above, so a compact excerpt is a prefix of the one full mode releases.
+        # Cutting first could end inside an identity the strip removes whole, and leave half of it.
+        excerpt = _excerpt_of(str(out["excerpt"]), COMPACT_HIT_EXCERPT_MAX)
+        if excerpt:
+            out["excerpt"] = excerpt
+        else:
+            del out["excerpt"]
     return out
 
 
