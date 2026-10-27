@@ -558,7 +558,9 @@ def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject
 
 #: Row subjects the writer's release cache keeps across collections before shedding them.
 _MAX_CACHED_SUBJECTS = 65536
-_MAX_CACHED_STATES = 8
+#: Collection states kept at once: as many as one discovery sweep can reach. A smaller cap evicts
+#: each state before a scan in path order returns to it, so every pass reloaded every collection.
+_MAX_CACHED_STATES = collections._MAX_DISCOVERY_CANDIDATES
 
 
 @dataclass(slots=True)

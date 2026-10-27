@@ -56,6 +56,32 @@ def test_inventory_counts_canonical_committed_and_held_without_views(store):
     assert result["collections"][0]["held"] == 1
 
 
+def test_inventory_counts_follow_a_write_to_a_collection_whose_state_the_sweep_kept(store):
+    """Ten collections fit the state cache, so a write patches a retained state instead of finding none.
+
+    A cache that evicted the first collection before the sweep returned to it would reload
+    its counts every time and never show a missed delta. Retained, the committed and held
+    counts depend on the write's delta reaching that state.
+    """
+    cids = [f"{number:08d}-0000-4000-8000-000000000000" for number in range(1, 11)]
+    for number, cid in enumerate(cids):
+        store.create_collection(manifest_path().replace("Work", f"Group{number:02d}"),
+                                manifest_text().replace(CID, cid), why="create", scaffold=False)
+
+    def counts():
+        with preview_store(store.root, store.handle):
+            rows = record_governance.inventory_collections(store.root)["collections"]
+        return {row["collection_id"]: (row["committed"], row["held"]) for row in rows}
+
+    assert counts() == dict.fromkeys(cids, (0, 0))
+    assert cids[0] in store.handle.release_cache.states  # The premise: the sweep did not evict it.
+    store.append_record(cids[0], item={"title": "One"}, item_key=KEY, why="capture")
+    with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE"):
+        store.append_record(cids[0], item={"title": "Bad", "count": "invalid"},
+                            item_key=OTHER, why="capture", hold=True)
+    assert counts() == {**dict.fromkeys(cids, (0, 0)), cids[0]: (1, 1)}
+
+
 def test_current_state_uses_canonical_contract_when_manifest_view_is_stale(store):
     text = manifest_text().replace("    count: {type: integer}",
                                   "    status: {type: string}")
