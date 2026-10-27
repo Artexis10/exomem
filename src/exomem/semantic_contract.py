@@ -840,15 +840,13 @@ class SemanticContractResult:
 
 ERROR_FINDING_LIMIT = 3
 
-# The validate form every writer's remediation text names. Edit and creation
-# writers take it as a parameter; an operation that validates differently
-# (observe_memory: operation=validate) rewrites it with `localize_validate_form`.
+# The validate form writers name in remediation text: the `validate_only`
+# parameter that edit and creation tools take by default.
 VALIDATE_FORM = "validate_only=true"
 
-
-def localize_validate_form(reason: str, validate_form: str) -> str:
-    """Name the calling operation's own validate form in a blocking reason."""
-    return reason.replace(VALIDATE_FORM, validate_form)
+# Tool parameter spellings fixed by the tool signatures, not registry vocabulary.
+# A writer operation absent here validates with VALIDATE_FORM.
+_OPERATION_VALIDATE_FORMS = MappingProxyType({"observe": "operation=validate"})
 
 
 def blocking_finding_text(finding: ContractFinding) -> str:
@@ -5193,9 +5191,11 @@ def _disposition_finding(
     disposition: RelationDisposition,
     *,
     existing: bool = True,
+    operation: str = "edit",
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
+    validate_form = _OPERATION_VALIDATE_FORMS.get(operation, VALIDATE_FORM)
     return ContractFinding(
         code=(
             "RELATION_DISPOSITION_STALE"
@@ -5221,7 +5221,7 @@ def _disposition_finding(
             if existing and page.identity_kind == "path"
             else (
                 "Add a qualifying typed relation. Retriggers: "
-                f"{VALIDATE_FORM}; re-issue the same edit with "
+                f"{validate_form}; re-issue the same edit with "
                 "transition_token=<returned>, "
                 "relation_disposition=\"reviewed_none\", "
                 "relation_review_hash=<returned>, "
@@ -5230,7 +5230,7 @@ def _disposition_finding(
             if existing
             else (
                 "Add a qualifying typed relation. Retriggers: "
-                f"call {VALIDATE_FORM}, then "
+                f"call {validate_form}, then "
                 "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
                 "draft_hash=<returned draft_hash>, draft_token=<returned "
                 "draft_token>, relation_disposition=\"reviewed_none\", "
@@ -5408,7 +5408,10 @@ def _raw_findings(
     findings.extend(_page_rule_findings(page, contracts, corpus))
     if disposition is not None:
         disposition_finding = _disposition_finding(
-            page, disposition, existing=before is not None or mode == "posthoc"
+            page,
+            disposition,
+            existing=before is not None or mode == "posthoc",
+            operation=operation,
         )
         if disposition_finding is not None:
             findings.append(disposition_finding)
