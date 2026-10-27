@@ -874,6 +874,19 @@ def _remember_reviewed(vault: Path, title: str, slug: str) -> dict:
         return writer_lease.invoke_command(remember, vault, **kwargs)
 
 
+def test_an_access_policy_edit_reaches_the_drain_as_a_policy_change(vault: Path) -> None:
+    """A policy change can alter any page's visibility, so the flush must reconcile access."""
+    target = vault / "Knowledge Base" / "Notes" / "own.md"
+    watcher = file_watcher.FileWatcher(vault)
+    with watcher._lock:
+        watcher._record_external_locked(target, deleted=False)
+    watcher._record(vault / "Knowledge Base" / "_access.yaml", deleted=False)
+
+    _media, ups, _dels, _epoch, access_policy = watcher._drain()
+    assert ups == [target]
+    assert access_policy is True
+
+
 def test_a_running_watcher_admits_none_of_a_remembers_files(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
