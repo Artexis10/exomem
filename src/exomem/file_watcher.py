@@ -1030,9 +1030,6 @@ class FileWatcher:
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
         self._pending_publication_intents: dict[Path, _PublicationIntent] = {}
-        # Pending paths admitted on an event Exomem cannot attribute to itself.
-        # A drain with none came only from a writer's failed publication.
-        self._pending_unattributed: set[Path] = set()
         self._pending_external_epoch = 0
         self._pending_access_policy = False
         self._last_change = 0.0
@@ -1080,11 +1077,7 @@ class FileWatcher:
 
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
-    def _record_external_locked(
-        self, path: Path, *, deleted: bool, self_authored: bool = False
-    ) -> None:
-        if not self_authored:
-            self._pending_unattributed.add(path)
+    def _record_external_locked(self, path: Path, *, deleted: bool) -> None:
         if deleted:
             self._pending_upsert.discard(path)
             self._pending_delete.add(path)
@@ -1114,7 +1107,7 @@ class FileWatcher:
             else:
                 self._pending_publication_intents.pop(path, None)
             if disposition != "succeeded":
-                self._record_external_locked(path, deleted=False, self_authored=True)
+                self._record_external_locked(path, deleted=False)
         self._wake.set()
 
     def _replay_publication_remnant(self, path: Path) -> None:
@@ -1123,7 +1116,7 @@ class FileWatcher:
             self._pending_publication_intents.pop(path, None)
             if path in self._pending_upsert or path in self._pending_delete:
                 return
-            self._record_external_locked(path, deleted=False, self_authored=True)
+            self._record_external_locked(path, deleted=False)
         self._wake.set()
 
     def _hold_publication_intent(self, path: Path, intent: _PublicationIntent) -> None:
@@ -1269,31 +1262,27 @@ class FileWatcher:
             except ValueError:
                 return None
 
-    def _drain(self) -> tuple[list[Path], list[Path], list[str], int, bool, bool]:
+    def _drain(self) -> tuple[list[Path], list[Path], list[str], int, bool]:
         with self._lock:
             media = sorted(self._pending_media)
             ups = sorted(self._pending_upsert)
             dels = sorted(self._pending_delete)
             pending_epoch = self._pending_external_epoch
             access_policy = self._pending_access_policy
-            self_authored = (
-                bool(ups or dels) and not self._pending_unattributed and not access_policy
-            )
             self._pending_media.clear()
             self._pending_upsert.clear()
             self._pending_delete.clear()
-            self._pending_unattributed.clear()
             self._pending_external_epoch = 0
             self._pending_access_policy = False
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
-        return media, ups, del_rels, pending_epoch, access_policy, self_authored
+        return media, ups, del_rels, pending_epoch, access_policy
 
     @_background_graph_caller
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         self._resolve_held_publication_intents()
-        media, ups, del_rels, pending_epoch, access_policy, _self_authored = self._drain()
+        media, ups, del_rels, pending_epoch, access_policy = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)
         if not (media or ups or del_rels):

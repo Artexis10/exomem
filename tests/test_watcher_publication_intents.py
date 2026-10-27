@@ -56,7 +56,7 @@ def test_published_event_is_held_until_postcommit_registration(
     watcher._flush()
 
     assert fanout == [[target]]
-    assert watcher._drain() == ([], [], [], 0, False, False)
+    assert watcher._drain() == ([], [], [], 0, False)
     assert freshness.external_pending(vault) is False
 
 
@@ -872,20 +872,6 @@ def _remember_reviewed(vault: Path, title: str, slug: str) -> dict:
     )
     with library_scope():
         return writer_lease.invoke_command(remember, vault, **kwargs)
-
-
-def test_an_access_policy_change_leaves_the_drain_unattributed(vault: Path) -> None:
-    """A policy change can alter any page's visibility, so its scope is unknown."""
-    target = vault / "Knowledge Base" / "Notes" / "own.md"
-    watcher = file_watcher.FileWatcher(vault)
-    with watcher._lock:
-        watcher._record_external_locked(target, deleted=False, self_authored=True)
-    watcher._record(vault / "Knowledge Base" / "_access.yaml", deleted=False)
-
-    _media, ups, _dels, _epoch, access_policy, self_authored = watcher._drain()
-    assert ups == [target]
-    assert access_policy is True
-    assert self_authored is False
 
 
 def test_a_running_watcher_admits_none_of_a_remembers_files(
