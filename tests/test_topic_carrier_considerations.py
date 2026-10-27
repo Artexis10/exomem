@@ -134,6 +134,19 @@ def test_the_write_path_never_ranks_the_vault(world: Path, monkeypatch: pytest.M
         assert tcc.after_write(world, f"{INSIGHTS}/quay-0.md") is not None
 
 
+def test_the_write_path_counts_a_folder_whole_while_skipping_entries_a_key_already_files(world: Path) -> None:
+    # Pages filed by their key's own domain skip the load, yet still count toward the folder's size.
+    _write(world, f"{KB}/_Schema/project-keys.yaml", "projects:\n  dock-ops: {folder: Dock Ops, category: domain, domain: harbour}\n")
+    docks = f"{KB}/Docks"
+    _add_pages(world, ["slip-0", "slip-1", "slip-2"], "project: dock-ops\n", folder=docks)
+    _add_pages(world, ["slip-loose"], "", folder=docks)
+    with library_scope():
+        written = tcc.after_write(world, f"{docks}/slip-0.md")
+
+    assert written is not None
+    assert written.logical_identity == "folder:docks"
+
+
 def test_a_carrier_is_announced_once_and_not_again_while_unchanged(world: Path) -> None:
     with library_scope():
         first = vocabulary_delivery._with_carrier_advisory(world, {"state": "committed"}, f"{INSIGHTS}/quay-0.md")  # noqa: SLF001 - the step after_commit runs

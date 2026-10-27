@@ -258,8 +258,6 @@ class ContextCatalogue:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS entries_thread ON entries(thread_key)")
-        # The write path counts one page's own carriers by these columns, never by a scan.
-        conn.execute("CREATE INDEX IF NOT EXISTS entries_path ON entries(path)")
         for table, column in (
             ("declared_topics_raw", "raw"),
             ("entry_projects", "project_key"),
