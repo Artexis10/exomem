@@ -294,7 +294,11 @@ async def main():
 asyncio.run(main())
 """
 
-INIT_VAULT = "import sys; from pathlib import Path; from exomem import init; init.init_vault(Path(sys.argv[1]))"
+INIT_VAULT = ("import sys; from pathlib import Path; from exomem import init; "
+              "init.init_vault(Path(sys.argv[1]), force=sys.argv[2:] == ['overlay'])")
+INIT_STATE = ("import sys; from pathlib import Path; from exomem import state_migration as m; "
+              "Path(sys.argv[1]).mkdir(parents=True, exist_ok=True); m.migrate_vault_state_offline(Path(sys.argv[1]), "
+              "authority=m.assert_offline_migration_authority(source='latency gate arm before seeding'))")
 
 #: The runner's own settings never reach an arm: its keys, tokens and service settings stay out.
 _HOST_PREFIXES = ("EXOMEM_", "KB_MCP_", "FASTMCP_", "GITHUB_")
@@ -365,8 +369,16 @@ class Arm:
             raise MeasurementRefused("arm-command-failed", phase="arm-setup") from error
         return done.stdout.strip()
 
-    def init_vault(self) -> None:
-        self.run_python(INIT_VAULT, str(self.vault))
+    def init_vault(self, *, overlay: bool = False) -> None:
+        """Lay down the starter scaffold, with the state manifest only on an empty vault.
+
+        `overlay` lays it over pages already written; a page at a scaffold path is replaced.
+        """
+        self.run_python(INIT_VAULT, str(self.vault), *(("overlay",) if overlay else ()))
+
+    def init_state(self) -> None:
+        """Write the empty vault's external state manifest, as `init_vault` does for a new vault."""
+        self.run_python(INIT_STATE, str(self.vault))
 
     async def start(self, *, quiescence_limit: float) -> dict[str, float]:
         """Start the coordinator and the worker, join the worker as a local client and wait for quiet."""
@@ -417,7 +429,10 @@ class Arm:
         self.client = Client(StreamableHttpTransport("http://127.0.0.1/mcp", headers=headers,
                                                      httpx_client_factory=factory), timeout=120)
         await self.client.__aenter__()
-        return {"ready_s": ready, "quiescent_s": await self.quiesce(limit=quiescence_limit)}
+        progress(f"arm-ready arm={self.name} ready_s={ready:.0f}")
+        quiescent = await self.quiesce(limit=quiescence_limit)
+        progress(f"arm-quiet arm={self.name} quiescent_s={quiescent:.0f}")
+        return {"ready_s": ready, "quiescent_s": quiescent}
 
     @staticmethod
     async def _port_open(port: int, process: subprocess.Popen) -> bool:
@@ -567,14 +582,18 @@ async def stop_arms(arms: dict[str, Arm]) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def progress(line: str) -> None:
+    """One stderr line per preparation step: a run that overruns its step budget still shows where the time went."""
+    print(line, file=sys.stderr, flush=True)
+
+
 async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
     started = time.monotonic()
     await arm.load_collections(fixture)
     loaded = time.monotonic()
     await arm.quiesce(limit=1800)
     # Fixture preparation is not part of the summary; one stderr line keeps its cost visible to the operator.
-    print(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}",
-          file=sys.stderr, flush=True)
+    progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}")
 
 
 async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, repeats: int) -> dict[str, Any]:
@@ -680,20 +699,27 @@ def prepare_notes(arms: dict[str, Arm], base_src: Path, base_python: Path, *, no
 
     head, base = arms["head"], arms["base"]
     recall_profile = json.loads((RECALL_BENCHMARK / "profile.json").read_text())
-    head.init_vault()
     if notes_pages is None:
         import recall_latency_gate as recall
 
         if len(os.sched_getaffinity(0)) < recall.REFERENCE["reference_cpus"]:
             raise MeasurementRefused("two-cpu-reference-unavailable", phase="reference-preparation")
+        # The recall worker checks the stored corpus against its reference profile before it serves, and
+        # the scaffold's navigation pages carry semantic units that no vector covers. So each arm is seeded
+        # before its scaffold is laid. Its state manifest comes first: the managed worker refuses state
+        # without one, and a later `init_vault` writes one only for an empty vault.
+        head.init_state()
+        base.init_state()
         head_inputs = seed_reference_notes(head, ROOT, None, recall, recall_profile)
         rels = json.loads((head.vault / "reference-corpus.json").read_text())
-        base.init_vault()
         copy_notes(rels, head.vault, base.vault)
         base_inputs = seed_reference_notes(base, base_src, base_python, recall, recall_profile)
         if any(head_inputs[key] != base_inputs[key] for key in ("corpus", "encoder_digest", "encoder_identity")):
             raise MeasurementRefused("paired-reference-inputs-differ", phase="reference-preparation")
+        head.init_vault(overlay=True)
+        base.init_vault(overlay=True)
         return rels
+    head.init_vault()
     recall_profile["pages"] = notes_pages
     words, _digest = reference_source(recall_profile, RECALL_BENCHMARK)
     rels = gen_reference_vault(head.vault, recall_profile, words)
@@ -755,13 +781,16 @@ def run_paired(args: argparse.Namespace) -> dict:
     reduced = bool(args.max_cases or args.notes_pages)
     with scratch_directory(args.scratch) as temporary:
         scratch = Path(temporary)
+        began = time.monotonic()
         base_src, base_python = prepare_release(tag, scratch)
+        progress(f"release-prepared elapsed_s={time.monotonic() - began:.0f}")
         recall_profile = json.loads((RECALL_BENCHMARK / "profile.json").read_text())
         arms = build_arms({"head": scratch / "arms/head", "base": scratch / "arms/base"},
                           {"head": sys.executable, "base": base_python},
                           worker_settings(embeddings=args.notes_pages is None,
                                           passthrough=recall_profile["worker_environment"]))
         rels = prepare_notes(arms, base_src, base_python, notes_pages=args.notes_pages)
+        progress(f"notes-prepared elapsed_s={time.monotonic() - began:.0f}")
         fixture = gen_collection_fixture(profile)
         everything = gen_collection_cases(fixture, profile) + gen_note_cases(arms["head"].vault, rels, profile)
         cases, total = select_cases(everything, per_group=args.max_cases, shard=args.shard, shards=profile["shards"])
