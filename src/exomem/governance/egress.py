@@ -173,6 +173,9 @@ def _packet_publications(packet: Any) -> set[str] | None:
     # Pointers do not carry their producer's authored-page/canonical-item basis.
     if packet.get("pointers"):
         return None
+    # A map block lists catalogue entries without a per-page basis: the count stays unknown, never zero.
+    if "map" in packet:
+        return None
     paths: set[str] = set()
     # These are packet schema blocks, not customer-defined roles or meanings.
     for block in ("anchors", "related", "recent_context", "current_state", "units"):
@@ -752,6 +755,11 @@ assert LEVEL_NONE == DISCLOSURE_MIN and LEVEL_FULL == DISCLOSURE_MAX
 # ---------------------------------------------------------------------------
 # Per-level field allow-lists (D3)
 # ---------------------------------------------------------------------------
+
+#: Characters of page text a compact hit excerpt keeps; a cut adds the " …" marker after them.
+#: The page builders already cut near 220 characters (`find_results`), so this clips only an
+#: outlier and bounds the compact payload at a few hundred bytes per hit.
+COMPACT_HIT_EXCERPT_MAX = 240
 
 # A find hit is inherently an excerpt shape, so L5 and L6 share a field set;
 # the ladder distinction between them bites on `get`/`read_memory`, where L5 is
@@ -1506,6 +1514,14 @@ def project(
     out = _strip_withheld_provenance(out, withheld_paths)
     if decision is not None and decision.release_strip:
         out = bridges.strip_provenance(out, decision.release_strip)
+    if compact and resolved_kind == "hit" and "excerpt" in out:
+        # Cut AFTER every strip above, so a compact excerpt is a prefix of the one full mode releases.
+        # Cutting first could end inside an identity the strip removes whole, and leave half of it.
+        excerpt = _excerpt_of(str(out["excerpt"]), COMPACT_HIT_EXCERPT_MAX)
+        if excerpt:
+            out["excerpt"] = excerpt
+        else:
+            del out["excerpt"]
     return out
 
 
@@ -5484,10 +5500,12 @@ def _annotate_page(
             principal=who,
             purpose=declared_purpose,
         )
+        shown = _excerpt_of(body)
         excerpt = {
             "path": rel_path,
-            "body": _excerpt_of(body),
-            "body_truncated": True,
+            "body": shown,
+            # `_excerpt_of` collapses whitespace and, only when it cuts, adds a marker.
+            "body_truncated": shown != " ".join(body.split()),
             "release_level": level,
         }
         if decision.release_strip:

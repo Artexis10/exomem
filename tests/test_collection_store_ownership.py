@@ -1,9 +1,10 @@
 """Canonical ownership survives stale hints and concurrent first admission."""
 
+import contextvars
 import hashlib
 import sqlite3
 import threading
-from contextlib import closing
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -37,7 +38,15 @@ from exomem import (
     writer_lease,
 )
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority, connection, owner, replica, runtime, schema
+from exomem.collection_store import (
+    authority,
+    connection,
+    owner,
+    ownership,
+    replica,
+    runtime,
+    schema,
+)
 from exomem.collection_store.preview import preview_store
 
 
@@ -399,6 +408,8 @@ def test_complete_negative_ownership_reads_no_row_or_projection_census(service, 
     attempted = []
     observed = set()
     foreground = ContextVar("negative_ownership_foreground", default=False)
+    # The observer sits on the opener, and a pooled reader opened before it would skip it.
+    runtime.reader_pool(root, connection.store_path(root)).close()
 
     def no_rows(*args, **kwargs):
         conn, version = opened(*args, **kwargs)
@@ -457,6 +468,35 @@ def test_an_ordinary_row_save_does_not_invalidate_a_whole_overview(service, monk
     assert not reader.is_alive()
     assert len(result) == 1 and isinstance(result[0], dict), result
     assert titles(root, CID) == ["Canonical", "Concurrent row"]
+
+
+def test_a_pooled_proof_does_not_release_a_read_after_a_namespace_change(service, monkeypatch):
+    """The release re-proves ownership on its own lend, which starts with no transaction, not from the body's snapshot."""
+    root = service.root
+    # The fixture's first row is still publishing; a request that starts meanwhile meets the handoff.
+    _published(SimpleNamespace(meta=lambda: store_meta(root)))
+    pool = runtime.reader_pool(root, connection.store_path(root))
+    lent = []
+    lend = pool.lend
+
+    @contextmanager
+    def recording(**kwargs):
+        with lend(**kwargs) as reader:
+            lent.append((threading.get_ident(), reader))
+            yield reader
+
+    monkeypatch.setattr(pool, "lend", recording)
+    with ownership.read_scope(root) as scope:
+        scope.proof()
+        # A new request context, as the caller's own: the create must not share this read's scope.
+        contextvars.Context().run(call, root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                                  manifest_text=DAILY_TEXT, why="second collection")
+        with pytest.raises(OpError) as refused:
+            scope.finish()
+    assert refused.value.code == "COLLECTION_STORE_UNAVAILABLE"
+    # The store thread's own reads share this pool, so the release may take a reader that thread returned last.
+    last = max(index for index, (thread, _) in enumerate(lent) if thread == threading.get_ident())
+    assert any(lent[last][1] is earlier for _, earlier in lent[:last]), "the release did not reuse a pooled reader"
 
 
 def test_recovery_must_cover_later_collections_before_and_after_a_whole_read(service, tmp_path, monkeypatch):

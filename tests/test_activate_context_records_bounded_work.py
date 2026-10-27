@@ -113,6 +113,7 @@ class _WalkCounter:
         vault_module.walk_vault_md = self._real
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_activation_bounds_records_current_state_end_to_end(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

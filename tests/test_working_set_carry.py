@@ -1983,6 +1983,7 @@ def _picked_page_token(vault: Path) -> tuple[str, str]:
     return pages[0], token
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_continue_after_an_agent_pick_resumes_the_picked_page(carry_vault: Path) -> None:
     """The reviewer's r4 pick-continue: the token named the picked research
     note, which is not an index row, so the continuity tier matched nothing
@@ -2006,6 +2007,7 @@ def test_continue_after_an_agent_pick_resumes_the_picked_page(carry_vault: Path)
     assert working_set_runtime.decode_continuity(packet["continuity"])["refs"] == [page]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_continue_after_a_pick_the_audience_may_not_see_abstains(carry_vault: Path) -> None:
     """A page the audience may not see is treated as a missing one (R-Q N1:
     `withheld` here told the caller the page existed), and the turn never
@@ -2032,6 +2034,7 @@ def test_continue_after_a_pick_the_audience_may_not_see_abstains(carry_vault: Pa
     assert not [item for item in packet.get("anchors") or () if item.get("status") == "resolved"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_continue_with_a_fresh_token_naming_nothing_eligible_abstains(
     carry_vault: Path,
 ) -> None:
@@ -2169,6 +2172,7 @@ def test_raw_material_and_navigation_cannot_fill_the_ranking_window(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_continue_after_a_carried_answer_resumes_the_carried_page(carry_vault: Path) -> None:
     """The review's seam B: the carried turn minted no token, the hook kept
     the previous one, and "continue" answered with the anchor from BEFORE
@@ -2270,6 +2274,7 @@ def test_a_withheld_continuity_ref_answers_exactly_as_a_missing_one(
     assert shown.get("missing") == absent.get("missing")
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_page_token_on_a_turn_that_is_not_referential_is_stale(carry_vault: Path) -> None:
     """`applied` means the token qualified something. A picked page's token
     on a turn that neither resumes nor reaches it contributed nothing."""
@@ -2845,6 +2850,7 @@ def test_the_band_does_not_yield_to_a_page_the_carry_cannot_serve(
     assert not any(unit["provenance"]["path"] == CARRY_PAGE for unit in packet["units"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_status_save_and_restore_change_warm_carry_without_rewriting_pages(
     carry_vault: Path,
 ) -> None:
@@ -2909,6 +2915,7 @@ def test_status_save_and_restore_change_warm_carry_without_rewriting_pages(
 
 
 # Match the large-vault envelope for setup and required graph teardown.
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.timeout(900)
 def test_hidden_status_contributors_do_not_change_public_carry_at_production_volume(
     vault: Path,

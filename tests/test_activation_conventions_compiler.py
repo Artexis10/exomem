@@ -340,7 +340,8 @@ def test_edit_with_no_vault_write_still_rebuilds_the_sidecar_and_stales_a_token(
     assert packet2["generation"]["continuity"] == working_set_runtime.CONTINUITY_STALE
 
 
-def test_no_cached_packet_is_served_across_a_conventions_edit(vault: Path) -> None:
+# `current_state` is an `anchors` packet block; `maps` is the shipped default.
+def test_no_cached_packet_is_served_across_a_conventions_edit(vault: Path, anchors_packet: None) -> None:
     kb = vault / kb_dirname()
     _write(
         kb / "Products" / "widget.md",

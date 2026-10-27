@@ -32,7 +32,8 @@ from test_working_set_index import _seed_structure, _write
 from exomem import commands, embeddings, readiness, working_set_index, working_set_runtime
 from exomem.governance.principal import owner_principal, request_scope
 
-pytestmark = pytest.mark.timeout(600)
+# These tests exercise the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = [pytest.mark.timeout(600), pytest.mark.usefixtures("anchors_packet")]
 
 DIM = 64
 E0 = np.eye(DIM, dtype=np.float32)[0]

@@ -40,6 +40,9 @@ from exomem import (
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 TALIA_ID = "5b1d7c2e-8f4a-4c61-9e3b-7a2d6f0c9e14"
 TALIA = "Knowledge Base/Entities/People/Talia Verenko.md"
 OREN = "Knowledge Base/Entities/People/Oren Haldane.md"

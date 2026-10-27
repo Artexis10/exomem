@@ -14,7 +14,7 @@ from functools import cache, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import memory_refs
+from .. import memory_refs, state_paths
 from .. import structured_collections as collections
 from .connection import CollectionStoreError, WriterConnection
 
@@ -69,15 +69,20 @@ def unbound() -> Iterator[None]:
         _BOUND.reset(token)
 
 
+def _bound_to(binding: tuple[Path, CollectionWriter, bool], vault_root: Path) -> bool:
+    # The vault root's canonical form is configuration, so a request's resolution scope resolves it once.
+    return binding[0] == state_paths.resolved_vault_path(vault_root, expanduser=False)
+
+
 def bound_writer(vault_root: Path) -> CollectionWriter | None:
     binding = _BOUND.get()
-    return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
+    return binding[1] if binding is not None and _bound_to(binding, vault_root) else None
 
 
 def production_bound(vault_root: Path) -> bool:
     """Whether a production session serves ``vault_root`` here, so its routes answer to the release."""
     binding = _BOUND.get()
-    return binding is not None and binding[0] == Path(vault_root).resolve() and binding[2]
+    return binding is not None and binding[2] and _bound_to(binding, vault_root)
 
 
 def selected_writer(vault_root, selector, *, prove=None):

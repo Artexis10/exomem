@@ -29,6 +29,9 @@ from exomem import (
 )
 from exomem.governance.principal import request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 SENTINEL = "quillfeather-lantern-sentinel-phrase"
 TURN = "Ottilie asked about the grant"
 HUB_PATH = "Knowledge Base/Notes/Insights/tidewater-grant-hub.md"

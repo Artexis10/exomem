@@ -37,6 +37,9 @@ from test_working_set_index import _seed_planning, _seed_structure
 from exomem import commands, lexstore, working_set, working_set_index, working_set_runtime
 from exomem.governance.principal import request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 #: A turn with nothing in the fixture catalogue's vocabulary at all. The
 #: override branch never reads the turn's words to decide WHICH page —
 #: `anchor` alone does that — so any turn this deliberately empty proves the

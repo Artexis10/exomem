@@ -16,7 +16,7 @@ from urllib.parse import quote, unquote
 
 import pytest
 
-from exomem import attention, commands, reserved_paths, review_state
+from exomem import attention, commands, embeddings, find_results, reserved_paths, review_state
 from exomem import find as find_module
 from exomem.governance import bridges, decisions, egress, membership, policy
 from exomem.governance.principal import (
@@ -165,6 +165,8 @@ def _bridge_text(
     bridge_id: str = "00000000-0000-4000-8000-000000000201",
     review: str = "2026-12-01",
     source_path: str = SOURCE_PATH,
+    padding: str = "",
+    relations: str | None = None,
 ) -> str:
     return (
         "---\n"
@@ -184,8 +186,9 @@ def _bridge_text(
         "# Workload constraint\n\n"
         "## Observations\n"
         "- [constraint] Do not assume unlimited evening capacity #planning ^capacity\n\n"
+        f"{padding}"
         "## Relations\n"
-        f"- derived_from [[{source_path.removesuffix('.md')}]]\n"
+        + (relations or f"- derived_from [[{source_path.removesuffix('.md')}]]\n")
     )
 
 
@@ -206,6 +209,8 @@ def _write_bridge_fixture(
     bridge_path: str = BRIDGE_PATH,
     source_path: str = SOURCE_PATH,
     bridge_suffix: str = "",
+    bridge_padding: str = "",
+    bridge_relations: str | None = None,
 ) -> tuple[Path, Path]:
     source = vault / source_path
     bridge = vault / bridge_path
@@ -213,7 +218,14 @@ def _write_bridge_fixture(
     bridge.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(_bridge_source_text(title=source_title), encoding="utf-8")
     bridge.write_text(
-        _bridge_text(review=review, source_path=source_path) + bridge_suffix, encoding="utf-8"
+        _bridge_text(
+            review=review,
+            source_path=source_path,
+            padding=bridge_padding,
+            relations=bridge_relations,
+        )
+        + bridge_suffix,
+        encoding="utf-8",
     )
     _write_policy(vault, "scopes", "private", _scope_document(SCOPE_A, path=source_path))
     _write_policy(
@@ -998,6 +1010,144 @@ def test_release_strips_dependency_provenance_from_direct_and_search_outputs(
     assert "content" not in page
     assert "bridge_of" not in page.get("frontmatter", {})
     assert "unlimited evening capacity" in page["body"]
+
+
+_SOURCE_STEM = SOURCE_PATH.rsplit("/", 1)[-1].removesuffix(".md")
+_PLAIN_MENTION = f"Compiled from {_SOURCE_STEM}.\n"
+
+
+def _cap_bridge_page_at_excerpt_level(vault: Path) -> None:
+    """Cap the bridge page itself at L5, so a read of it returns the bounded body."""
+    _write_policy(vault, "scopes", "bridge", _scope_document(SCOPE_B, path=BRIDGE_PATH))
+    _write_policy(
+        vault,
+        "rules",
+        "bridge",
+        _rule_document(
+            scope_ids=(SCOPE_B,),
+            ceiling=egress.LEVEL_EXCERPT,
+            rule_id="01ARZ3NDEKTSV4RRFFQ69G5FBD",
+        ),
+    )
+    policy._CACHE.clear()
+
+
+# `zebra` anchors the excerpt a hundred characters past the link, so a length cut starts inside it.
+# `capacity` on a short page gives an excerpt that is the whole page, with no cut at all.
+_EXCERPT_UNDER_STRIP = [
+    pytest.param(
+        "zebra", f"\n[the source]({SOURCE_PATH}) for detail. " + "filler " * 10 + "zebra\n", None,
+        id="cut-inside-a-link",
+    ),
+    pytest.param("capacity", "", _PLAIN_MENTION, id="uncut"),
+]
+
+
+@pytest.mark.parametrize("detail", ["compact", "full"])
+@pytest.mark.parametrize(("query", "suffix", "relations"), _EXCERPT_UNDER_STRIP)
+def test_a_hit_under_a_release_strip_carries_no_excerpt(
+    vault: Path, detail: str, query: str, suffix: str, relations: str | None
+) -> None:
+    _write_bridge_fixture(
+        vault, approval=True, bridge_suffix=suffix, bridge_relations=relations
+    )
+
+    with request_scope(_external()):
+        found = commands.op_ask_memory(
+            vault, query=query, mode="keyword", limit=10, detail=detail
+        )
+
+    bridge_hit = next(hit for hit in found["hits"] if hit["path"] == BRIDGE_PATH)
+    assert "excerpt" not in bridge_hit
+    wire = json.dumps(bridge_hit, sort_keys=True).casefold()
+    for length in range(4, len(_SOURCE_STEM) + 1):
+        assert _SOURCE_STEM[:length] not in wire, _SOURCE_STEM[:length]
+        assert _SOURCE_STEM[-length:] not in wire, _SOURCE_STEM[-length:]
+
+
+def test_a_vector_chunk_that_starts_inside_a_link_is_withheld_under_a_release_strip() -> None:
+    # An unspaced paragraph is split at sentence marks and hard cuts, so a chunk can start inside
+    # a link, and the excerpt of such a chunk carries no cut mark.
+    body = "这是一个关于工作量约束的说明" * 32 + (
+        "见[[Knowledge Base/Notes/Research/Health/private source note]]之后的内容很短。"
+    )
+    chunk = embeddings.chunk_text("Workload constraint", body)[1]
+    page = SimpleNamespace(search_body="", body="", title="Workload constraint")
+    excerpt = find_results.semantic_excerpt(page, "", chunk, None)
+    assert excerpt.startswith("source note]]")
+    identity = bridges.StripIdentity(
+        path="Knowledge Base/Notes/Research/Health/private source note.md",
+        ref=SOURCE_REF,
+        title="Private source title",
+    )
+
+    assert bridges.strip_provenance({"excerpt": excerpt}, (identity,)) == {}
+
+
+def test_a_cut_excerpt_is_unchanged_in_an_ungoverned_vault(vault: Path) -> None:
+    (vault / BRIDGE_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (vault / BRIDGE_PATH).write_text(
+        _bridge_text()
+        + f"\n{SOURCE_PATH} for detail. "
+        + "filler " * 11
+        + "zebra\n",
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+
+    with request_scope(_external()):
+        found = commands.op_ask_memory(vault, query="zebra", mode="keyword", limit=10)
+
+    excerpt = next(hit for hit in found["hits"] if hit["path"] == BRIDGE_PATH)["excerpt"]
+    assert excerpt.startswith("…")
+    assert "-source.md for detail." in excerpt
+
+
+def test_a_truncated_read_body_of_a_page_under_a_release_strip_is_withheld(
+    vault: Path,
+) -> None:
+    # The source name holds spaces, so the whole-word cut of the bounded body ends inside it.
+    source_path = "Knowledge Base/Notes/Research/Health/private source note.md"
+    bridge, _source = _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_path=source_path,
+        source_ceiling=egress.LEVEL_EXCERPT,
+        bridge_padding="filler " * 57 + "\n\n",
+    )
+    # The source is readable at the excerpt level, so only the bridge strip removes it.
+    _cap_bridge_page_at_excerpt_level(vault)
+    cut = egress._excerpt_of(bridge.read_text(encoding="utf-8").split("\n---\n", 1)[1])
+    assert cut.endswith("private source …")
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=BRIDGE_PATH)
+
+    assert page["body_truncated"] is True
+    assert "body" not in page
+    wire = json.dumps(page, sort_keys=True, default=str).casefold()
+    stem = "private source note"
+    for length in range(4, len(stem) + 1):
+        assert stem[:length] not in wire, stem[:length]
+
+
+def test_an_uncut_read_body_of_a_page_under_a_release_strip_keeps_its_text_without_the_source(
+    vault: Path,
+) -> None:
+    _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_ceiling=egress.LEVEL_EXCERPT,
+        bridge_relations=_PLAIN_MENTION,
+    )
+    _cap_bridge_page_at_excerpt_level(vault)
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=BRIDGE_PATH)
+
+    assert page["body_truncated"] is False
+    assert "Do not assume unlimited evening capacity" in page["body"]
+    assert "private" not in page["body"].casefold()
 
 
 def test_due_bridge_is_in_default_attention_with_date_stable_signal(
@@ -2272,19 +2422,17 @@ def test_release_redacts_encoded_delimiters_without_redacting_encoded_superstrin
             limit=10,
         )
 
-    for wire in (
-        json.dumps(page, sort_keys=True, default=str).casefold(),
-        json.dumps(hits, sort_keys=True, default=str).casefold(),
-    ):
+    page_wire = json.dumps(page, sort_keys=True, default=str).casefold()
+    for wire in (page_wire, json.dumps(hits, sort_keys=True, default=str).casefold()):
         for alias in aliases:
             assert alias.casefold() not in wire
-        assert "apollo%58" in wire
-        assert "apollox" in wire
         decoded = wire
         for _ in range(8):
             decoded = unquote(decoded)
         assert not re.search(r"(?<!\w)apollo(?!\w)", decoded, re.IGNORECASE)
-        assert "apollox" in decoded
+    # The search excerpt is cut from the page, so the strip withholds it; the read body keeps the text.
+    assert "apollo%58" in page_wire
+    assert "apollox" in page_wire
 
 
 def test_provenance_shadow_decode_preserves_malformed_percent_and_near_misses() -> None:
@@ -2319,7 +2467,7 @@ def test_provenance_reference_context_uses_exact_aliases_not_substrings() -> Non
             {
                 "source_title": "ApolloX",
                 "candidate_id": "ApolloX",
-                "excerpt": "ApolloX is unrelated.",
+                "context": "ApolloX is unrelated.",
             },
             {"source_title": "Apollo"},
         ]
@@ -2331,7 +2479,7 @@ def test_provenance_reference_context_uses_exact_aliases_not_substrings() -> Non
         {
             "source_title": "ApolloX",
             "candidate_id": "ApolloX",
-            "excerpt": "ApolloX is unrelated.",
+            "context": "ApolloX is unrelated.",
         }
     ]
 
@@ -2365,16 +2513,15 @@ def test_release_redacts_aliases_adjacent_to_invalid_percent_bytes(
             limit=10,
         )
 
-    for wire in (
-        json.dumps(page, sort_keys=True, default=str).casefold(),
-        json.dumps(hits, sort_keys=True, default=str).casefold(),
-    ):
+    page_wire = json.dumps(page, sort_keys=True, default=str).casefold()
+    for wire in (page_wire, json.dumps(hits, sort_keys=True, default=str).casefold()):
         decoded = wire
         for _ in range(8):
             decoded = unquote(decoded)
         assert not re.search(r"(?<!\w)apollo(?!\w)", decoded, re.IGNORECASE)
-        assert "unrelated text remains" in decoded
-        assert "%ff" in wire
+    # The search excerpt is cut from the page, so the strip withholds it; the read body keeps the text.
+    assert "unrelated text remains" in page_wire
+    assert "%ff" in page_wire
 
 
 @pytest.mark.parametrize("title", ["restricted dependency", "[restricted dependency]"])
@@ -2431,7 +2578,7 @@ def test_provenance_compiles_alias_patterns_once_per_strip(
         for index in range(100)
     )
     aliases = bridges._embedded_identity_aliases(identities)
-    payload = {"entries": [{"excerpt": "ordinary prose"} for _ in range(30)]}
+    payload = {"entries": [{"context": "ordinary prose"} for _ in range(30)]}
     original_compile = bridges.re.compile
     calls = 0
 

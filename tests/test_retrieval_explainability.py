@@ -126,9 +126,9 @@ def test_explain_is_opt_in_and_filter_only_profile_is_truthful(tmp_path: Path) -
     assert profile["lanes"]["vector"]["status"] == "non_applicable"
     assert profile["lanes"]["vector"]["reason"] == "empty_query"
 
-    for final_rank, hit in enumerate(explained["hits"], start=1):
-        assert "excerpt" not in hit
-        assert "content" not in hit
+    for final_rank, (hit, plain) in enumerate(zip(explained["hits"], omitted, strict=True), start=1):
+        # Explaining adds `ranking_explanation` and no other field, so no body or unit content.
+        assert {name: value for name, value in hit.items() if name != "ranking_explanation"} == plain
         ranking = hit["ranking_explanation"]
         assert ranking["lanes"] == {
             "filtered_most_recent": {"rank": final_rank}

@@ -934,6 +934,15 @@ def manifest_view(text: str, view_stamp: Mapping[str, str | int]) -> str:
     )
 
 
+#: Every file the store projects: published or pending views and each item's view path.
+OWNED_VIEW_PATHS = "SELECT path FROM projection_state UNION SELECT view_path FROM items WHERE view_path IS NOT NULL"
+
+
+def owned_view_paths(operation) -> frozenset[str]:
+    """The vault-relative files this store owns as views, read in the operation's snapshot."""
+    return frozenset(path for (path,) in operation.conn.execute(OWNED_VIEW_PATHS))
+
+
 def presentation_wikilinks(operation, *, fresh=False):
     """Overlay the owned namespace on ordinary files within this operation's SQL snapshot."""
     cached = operation._presentation_wikilinks
@@ -944,8 +953,7 @@ def presentation_wikilinks(operation, *, fresh=False):
     deleted = [path + ".md" for path in resolver.full_paths
                if proof.owner(operation.root, path + ".md") is not None]
     paths = operation.conn.execute(
-        "SELECT path FROM projection_state UNION SELECT view_path FROM items WHERE view_path IS NOT NULL "
-        "UNION SELECT manifest_path FROM collections"
+        f"{OWNED_VIEW_PATHS} UNION SELECT manifest_path FROM collections"
     ).fetchall()
     entries = []
     for (path,) in paths:

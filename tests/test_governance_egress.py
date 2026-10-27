@@ -640,6 +640,45 @@ def test_annotate_hits_uses_the_bound_principal_when_none_passed(vault: Path) ->
 
 
 # --------------------------------------------------------------------------
+# Compact page hits release no more than the full hit does
+# --------------------------------------------------------------------------
+
+
+def _page_excerpts(hits: list[dict]) -> dict[str, str]:
+    """Excerpt by path for the page hits, leaving out any withheld-hit notice."""
+    return {hit["path"]: hit["excerpt"] for hit in hits if "path" in hit}
+
+
+def test_op_find_compact_releases_nothing_of_a_page_the_ceiling_withholds(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_ABSTRACT)
+    query = "kill switch risky releases"
+    with request_scope(_external()):
+        full = commands.op_find(vault, query=query, limit=10)
+        compact = commands.op_find(vault, query=query, limit=10, detail="compact")
+
+    assert _page_excerpts(compact) != {}
+    assert RESTRICTED_PATH not in _page_excerpts(compact)
+    # A phrase from the withheld page's own excerpt: no other hit may carry it.
+    assert "misbehaving in production" not in json.dumps(compact)
+    assert _page_excerpts(compact) == _page_excerpts(full)
+
+
+def test_compact_excerpt_is_a_prefix_of_the_excerpt_full_mode_releases() -> None:
+    """A cut compact excerpt never reaches past what full mode releases for the hit."""
+    hit = _hit(OPEN_PATH, excerpt="filler words " * 40)
+
+    full = egress.project(hit, egress.LEVEL_FULL)
+    compact = egress.project(hit, egress.LEVEL_FULL, compact=True)
+
+    assert full is not None and compact is not None
+    assert compact["excerpt"].endswith("…")
+    cut = compact["excerpt"].removesuffix(" …")
+    assert len(cut) <= egress.COMPACT_HIT_EXCERPT_MAX
+    assert " ".join(full["excerpt"].split()).startswith(cut)
+
+
+# --------------------------------------------------------------------------
 # D2 — op_find integration: annotation strictly after find(), before pack
 # --------------------------------------------------------------------------
 

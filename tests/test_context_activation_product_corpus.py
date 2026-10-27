@@ -567,6 +567,7 @@ def test_freeze_refuses_a_stale_canonical_source_file(tmp_path: Path) -> None:
         freeze_reference_binding(tmp_path, manifest, manifest.key_to_path)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_c1_resolves_its_gold_collection_through_the_door(tmp_path: Path) -> None:
     """R-E: C1 says "my AI usage limits", and "AI" is the only word it shares
     with its gold collection's name. D4's three-letter floor refused that

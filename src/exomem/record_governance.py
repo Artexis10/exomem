@@ -1801,7 +1801,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         return _authorize(root, path, receipt=True)
 
     discovered, unreadable = collections.discover_collections_with_errors(
-        root, authorize_path=authorize
+        root, authorize_path=authorize, semantic_profile=semantic_profile
     )
     manifests = [
         manifest
@@ -1823,8 +1823,15 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
     legacy: tuple[collections.LegacyCollection, ...] = ()
     legacy_truncated = False
     if semantic_profile == "records":
+        from .collection_store.views import owned_view_paths
+
+        owned_views = frozenset()
+        writer = bound_writer(root)
+        if writer is not None:
+            with writer.read_snapshot():
+                owned_views = owned_view_paths(writer._operation)
         legacy, legacy_truncated = collections.discover_legacy_trackers(
-            root, authorize_path=authorize
+            root, authorize_path=authorize, owned_views=owned_views
         )
     from . import due_state
 

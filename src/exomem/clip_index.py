@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -33,6 +34,18 @@ def _sqlite_connect_owned(
 
 CLIP_DIM = 512
 
+#: The recorded vector space. A writer's artifact identity is recorded beside it.
+SPACE_KEYS = ("space", "width", "precision")  # nosemgrep: ep-word-set -- the keys of this module's own space record schema.
+
+
+class ClipSpaceMismatch(ValueError):
+    """An encoder in another vector space must not write into this sidecar."""
+
+
+#: The space of rows written before the record existed. It is a historical fact,
+#: like `recall_space.LEGACY_IDENTITY`, so it must not follow a registry change.
+LEGACY_SPACE = {"space": "openai/clip-vit-base-patch32", "width": "512", "precision": "fp32"}
+
 
 class _ClipCache(NamedTuple):
     """ClipIndex's in-memory matrix cache.
@@ -54,8 +67,10 @@ class _ClipCache(NamedTuple):
 class ClipIndex:
     """Per-vault sqlite sidecar of CLIP image/video-frame vectors."""
 
-    def __init__(self, vault_root: Path):
+    def __init__(self, vault_root: Path, encoder_space: Callable[[], dict[str, str]] | None = None):
         self.vault_root = vault_root
+        #: The writing encoder's space and artifact; storage-only callers pass none.
+        self._encoder_space = encoder_space
         self.path = index_paths.clip_sidecar_path(vault_root)
         self._cache: _ClipCache | None = None
         self._lock = threading.RLock()
@@ -120,6 +135,39 @@ class ClipIndex:
                 raise
         return conn
 
+    def _claim_space(self, conn: sqlite3.Connection) -> None:
+        """Record the writer's space, or refuse a write that would mix two spaces."""
+        if self._encoder_space is None:
+            return
+        encoder = self._encoder_space()
+        conn.execute("CREATE TABLE IF NOT EXISTS space (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        recorded = dict(conn.execute("SELECT key, value FROM space").fetchall())
+        claimed = {key: encoder[key] for key in SPACE_KEYS}
+        if recorded:
+            current = {key: recorded.get(key) for key in SPACE_KEYS}
+        elif conn.execute("SELECT 1 FROM images LIMIT 1").fetchone() is not None:
+            current = dict(LEGACY_SPACE)
+        else:
+            current = claimed
+        if current != claimed:
+            raise ClipSpaceMismatch(f"image vectors are in {current}; the encoder writes {claimed}")
+        conn.executemany(
+            "INSERT OR IGNORE INTO space (key, value) VALUES (?, ?)",
+            [*claimed.items(), (f"artifact:{encoder['artifact']}", "written")],
+        )
+
+    def space(self) -> dict[str, str]:
+        """The recorded space and writer artifacts; an unrecorded sidecar reads as legacy."""
+        conn = self._connect()
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='space'"
+            ).fetchone()
+            recorded = dict(conn.execute("SELECT key, value FROM space").fetchall()) if exists else {}
+        finally:
+            conn.close()
+        return recorded or dict(LEGACY_SPACE)
+
     @staticmethod
     def _migrate_add_frame_ts(conn: sqlite3.Connection) -> None:
         """Upgrade a pre-existing single-vector `images` table in place."""
@@ -152,6 +200,7 @@ class ClipIndex:
         try:
             vec_on = vec_gate(self, conn)
             with conn:
+                self._claim_space(conn)
                 if vec_on:
                     self._vec.dual_delete(
                         conn, "file_path = ? AND frame_ts IS NULL", (rel_path,)
@@ -194,6 +243,7 @@ class ClipIndex:
         try:
             vec_on = vec_gate(self, conn)
             with conn:
+                self._claim_space(conn)
                 if vec_on:
                     self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))

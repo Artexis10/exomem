@@ -376,22 +376,25 @@ class CollectionWriter:
             manifest = self._collection(selector, facade_profile=facade_profile)[1]
             yield self._operation.field_plan(manifest).manifest
 
-    def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
+    def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512,
+                             semantic_profile=None):
+        """The releasable manifests of the admitted collections, of one profile when one is named.
+
+        A collection of another profile costs nothing here; ``released_identities`` answers for the
+        one case where the sweep still needs to know it exists.
+        """
         from . import ownership
         from .preview import production_bound
 
         with self.read_snapshot():
             proof = ownership.current(self.root, conn=self.connection, private=not production_bound(self.root))
             entries = [(entry["collection_id"], entry["manifest_path"]) for entry in proof.entries
-                       if entry["collection_id"] in proof.admitted]
+                       if entry["collection_id"] in proof.admitted
+                       # A marker entry without a recorded profile may still be of the asked one.
+                       and (semantic_profile is None or entry.get("semantic_profile") in (None, semantic_profile))]
             manifests = []
             for cid, path in sorted(entries, key=lambda entry: entry[1]):
-                if authorize_path is not None and not authorize_path(path):
-                    continue
-                head = self._operation.summary_manifest(cid)
-                if head is None:
-                    head = (None, self._operation.decision(self._operation.catalog(cid)[0]))
-                if head[1].level < 6:
+                if not self._shown(cid, path, authorize_path):
                     continue
                 if len(manifests) >= min(max_candidates, max_raw_candidates):
                     raise collections.CollectionError(
@@ -400,6 +403,27 @@ class CollectionWriter:
                 manifest = self._collection(cid)[1]
                 manifests.append(self._operation.field_plan(manifest).manifest)
             return tuple(manifests), ()
+
+    def released_identities(self, identities, *, authorize_path=None):
+        """Which of these collection identities name an admitted collection whose manifest is releasable.
+
+        A sweep that skips a profile still refuses a physical manifest that reuses a releasable identity.
+        """
+        from . import ownership
+        from .preview import production_bound
+
+        with self.read_snapshot():
+            proof = ownership.current(self.root, conn=self.connection, private=not production_bound(self.root))
+            paths = {entry["collection_id"]: entry["manifest_path"] for entry in proof.entries
+                     if entry["collection_id"] in proof.admitted}
+            return tuple(cid for cid in identities
+                         if cid in paths and self._shown(cid, paths[cid], authorize_path))
+
+    def _shown(self, cid, path, authorize_path):
+        """Whether the caller may see this collection's manifest: its path is authorized and its subject releases."""
+        if authorize_path is not None and not authorize_path(path):
+            return False
+        return self._operation.decision(self._operation.manifest_subject(cid)).level >= 6
 
     def _projection_manifest(self, selector):
         """Canonical contract for server-internal write deltas; never egress."""

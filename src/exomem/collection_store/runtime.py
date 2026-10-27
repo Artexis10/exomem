@@ -21,7 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
-from .. import foreground_priority, state_paths
+from .. import call_spans, foreground_priority, state_paths
 from . import connection, legacy_originals, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,16 @@ class _Publisher:
         if not self.runtime.replica_matches():
             with self.condition:
                 self.foreign = True
+
+
+def reader_pool(root, path):
+    """The reader pool of the serving runtime's cached writer for the store at ``path``, else None.
+
+    None means open a fresh reader, as every read did before the pool: no runtime serves ``root``
+    here, it holds no live writer, or that writer is not on this store file (R2).
+    """
+    runtime = _SERVING.get(root) or _SERVING.get(Path(root).resolve())
+    return None if runtime is None else runtime.reader_pool(path)
 
 
 def flush_for_export(vault_root, *, timeout=30.0):
@@ -345,8 +355,17 @@ class CollectionStoreRuntime:
         if self._publisher is None:
             self._publisher = _Publisher(self)
 
+    def reader_pool(self, path=None):
+        """The cached writer's reader pool when it is open on ``path`` (this runtime's store by default), else None."""
+        handle = self._handle
+        if handle is None or handle._closed or handle.path != self.path:
+            return None
+        if path is not None and Path(path) != self.path and Path(path).resolve() != self.path:
+            return None
+        return handle.readers
+
     def _meta(self, *keys):
-        with closing(connection.open_reader(self.path)) as reader:
+        with connection.store_reader(self.path, self.reader_pool()) as reader:
             found = dict(reader.execute(
                 f"SELECT key,value FROM store_meta WHERE key IN ({','.join('?' * len(keys))})", keys))
         return [found.get(key) for key in keys]
@@ -391,7 +410,7 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        with closing(connection.open_head_reader(self.path)) as reader:
+        with connection.head_reader(self.path, self.reader_pool()) as reader:
             intent = authority.pending_create(reader)
         if intent is None:
             return True
@@ -419,7 +438,9 @@ class CollectionStoreRuntime:
         if handle is not None:
             if handle.connection.in_transaction:
                 return False
-            # Quiescent close is the only cross-thread handle operation.
+            # Quiescent close and the reader pool are the only cross-thread handle operations. The pool
+            # has its own lock and lends one reader to one borrower at a time; close leaves a lent
+            # reader to close when its lend ends.
             self._handle = None
             self._writer_token = None
             handle.close()
@@ -455,7 +476,7 @@ class CollectionStoreRuntime:
             )
         # A store an earlier release wrote keeps its head where this reads it; its writer
         # migrates the schema once this head lets the lease manager acquire for the store.
-        with closing(connection.open_head_reader(self.path)) as reader:
+        with connection.head_reader(self.path, self.reader_pool()) as reader:
             reader.execute("BEGIN")
             metadata = legacy_originals.metadata(reader)
             head = CollectionStoreHead(
@@ -1133,7 +1154,8 @@ class StoreServer:
         # A store handoff, such as an idle release, refuses every checkout until it ends. Wait it out
         # here, where this thread holds nothing: a waiter at the deep refusals could stall the handoff.
         # The wait ends at the acceptance deadline, which the queue wait below shares.
-        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), \
+                call_spans.span("store.admission_wait"):
             self.manager.await_store_admission(deadline)
         request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
@@ -1142,7 +1164,8 @@ class StoreServer:
                 self._condition.notify_all()
         # Between two rebuild steps this thread waits as a bulk pass while other requests run;
         # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
-        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition:
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition, \
+                call_spans.span("store.queue_wait"):
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -1154,7 +1177,7 @@ class StoreServer:
         # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
         waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
                    else foreground_priority.outside_foreground)
-        with waiting():
+        with waiting(), call_spans.span("store.serve"):
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
         if not completed and read_only:
             # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.
@@ -1378,7 +1401,7 @@ class StoreServer:
             return IMPORT_IDLE_SECONDS
         try:
             # The resume migrates a store an earlier release left with this intent; until then only its head reads.
-            with closing(connection.open_head_reader(self.runtime.path)) as reader:
+            with connection.head_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 intent = authority.pending_create(reader)
             if intent is None:
                 self.pending_create = None
@@ -1408,7 +1431,7 @@ class StoreServer:
             return IMPORT_IDLE_SECONDS
         try:
             # A plain read first: an idle store takes no lease and no checkout.
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM import_jobs WHERE state='running' LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
             with preview_store(self.root, self.runtime):
@@ -1436,7 +1459,7 @@ class StoreServer:
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 due = index_migrations.backfill_due(reader)
         except Exception:  # noqa: BLE001 - an unreadable store is retried later
             logger.warning("derived backfill could not read its work; retrying later", exc_info=True)
@@ -1482,7 +1505,7 @@ class StoreServer:
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM collections WHERE derived=1 LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
             if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
@@ -1615,7 +1638,7 @@ class StoreServer:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                     inputs = _mutate(self.root, writer.invalidate_history_pages)
                     self._history_policy = (self.runtime._handle, inputs)
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
                     return min(wait, IMPORT_IDLE_SECONDS)
