@@ -130,7 +130,9 @@ def contract() -> dict[str, Any]:
             "mapping": {
                 "rows": (
                     "json-document only: the row path, such as a[].b[]; each [] crosses an array "
-                    "and the last array's elements are rows"
+                    "and the last array's elements are rows. A path that ends at a name, such as "
+                    "a[].b, takes the object there: one row per element of the last array crossed. "
+                    "$ makes the whole document one row. $index needs a path that crosses an array"
                 ),
                 "fields": (
                     f"1 to {MAX_MAPPED_FIELDS} declared target fields, each a dotted source path "
@@ -143,15 +145,26 @@ def contract() -> dict[str, Any]:
                     "$value the row"
                 ),
                 "time": (
-                    "optional {from: 1 to 4 ordered bases, instant?, offset?, local_date}: the "
-                    "first basis present gives the UTC instant, its offset and the source-local "
-                    "day; a day is never guessed. A basis is {date} or {instant}, then zone (IANA "
-                    "name), offset (path to ±HH:MM) or offset_minutes (path), then seconds (path) "
-                    "or index: $index with every {s or ms: number or path}. A zone declares fold: "
-                    "order (the earlier offset until the clock steps back within one array), "
-                    "earlier or later, and with an increment clock: elapsed or wall. A local time "
-                    "in a gap is refused TIME_LOCAL_GAP and counted without stopping the job; an "
-                    "instant without an offset, zone or offset path is refused TIME_BASIS_UNZONED"
+                    "optional {from: 1 to 4 ordered bases, instant?, offset?, local_date, "
+                    "local_datetime?}: the first basis present gives the UTC instant, its offset "
+                    "and the source-local day; a day is never guessed. local_datetime names a "
+                    "declared string field that receives the source-local wall clock, "
+                    "YYYY-MM-DDTHH:MM:SS with .ffffff only when there are microseconds. A basis "
+                    "is {date} or {instant}, then zone (IANA name), offset (path to ±HH:MM), "
+                    "offset_minutes (path) or floating: true, then seconds, milliseconds or "
+                    "duration (a path), or index: $index with every {s or ms: number or path}. "
+                    "duration is ISO 8601: an optional -, P, weeks and days, then T with hours, "
+                    "minutes and seconds, a fraction on the last unit only; years and months are "
+                    "refused TIME_BASIS_INVALID. A time written to the minute, 2024-03-01T07:45, "
+                    "reads as second 00. A zone declares fold: order (the earlier offset until "
+                    "the clock steps back within one array), earlier or later, and with an "
+                    "increment clock: elapsed or wall. A local time in a gap is refused "
+                    "TIME_LOCAL_GAP and counted without stopping the job; an instant without an "
+                    "offset, zone, offset path or floating is refused TIME_BASIS_UNZONED. A floating "
+                    "basis takes no zone, offset, clock or fold: its row gets local_date and "
+                    "local_datetime and no instant or offset, unless the value carries its own "
+                    "offset, which still gives an instant. Instant filters exclude floating rows, "
+                    "so the instant and offset targets are optional and outside the natural key"
                 ),
                 "coverage": (
                     "owner-reviewed source paths mapped to {classification: null or location, subtree?: boolean}; "
@@ -183,7 +196,8 @@ def contract() -> dict[str, Any]:
         ),
         "preview": (
             f"owner-only; reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
-            "fields, flagged rows, mapping findings, row identity and recommended_declarations"
+            "fields, how the sampled rows' times resolved (instant, local or day), flagged rows, mapping "
+            "findings, row identity and recommended_declarations"
         ),
         "states": {
             "running": (
@@ -1096,7 +1110,7 @@ class _Streams:
         if self.fmt == "json-document":
             for found in import_document.Rows(
                 handle, self.rows.routes, self.rows.wanted, row_bytes=MAX_ROW_BYTES, depth=MAX_DEPTH,
-                exact=self.exact,
+                object_rows=self.rows.object_rows, exact=self.exact,
             ):
                 context = (
                     None if found.error
@@ -1177,14 +1191,17 @@ _NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # nosemgrep: ep-word-set -- The time-basis grammar fixes these keys.
 _BASIS_KEYS = (
-    "date", "instant", "zone", "offset", "offset_minutes", "seconds", "index", "every", "clock", "fold"
+    "date", "instant", "zone", "offset", "offset_minutes", "floating", "seconds", "milliseconds", "duration",
+    "index", "every", "clock", "fold",
 )
+# nosemgrep: ep-word-set -- The time-basis grammar fixes these increment keys; a basis declares at most one.
+_INCREMENTS = ("seconds", "milliseconds", "duration", "index")
 # nosemgrep: ep-word-set -- The grammar's interval units, keyed to their timedelta argument.
 _UNITS = {"s": "seconds", "ms": "milliseconds"}
 # nosemgrep: ep-word-set -- The grammar's clock and fold rules.
 _CLOCKS, _FOLDS = ("elapsed", "wall"), ("order", "earlier", "later")
-# json-document's reserved path forms: the row's index, the row itself, an enclosing scope.
-_INDEX, _VALUE, _SCOPE = "$index", "$value", "$."
+# json-document's reserved path forms: the row's index, the row itself, an enclosing scope, the document.
+_INDEX, _VALUE, _SCOPE, _ROOT = "$index", "$value", "$.", "$"
 
 
 @dataclass(slots=True)
@@ -1233,12 +1250,17 @@ class _Field:
 
 @dataclass(frozen=True, slots=True)
 class _Rows:
-    """A json-document row path: ``routes[n]`` is the key path from scope n to the next array."""
+    """A json-document row path: ``routes[n]`` is the key path from scope n to the next array.
+
+    A row path that ends at a name (``a[].b``) adds a last route to the row's object, and ``$`` is
+    one empty route: the document itself.
+    """
 
     text: str
     routes: tuple[tuple[str, ...], ...]
     prefixes: tuple[str, ...]
     wanted: tuple[dict[tuple[str, ...], str], ...]
+    object_rows: bool = False  # the last route ends at the row's object, not at an array of rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -1250,19 +1272,32 @@ class _Basis:
     offset: _Path | None = None
     offset_minutes: _Path | None = None
     seconds: _Path | None = None
+    milliseconds: _Path | None = None
+    duration: _Path | None = None
     position: _Path | None = None
     every: Any = None  # a positive number or a _Path to one
     unit: str | None = None
     clock: str | None = None
     fold: str | None = None
+    floating: bool = False
     label: str = ""
 
+    @property
+    def moves(self) -> bool:
+        """Whether the basis declares an increment, so a date base names a clock."""
+        return any(
+            source is not None for source in (self.seconds, self.milliseconds, self.duration, self.position)
+        )
+
     def resolve(self, value: Any, order: import_time.Fold | None) -> Any:
-        """``(utc, minutes, day)`` or ``(code, at)`` for this basis, or None when it is absent.
+        """``(utc, minutes, day, wall)`` or ``(code, at)`` for this basis, or None when it is absent.
 
         A date alone gives only its day. Otherwise the base names a local wall clock
         (a date's midnight, or an instant without an offset) or an instant; the zone or
         offset places a wall clock, and the increment moves it by elapsed or wall time.
+        A floating basis leaves the wall clock unplaced: its row has a day and a wall clock,
+        and no instant or offset, unless the value carries its own offset. ``wall`` is the
+        local wall clock, or None for a day alone.
         """
         at = f"mapping.time.from[{self.index}]"
         base = "date" if self.date is not None else "instant"
@@ -1283,13 +1318,13 @@ class _Basis:
                 day = dt.date.fromisoformat(raw)
             except ValueError:
                 return "TIME_BASIS_INVALID", f"{at}.date"
-            if self.zone is None and not placed:
-                return None, None, raw
+            if self.zone is None and not placed and not (self.floating and self.moves):
+                return None, None, raw, None
             utc, wall = None, dt.datetime.combine(day, dt.time())
         else:
             utc, wall = _instant(raw), None
             if utc is None:
-                if self.zone is None and not placed:
+                if self.zone is None and not placed and not self.floating:
                     return ("TIME_BASIS_UNZONED" if _unzoned(raw) else "TIME_BASIS_INVALID"), f"{at}.instant"
                 wall = _wall(raw)
                 if wall is None:
@@ -1308,11 +1343,14 @@ class _Basis:
                 minutes = (
                     fixed if fixed is not None
                     else _zone_minutes(utc, self.zone) if self.zone is not None
-                    else scalars.instant_offset_minutes(raw)
+                    else _instant_offset(raw)
                 )
             elif fixed is not None:
                 utc = (wall + step - dt.timedelta(minutes=fixed)).replace(tzinfo=dt.UTC)
                 minutes = fixed
+            elif self.zone is None:
+                wall += step  # floating: the compiler refuses an unplaced basis that does not say so
+                return None, None, wall.date().isoformat(), wall
             else:
                 elapsed = bool(step) and self.clock == "elapsed"
                 array = value.array if type(value) is _Context else None
@@ -1323,23 +1361,30 @@ class _Basis:
                 minutes = _zone_minutes(utc, self.zone)
             if minutes is None:
                 return "TIME_BASIS_INVALID", f"{at}.zone"
-            day = (utc + dt.timedelta(minutes=minutes)).date().isoformat()
+            local = (utc + dt.timedelta(minutes=minutes)).replace(tzinfo=None)
         except (OverflowError, ValueError):
             return "TIME_BASIS_INVALID", f"{at}.{base}"
-        return utc, minutes, day
+        return utc, minutes, local.date().isoformat(), local
 
     def _step(self, value: Any, at: str) -> Any:
         """The declared increment as a timedelta, an error, or None when its source is absent."""
-        if self.seconds is not None:
-            raw = self.seconds.read(value)
+        for name in _UNITS.values():  # the increments that count a number of one timedelta unit
+            if (source := getattr(self, name)) is not None:
+                raw = source.read(value)
+                if raw is _ABSENT:
+                    return None
+                if not _finite(raw):
+                    return "TIME_BASIS_INVALID", f"{at}.{name}"
+                try:
+                    return dt.timedelta(**{name: raw})
+                except OverflowError:
+                    return "TIME_BASIS_INVALID", f"{at}.{name}"
+        if self.duration is not None:
+            raw = self.duration.read(value)
             if raw is _ABSENT:
                 return None
-            if not _finite(raw):
-                return "TIME_BASIS_INVALID", f"{at}.seconds"
-            try:
-                return dt.timedelta(seconds=raw)
-            except OverflowError:
-                return "TIME_BASIS_INVALID", f"{at}.seconds"
+            step = import_time.duration(raw)
+            return ("TIME_BASIS_INVALID", f"{at}.duration") if step is None else step
         if self.position is None:
             return dt.timedelta()
         index = self.position.read(value)
@@ -1368,6 +1413,7 @@ class Plan:
     canonical: dict[str, Any] = field(compare=False)
     rows: _Rows | None = None
     source_types: dict[_Path, tuple[str, ...]] = field(default_factory=dict, compare=False)
+    local_datetime: str | None = None
 
     @property
     def zoned(self) -> bool:
@@ -1405,33 +1451,35 @@ class Plan:
     ) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
         out, error = self.values(value)
         if error is None and self.bases:
-            times, error, _ = self.time(value, order)
+            times, error, _, _ = self.time(value, order)
             out.update(times)
         return (None, error) if error is not None else (out, None)
 
     def time(
         self, value: Any, order: import_time.Fold | None = None
-    ) -> tuple[dict[str, Any], tuple[str, str] | None, _Basis | None]:
-        """Resolve the declared time basis; a missing one is flagged, never guessed."""
+    ) -> tuple[dict[str, Any], tuple[str, str] | None, _Basis | None, str | None]:
+        """Resolve the declared time basis: its values, its flag, the basis and how the time resolved.
+
+        A missing basis is flagged, never guessed. The resolution is ``instant``, ``local`` (a
+        wall clock with no instant) or ``day``.
+        """
         for basis in self.bases:
             found = basis.resolve(value, order)
             if found is None:
                 continue
             if len(found) == 2:
-                return {}, found, basis
-            utc, minutes, day = found
+                return {}, found, basis, None
+            utc, minutes, day, wall = found
             out = {self.local_date: day}
             if utc is not None and self.instant is not None:
-                out[self.instant] = (
-                    utc.strftime("%Y-%m-%dT%H:%M:%S")
-                    + (f".{utc.microsecond:06d}" if utc.microsecond else "")
-                    + "Z"
-                )
+                out[self.instant] = _clock(utc) + "Z"
             if minutes is not None and self.offset is not None:
                 sign = "-" if minutes < 0 else "+"
                 out[self.offset] = f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
-            return out, None, basis
-        return {}, ("TIME_BASIS_ABSENT", "mapping.time.from"), None
+            if wall is not None and self.local_datetime is not None:
+                out[self.local_datetime] = _clock(wall)
+            return out, None, basis, "instant" if utc is not None else "local" if wall is not None else "day"
+        return {}, ("TIME_BASIS_ABSENT", "mapping.time.from"), None, None
 
 
 def _lookup(value: Any, path: tuple[str, ...]) -> Any:
@@ -1482,11 +1530,28 @@ def _unzoned(raw: Any) -> bool:
         return False
 
 
+def _seconds(raw: Any) -> Any:
+    """``raw`` with second ``:00`` added when it is written to the minute, so the instant grammar reads it.
+
+    Only a string that ends after the minute, or goes on with an offset, changes. A
+    string that holds seconds has ``:`` at that place, so it keeps its text, and the
+    instant grammar still refuses what the result is not.
+    """
+    if type(raw) is str and len(raw) >= 16 and raw[16:17] in ("", "Z", "+", "-"):
+        return f"{raw[:16]}:00{raw[16:]}"
+    return raw
+
+
 def _instant(raw: Any) -> dt.datetime | None:
     try:
-        return scalars.parse_instant(raw)
+        return scalars.parse_instant(_seconds(raw))
     except scalars.ScalarValueError:
         return None
+
+
+def _instant_offset(raw: Any) -> int:
+    """The offset, in minutes, that a string ``_instant`` reads carries."""
+    return scalars.instant_offset_minutes(_seconds(raw))
 
 
 def _wall(raw: Any) -> dt.datetime | None:
@@ -1495,6 +1560,11 @@ def _wall(raw: Any) -> dt.datetime | None:
         return None
     found = _instant(raw + "Z")
     return None if found is None else found.replace(tzinfo=None)
+
+
+def _clock(moment: dt.datetime) -> str:
+    """``YYYY-MM-DDTHH:MM:SS``, then ``.ffffff`` when the moment has microseconds."""
+    return moment.strftime("%Y-%m-%dT%H:%M:%S") + (f".{moment.microsecond:06d}" if moment.microsecond else "")
 
 
 def _offset_minutes(raw: Any) -> int | None:
@@ -1528,6 +1598,11 @@ def _source(raw: Any, at: str, fmt: str, rows: _Rows | None) -> _Path:
     if rows is None:
         return _Path(parts)
     if raw == _INDEX:
+        if not rows.prefixes:
+            _mapping_invalid(
+                at, "$index is the row's place in an array, and this row path crosses no array",
+                expected="a row path with a [] before its end",
+            )
         return _Path(position=True)
     if raw == _VALUE:
         return _Path(whole=True)
@@ -1548,7 +1623,7 @@ def _source(raw: Any, at: str, fmt: str, rows: _Rows | None) -> _Path:
     if not all(keys) or any("[" in key or "]" in key for key in keys) or not route:
         _mapping_invalid(
             at, "$. names a field of the document or of an element the row path crosses",
-            allowed=[_SCOPE, *(f"{_SCOPE}{prefix}." for prefix in rows.prefixes[:-1])],
+            allowed=[_SCOPE, *(f"{_SCOPE}{prefix}." for prefix in rows.prefixes[: len(rows.routes) - 1])],
         )
     if keys[: len(route)] == route or route[: len(keys)] == keys:
         _mapping_invalid(at, "an enclosing field cannot hold or enter the row path", expected="a sibling of the row path")
@@ -1557,9 +1632,15 @@ def _source(raw: Any, at: str, fmt: str, rows: _Rows | None) -> _Path:
 
 
 def _row_path(raw: Any) -> _Rows:
-    """``a[].b[]``: dotted names, each ``[]`` crossing an array; rows are the last array's elements."""
+    """``a[].b[]``: dotted names, each ``[]`` crossing an array; rows are the last array's elements.
+
+    A path that ends at a name, ``a[].b``, takes the object there: one row for each element of the
+    last array crossed. ``$`` is the document: one row.
+    """
     if type(raw) is not str or not raw or len(raw.encode()) > _PATH_BYTES:
-        _mapping_invalid("mapping.rows", "rows is the path to the rows' array", expected="a[].b[]")
+        _mapping_invalid("mapping.rows", "rows is the path to the rows' array or object", expected="a[].b[]")
+    if raw == _ROOT:
+        return _Rows(raw, ((),), (), ({},), True)
     routes, keys = [], []
     for number, part in enumerate(raw.split(".")):
         name, arrays = part, 0
@@ -1575,9 +1656,9 @@ def _row_path(raw: Any) -> _Rows:
             routes.append(tuple(keys))
             keys = []
     if keys:
-        _mapping_invalid("mapping.rows", "a row path ends with [], so each row is an array element", expected="a[].b[]")
+        routes.append(tuple(keys))
     prefixes = tuple(raw[: index + 2] for index in range(len(raw)) if raw.startswith("[]", index))
-    return _Rows(raw, tuple(routes), prefixes, tuple({} for _ in routes))
+    return _Rows(raw, tuple(routes), prefixes, tuple({} for _ in routes), bool(keys))
 
 
 def _target(raw: Any, at: str, declared: Mapping[str, Any], used: set[str]) -> str:
@@ -1637,16 +1718,29 @@ def _basis(index: int, raw: Any, fmt: str, rows: _Rows | None) -> tuple[_Basis, 
     if len(bases) != 1:
         _mapping_invalid(at, "a time basis has one base, a date or an instant", allowed=["date", "instant"])
     places = [key for key in ("zone", "offset", "offset_minutes") if key in raw]
-    increments = [key for key in ("seconds", "index") if key in raw]
+    increments = [key for key in _INCREMENTS if key in raw]
+    floating = "floating" in raw
     if len(places) > 1 or len(increments) > 1:
         _mapping_invalid(
             at, "a time basis has at most one zone or offset and one increment",
-            allowed=[["zone", "offset", "offset_minutes"], ["seconds", "index"]],
+            allowed=[["zone", "offset", "offset_minutes"], list(_INCREMENTS)],
         )
+    if floating:
+        if raw["floating"] is not True:
+            _mapping_invalid(f"{at}.floating", "floating is true, or absent", allowed=[True])
+        for key in (*places, "clock", "fold"):
+            if key in raw:
+                _mapping_invalid(
+                    f"{at}.{key}", "a floating basis places a row by its wall clock alone: it takes no zone, offset, clock or fold",
+                    expected=None,
+                )
     if ("every" in raw) != ("index" in raw):
         _mapping_invalid(f"{at}.every", "index and every go together", allowed=["index", "every"])
-    if increments and bases == ["date"] and not places:
-        _mapping_invalid(at, "a date with an increment needs a zone or an offset", allowed=["zone", "offset", "offset_minutes"])
+    if increments and bases == ["date"] and not places and not floating:
+        _mapping_invalid(
+            at, "a date with an increment needs a zone, an offset or a floating basis",
+            allowed=["zone", "offset", "offset_minutes", "floating"],
+        )
     zoned = "zone" in raw
     for key, needed, allowed in (("clock", zoned and bool(increments), _CLOCKS), ("fold", zoned, _FOLDS)):
         if needed and raw.get(key) not in allowed:
@@ -1686,10 +1780,16 @@ def _basis(index: int, raw: Any, fmt: str, rows: _Rows | None) -> tuple[_Basis, 
     for key in ("clock", "fold"):
         if key in raw:
             canonical[key] = raw[key]
-    label = "+".join(key for key in ("date", "instant", *places, *increments) if key in raw)
+    if floating:
+        canonical["floating"] = True
+    label = "+".join(
+        # nosemgrep: ep-word-set -- The time-basis grammar fixes these keys; the label orders them as written.
+        key for key in ("date", "instant", *places, "floating", *increments) if key in raw
+    )
     basis = _Basis(
         index, paths.get("date"), paths.get("instant"), where, paths.get("offset"), paths.get("offset_minutes"),
-        paths.get("seconds"), paths.get("index"), every, unit, raw.get("clock"), raw.get("fold"), label,
+        paths.get("seconds"), paths.get("milliseconds"), paths.get("duration"), paths.get("index"), every, unit,
+        raw.get("clock"), raw.get("fold"), floating, label,
     )
     return basis, canonical
 
@@ -1735,16 +1835,16 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         fields.append(compiled)
     bases: list[_Basis] = []
     canonical_bases: list[dict] = []
-    instant = offset = local_date = None
+    instant = offset = local_date = local_datetime = None
     time_raw = raw.get("time")
     if time_raw is not None:
         if not isinstance(time_raw, Mapping):
             _mapping_invalid("mapping.time", "time must be an object", expected="object")
-        for key in sorted(set(time_raw) - {"from", "instant", "offset", "local_date"}):
+        for key in sorted(set(time_raw) - {"from", *import_time.TIME_TARGETS}):
             _mapping_invalid(
                 f"mapping.time.{key}",
                 "unknown time key",
-                allowed=["from", "instant", "local_date", "offset"],
+                allowed=sorted({"from", *import_time.TIME_TARGETS}),
             )
         if "local_date" not in time_raw:
             _mapping_invalid(
@@ -1757,6 +1857,14 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
             instant = _target(time_raw["instant"], "mapping.time.instant", declared, used)
         if time_raw.get("offset") is not None:
             offset = _target(time_raw["offset"], "mapping.time.offset", declared, used)
+        if time_raw.get("local_datetime") is not None:
+            local_datetime = _target(time_raw["local_datetime"], "mapping.time.local_datetime", declared, used)
+            if declared[local_datetime].type != "string":
+                _mapping_invalid(
+                    "mapping.time.local_datetime",
+                    "local_datetime receives the wall clock as text, so it is a declared string field",
+                    expected="declared string field",
+                )
         alternatives = time_raw.get("from")
         if not isinstance(alternatives, list) or not 1 <= len(alternatives) <= 4:
             _mapping_invalid(
@@ -1766,6 +1874,14 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
             compiled, canonical = _basis(index, basis, fmt, rows)
             bases.append(compiled)
             canonical_bases.append(canonical)
+        if any(basis.floating for basis in bases):
+            for name, target in (("instant", instant), ("offset", offset)):
+                if target is not None and (declared[target].required or target in manifest.schema.natural_key):
+                    _mapping_invalid(
+                        f"mapping.time.{name}",
+                        f"a floating basis gives a row no {name}, so its target is neither required nor part of the natural key",
+                        expected="an optional field outside the natural key",
+                    )
     on_invalid = raw.get("on_invalid", "stop")
     if on_invalid not in {"stop", "skip"}:
         _mapping_invalid(
@@ -1780,7 +1896,10 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         "fields": canonical_fields,
         "time": None
         if not bases
-        else {"from": canonical_bases, "instant": instant, "offset": offset, "local_date": local_date},
+        else {
+            "from": canonical_bases, "instant": instant, "offset": offset, "local_date": local_date,
+            **({"local_datetime": local_datetime} if local_datetime is not None else {}),
+        },
         "on_invalid": on_invalid,
         "format": fmt,
         "coverage": dict(coverage),
@@ -1801,6 +1920,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         canonical,
         rows,
         source_types,
+        local_datetime,
     )
 
 
@@ -3364,11 +3484,9 @@ def _time_kind(text: str) -> str | None:
         return "offset"
     if _DATE.fullmatch(text):
         return "date"
-    try:
-        scalars.parse_instant(text)
+    if _instant(text) is not None:
         return "instant"
-    except scalars.ScalarValueError:
-        return "unzoned" if _unzoned(text) else None
+    return "unzoned" if _unzoned(text) else None
 
 
 class _Sample:
@@ -3382,6 +3500,7 @@ class _Sample:
         self.time_fields: dict[str, set[str]] = {}
         self.flagged: list[dict[str, Any]] = []
         self.bases: dict[str, int] = {}
+        self.resolutions: dict[str, int] = {}
         self.errors: list[dict[str, Any]] = []
         self.conflicts: dict[str, set[str]] = {}
         self.present: set[str] = set()
@@ -3445,11 +3564,12 @@ class _Sample:
         if error is not None and len(self.errors) < _LISTED:
             self.errors.append({"row": row.ordinal, "byte": row.start, "code": error[0], "at": error[1]})
         if self.plan.bases:
-            times, flagged, basis = self.plan.time(row.value, order)
+            times, flagged, basis, resolution = self.plan.time(row.value, order)
             if flagged is not None and len(self.flagged) < 2 * _LISTED:
                 self.flagged.append({"row": row.ordinal, "code": flagged[0], "at": flagged[1]})
             elif flagged is None:
                 self.bases[basis.label] = self.bases.get(basis.label, 0) + 1
+                self.resolutions[resolution] = self.resolutions.get(resolution, 0) + 1
             error = error or flagged
             if error is None:
                 values.update(times)
@@ -3565,7 +3685,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         None
         if plan is None
         else {spec.target for spec in plan.fields}
-        | {name for name in (plan.instant, plan.offset, plan.local_date) if name}
+        | {name for name in (plan.instant, plan.offset, plan.local_date, plan.local_datetime) if name}
     )
     inferred = {
         target: path
@@ -3605,6 +3725,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         "time": {
             "fields": {path: sorted(kinds) for path, kinds in sample.time_fields.items()},
             "bases": sample.bases if plan is not None and plan.bases else None,
+            "resolution": sample.resolutions if plan is not None and plan.bases else None,
             "flagged": sample.flagged if plan is not None and plan.bases else None,
         },
         "mapping": {
