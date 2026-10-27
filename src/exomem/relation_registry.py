@@ -824,6 +824,11 @@ def save_registry(
     }
 
 
+def saved_document(vault_root: Path) -> dict[str, Any]:
+    """The overlay as saved, each entry with the fields it was written with."""
+    return SPEC.adapter.document(vocabulary_registry.load(SPEC, Path(vault_root)).overlay_text)
+
+
 def empty_proposal() -> dict[str, Any]:
     return {"schema_version": EXTENSION_SCHEMA_VERSION, "extensions": {}}
 

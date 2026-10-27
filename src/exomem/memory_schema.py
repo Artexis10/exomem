@@ -1065,6 +1065,29 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
     return {"schema_version": 1, "extensions": extensions}
 
 
+def relation_registry_merge_base(
+    vault_root: Path, registry: relation_registry.RelationRegistry, delta: object
+) -> dict[str, Any]:
+    """The saved overlay a relation delta merges into.
+
+    Each entry the delta names takes its rendered form, which the merge's
+    immutability check compares against. Every other entry keeps the fields it
+    was saved with, so a save never rewrites an entry it did not touch.
+    """
+    document = relation_registry.saved_document(vault_root)
+    rendered = relation_registry_proposal(registry)["extensions"]
+    named = {
+        key
+        for keyed in (delta.values() if isinstance(delta, dict) else ())
+        if isinstance(keyed, dict)
+        for key in keyed
+        if key in rendered
+    }
+    for key in named:
+        document["extensions"][key] = rendered[key]
+    return document
+
+
 def infer_category_registry(
     vault_root: Path,
     *,

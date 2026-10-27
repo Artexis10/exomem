@@ -295,3 +295,24 @@ def test_a_new_mismatched_extension_is_still_refused_beside_a_grandfathered_one(
     with pytest.raises(ValueError, match="family_mismatch"):
         _save(vault, delta, current)
     assert "vault.runs_site" not in relation_registry.load_registry(vault).extensions
+
+
+def test_a_delta_save_leaves_every_untouched_entry_as_it_was_saved(vault: Path) -> None:
+    path = relation_registry.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    untouched = {
+        "parent": "used_for",
+        "description": "Stores earlier fixture bytes.",
+        "aliases": [],
+        "status": "active",
+    }
+    path.write_text(
+        yaml.safe_dump({"schema_version": 1, "extensions": {"vault.keeps_bytes": untouched}}),
+        encoding="utf-8",
+    )
+
+    _save(vault, _delta(), relation_registry.load_registry(vault).extension_hash)
+
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))["extensions"]
+    assert saved["vault.keeps_bytes"] == untouched
+    assert saved["vault.applies_to"]["aliases"] == ["applies_to"]
