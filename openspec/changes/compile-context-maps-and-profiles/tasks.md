@@ -33,7 +33,7 @@
 - [ ] 5.4 Optional, later, and not a gate: run the frozen held-out evaluation once, blind, on the sealed split. Report each comparison. No result changes the default by itself.
 - [ ] 5.5 Switch the default of `EXOMEM_ACTIVATION_PACKET` to `maps` by operator ruling (design amendment 12) through the release line. Document `EXOMEM_ACTIVATION_PACKET=anchors` as the rollback. Replay field reports on the installed release.
 
-- [ ] 5.6 Build the turn slice behind `EXOMEM_ACTIVATION_TURN_SLICE`, off by default, over the one guarded anchors compile (design D13, amendment 13). Prove it on the activation audit fixtures, with the caller-view twins, the failure-keeps-the-map case, the packet-unchanged case with the setting off, and the latency gate. Turning it on by default waits for a development round and an operator decision.
+- [ ] 5.6 Build the turn slice, shipped on by default with `EXOMEM_ACTIVATION_TURN_SLICE=off` as the rollback, over the one guarded anchors compile (design D13, amendment 13). Prove it on the activation audit fixtures, with the caller-view twins, the failure-keeps-the-map case, the packet-restored case with the setting off, and the latency gate.
 
 ## 6. Preparation recovery
 

@@ -1349,26 +1349,45 @@ using maps`, and serves `maps`. The working-set kill switch disables both modes.
 
 ### The turn slice
 
-The `maps` packet is the same index on every turn. `EXOMEM_ACTIVATION_TURN_SLICE=on`
-adds a `turn_slice` block beside the map. It lists the leads that the words of
-this turn reached: resolved and partial anchors, the senses of an ambiguous
-turn, pages that the turn names by title, related pages and the carried page.
-Each item names the match and the kinds of evidence behind it. The slice is not
-checked for relevance, so the client reads a ref before it relies on it.
+The `maps` packet carries a `turn_slice` block beside the map. The map is the same
+index on every turn. The slice lists the leads that the words of this turn
+reached: resolved and partial anchors, the senses of an ambiguous turn, pages
+that the turn names by title, related pages and the carried page. Each item names
+the match and the kinds of evidence behind it. The slice is not checked for
+relevance, so the client reads a ref before it relies on it.
 
-The default is `off`, and the packet is then the same as before. With the setting
-on, the map compiles in a fixed share of the packet budget on every turn, so the
-map is the same on a turn that resolves nothing. The slice takes the rest. A turn
-that reaches nothing gets `turn_slice.state` of `empty`. A slice that cannot be
-built sets its `state` and leaves the map as it is.
+The slice is on by default. The map compiles in a fixed share of the packet
+budget on every turn, so the map is the same on a turn that resolves nothing.
+The slice takes the rest. A turn that reaches nothing gets `turn_slice.state` of
+`empty`. A slice that cannot be built sets its `state` and leaves the map as it
+is. The default changed to on by an operator decision, so that the `maps` packet
+reaches pages that the map does not list; it is not the result of a measured gain.
 
-1. Add `EXOMEM_ACTIVATION_TURN_SLICE=on` to the service environment, in the same place as `EXOMEM_ACTIVATION_PACKET`.
-2. Restart the service in the same way.
-3. Call `recall_context` once with a turn that names a known page. The packet has a `turn_slice` block with `state` of `ready`.
+To go back to the map alone, add one line to the service environment and restart
+the service:
 
-To turn the slice off, change the value to `off` and restart. A value other than
-`on` or `off` logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using off`,
-and serves the map alone. The setting has no effect in the `anchors` mode.
+```bash
+EXOMEM_ACTIVATION_TURN_SLICE=off
+```
+
+1. If the install is managed (`--seamless`), add the line to `service.env`, usually `~/.config/exomem/service.env`, and run `bash scripts/upgrade.sh --package-version <the serving version>`. The next worker re-reads `service.env`. Without `--package-version`, the command also stages a newer release when one exists.
+2. If the install is a release install that is not managed, add the line to the dotenv file that you gave to the installer, and run the same `bash scripts/install-service.sh --release` command again.
+3. If the service runs from a source checkout, add the line to the checkout's `.env` and run `bash scripts/restart.sh`.
+4. Call `recall_context` once. The packet has no `turn_slice` block, and the map is the packet that the packet mode alone gives.
+
+To return to the slice, change the line to `EXOMEM_ACTIVATION_TURN_SLICE=on` and
+restart in the same way, then call `recall_context` once with a turn that names a
+known page: the packet has a `turn_slice` block with `state` of `ready`. Do not
+only remove the line. A managed supervisor that started while the line was
+present keeps the value in its own environment, and each new worker inherits it.
+
+A cloud cell reads no `.env` file. Set the same variable in the cell model
+environment that `cellctl` renders (`CELLCTL_CELL_MODEL_ENV`), then roll the
+cell.
+
+Any value other than `off` serves the slice. A value other than `on` or `off`
+also logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using on`. The
+setting has no effect in the `anchors` mode.
 
 ## Reranking and languages
 

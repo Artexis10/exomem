@@ -1350,7 +1350,7 @@ def _fetch_packet_via_rest(
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_rest(
                 prompt, api_key, continuity, remaining, attribution, base_url, conversation,
-                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"])),
+                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
             )
             return smaller if smaller is not None else packet
         return packet
@@ -1428,7 +1428,7 @@ def _fetch_packet_via_cli(
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_cli(
                 prompt, continuity, remaining, attribution, conversation,
-                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"])),
+                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
             )
             return smaller if smaller is not None else packet
         return packet
@@ -2073,7 +2073,7 @@ def _map_header(block: dict) -> str:
     )
 
 
-def _map_render_overhead(block: dict) -> int:
+def _map_render_overhead(block: dict, slice_block: object = None) -> int:
     """Reserve hook-only framing without depending on the configured render cap."""
     overhead = len(_map_header(block)) + 1
     overhead += len(_packet_line("map", "", str(block.get("ref") or "exomem://map")))
@@ -2082,6 +2082,9 @@ def _map_render_overhead(block: dict) -> int:
     overhead += 16 * len(block.get("items") or ())
     if block.get("state_available") is False:
         overhead += len("- State is unavailable.") + 1
+    if isinstance(slice_block, dict) and slice_block.get("state") == "ready":
+        # The slice's lead line, its "more not shown" marker and the same per-item margin as a map item.
+        overhead += len(_packet_line("turn", "", "")) + 1 + 10 + 16 * len(slice_block.get("items") or ())
     return overhead
 
 
@@ -3354,7 +3357,7 @@ def main(argv: list[str] | None = None) -> int:
                 block, complete = _format_map_with_slice(packet, _working_set_max_chars(), last_generation)
                 if generation_path is not None and overhead_path is not None:
                     try:
-                        overhead = _map_render_overhead(packet["map"])
+                        overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
                         budget = packet.get("budget")
                         requested = _working_set_max_chars() if max_chars is None else max_chars
                         if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:

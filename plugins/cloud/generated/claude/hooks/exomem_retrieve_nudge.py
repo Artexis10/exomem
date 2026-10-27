@@ -1350,7 +1350,7 @@ def _fetch_packet_via_rest(
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_rest(
                 prompt, api_key, continuity, remaining, attribution, base_url, conversation,
-                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"])),
+                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
             )
             return smaller if smaller is not None else packet
         return packet
@@ -1428,7 +1428,7 @@ def _fetch_packet_via_cli(
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_cli(
                 prompt, continuity, remaining, attribution, conversation,
-                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"])),
+                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
             )
             return smaller if smaller is not None else packet
         return packet
@@ -2073,7 +2073,7 @@ def _map_header(block: dict) -> str:
     )
 
 
-def _map_render_overhead(block: dict) -> int:
+def _map_render_overhead(block: dict, slice_block: object = None) -> int:
     """Reserve hook-only framing without depending on the configured render cap."""
     overhead = len(_map_header(block)) + 1
     overhead += len(_packet_line("map", "", str(block.get("ref") or "exomem://map")))
@@ -2082,12 +2082,71 @@ def _map_render_overhead(block: dict) -> int:
     overhead += 16 * len(block.get("items") or ())
     if block.get("state_available") is False:
         overhead += len("- State is unavailable.") + 1
+    if isinstance(slice_block, dict) and slice_block.get("state") == "ready":
+        # The slice's lead line, its "more not shown" marker and the same per-item margin as a map item.
+        overhead += len(_packet_line("turn", "", "")) + 1 + 10 + 16 * len(slice_block.get("items") or ())
     return overhead
 
 
 def _map_request_max_chars(overhead: int) -> int:
     # Activation's public prose-cap contract clamps requests to at least 500.
     return max(500, _working_set_max_chars() - overhead)
+
+
+def _map_item_parts(item: dict) -> tuple[str, str]:
+    """The prose and the ref of one map or turn slice item."""
+    text = str(item.get("title") or "")
+    if item.get("description"):
+        text += f" — {item['description']}"
+    state = item.get("state")
+    if isinstance(state, dict) and state.get("statement"):
+        text += f"; state: {state['statement']}"
+        # nosemgrep: ep-word-set -- The current-state resolver fixes these wire fields.
+        details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
+        if details:
+            text += " (" + "; ".join(details) + ")"
+    item_ref = item.get("profile") if item.get("kind") == "anchor" and not item.get("path") else item.get("ref")
+    return text, str(item_ref or item.get("ref") or "")
+
+
+def _format_slice_block(block: object, max_chars: int) -> str:
+    """The turn slice as whole lines, or "" when it lists nothing or nothing fits.
+
+    The slice answers this turn alone, so it is rendered on every turn, also when the map
+    beside it is the unchanged one. The server has already cut it to its own share of the budget.
+    """
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return ""
+    lines = []
+    for item in block.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        text, ref = _map_item_parts(item)
+        evidence = ", ".join(str(kind) for kind in item.get("evidence") or ())
+        label = f"{item.get('match') or 'lead'} ({evidence})" if evidence else str(item.get("match") or "lead")
+        lines.append(_packet_line(label, text, ref))
+    if not lines:
+        return ""
+    leading = _packet_line("turn", str(block.get("description") or ""), "")
+    marker_room = len("- … 99 more not shown.") + 1
+    kept, used = [], len(leading)
+    for line in lines:
+        if used + 1 + len(line) + marker_room > max_chars:
+            break
+        kept.append(line)
+        used += 1 + len(line)
+    if not kept:
+        return ""
+    unseen = len(lines) - len(kept) + (block["overflow"] if type(block.get("overflow")) is int else 0)
+    tail = [f"- … {unseen} more not shown."] if unseen else []
+    return "\n".join([leading, *kept, *tail])
+
+
+def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
+    """The map block, then the turn slice the packet carries beside it, and whether the map was complete."""
+    text, complete = _format_map_block(packet["map"], max_chars, last_generation)
+    turn = _format_slice_block(packet.get("turn_slice"), max_chars - len(text) - (1 if text else 0))
+    return ("\n".join([text, turn]) if text else turn) if turn else text, complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
@@ -2118,18 +2177,8 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tupl
     for item in block.get("items") or ():
         if not isinstance(item, dict):
             continue
-        text = str(item.get("title") or "")
-        if item.get("description"):
-            text += f" — {item['description']}"
-        state = item.get("state")
-        if isinstance(state, dict) and state.get("statement"):
-            text += f"; state: {state['statement']}"
-            # nosemgrep: ep-word-set -- The current-state resolver fixes these wire fields.
-            details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
-            if details:
-                text += " (" + "; ".join(details) + ")"
-        item_ref = item.get("profile") if item.get("kind") == "anchor" and not item.get("path") else item.get("ref")
-        items.append(_packet_line("item", text, str(item_ref or item.get("ref") or "")))
+        text, item_ref = _map_item_parts(item)
+        items.append(_packet_line("item", text, item_ref))
     # These are the read contract's derived-view refs, not vocabulary entries.
     overflow = _packet_line("overflow", str(block.get("overflow") or (
         "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."
@@ -2172,7 +2221,7 @@ def _format_working_set_block(packet: dict, max_chars: int, last_generation: str
     if not isinstance(packet, dict) or max_chars <= 0:
         return ""
     if isinstance(packet.get("map"), dict):
-        return _format_map_block(packet["map"], max_chars, last_generation)[0]
+        return _format_map_with_slice(packet, max_chars, last_generation)[0]
     reason = _abstention_reason(packet)
     if packet.get("abstained"):
         if reason == "ambiguous":
@@ -3305,10 +3354,10 @@ def main(argv: list[str] | None = None) -> int:
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
             if isinstance(packet.get("map"), dict):
-                block, complete = _format_map_block(packet["map"], _working_set_max_chars(), last_generation)
+                block, complete = _format_map_with_slice(packet, _working_set_max_chars(), last_generation)
                 if generation_path is not None and overhead_path is not None:
                     try:
-                        overhead = _map_render_overhead(packet["map"])
+                        overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
                         budget = packet.get("budget")
                         requested = _working_set_max_chars() if max_chars is None else max_chars
                         if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
