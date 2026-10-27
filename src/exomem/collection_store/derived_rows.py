@@ -1125,13 +1125,15 @@ def _restore_rows(conn: sqlite3.Connection, goal: Target, revert: dict) -> tuple
         (revert["after"], REBUILD_STEP_ROWS))] if _has_table(conn, undo) else []
     if not ids:
         return 0, True
-    where = f"d.row_id>? AND d.row_id<=? AND d.row_id IN (SELECT row_id FROM {undo})"  # noqa: S608
+    # Both statements are driven by the undo rows of this step's range, so their cost follows the rows restored.
+    where = f"d.row_id IN (SELECT row_id FROM {undo} WHERE row_id>? AND row_id<=?)"  # noqa: S608
     bounds = (revert["after"], ids[-1])
     # A membership follows the row's values, so leave the current place before the values change.
     _memberships(conn, goal, where, bounds, _DROP_MEMBER)
-    columns = _stored_columns(conn, goal.table)
-    conn.execute(f"UPDATE {goal.table} SET {','.join(f'{c}=u.{c}' for c in columns)} FROM {undo} u "  # noqa: S608
-                 f"WHERE {goal.table}.row_id=u.row_id AND u.row_id>? AND u.row_id<=?", bounds)
+    columns = ",".join(_stored_columns(conn, goal.table))
+    conn.execute(f"UPDATE {goal.table} SET ({columns})=(SELECT {columns} FROM {undo} u "  # noqa: S608
+                 f"WHERE u.row_id={goal.table}.row_id) WHERE row_id IN (SELECT row_id FROM {undo} "
+                 f"WHERE row_id>? AND row_id<=?)", bounds)
     _memberships(conn, goal, where, bounds, _PLACE_MEMBER)
     revert["after"] = ids[-1]
     return len(ids), len(ids) < REBUILD_STEP_ROWS
