@@ -29,5 +29,6 @@
 - [ ] 4.2 Complete independent adversarial review and integrated checks; record product-versus-proof weight and preserve all governance guarantees.
 - [ ] 4.3 Merge and release through the existing release owner; verify the released package and retain matched before-and-after evidence.
 - [ ] 4.4 Synchronize the existing latency capability and this delta when their tasks are shipped; validate and archive without losing later requirements.
-- [ ] 4.5 Load the generated collection fixture through both arms' own tools and complete one reduced paired smoke on the managed workers; verify the summary against `summary.schema.json` with the profile and case digests.
-- [ ] 4.6 Fill the contract's `fixture_profile_sha256` from the loaded profile; dispatch the CI jobs once and record the A/A intervals that set the first allowances.
+- [x] 4.5 Load the generated collection fixture through both arms' own tools and complete one reduced paired smoke on the managed workers; verify the summary against `summary.schema.json` with the profile and case digests.
+- [x] 4.6 Fill the contract's `fixture_profile_sha256` from the loaded profile.
+- [ ] 4.7 Dispatch the CI jobs once and record the A/A intervals that set the first allowances.
