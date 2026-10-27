@@ -228,6 +228,7 @@ def _write_bridge_fixture(
     bridge_relations: str | None = None,
     bridge_sources: str | None = None,
     bridge_lede: str = "",
+    audience: str = "external",
 ) -> tuple[Path, Path]:
     source = vault / source_path
     bridge = vault / bridge_path
@@ -255,14 +256,15 @@ def _write_bridge_fixture(
             scope_ids=(SCOPE_A,),
             ceiling=source_ceiling,
             extra=source_rule_extra,
+            audience=audience,
         ),
     )
     if approval:
-        release = _release_document()
+        release = _release_document().replace("to_audience: external", f"to_audience: {audience}")
         release = release.replace(BRIDGE_PATH, bridge_path).replace(SOURCE_PATH, source_path)
         release = release.replace(SHA_A, hashlib.sha256(bridge.read_bytes()).hexdigest(), 1)
         release = release.replace(SHA_B, hashlib.sha256(source.read_bytes()).hexdigest(), 1)
-        release = release.replace("c" * 64, _restriction_signature(vault), 1)
+        release = release.replace("c" * 64, _restriction_signature(vault, audience=audience), 1)
         _write_policy(vault, "grants", "bridge-release", release)
     policy._CACHE.clear()
     policy._LAST_GOOD.clear()
@@ -1199,13 +1201,19 @@ _TRAIL_DECISION = (
 )
 
 
-def _ask_as_guest(vault: Path, query: str = "unlimited evening capacity", **arguments) -> dict:
-    """What an external caller receives on the wire: through the dispatcher and its terminal filter."""
+def _ask_as(
+    vault: Path, principal: RequestPrincipal, query: str = "unlimited evening capacity", **arguments
+) -> dict:
+    """What a caller receives on the wire: through the dispatcher and its terminal filter."""
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "ask_memory")
-    with request_scope(_external()):
+    with request_scope(principal):
         return invoke_command(
             command, vault, query=query, mode="keyword", limit=10, deep=True, **arguments
         )
+
+
+def _ask_as_guest(vault: Path, query: str = "unlimited evening capacity", **arguments) -> dict:
+    return _ask_as(vault, _external(), query, **arguments)
 
 
 def _assert_stem_absent(wire: object) -> None:
@@ -1237,6 +1245,29 @@ def test_a_deep_pack_of_a_page_under_a_release_strip_carries_no_source_trail(
     assert "Decision" not in " ".join(found["pack"]["claims"][BRIDGE_PATH]["sections"])
     # The released claim itself stays.
     assert compact["excerpt"] == "Do not assume unlimited evening capacity"
+    _assert_stem_absent(found)
+
+
+@pytest.mark.parametrize("surface", ["mcp", "cli"])
+def test_a_deep_pack_for_the_owner_under_an_owner_release_strip_carries_no_source_trail(
+    vault: Path, surface: str
+) -> None:
+    # Policy may hold the owner audience below a source and release a bridge to that audience, so the
+    # owner's pack strips the trail like any other caller's.
+    _write_bridge_fixture(
+        vault,
+        approval=True,
+        audience="owner",
+        source_path=_TRAIL_PATH,
+        bridge_suffix=_TRAIL_DECISION,
+        bridge_relations="No further relations.\n",
+    )
+
+    found = _ask_as(vault, owner_principal(surface=surface))
+
+    entry = found["pack"]["semantic_units"][BRIDGE_PATH]
+    assert entry["parent"]["sources"] == []
+    assert "context" not in entry["units"][1]
     _assert_stem_absent(found)
 
 

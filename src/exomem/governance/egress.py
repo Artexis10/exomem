@@ -6806,21 +6806,15 @@ def release_strip_resolver(
     agree on which pages are bridges without sharing a list of paths.
 
     It answers `()` for a page that cannot be decided and for every page of a blocked policy or an
-    unresolved caller, because none of those is released, and for every page of an open vault or of an
-    owner call, which have nothing to strip. Policy and caller are read once; each path is decided once.
+    unresolved caller, because none of those is released, and for every page of an open vault, which
+    has nothing to strip. Policy and caller are read once; each path is decided once.
     One request builds one resolver and hands it to every pack stage, so they cannot disagree.
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
-    # An open vault has no release plane to strip under, and a release cannot name the owner as its
-    # audience, so the owner's decision never carries a strip; a pack asks this for every page it holds.
-    if (
-        policy.blocked
-        or not who.resolved
-        or who.audience_id == OWNER_AUDIENCE
-        or _file_policy_empty(vault_root, policy)
-    ):
+    # An open vault has no release plane to strip under, and a pack asks this for every page it holds.
+    if policy.blocked or not who.resolved or _file_policy_empty(vault_root, policy):
         return lambda _rel_path: ()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     grants_hash = _grants_hash(policy)
