@@ -119,6 +119,11 @@ names a dataset.
    carries its own offset still resolves as an instant.
 2. A `YYYY-MM-DDTHH:MM` value, with or without an offset, reads as second `:00`. The
    importer's instant and wall-clock readers change; `scalars.parse_instant` does not.
+   A rebuild replays each logged member through the current importer. A member that an
+   earlier release imported with `on_invalid: skip`, and whose minute-precision times it
+   rejected, now accepts those rows. Its rebuild then stops with `REBUILD_MISMATCH`, and a
+   fresh import of that member restores the collection. Such a member imported none of
+   those rows, so the case needs a mapping that already failed on its own time values.
 3. `milliseconds: <path>` reads a finite number. `duration: <path>` reads an ISO 8601
    duration: an optional `-`, weeks and days, then hours, minutes and seconds, with a
    fraction allowed on the last unit. Years and months are refused with
