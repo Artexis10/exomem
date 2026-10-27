@@ -110,8 +110,8 @@ Each item's fingerprint covers:
 The deterministic sample is evidence only, because any sample over a growing set changes when a page lands. So a single new page does not re-offer deferred advice, and a material change does.
 
 The consideration reaches ordinary work in two places:
-- **After a committed write.** The producer reads the written page's own folder chain, tags and project keys from the page. It counts only those carriers, with indexed queries, and offers at most one item in the single advisory slot when the slot is free. A whole-vault ranking never runs on the write path.
-- **In explicit vocabulary review and `inspect`.** Here the producer ranks carriers across the vault by the unfiled entries they would file, within bounded pages.
+- **After a committed write.** The producer first asks whether a notice could be taken at all: the family disposition and the reservation state. It then reads the written page's own folder chain, tags and project keys, skips carriers already declared, and reads each remaining carrier's count from a briefly cached recount. It offers at most one item in the single advisory slot, and only when the tag-variant advisory left the slot free. A whole-vault ranking never runs on the write path.
+- **In explicit vocabulary review.** `review_memory(mode="vocabulary")` and `review_item_context` rank carriers across the vault by the unfiled entries they would file, and the review continuation pages through them. A parent folder whose unfiled entries equal those of one offered folder below it is not offered. `inspect` stays a pure registry read: it lists declarations and the hand-written project-key topics, and it ranks and records nothing.
 
 The agent may declare with origin `inferred` without a per-carrier approval, and the map uses the declaration at once. Inferred declarations stay listed for review until a person accepts, replaces or rejects them.
 
@@ -131,6 +131,8 @@ The owner coverage counts:
 - carriers that would file them;
 - unresolved topics on carriers, homes and project keys;
 - carriers that no longer match anything, such as a moved folder.
+
+The carrier counts partition the declared carriers: filing, matching but with no resolved topic, dangling, and tag carriers still unknown before the tag fill.
 
 ## Risks
 

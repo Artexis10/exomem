@@ -47,7 +47,7 @@ None. `context-catalogue` membership and `agent-vocabulary-workflow` are still u
 ## Impact
 
 - Code:
-  - a new `topic_carriers` registry module, and `homes.py` for resolved home topics;
+  - a new `topic_carriers` registry module;
   - `context_views.py`, for the cached map key and caller-view admission;
   - `context_catalogue.py`, which stores entry tags in place and joins the carriers; one background fold fills the tags after upgrade;
   - the vocabulary family and its producer;

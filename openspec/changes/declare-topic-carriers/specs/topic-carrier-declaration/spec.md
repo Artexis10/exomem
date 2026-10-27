@@ -62,6 +62,11 @@ An entry SHALL join the topics of its `topics` field, of its project keys' domai
 - **WHEN** a person wrote `domain: ops` for a project key by hand
 - **THEN** `inspect` reports that declaration with origin `reviewed`
 
+#### Scenario: A caller who may not read the project registry sees no hand-written declarations
+
+- **WHEN** a caller whose release excludes `project-keys.yaml` inspects the carriers
+- **THEN** the result carries no hand-written declarations, rather than an empty list
+
 #### Scenario: Exomem never edits the project-key file
 
 - **WHEN** the agent declares a topic for a project key
@@ -69,12 +74,17 @@ An entry SHALL join the topics of its `topics` field, of its project keys' domai
 
 ### Requirement: The agent infers carrier topics and the server only supplies evidence
 
-Ordinary work SHALL expose bounded considerations in the `topic-carrier/v1` vocabulary family, to the owner only, for carriers whose declaration would file unfiled entries. After a committed write, the producer SHALL consider only the written page's own carriers and SHALL offer at most one item. Explicit review SHALL rank carriers across the vault by the number of unfiled entries they would file. A carrier below a minimum entry count SHALL NOT be offered. A consideration SHALL carry the carrier, its entry and unfiled counts, a deterministic bounded sample of entry titles with their catalogue descriptions, the tags most frequent among its entries, the topics already held by its entries' relation targets, the subject domains of the sources its entries cite, whether a tag is also a key of another registry, and the existing domains with their descriptions and aliases. The active agent SHALL choose the topic. The server SHALL NOT call a model and SHALL NOT propose or refuse a topic from word lists or text patterns. The family's only workflow decision SHALL be `defer`. An unchanged or deferred consideration SHALL NOT be repeated, and a material change to its bucketed evidence SHALL allow it again.
+Ordinary work SHALL expose bounded considerations in the `topic-carrier/v1` vocabulary family, to the owner only, for carriers whose declaration would file unfiled entries. After a committed write, the producer SHALL consider only the written page's own carriers and SHALL offer at most one item. That item SHALL take the single advisory slot only when no other notice, including a tag-variant advisory, holds it. Explicit vocabulary review SHALL rank carriers across the vault by the number of unfiled entries they would file, and SHALL page through the whole ranking with its continuation. A folder whose unfiled entries equal those of one offered folder below it SHALL NOT be offered. `inspect` SHALL NOT rank carriers or record review state. A carrier below a minimum entry count SHALL NOT be offered. A consideration SHALL carry the carrier, its entry and unfiled counts, a deterministic bounded sample of entry titles with their catalogue descriptions, the tags most frequent among its entries, the topics already held by its entries' relation targets, the subject domains of the sources its entries cite, whether a tag is also a key of another registry, and the existing domains with their descriptions and aliases. The active agent SHALL choose the topic. The server SHALL NOT call a model and SHALL NOT propose or refuse a topic from word lists or text patterns. The family's only workflow decision SHALL be `defer`. An unchanged or deferred consideration SHALL NOT be repeated, and a material change to its bucketed evidence SHALL allow it again.
 
 #### Scenario: An undeclared carrier is considered once
 
 - **WHEN** a carrier would file unfiled entries and its evidence does not change
 - **THEN** the consideration appears once and is not repeated in later turns
+
+#### Scenario: A tag-variant advisory keeps the slot
+
+- **WHEN** a committed write earns both a tag-variant advisory and a carrier consideration
+- **THEN** the write carries the tag-variant advisory, and the carrier stays listed in explicit review
 
 #### Scenario: The agent declares an inferred topic
 
