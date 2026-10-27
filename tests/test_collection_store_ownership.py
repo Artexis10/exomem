@@ -473,6 +473,8 @@ def test_an_ordinary_row_save_does_not_invalidate_a_whole_overview(service, monk
 def test_a_pooled_proof_does_not_release_a_read_after_a_namespace_change(service, monkeypatch):
     """The release re-proves ownership on its own lend, which starts with no transaction, not from the body's snapshot."""
     root = service.root
+    # The fixture's first row is still publishing; a request that starts meanwhile meets the handoff.
+    _published(SimpleNamespace(meta=lambda: store_meta(root)))
     pool = runtime.reader_pool(root, connection.store_path(root))
     lent = []
     lend = pool.lend
@@ -492,8 +494,9 @@ def test_a_pooled_proof_does_not_release_a_read_after_a_namespace_change(service
         with pytest.raises(OpError) as refused:
             scope.finish()
     assert refused.value.code == "COLLECTION_STORE_UNAVAILABLE"
-    mine = [reader for thread, reader in lent if thread == threading.get_ident()]
-    assert any(mine[-1] is earlier for earlier in mine[:-1]), "the proofs did not share a pooled reader"
+    # The store thread's own reads share this pool, so the release may take a reader that thread returned last.
+    last = max(index for index, (thread, _) in enumerate(lent) if thread == threading.get_ident())
+    assert any(lent[last][1] is earlier for _, earlier in lent[:last]), "the release did not reuse a pooled reader"
 
 
 def test_recovery_must_cover_later_collections_before_and_after_a_whole_read(service, tmp_path, monkeypatch):
