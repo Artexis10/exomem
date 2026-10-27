@@ -11,6 +11,7 @@ serves explicit review only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -53,11 +54,13 @@ SOURCE_SAMPLE = 16
 OFFER_LIMIT = 64
 MAX_DOMAINS = 40
 TEXT_CHARS = 160
-#: Seconds one carrier's count serves the write path. Recounting a 2,500-entry folder on every
-#: write cost about 260 ms, and an offer moves only by a power-of-two bucket, so writes read a
-#: briefly cached count. A registry edit, such as a declaration, invalidates it at once.
-COUNT_TTL_SECONDS = 120.0
-_COUNTS: dict[tuple[str, str], tuple[float, str, Candidate | None, frozenset[str]]] = {}
+#: Seconds one carrier's count serves the write path: about one working session. An offer moves
+#: only by a power-of-two bucket, and a stale one costs the agent one `VOCABULARY_DECISION_STALE`
+#: on open. A registry edit, such as a declaration, invalidates a count at once.
+COUNT_TTL_SECONDS = 1800.0
+#: Most carrier counts one process keeps; the oldest goes first. A memory bound, not vocabulary.
+COUNT_LIMIT = 512
+_COUNTS: dict[tuple[str, str], tuple[float, str, Candidate | None, str]] = {}
 _COUNTS_LOCK = threading.Lock()
 
 
@@ -165,6 +168,32 @@ def _count(
     return (Candidate(kind, match, len(rows), len(open_ids)) if open_ids else None), open_ids
 
 
+def _digest(ids: Iterable[str]) -> str:
+    """One name for a set of entry ids: counts compare their unfiled sets only for equality."""
+    return hashlib.sha256("\n".join(sorted(ids)).encode()).hexdigest()
+
+
+def _count_together(
+    catalogue: context_catalogue.ContextCatalogue,
+    carriers: list[tuple[str, str]],
+    filing: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[Candidate | None, str]]:
+    """Count several carriers over one load of the entries they reach.
+
+    An entry a `filing` carrier reaches is filed by construction, so only the rest are loaded
+    and resolved.
+    """
+    reached = {carrier: catalogue.reached_ids(*carrier) for carrier in carriers}
+    settled = {entry_id for carrier in filing for entry_id in catalogue.reached_ids(*carrier)}
+    rest = {entry_id for ids in reached.values() for entry_id in ids} - settled
+    unfiled, _joined, _edges = _unfiled(catalogue, catalogue.entries_by_id(rest)) if rest else (set(), None, None)
+    counted: dict[tuple[str, str], tuple[Candidate | None, str]] = {}
+    for (kind, match), ids in reached.items():
+        open_ids = [entry_id for entry_id in ids if entry_id in unfiled] if len(ids) >= MIN_ENTRIES else []
+        counted[(kind, match)] = (Candidate(kind, match, len(ids), len(open_ids)) if open_ids else None), _digest(open_ids)
+    return counted
+
+
 def _count_basis(vault_root: Path) -> str:
     """The registries a count depends on; a change to any of them recounts."""
     from . import homes
@@ -172,29 +201,37 @@ def _count_basis(vault_root: Path) -> str:
     return json.dumps([registry_hashes(vault_root), homes.load(vault_root).content_hash])
 
 
-def _cached_count(
-    vault_root: Path, catalogue: context_catalogue.ContextCatalogue, kind: str, match: str, basis: str
-) -> tuple[Candidate | None, frozenset[str]]:
-    key = (str(Path(vault_root).resolve()), ":".join(topic_carriers.identity_of(kind, match)))
+def _cached_counts(
+    vault_root: Path,
+    catalogue: context_catalogue.ContextCatalogue,
+    carriers: list[tuple[str, str]],
+    filing: list[tuple[str, str]],
+) -> list[tuple[Candidate | None, str]]:
+    """Each carrier's count, cached per carrier; the carriers that missed are counted together."""
+    root = str(Path(vault_root).resolve())
+    basis = _count_basis(vault_root)
     now = time.monotonic()
+    keys = {carrier: (root, ":".join(topic_carriers.identity_of(*carrier))) for carrier in carriers}
+    found: dict[tuple[str, str], tuple[Candidate | None, str]] = {}
     with _COUNTS_LOCK:
-        cached = _COUNTS.get(key)
-    if cached is not None and now - cached[0] < COUNT_TTL_SECONDS and cached[1] == basis:
-        return cached[2], cached[3]
-    found, open_ids = _count(catalogue, kind, match)
-    with _COUNTS_LOCK:
-        _COUNTS[key] = (now, basis, found, open_ids)
-    return found, open_ids
+        for carrier, key in keys.items():
+            cached = _COUNTS.get(key)
+            if cached is not None and now - cached[0] < COUNT_TTL_SECONDS and cached[1] == basis:
+                found[carrier] = (cached[2], cached[3])
+    missed = [carrier for carrier in carriers if carrier not in found]
+    if missed:
+        fresh = _count_together(catalogue, missed, filing)
+        found.update(fresh)
+        with _COUNTS_LOCK:
+            for carrier, (candidate, digest) in fresh.items():
+                _COUNTS.pop(keys[carrier], None)
+                _COUNTS[keys[carrier]] = (now, basis, candidate, digest)
+            while len(_COUNTS) > COUNT_LIMIT:
+                _COUNTS.pop(next(iter(_COUNTS)))
+    return [found[carrier] for carrier in carriers]
 
 
-def clear_cache() -> None:
-    with _COUNTS_LOCK:
-        _COUNTS.clear()
-
-
-def _without_covered_folders(
-    candidates: list[Candidate], open_ids: dict[str, frozenset[str]]
-) -> list[Candidate]:
+def _without_covered_folders(candidates: list[Candidate], open_ids: dict[str, object]) -> list[Candidate]:
     """Drop a folder whose unfiled entries are exactly those of one offered folder below it: the child names them better."""
     folders = [candidate for candidate in candidates if candidate.kind == topic_carriers.KIND_FOLDER]
     parts = {candidate.identity: topic_carriers.fold_folder(candidate.match) for candidate in folders}
@@ -211,11 +248,39 @@ def _without_covered_folders(
     return [candidate for candidate in candidates if candidate.kind != topic_carriers.KIND_FOLDER or not covered(candidate)]
 
 
+def _filing(vault_root: Path) -> tuple[set[tuple[str, str]], Any]:
+    """The declared carriers, by identity, and the rule for a carrier that files every entry it reaches.
+
+    A carrier files by construction when its declared topics resolve, or when it is a project key
+    whose hand-written domains resolve: `ContextCatalogue.memberships` files its entries whatever
+    else they declare.
+    """
+    taxonomy = source_taxonomy.load_taxonomy(vault_root)
+    projects = project_keys.load_project_registry(vault_root)
+    declared = {
+        topic_carriers.identity_of(carrier.kind, carrier.match): carrier
+        for carrier in topic_carriers.load(vault_root).carriers
+        if carrier.active and carrier.topics
+    }
+
+    def files(kind: str, match: str) -> bool:
+        carrier = declared.get(topic_carriers.identity_of(kind, match))
+        if carrier is not None and vocabulary_resolution.resolve_topics(taxonomy, carrier.topics).resolved:
+            return True
+        return kind == topic_carriers.KIND_PROJECT and bool(
+            vocabulary_resolution.resolve_topics(taxonomy, projects.domains_for(match)).resolved
+        )
+
+    return set(declared), files
+
+
 def after_write(vault_root: Path, path: str) -> WorkItem | None:
     """The most useful consideration among the written page's own carriers, or None.
 
-    Asks first whether a notice could be taken at all, skips carriers already declared, and reads
-    each remaining carrier's count from a briefly cached recount. Never ranks the vault.
+    Asks first whether a notice could be taken at all and skips carriers already declared or
+    filed by construction. The remaining counts come from a cache that lasts about a session;
+    the carriers that missed it are counted over one load that leaves out filed entries. Never
+    ranks the vault.
     """
     root = Path(vault_root)
     if not permitted(root) or not vocabulary_notifications.may_offer(root, FAMILY, SIGNAL):
@@ -231,23 +296,31 @@ def after_write(vault_root: Path, path: str) -> WorkItem | None:
         if page is None or not isinstance(page.frontmatter, dict):
             return None
         eligible = _Eligible.load(root, catalogue)
-        declared = {
-            topic_carriers.identity_of(carrier.kind, carrier.match)
-            for carrier in topic_carriers.load(root).carriers
-            if carrier.active and carrier.topics
-        }
-        basis = _count_basis(root)
-        counted = [
-            _cached_count(root, catalogue, kind, match, basis)
-            for kind, match in context_catalogue.carrier_keys(
-                rel,
-                projects=tuple(sorted(context_catalogue.page_projects(page.frontmatter))),
-                tags=context_catalogue.page_tags(page.frontmatter),
-            )
-            if eligible.carries(kind, match) and topic_carriers.identity_of(kind, match) not in declared
+        declared, files = _filing(root)
+        reached = context_catalogue.carrier_keys(
+            rel,
+            projects=tuple(sorted(context_catalogue.page_projects(page.frontmatter))),
+            tags=context_catalogue.page_tags(page.frontmatter),
+        )
+        filing = [carrier for carrier in reached if files(*carrier)]
+        # Folders come top down, so a folder below a filing folder holds only filed entries.
+        under = [
+            topic_carriers.fold_folder(match) for kind, match in filing if kind == topic_carriers.KIND_FOLDER
         ]
-        open_ids = {found.identity: ids for found, ids in counted if found is not None}
-        candidates = _without_covered_folders([found for found, _ids in counted if found is not None], open_ids)
+        counting = [
+            (kind, match)
+            for kind, match in reached
+            if eligible.carries(kind, match)
+            and topic_carriers.identity_of(kind, match) not in declared
+            and (kind, match) not in filing
+            and not (
+                kind == topic_carriers.KIND_FOLDER
+                and any(topic_carriers.fold_folder(match)[: len(parent)] == parent for parent in under)
+            )
+        ]
+        counted = _cached_counts(root, catalogue, counting, filing) if counting else []
+        open_ids = {found.identity: digest for found, digest in counted if found is not None}
+        candidates = _without_covered_folders([found for found, _digest in counted if found is not None], open_ids)
         if not candidates:
             return None
         return item(root, min(candidates, key=lambda candidate: candidate.rank_key))
