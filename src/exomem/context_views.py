@@ -131,7 +131,7 @@ SLICE_DESCRIPTION = (
 SLICE_EMPTY = "empty"
 SLICE_SKIPPED = "skipped"
 #: How a lead was reached, strongest first: the closed set of a slice item's `match`, in listing order.
-MATCHES = ("resolved", "ambiguous", "carried", "partial", "named", "related")
+MATCHES = ("resolved", "ambiguous", "carried", "partial", "named", "related")  # nosemgrep: ep-word-set -- The packet specification fixes this set.
 #: The anchor statuses that make a lead, and the match each one is. The packet specification fixes both sets.
 _MATCH_OF_STATUS = {  # nosemgrep: ep-word-set -- Fixed anchor statuses of the activation packet.
     "resolved": "resolved",
