@@ -1289,6 +1289,14 @@ def op_bootstrap(
                 "schema_memory", {"operation": "save-relations", "subject": "relations"}
             ),
         },
+        "topic_carrier": {
+            "review": vocabulary_operation(
+                "schema_memory", {"operation": "inspect", "subject": "topic-carriers"}
+            ),
+            "apply": vocabulary_operation(
+                "schema_memory", {"operation": "save", "subject": "topic-carriers"}
+            ),
+        },
         "authority": {
             "contract_version": "v1",
             "scoped_delegation": False,

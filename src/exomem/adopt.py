@@ -65,7 +65,47 @@ class AdoptError(Exception):
         self.reason = reason
 
 
-def _safe_next_actions(kb_present: bool) -> list[dict]:
+def _carrier_review_action(root: Path, kb_present: bool) -> dict | None:
+    """Name the topic-carrier review when entries are unfiled; it names a route and never writes.
+
+    A catalogue that is not built, or that this caller may not total, is `unknown`: never 0.
+    """
+    if not kb_present:
+        return None
+    from . import context_catalogue
+
+    route = 'schema_memory(subject="topic-carriers", operation="inspect")'
+    unknown = {
+        "action": "review-topic-carriers",
+        "status": "unknown",
+        "description": (
+            "Unfiled entries are not counted yet: the context catalogue is not built or this caller "
+            f"may not total the vault. Run {route} once it is."
+        ),
+    }
+    if not context_catalogue.sidecar_path(root).exists():
+        return unknown
+    catalogue = context_catalogue.ContextCatalogue(root)
+    try:
+        coverage = catalogue.owner_coverage() if catalogue.built() else {}
+    finally:
+        catalogue.close()
+    unfiled = coverage.get("unfiled_entries") if coverage.get("available") else None
+    if unfiled is None:
+        return unknown
+    if not unfiled:
+        return None
+    return {
+        "action": "review-topic-carriers",
+        "status": "available",
+        "description": (
+            f"{unfiled} entries file under no topic. Run {route} to read the carrier considerations, "
+            "save inferred carriers, then show the person one list to accept, change or skip."
+        ),
+    }
+
+
+def _safe_next_actions(kb_present: bool, carrier_review: dict | None = None) -> list[dict]:
     actions = [
         {
             "action": "scan-only",
@@ -115,6 +155,8 @@ def _safe_next_actions(kb_present: bool) -> list[dict]:
                 ),
             }
         )
+    if carrier_review is not None:
+        actions.append(carrier_review)
     return actions
 
 
@@ -1195,7 +1237,7 @@ def adopt(
         "pack_suggestions": knowledge_packs.suggest_packs(scan, limit=pack_limit),
         "available_packs": knowledge_packs.list_builtin_packs(),
         "pack_schema": knowledge_packs.pack_schema(),
-        "next_actions": _safe_next_actions(kb_present),
+        "next_actions": _safe_next_actions(kb_present, _carrier_review_action(root_path, kb_present)),
         "refs": {"root": context_refs.vault_ref(path or "")},
         "overview": scan,
     }
