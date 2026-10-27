@@ -1166,6 +1166,7 @@ def discover_collections_with_errors(
     max_raw_candidates: int = _MAX_DISCOVERY_CANDIDATES,
     reject_duplicates: bool = True,
     ownership_proof=None,
+    semantic_profile: str | None = None,
 ) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
     """Discover releasable manifests AND the ones this sweep could not read.
 
@@ -1180,6 +1181,10 @@ def discover_collections_with_errors(
     fails closed: `load_manifest` and `resolve_collection`'s path branch raise
     exactly as before. The discovery bounds also still raise -- a limit is a
     refusal to look further, not a manifest that was looked at and failed.
+
+    ``semantic_profile`` limits the store's own collections to that profile, for a caller that
+    discards the others. Files are still swept whole, and a duplicate identity still refuses
+    when it involves a releasable store collection of any profile.
     """
     if (
         type(max_candidates) is not int
@@ -1208,7 +1213,8 @@ def discover_collections_with_errors(
         proof = ownership.current(root, conn=None if writer is None else writer.connection,
                                   private=writer is not None and not production_bound(root))
     stored, store_errors = ((), ()) if writer is None else writer.discover_collections(
-        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates)
+        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
+        semantic_profile=semantic_profile)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
@@ -1265,7 +1271,12 @@ def discover_collections_with_errors(
         except CollectionError as error:
             unreadable.append(UnreadableManifest(rel, error.code, error.reason))
     if reject_duplicates:
-        raise_duplicate_ids(manifest.collection_id for manifest in manifests)
+        identities = [manifest.collection_id for manifest in manifests]
+        if writer is not None and semantic_profile is not None:
+            # The store pass left out the other profile, so a physical manifest reusing its identity is checked here.
+            files = {manifest.collection_id for manifest in manifests[len(stored):]}
+            identities.extend(writer.released_identities(sorted(files - visible), authorize_path=authorize_path))
+        raise_duplicate_ids(identities)
     return tuple(manifests), tuple(unreadable)
 
 

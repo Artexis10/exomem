@@ -82,6 +82,17 @@ def test_inventory_counts_follow_a_write_to_a_collection_whose_state_the_sweep_k
     assert counts() == {**dict.fromkeys(cids, (0, 0)), cids[0]: (1, 1)}
 
 
+@pytest.mark.parametrize("asked", ["records", "planning"])
+def test_a_file_manifest_that_reuses_a_store_collections_identity_refuses_either_inventory(store, asked):
+    """The inventory skips the store collections of the other profile; a file reusing one's identity is still ambiguous."""
+    create(store, "planning")
+    duplicate = store.root / "Knowledge Base/Records/Elsewhere/_collection.md"
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_text(manifest_text())
+    with preview_store(store.root, store.handle), pytest.raises(collections.CollectionError, match="AMBIGUOUS_COLLECTION"):
+        record_governance.inventory_collections(store.root, semantic_profile=asked)
+
+
 def test_current_state_uses_canonical_contract_when_manifest_view_is_stale(store):
     text = manifest_text().replace("    count: {type: integer}",
                                   "    status: {type: string}")
