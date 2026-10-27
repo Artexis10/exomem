@@ -1824,17 +1824,18 @@ def upsert_after_write(
     requested_report, requested_truncated = _bounded_paths(requested_rels)
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
     if not eligible and not watcher_mode:
-        from . import epistemic_graph
+        from . import epistemic_graph, graph_sync
         from .writer_lease import active_derived_batch_custody
 
         graph_component = (
             _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
             # Operational writes must leave existing graph debt with its durable
-            # owner, and so must a caller that may stop at queued: the drain
-            # converges the marker off this thread.
+            # owner, and so must a background caller that nobody waits on: the
+            # drain converges the marker off this thread. A request without
+            # custody keeps the synchronous path the explicit rollback restores.
             if not active_derived_batch_custody(vault_root)
             and deferred_index.graph_full_rebuild_pending(vault_root) is not None
-            and not epistemic_graph.caller_can_carry_pending(vault_root)
+            and not graph_sync.standalone_join_is_waived()
             else None
         )
         return IndexSyncReport(

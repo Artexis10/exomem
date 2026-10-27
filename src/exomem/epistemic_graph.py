@@ -10213,15 +10213,6 @@ def _caller_can_carry_pending(
     )
 
 
-def caller_can_carry_pending(vault_root: Path) -> bool:
-    """`_caller_can_carry_pending` for a caller outside this module."""
-    from .writer_lease import active_manager
-
-    return _caller_can_carry_pending(
-        vault_root, active_manager()._mutation_coordinator_for(vault_root)
-    )
-
-
 def _caller_has_pending_boundary(
     vault_root: Path,
     mutation_coordinator: mutation_lock.VaultMutationCoordinator,
