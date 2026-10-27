@@ -828,6 +828,7 @@ def graph_repair_is_owned(
     if checkpoint is None:
         if component.code != "graph_repair_queued_for_drain":
             return False
+    # A closed `GraphDispatchResult` outcome set: only these two may own repair.
     elif component.outcome not in {"registered", "deferred"}:
         return False
     elif graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
