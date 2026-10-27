@@ -3672,3 +3672,53 @@ def test_a_restricted_writers_link_ignores_a_withheld_vault_root_page(tmp_path: 
             )
 
     assert normalized(with_root) == normalized(without_root) == ("Knowledge Base/Notes/Target", None)
+
+
+def test_a_title_link_query_answers_while_pending_custody_is_unreadable(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deferred-store read error must not turn a Records query into a warming error.
+
+    A bare title never needs pending identity custody, so the query must not read it.
+    """
+    from exomem import pending_recall
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    record = fixture / "Events" / "released" / "2026-06-01-oil.md"
+    record.write_text(
+        record.read_text(encoding="utf-8").replace(
+            'asset: "[[Assets/Vehicle]]"', 'asset: "[[Target]]"'
+        ),
+        encoding="utf-8",
+    )
+    _write_md(tmp_path, "Knowledge Base/Notes/Public/Target.md", "# Target\n")
+    _publish_corpus(tmp_path)
+    monkeypatch.setattr(
+        pending_recall, "overlay",
+        lambda _root: pending_recall._warming("pending_visibility_unprovable"),
+    )
+
+    result = record_governance.query_collection(tmp_path, manifest, limit=10)
+
+    assert "[[Target]]" in [row.get("asset") for row in result.rows]
+
+
+def test_a_hidden_uppercase_extension_title_twin_does_not_change_a_link(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hidden `beta.MD` with a visible page's title leaves the link as without it.
+
+    Asking visibility about `beta.MD.md`, a path that does not exist, would count the
+    hidden page as a visible twin and withhold the link.
+    """
+    manifest = _vehicle_manifest(tmp_path)
+    _write_md(tmp_path, "Knowledge Base/Notes/Public/alpha.md", "---\ntitle: Twin\n---\npublic")
+    _write_md(tmp_path, "Knowledge Base/Evidence/beta.MD", "---\ntitle: Twin\n---\nwithheld")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/*.MD")
+
+    cold, published, walks = _cold_then_published(tmp_path, manifest, "[[Twin]]", monkeypatch)
+
+    assert cold == published == {"asset": "[[Twin]]"}
+    assert walks == []
