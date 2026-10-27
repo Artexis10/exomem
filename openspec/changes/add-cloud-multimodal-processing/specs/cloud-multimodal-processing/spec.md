@@ -198,6 +198,19 @@ Language sets, mappings and thresholds SHALL remain deployment data. Wider quali
 - **THEN** that chunk adds no transcript text
 - **AND** the completed artifact uses the existing silent-media outcome
 
+#### Scenario: A repeating window is decoded again
+
+- **WHEN** a window's decode exceeds the registry's compression-ratio threshold or falls below its log-probability threshold
+- **THEN** the engine decodes that window again at the next registry temperature
+- **AND** the transcript keeps the first attempt that meets both thresholds, or else the most probable plausible attempt
+
+#### Scenario: A long recording continues after a stop
+
+- **WHEN** a speech job stops after some windows complete, and the same engine processes the same file again
+- **THEN** transcription continues from the first unfinished window, in the language detected before the stop
+- **AND** the completed transcript equals the transcript of a run without the stop
+- **AND** a run by another engine label starts from the first window
+
 ### Requirement: Each Cloud engine is off by default and turns on after acceptance in a canary cell
 
 Each engine (documents, OCR, image search, captions and speech) SHALL have its own switch. cellctl SHALL render the switch into each cell's environment, per cell. Every switch SHALL default to off: a deployment that sets no per-cell selection and no fleet default SHALL run no engine in any cell. Personal installs SHALL keep their current defaults. Under the current cellctl render, changing a cell's switch re-renders that cell and restarts its pod, a brief outage. While a switch change restarts the pod, the canary and the rollout SHALL change switches outside the cell backup window.

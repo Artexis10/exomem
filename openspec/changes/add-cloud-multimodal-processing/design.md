@@ -215,6 +215,20 @@ The real-model workflow check must therefore include quiet speech and silence be
 The existing worker publishes the transcript automatically and preserves completed sidecars.
 Model identities and build recipes live in `src/exomem/media_models.json` and `scripts/build-media-artifacts.py`.
 
+**Long recordings.** 30-minute English and Japanese readings exposed two decoder faults that short clips did not show.
+The adapter detected the language in every window by an argmax over the whole vocabulary, and often returned the transcribe token instead of a language.
+Greedy decoding had no loop guard, so a repeating window ran to its 448-token cap.
+On those readings, 14 of 60 English windows and 13 of 60 Japanese windows looped.
+The engine therefore detects the language once per file, from the language tokens that the pinned generation config declares.
+It decodes each window with the reference Whisper fallback: at most 224 tokens, retried at higher temperatures when the compression ratio exceeds 2.4 or the mean log-probability falls below -1.0.
+The speech entry of `media_models.json` holds these values with their source and a decoding revision, and the revision is part of the engine label.
+
+A 30-minute recording at 2 CPU takes longer than one 900-second job timeout.
+The engine writes an atomic progress record under the vault's derived state after each window.
+A later run of the same file, digest and engine label continues from the next window, with the recorded language; another engine label starts again.
+The engine deletes the record when the transcript completes.
+The worker re-queues a stopped job, and a stop that advanced the record does not count toward the stop limit.
+
 ### D7. Off until proven, and the disabled state
 
 Each engine (documents, OCR, image search, captions, speech) has a switch.
