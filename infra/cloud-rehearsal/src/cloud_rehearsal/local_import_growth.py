@@ -158,6 +158,8 @@ async def check_import_growth(drill: Drill, record: StepRecord) -> None:
                 for key in ("part_urls", "part_etags"):
                     if isinstance(item_row.get(key), str):
                         item_row[key] = json.loads(item_row[key])
+                # As cellctl's db.read_import does, ImportRow takes the canonical UUID text.
+                item_row["import_id"] = str(item_row["import_id"])
                 row = await drill.row(cell)
                 claim = drill.kube_json("get", "pvc", "cell-data", "--namespace", cell.namespace)
                 volumes = drill.kube_json("get", "logicalvolumes.topolvm.io")["items"]
