@@ -1339,7 +1339,9 @@ def _replacement_closure(
             terminal_key = current
         # Every key whose chain stops short, dangles or cycles carries its own
         # finding, so a save that newly points a key at a broken chain is refused.
-        terminal = None if terminal_key is None else core.get(terminal_key) or extensions.get(terminal_key)
+        terminal = (
+            None if terminal_key is None else core.get(terminal_key) or extensions.get(terminal_key)
+        )
         if terminal_key is None or terminal is None or terminal.status != "active":
             findings.append(
                 _finding(
