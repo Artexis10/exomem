@@ -565,6 +565,32 @@ def test_move_still_refuses_a_link_in_an_evidence_body(vault: Path) -> None:
     assert (vault / note_rel).is_file()
 
 
+def test_move_refuses_an_evidence_page_that_would_keep_a_link_to_the_old_path(vault: Path) -> None:
+    """Defect: an escaped back-reference matched the link count, so a body link kept the old path."""
+    note_rel = "Knowledge Base/Notes/food/trial.md"
+    (vault / note_rel).parent.mkdir(parents=True)
+    (vault / note_rel).write_text("---\ntype: note\n---\n\nTrial.\n", encoding="utf-8")
+    captured = preserve_module.preserve(
+        vault, scope="food", category="receipts", filename="receipt.txt", content="milk"
+    )
+    sidecar = vault / captured.sidecar_path
+    text = sidecar.read_text(encoding="utf-8")
+    escaped = 'ingested_into:\n  - "[[Knowledge Base/Notes/food/tri\\x61l]]"\n'
+    before = text.replace("ingested_into: []\n", escaped, 1) + "\nSee [[Knowledge Base/Notes/food/trial]].\n"
+    sidecar.write_text(before, encoding="utf-8")
+
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path=note_rel,
+            new_path="Knowledge Base/Notes/garden/trial.md",
+            today=TODAY,
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert sidecar.read_text(encoding="utf-8") == before
+
+
 def test_move_file_allows_intra_sources_relocation(vault: Path) -> None:
     """Relocating WITHIN Sources/ (e.g. into a themed sub-folder) is allowed.
 

@@ -325,6 +325,8 @@ def _repoint_back_references(text: str, old_rel: str, new_rel: str, changes: int
     sits in that field, the field is patched where the YAML parser places it,
     so the body and every other field keep their bytes. Any other link, or a
     page the parser cannot read, leaves the page refused as append-only.
+    Sources pages keep the refusal: only Evidence sidecars carry this
+    system-kept field that a folder merge must repoint.
     """
     from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
 
@@ -345,9 +347,14 @@ def _repoint_back_references(text: str, old_rel: str, new_rel: str, changes: int
     if moved != changes:
         return None
     try:
-        return splice_markdown_frontmatter(text, {"ingested_into": repointed})
+        result = splice_markdown_frontmatter(text, {"ingested_into": repointed})
     except FrontmatterSpliceError:
         return None
+    # The counts can agree while a link elsewhere stays behind (an escaped entry, a merge key);
+    # the page then still points at the old path, so it stays refused.
+    if _rewrite_wikilinks(result, old_rel, new_rel)[1]:
+        return None
+    return result
 
 
 def move_file(
