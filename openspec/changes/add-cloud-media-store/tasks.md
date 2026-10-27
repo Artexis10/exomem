@@ -35,7 +35,7 @@
   - The bucket and bucket-restricted read/write key are implemented, disabled by default. All five mocked durability plans pass, including two media cases. The provider plan and live key listing remain unverified; no provider resources were created.
 - [ ] 4.2 In cellctl, mint the media bundle, wrap it under the cell root, and sign the per-cell edge credential. Render the standard-mode bundle and edge credential into selected cells' Secrets. Tenant-lock enablement stays with `cloud-cell-key-custody`; this task adds no unlock channel. Verify: tests show the cell-root wrap and additional data, standard-mode re-rendering, and an edge render that holds neither key.
 - [ ] 4.3 In the chart, add the edge Deployment and Service (literal ClusterIP, Recreate rollout), the canary list, the fleet switch, and the network and admission rules for selected runtimes and the export packing step. Verify: chart tests show an unchanged default render, only the edge peer added for a selected cell, and nothing added for an unselected cell.
-- [ ] 4.4 Build the edge as decided in 2.1, with the active set that cellctl publishes and the generation the edge reports. Verify these with tests:
+- [x] 4.4 Build the edge as decided in 2.1, with the active set that cellctl publishes and the generation the edge reports. Verify these with tests:
   - the prefix is taken from the credential;
   - another cell's object is refused;
   - a rotated or deleted cell's validly signed credential is refused;

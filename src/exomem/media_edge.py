@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import held_fs
+from .cloud_cell import CELL_ID_PATTERN
 from .media_edge_b2 import (
     B2,
     FileInfo,
@@ -64,7 +65,7 @@ log = logging.getLogger("exomem.media_edge")
 _CLAIMS = frozenset({"v", "aud", "sub", "ver", "issued_ms"})
 # A cell ID becomes a path segment of the object prefix. This checks its shape only;
 # the active set decides which cells exist.
-_CELL_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_CELL_ID = re.compile(CELL_ID_PATTERN)
 # The provider limits a large file to 10,000 parts.
 _MAX_PARTS = 10_000
 _NONCE_INFO = "exomem_nonce"

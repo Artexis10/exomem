@@ -3,11 +3,12 @@
 It answers real httpx requests through a mock transport. It enforces the rules the
 edge depends on: SHA-1 on every upload, token use, two or more parts with a
 minimum size for all but the last, and a finish that is not repeatable. It also
-records every call, and it can lose a reply after the call took effect.
+records every call, and it can lose a reply, with or without the call having taken effect.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -28,15 +29,26 @@ class FakeB2:
         self.calls: list[str] = []
         self.upload_bytes = 0
         self.outage = False
-        self._lost: dict[str, bool] = {}  # endpoint -> whether an outage follows the lost reply
+        self._lost: dict[str, tuple[str, bool]] = {}  # endpoint -> (mode, whether an outage follows)
+        self._parked: dict[str, dict] = {}
         self._counter = 0
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
 
-    def lose_reply(self, endpoint: str, *, then_outage: bool = False) -> None:
-        """The next call to `endpoint` takes effect, but its reply never arrives."""
-        self._lost[endpoint] = then_outage
+    def lose(self, endpoint: str, mode: str, then_outage: bool = False) -> None:
+        """The next call to `endpoint` gets no reply.
+
+        `reply`: the call took effect. `request`: it never took effect.
+        `late`: it has not taken effect yet, and `land_late` applies it.
+        """
+        assert mode in {"reply", "request", "late"}
+        self._lost[endpoint] = (mode, then_outage)
+
+    def land_late(self) -> None:
+        """Apply every parked write, as a slow provider would."""
+        self.files.update(self._parked)
+        self._parked.clear()
 
     def names(self, action: str = "upload") -> list[str]:
         return [item["name"] for item in self.files.values() if item["action"] == action]
@@ -54,11 +66,17 @@ class FakeB2:
     async def _handle(self, request: httpx.Request) -> httpx.Response:
         if self.outage:
             raise httpx.ConnectError("the fake provider is down", request=request)
+        before = copy.deepcopy(self.files) if self._lost else None
         endpoint, response = await self._dispatch(request)
         self.calls.append(endpoint)
         if endpoint in self._lost:
-            if self._lost.pop(endpoint):
-                self.outage = True
+            mode, then_outage = self._lost.pop(endpoint)
+            if mode != "reply":
+                if mode == "late":
+                    self._parked |= {file_id: item for file_id, item in self.files.items()
+                                     if before.get(file_id) != item}
+                self.files = before
+            self.outage = then_outage
             raise httpx.ReadTimeout("the reply was lost", request=request)
         return response
 
@@ -192,4 +210,6 @@ class FakeB2:
             headers["content-range"] = f"bytes {start}-{end}/{len(data)}"
         if request.method == "HEAD":
             return endpoint, httpx.Response(200, headers={**headers, "content-length": str(len(data))})
-        return endpoint, httpx.Response(status, headers=headers, content=body)
+        # An unread stream, as a network response is: the edge streams it block by block.
+        return endpoint, httpx.Response(status, headers={**headers, "content-length": str(len(body))},
+                                        stream=httpx.ByteStream(body))
