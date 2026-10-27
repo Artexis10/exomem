@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 #: The first schema that the vault state manifest guards with an ID. Every release since the
 #: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
 #: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.
@@ -915,6 +915,34 @@ _TRIGGERS_V11 = (
     BEGIN SELECT RAISE(ABORT,'typed payload state has no reverse transition'); END""",
 )
 
+
+def _migrate_to_14(conn: sqlite3.Connection) -> None:
+    """Record how each collection derives its item keys; every collection that exists keeps ``hashed-v1``.
+
+    ``ordered-v1`` is the order-preserving byte key of a derived collection (``item_keys``), so only a derived
+    collection takes it. The scheme is set at creation and never changes, because the stored keys all follow
+    one scheme: a trigger refuses any update. The two literals are frozen here, as the CHECK fixes them.
+    """
+    conn.execute("ALTER TABLE collections ADD COLUMN item_key_scheme TEXT NOT NULL DEFAULT 'hashed-v1' "
+                 "CHECK (item_key_scheme IN ('hashed-v1', 'ordered-v1'))")
+    for statement in _TRIGGERS_V14:
+        conn.execute(statement)
+
+
+_TRIGGERS_V14 = (
+    """
+    CREATE TRIGGER IF NOT EXISTS collections_item_key_scheme_fixed BEFORE UPDATE OF item_key_scheme ON collections
+    WHEN NEW.item_key_scheme IS NOT OLD.item_key_scheme
+    BEGIN SELECT RAISE(ABORT, 'a collection keeps the item key scheme it was created with'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS collections_ordered_keys_derived BEFORE INSERT ON collections
+    WHEN NEW.item_key_scheme = 'ordered-v1' AND NEW.derived <> 1
+    BEGIN SELECT RAISE(ABORT, 'only a derived collection takes ordered item keys'); END
+    """,
+)
+
+
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
 # Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
 _ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
@@ -1023,7 +1051,8 @@ def ensure_schema(conn: Connection) -> int:
                 command.upgrade(config, str(target))
             encoding_triggers = _TRIGGERS_V11 if target >= 11 else _TRIGGERS_V5 if target >= 5 else ()
             for statement in (*_TRIGGERS_V1, *encoding_triggers,
-                              *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ())):
+                              *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ()),
+                              *(_TRIGGERS_V14 if target >= 14 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

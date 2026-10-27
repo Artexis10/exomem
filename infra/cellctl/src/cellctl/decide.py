@@ -918,13 +918,16 @@ def plan_growth(
 
     local = storage.local
     used, total = observation.backup_job_used_bytes, observation.backup_job_total_bytes
-    if local is None or not storage.is_local(observation.pv_storage_class) or used is None or not total or room is None:
+    if local is None or not storage.is_local(observation.pv_storage_class) or used is None or not total or (room is None and not local.reservations):
         return None, None
     if used * 100 <= total * GROWTH_THRESHOLD_PERCENT:
         return GROWTH_NOT_NEEDED, None
     if row.size_gib >= storage.max_cell_gib:
         return GROWTH_AT_CAP, None
     grown = min(row.size_gib + local.default_cell_gib, storage.max_cell_gib)
+    if local.reservations:
+        # The provider reserves the retained target; cached capacity never authorizes growth.
+        return GROWTH_PLANNED, grown
     free = room.free_bytes.get(observation.pv_node) if observation.pv_node else None
     if not pool_takes(local, free_bytes=free, added_bytes=(grown - row.size_gib) * GIB,
                       largest_cell_gib=max(room.largest_cell_gib, grown)):

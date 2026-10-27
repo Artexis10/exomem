@@ -54,7 +54,7 @@ def _capture(args: argparse.Namespace) -> int:
 
 def _packet(args: argparse.Namespace) -> int:
     root = private.private_root(args.private_dir)
-    print(json.dumps(packet.build_packet(root, args.run, k=args.k)))
+    print(json.dumps(packet.build_packet(root, args.run, k=args.k, vault=Path(args.vault))))
     return 0
 
 
@@ -119,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     common(pool)
     pool.add_argument("--run", required=True)
     pool.add_argument("--k", type=int, default=packet.DEFAULT_K)
+    pool.add_argument(
+        "--vault",
+        required=True,
+        help="source vault directory, read only; the judge's view of every document comes from it",
+    )
     pool.set_defaults(handler=_packet)
 
     score = commands.add_parser("score", help="score judgements: paired nDCG, CI, latency")

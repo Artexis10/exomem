@@ -1995,11 +1995,10 @@ def _resolve_reference_wikilink_from_context(
         for candidate in candidates:
             if candidate in context.resolver_full_paths and _seen(candidate):
                 return ReferenceWikilinkResolution("resolved", f"{candidate}.md")
-        if cleaned in context.resolver_kb_stripped and _seen(f"{vault.kb_prefix()}{cleaned}"):
-            return ReferenceWikilinkResolution(
-                "resolved",
-                f"{vault.kb_prefix()}{cleaned}.md",
-            )
+        # No Knowledge-Base-relative step follows: `normalize_wikilink` matches that form
+        # by `kb_prefix() + cleaned` in `full_paths`, which the second candidate above
+        # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
+        # with the same name decide the result.
         return ReferenceWikilinkResolution("unresolved")
 
     matches = set(context.resolver_stems.get(cleaned, ()))
@@ -2029,6 +2028,62 @@ def resolve_reference_wikilink(
     if not reference_identity_snapshot_is_current(root, snapshot):
         return ReferenceWikilinkResolution("unavailable")
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class LinkSnapshot:
+    """One published corpus generation, borrowed to decide link targets.
+
+    `resolver` holds the path, stem and title maps of every Markdown page of that
+    generation, hidden pages included, so a caller must apply its own visibility
+    to each match. `reference_owners` is identity -> every page holding it.
+    """
+
+    resolver: _WikilinkResolverView
+    reference_owners: Mapping[str, tuple[str, ...]]
+
+
+def borrow_link_snapshot(
+    vault_root: Path, *, declined: dict[str, int] | None = None
+) -> LinkSnapshot | None:
+    """Lend the last published corpus generation to a link projector, or None.
+
+    Never builds, refreshes or waits on a build: the corpus lock is taken without
+    blocking because a rebuild publishes while holding it, and a request thread
+    must not queue behind that. An outside edit the watcher has seen but not yet
+    published does not decline the borrow; the lender's answer is the last
+    published generation, and the caller decides each page's existence and
+    visibility live.
+
+    `declined` receives the first reason this borrow declined, as one closed
+    `declined_<reason>` counter.
+    """
+    if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+        if declined is not None:
+            declined["declined_lock_busy"] = 1
+        return None
+    try:
+        snapshot = current_reference_identity_snapshot(
+            Path(vault_root), declined=declined, tolerate_external_pending=True
+        )
+    finally:
+        _CORPUS_CONTEXT_UPDATE_LOCK.release()
+    if snapshot is None:
+        return None
+    context = snapshot._cache_context_identity
+    if not isinstance(context, SemanticCorpusContext):
+        if declined is not None:
+            declined["declined_context_unusable"] = 1
+        return None
+    return LinkSnapshot(
+        _WikilinkResolverView(
+            full_paths=context.resolver_full_paths,
+            kb_stripped=context.resolver_kb_stripped,
+            stems=context.resolver_stems,
+            titles=context.resolver_titles,
+        ),
+        snapshot.reference_owners,
+    )
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:

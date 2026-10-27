@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import UUID
 
+from .. import item_keys
+
 # These identifiers describe the closed typed-v2 wire, not collection vocabulary.
 UUID16 = "uuid16"
 UTF8 = "utf8"
+# The raw bytes of an ``ordered-v1`` item key; the public spelling is item_keys.spell.
+ORDERED = "ordered"
 # Canonical UUID text and unsigned big-endian UUID bytes have the same order.
 _UUID_LIMIT = 1 << 128
 
@@ -38,6 +42,8 @@ def encode(key: str, codec: str) -> bytes:
         if str(identity) != key:
             raise ValueError("UUID16 requires a canonical identity")
         return identity.bytes
+    if codec == ORDERED:
+        return item_keys.unspell(key)
     raise ValueError("unsupported native identity codec")
 
 
@@ -49,6 +55,8 @@ def decode(cell: bytes, codec: str) -> str:
         return cell.decode("utf-8")
     if codec == UUID16:
         return str(UUID(bytes=cell))
+    if codec == ORDERED:
+        return item_keys.spell(cell)
     raise ValueError("unsupported native identity codec")
 
 

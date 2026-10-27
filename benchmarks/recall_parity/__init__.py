@@ -8,10 +8,10 @@ recall_parity``: ``sample`` real queries into a tuning and a held-out set,
 a bootstrap interval and per-arm latency.
 
 Lives outside ``src/`` and is never shipped. The queries it handles are
-private: every artifact goes under one operator-chosen directory outside the
-repository (or under the git-ignored ``benchmarks/private/``), and nothing in
-this package or its tests contains a real query. Import side effects are
-forbidden here so lean tests stay fast.
+private: every artifact goes under one operator-chosen directory that is in no
+git work tree or that git reports ignored, and nothing in this package or its
+tests contains a real query. Import side effects are forbidden here so lean
+tests stay fast.
 """
 
 from __future__ import annotations

@@ -28,7 +28,8 @@ from typing import Any
 
 SCHEMA = "recall-parity/sample/1"
 SPLITS = ("tuning", "heldout")
-DEFAULT_MIN_CHARS = 8
+#: Real one-word queries stay in the decision population; only a lone character is dropped.
+DEFAULT_MIN_CHARS = 2
 
 
 def normalize(query: str) -> str:

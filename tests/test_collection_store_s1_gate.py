@@ -1129,7 +1129,8 @@ def test_publication_diverges_on_a_same_signature_rewrite_and_adopt_local_keeps_
     path = replica.replica_path(abc.root)
     signature, stamp = takeover.replica_signature(abc.root), path.stat()
     rewritten = bytearray(path.read_bytes())
-    rewritten[-1] ^= 0xFF
+    # The header's user_version (bytes 60-63): no replica reader uses it, so the store stays readable.
+    rewritten[63] ^= 0xFF
     with open(path, "r+b") as file:
         file.write(rewritten)
     os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))

@@ -19,6 +19,8 @@ tests/*
 tests/fixtures/*
 !tests/fixtures/media-samples/
 !tests/fixtures/media-samples/**
+!tests/fixtures/clip/
+!tests/fixtures/clip/**
 !scripts/
 scripts/*
 !scripts/check-media-samples.py
