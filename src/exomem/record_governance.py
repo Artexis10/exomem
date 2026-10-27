@@ -1123,7 +1123,7 @@ class _LinkProjector:
             # The borrowed generation may predate an outside edit the watcher has seen
             # and not yet published. Every page re-read is one this reader may see.
             # A page that no longer holds the identity is dropped, never resolved around.
-            with call_spans.span("records.link_index", {}) as measured:
+            with call_spans.span("records.link_stale_recheck", {}) as measured:
                 measured["stale_rechecks"] = len(visible)
                 visible = tuple(
                     path for path in visible
@@ -1132,6 +1132,9 @@ class _LinkProjector:
         return visible[0] if len(visible) == 1 else None
 
     def _walk_candidate_index(self) -> bool:
+        # Lazy: `semantic_contract` imports a module that imports this one.
+        from . import semantic_contract
+
         entries: list[tuple[str, str | None]] = []
         memory_targets: dict[str, list[str]] = {}
         admitted: dict[str, bool] = {}
@@ -1156,7 +1159,9 @@ class _LinkProjector:
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = (self.authorize_path(relative) if self.authorize_path is not None
+            # Only a link's final target takes a receipt, so the walk asks visibility.
+            check = self.visible_path or self.authorize_path
+            allowed = (check(relative) if check is not None
                        else _authorize(self.root, relative, policy=self.policy))
             admitted[relative] = allowed
             if not allowed:
@@ -1183,7 +1188,10 @@ class _LinkProjector:
             except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError):
                 complete = False
                 break
-            entries.append((relative, title))
+            # The published corpus gives a Knowledge Base `trash/` page no title or
+            # stem but keeps its identity; the walk answers as the borrowed route does.
+            if not semantic_contract._is_reference_only_path(relative):
+                entries.append((relative, title))
             if identity is not None:
                 memory_targets.setdefault(identity, []).append(relative)
         if complete:
