@@ -30,6 +30,7 @@ import math
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -537,7 +538,11 @@ class _UnitPackPlan:
 
 
 def _neighborhood(
-    vault_root: Path, packed_pages: list[ParsedPage], max_neighbors: int
+    vault_root: Path,
+    packed_pages: list[ParsedPage],
+    max_neighbors: int,
+    *,
+    under_strip: Callable[[str], bool],
 ) -> tuple[list[dict], int, list[str]]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
     excluded, ranked by co-citation (distinct packed notes linked), capped.
@@ -619,16 +624,18 @@ def _neighborhood(
         page = find_module._CACHE.get(vault_root / entry["path"], vault_root)
         directions = entry["directions"]
         direction = "both" if len(directions) > 1 else next(iter(directions))
-        lede = (
-            _cap(
-                _first_sentence(
-                    _lede(_strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path)))
-                ),
-                _NEIGHBOR_LEDE_CHARS,
+        lede = ""
+        if page:
+            paragraph = _lede(
+                _strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path))
             )
-            if page
-            else ""
-        )
+            # The sentence split ends a lede wherever a full stop falls, even inside a link, so a
+            # neighbour under a release strip shows its whole first paragraph or nothing.
+            lede = (
+                _cap(paragraph, _NEIGHBOR_LEDE_CHARS, whole=True)
+                if under_strip(entry["path"])
+                else _cap(_first_sentence(paragraph), _NEIGHBOR_LEDE_CHARS)
+            )
         out.append(
             {
                 "path": entry["path"],
@@ -891,16 +898,18 @@ def assemble_pack(
 
     truncation: list[str] = []
     from . import unit_corrections, working_set
+    from .governance import egress
 
     original_paths = {_hit_parent_path(hit) for hit in hits}
     # A released bridge page strips its dependencies' identities from what the caller receives, and
     # the strip sees only whole identities, so every value of such a page that would be cut is
-    # withheld whole. `getattr` because a hit that no release decision touched carries none.
-    under_strip = {
-        _hit_parent_path(hit)
-        for hit in hits
-        if getattr(getattr(hit, "decision", None), "release_strip", None)
-    }
+    # withheld whole. Each page's own release decision says so, for every page this pack builds text
+    # from (hit, correction counterpart and neighbour); `annotate_pack` asks the same by page path.
+    strip_for = egress.release_strip_resolver(vault_root, purpose=purpose)
+
+    def under_strip(rel_path: str) -> bool:
+        return bool(strip_for(rel_path))
+
     parent_reads = find_module.UnitParentReads()
     references = tuple(reference for hit in hits for reference in _selected_unit_refs(hit))
     visible = unit_corrections.reader_view(vault_root, purpose) if references else None
@@ -917,17 +926,16 @@ def assemble_pack(
             return False
         held = parent_reads.parents[hit.parent_path]
         unit = held.state.document.resolve_unit(hit.unit_ref).unit
-        packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+        whole = under_strip(hit.parent_path)
+        packed, dropped = _pack_unit(unit, unit_chars=unit_chars, whole=whole)
         packed.update({key: candidate[key] for key in ("corrects", "relation", "family")})
-        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
-        parent, _dropped_parent = _parent_context(held.page, held.state.parent_ref)
+        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed, whole=whole)
+        parent, _dropped_parent = _parent_context(held.page, held.state.parent_ref, whole=whole)
         # Membership uses the prose actually emitted, not clipped-away source bytes.
         prose_hit = replace(hit, content=packed["excerpt"], excerpt=packed["excerpt"])
         if not working_set.hits_in_view([prose_hit], visible):
             return False
         bundle = {"unit": packed, "legacy_block": block, "parent": parent}
-        from .governance import egress
-
         if isinstance(visible, egress.ReaderView):
             bundle = visible.project_pack(bundle)
         tentative[hit.unit_ref] = hit
@@ -1005,7 +1013,7 @@ def assemble_pack(
             p.rel_path: _extract_claims(
                 p,
                 claim_chars=claim_chars,
-                whole=p.rel_path in under_strip,
+                whole=under_strip(p.rel_path),
             )
             for p in packed_pages
             if p.rel_path in original_paths
@@ -1033,11 +1041,14 @@ def assemble_pack(
                 )
 
             selected_ids = {id(item[2]) for item in selected}
-            whole = page.rel_path in under_strip
+            whole = under_strip(page.rel_path)
             parent, dropped_provenance = _parent_context(
                 page, semantic_states[page.rel_path].parent_ref, whole=whole
             )
-            parent = correction_parents.get(page.rel_path, parent)
+            if page.rel_path not in original_paths:
+                # A page that only a correction brought in keeps the parent that its bundle was
+                # projected with. A page that a hit selected keeps its own, whatever a bundle holds.
+                parent = correction_parents.get(page.rel_path, parent)
             plans.append(
                 _UnitPackPlan(
                     page=page,
@@ -1157,7 +1168,7 @@ def assemble_pack(
 
     with find_module._span(timings, "pack.neighborhood"):
         neighborhood, n_dropped, incomplete = _neighborhood(
-            vault_root, packed_pages, max_neighbors
+            vault_root, packed_pages, max_neighbors, under_strip=under_strip
         )
     truncation.extend(incomplete)
     if n_dropped > 0:

@@ -3514,7 +3514,7 @@ def test_ungoverned_vault_dict_values_are_untouched(vault: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_pack_governance_block_is_absent_when_there_are_no_notices() -> None:
+def test_pack_governance_block_is_absent_when_there_are_no_notices(tmp_path: Path) -> None:
     """At L0 the item is dropped SILENTLY and no notice is emitted (D4), so a
     `governance` block carrying an empty notices list says exactly one thing:
     "something was hidden from you". That is the existence oracle the silent
@@ -3526,12 +3526,12 @@ def test_pack_governance_block_is_absent_when_there_are_no_notices() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack(tmp_path, {"packed_paths": []}, release)
     assert pack is not None
     assert "governance" not in pack
 
 
-def test_pack_governance_block_is_present_when_a_notice_exists() -> None:
+def test_pack_governance_block_is_present_when_a_notice_exists(tmp_path: Path) -> None:
     """…and still appears whenever there is something to say."""
     release = egress.AnnotatedHits(
         hits=[],
@@ -3539,7 +3539,7 @@ def test_pack_governance_block_is_present_when_a_notice_exists() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack(tmp_path, {"packed_paths": []}, release)
     assert pack is not None
     assert pack["governance"]["notices"]
 

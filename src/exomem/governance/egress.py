@@ -1584,21 +1584,35 @@ def _strip_bridge_pack_page(
         blocks[path] = [strip(block) for block in blocks[path]]
 
 
-def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[str, Any] | None:
+def annotate_pack(
+    vault_root: Path,
+    pack: dict[str, Any] | None,
+    release: AnnotatedHits,
+    *,
+    purpose: str | None = None,
+) -> dict[str, Any] | None:
     """Carry governance context in the pack header, never sub-notice content.
 
     `assemble_pack` already runs over released hits only, so `packed_paths`
     is clean by construction. What still needs scrubbing is everything the
     pack derives from the graph — neighbours, contradictions, claims — since
     those walk edges out of permitted pages and can land on a withheld one.
-    A page released under a bridge approval also loses its source trail here.
+    A page released under a bridge approval also loses its source trail here,
+    decided from that page's own release decision, whether a hit, a correction
+    counterpart or a neighbour brought it into the pack.
     """
     if pack is None:
         return None
-    for hit in release.hits:
-        decision = getattr(hit, "decision", None)
-        if decision is not None and decision.release_strip:
-            _strip_bridge_pack_page(pack, _hit_path(hit), decision.release_strip)
+    strip_for = release_strip_resolver(vault_root, purpose=purpose)
+    keyed_by_path = (pack.get("claims"), pack.get("semantic_units"), pack.get("semantic_blocks"))
+    for path in sorted({key for section in keyed_by_path if isinstance(section, dict) for key in section}):
+        if identities := strip_for(path):
+            _strip_bridge_pack_page(pack, path, identities)
+    neighborhood = pack.get("neighborhood")
+    if isinstance(neighborhood, list):
+        for index, entry in enumerate(neighborhood):
+            if isinstance(entry, dict) and (identities := strip_for(str(entry.get("path") or ""))):
+                neighborhood[index] = bridges.strip_provenance(entry, identities)
     withheld = release.withheld_paths
     if withheld:
         for section in (
@@ -6777,6 +6791,51 @@ def release_level_for(
         size=artifact_copy.size if artifact_copy is not None else None,
     )
     return level
+
+
+def release_strip_resolver(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str], tuple[bridges.StripIdentity, ...]]:
+    """A caller's view of which source identities each page's own release decision strips.
+
+    The returned function answers, for one vault path, the identities of the sources that a bridge
+    approval holds back from this caller, or `()` when the page is released whole. It reads the same
+    decision as every other release gate, so a builder that cuts text and the gate that strips it
+    agree on which pages are bridges without sharing a list of paths.
+
+    It answers `()` for a page that cannot be decided and for every page of a blocked policy or an
+    unresolved caller, because none of those is released, and for every page of an open vault, which
+    has nothing to strip. Policy and caller are read once; each path is decided once.
+    """
+    vault_root = Path(vault_root)
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    # An open vault has no release plane to strip under, and a pack asks this for every page it holds.
+    if policy.blocked or not who.resolved or _file_policy_empty(vault_root, policy):
+        return lambda _rel_path: ()
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    grants_hash = _grants_hash(policy)
+    decided: dict[str, tuple[bridges.StripIdentity, ...]] = {}
+
+    def strip_for(rel_path: str) -> tuple[bridges.StripIdentity, ...]:
+        if rel_path not in decided:
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                principal=who, audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+            decided[rel_path] = () if decision is None else decision.release_strip
+        return decided[rel_path]
+
+    return strip_for
 
 
 def unit_seed_parent_filter(

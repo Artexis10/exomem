@@ -3016,7 +3016,9 @@ def op_find(
                 ):
                     active_budget.note_skipped("graph_enrich")
                 if release.active:
-                    pack_obj = egress_module.annotate_pack(pack_obj, release)
+                    pack_obj = egress_module.annotate_pack(
+                        vault_root, pack_obj, release, purpose=purpose
+                    )
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone

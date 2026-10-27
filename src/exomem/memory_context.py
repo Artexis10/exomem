@@ -96,7 +96,7 @@ def assemble_context(
         max_tension=min(max_edges, 20),
     )
     if release is not None:
-        pack = egress.annotate_pack(pack, release) or pack
+        pack = egress.annotate_pack(vault_root, pack, release) or pack
     ref_index = memory_refs.ReferenceIndex(vault_root)
     documents: list[dict[str, Any]] = []
     provenance: list[dict[str, Any]] = []

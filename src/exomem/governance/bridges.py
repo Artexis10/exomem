@@ -162,6 +162,9 @@ def _reference_key(value: str) -> str:
         text = text[2:-2]
     text = text.split("|", 1)[0].split("#", 1)[0]
     text = text.replace("\\", "/").strip().strip("/").casefold()
+    # Unicode defines which characters are whitespace, so a run of them is one separator here and in
+    # every pack builder that collapses whitespace before the strip runs; this decides no meaning.
+    text = " ".join(text.split())
     prefix = "knowledge base/"
     if text.startswith(prefix):
         text = text[len(prefix) :]
@@ -199,7 +202,7 @@ def _embedded_identity_aliases(
         text = value.strip()
         if text:
             decoded, _spans = _decoded_shadow(text)
-            canonical = decoded.strip()
+            canonical = " ".join(decoded.split())
             if canonical:
                 terms.add(canonical)
 
@@ -232,8 +235,13 @@ def _embedded_identity_patterns(
     aliases: tuple[str, ...],
 ) -> tuple[re.Pattern[str], ...]:
     """Compile Unicode-aware decoded-token matchers once per strip operation."""
+    # An alias is an approved identity, not a word list. Its whitespace runs match any whitespace run
+    # (see `_reference_key`), so a builder that collapsed the text cannot hide the identity.
     return tuple(
-        re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.IGNORECASE)
+        re.compile(
+            r"(?<!\w)" + r"\s+".join(re.escape(part) for part in alias.split()) + r"(?!\w)",
+            re.IGNORECASE,
+        )
         for alias in aliases
     )
 
@@ -368,7 +376,7 @@ def _string_names_identity(
     reference_context: bool,
 ) -> bool:
     """Match exact identities and explicit link targets, never arbitrary prose."""
-    if _reference_key(value) in keys and (reference_context or " " not in value.strip()):
+    if _reference_key(value) in keys and (reference_context or len(value.split()) < 2):
         return True
     for target in (*_WIKILINK_RE.findall(value), *_MARKDOWN_LINK_RE.findall(value)):
         if _reference_key(target) in keys:
