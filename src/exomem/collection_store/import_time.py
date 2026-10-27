@@ -11,14 +11,32 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import importlib.resources
+import re
 import zoneinfo
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 _MAX_NAME_BYTES = 64
 
 # nosemgrep: ep-word-set -- The time-basis grammar fixes these source-path keys.
-BASIS_PATHS = ("date", "instant", "offset", "offset_minutes", "seconds", "index")
+BASIS_PATHS = ("date", "instant", "offset", "offset_minutes", "seconds", "milliseconds", "duration", "index")
+# nosemgrep: ep-word-set -- The time-mapping grammar fixes these output targets, each a declared collection field.
+TIME_TARGETS = ("instant", "offset", "local_date", "local_datetime")
+
+# nosemgrep: ep-word-set -- ISO 8601 fixes these designators; a year or month is absent because its length depends on the calendar.
+_UNIT_MICROSECONDS = {
+    "W": 7 * 86_400_000_000,
+    "D": 86_400_000_000,
+    "H": 3_600_000_000,
+    "M": 60_000_000,
+    "S": 1_000_000,
+}
+# A regex fits here: it checks the shape of a field over a closed ISO 8601 profile, not what the field means.
+_DURATION = re.compile(
+    r"-?P(?:(?P<W>[0-9]+(?:[.,][0-9]+)?)W)?(?:(?P<D>[0-9]+(?:[.,][0-9]+)?)D)?"
+    r"(?:T(?:(?P<H>[0-9]+(?:[.,][0-9]+)?)H)?(?:(?P<M>[0-9]+(?:[.,][0-9]+)?)M)?(?:(?P<S>[0-9]+(?:[.,][0-9]+)?)S)?)?"
+)
 
 
 def basis_paths(basis: Mapping[str, Any]) -> list[Any]:
@@ -28,6 +46,25 @@ def basis_paths(basis: Mapping[str, Any]) -> list[Any]:
     return [basis[key] for key in BASIS_PATHS if key in basis] + [
         value for value in intervals if type(value) is str
     ]
+
+
+def duration(text: Any) -> dt.timedelta | None:
+    """The ISO 8601 duration ``text`` as a timedelta, or None when it is outside the profile.
+
+    The profile is an optional ``-``, ``P``, weeks and days, then ``T`` with hours, minutes and
+    seconds. A fraction may follow the last unit only. Years and months are outside it.
+    """
+    found = _DURATION.fullmatch(text) if type(text) is str else None
+    if found is None or text.endswith("T"):
+        return None
+    parts = [(unit, found[unit]) for unit in _UNIT_MICROSECONDS if found[unit] is not None]
+    if not parts or any(not number.isdigit() for _, number in parts[:-1]):
+        return None
+    total = sum(Decimal(number.replace(",", ".")) * _UNIT_MICROSECONDS[unit] for unit, number in parts)
+    try:
+        return dt.timedelta(microseconds=-round(total) if text.startswith("-") else round(total))
+    except OverflowError:
+        return None
 
 
 def version() -> str:

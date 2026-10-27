@@ -94,20 +94,22 @@ def _populate_native(session, manifest, projection, private, table, scanned, whe
         session.connection.executemany(sql, parameters(rows))
 
 
-def declaration(manifest, basis, *, projected=frozenset()) -> dict:
+def declaration(manifest, basis, *, projected=frozenset(), item_key_withheld=False) -> dict:
     """The validator's declaration of one admitted collection.
 
     ``projected`` names fields whose values are projected per caller before a result
     is built; the validator lets a query read them but not filter, sort or join on them.
+    ``item_key_withheld`` marks an item key that spells a natural-key field the caller cannot see: the validator
+    refuses it everywhere a caller names a field, and still lets it break ties, which no response shows.
     """
     fields = {name: {"type": spec.type, "enum": spec.enum, **({"projected": True} if name in projected else {})}
               for name, spec in manifest.schema.fields.items()}
-    fields["item_key"] = {"type": "string"}
+    fields["item_key"] = {"type": "string", **({"withheld": True} if item_key_withheld else {})}
     return {"domain": "collections", "type": basis.type_name, "vault": basis.logical_vault_id,
             "fields": fields, "field_admission": True}
 
 
-def _validate(query, manifest, basis):
+def _validate(query, manifest, basis, *, item_key_withheld=False):
     """Rebind raw IR to the current schema using the existing closed validator."""
     def literal(value):
         if isinstance(value, tuple):
@@ -137,7 +139,7 @@ def _validate(query, manifest, basis):
         request["where"] = predicate(query.where)
     if query.as_of is not None:
         request["as_of"] = query.as_of
-    result = validation.normalize_query(request, declarations={manifest.collection_id: declaration(manifest, basis)},
+    result = validation.normalize_query(request, declarations={manifest.collection_id: declaration(manifest, basis, item_key_withheld=item_key_withheld)},
                                         collection=manifest.collection_id)
     if result.findings:
         raise QueryError(result.findings[0].code)
@@ -157,10 +159,10 @@ def _refuse_request(query) -> None:
         raise QueryError("QUERY_UNSUPPORTED", "row pages run under the interactive profile")
 
 
-def check_shape(query, manifest, basis) -> None:
+def check_shape(query, manifest, basis, *, item_key_withheld=False) -> None:
     """Every refusal a row query gets from its request and declaration; compose runs it too."""
     _refuse_request(query)
-    _validate(query, manifest, basis)
+    _validate(query, manifest, basis, item_key_withheld=item_key_withheld)
 
 
 def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> AdmittedQuery:
@@ -172,7 +174,7 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
         raise QueryError("QUERY_VALUE_INVALID", "an authenticated continuation is required")
     conn = session.connection
     with session._manifest(query.source.ref) as (manifest, basis, subjects, uniform):
-        fields, schema = _validate(query, manifest, basis)
+        fields, schema = _validate(query, manifest, basis, item_key_withheld=session._field_plans[manifest.collection_id].item_key_withheld)
         source = session.row_source(manifest.collection_id)
         if source is not derived_rows.STORE and not uniform:
             raise QueryError("QUERY_UNAVAILABLE", "a derived collection's rows are released whole or not at all")

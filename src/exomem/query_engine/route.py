@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import asdict, replace
 
-from .. import capabilities
+from .. import capabilities, item_keys
 from . import cursors, reductions, runtime, typed_rows, validation
 from .runtime import QueryError, QueryLimits
 
@@ -89,7 +89,8 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
         with session._manifest(collection_id) as (manifest, basis, _, _):
             links = frozenset(name for name, spec in manifest.schema.fields.items()
                               if _LinkProjector.carries_links(spec))
-            declaration = typed_rows.declaration(manifest, basis, projected=links)
+            withheld = session._field_plans[collection_id].item_key_withheld
+            declaration = typed_rows.declaration(manifest, basis, projected=links, item_key_withheld=withheld)
         if links:
             # A bare-title or memory link may build the candidate index inside the query deadline;
             # a cold build that runs past it fails the query with QUERY_TIMEOUT, never drops the link.
@@ -102,7 +103,7 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
         if query.mode == "compose":
             # Compose reads no values, but refuses every shape and profile the other modes refuse.
             if query.aggregate is None:
-                typed_rows.check_shape(replace(query, mode="execute"), manifest, basis)
+                typed_rows.check_shape(replace(query, mode="execute"), manifest, basis, item_key_withheld=withheld)
             else:
                 reductions.check_shape(query, manifest, limits)
             return {"source": asdict(query.source), "query_version": query.version,
@@ -148,7 +149,21 @@ def contract() -> dict:
                 {"action": "query", "collection": "<collection>", "query": {"version": VERSION}}),
             "grammar": {"tool": "schema_memory",
                         "args": {"subject": "query-engine", "operation": "inspect", "name": "collections"}},
-            "modes": list(validation.MODES), "execution_profiles": list(validation.PROFILES)}
+            "modes": list(validation.MODES), "execution_profiles": list(validation.PROFILES),
+            "item_keys": {
+                "default_order": (
+                    "A query with no order_by returns rows by item_key ascending. On a collection with "
+                    f"{item_keys.ORDERED_V1} keys that is the lowest natural keys first (a number above 2**53 orders by its "
+                    f"binary64 value); on {item_keys.HASHED_V1} keys it is a stable order with no meaning."),
+                "scheme": (
+                    f"A new derived collection takes {item_keys.ORDERED_V1} unless a natural-key field is a "
+                    f"location or has no ordered encoding; every other collection keeps {item_keys.HASHED_V1}. "
+                    f"An {item_keys.ORDERED_V1} item key is 1 to {item_keys.MAX_KEY_BYTES} bytes, spelled as "
+                    f"2 to {item_keys.MAX_KEY_BYTES * 8 // 5} characters; a {item_keys.HASHED_V1} key is a "
+                    "16-byte UUID. inspect reports the scheme and the byte lengths as contract.item_keys."),
+                "key_range": (
+                    f"On an {item_keys.ORDERED_V1} collection, a key range bound must be the exact spelling "
+                    "of an item key (lowercase base32hex); an equality that no key spells matches no row.")}}
 
 
 def chapter(name: str | None) -> dict:
