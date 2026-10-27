@@ -116,9 +116,9 @@ MAP_KIND_SHARES: dict[str, float] = {
 }
 
 #: The share of an activation packet's budget that the turn slice holds back while the slice is on.
-#: The map then always compiles into what is left, so it is the same on every turn. A starting
-#: value: it holds a few whole lines at the default budget, and the development round that decides
-#: whether the slice is on by default tunes it.
+#: The map then always compiles into what is left, so it is the same on every turn. The slice is on
+#: by default (design D13), and `EXOMEM_ACTIVATION_TURN_SLICE=off` is the rollback. A budget whose
+#: share cannot hold one line holds back nothing (`_slice_reserve`).
 TURN_SLICE_SHARE = 0.25
 
 #: The key a turn slice's record is kept under. It names no view and is never served.
@@ -1019,7 +1019,7 @@ def _activation_packet(
         }
         view = _usable(prepared)
         description = "Index of what exists."
-        reserve = 0 if turn_leads is None else int(max_chars * TURN_SLICE_SHARE)
+        reserve = 0 if turn_leads is None else _slice_reserve(max_chars)
         map_chars = max_chars - reserve - len(description) - 1
         if view is None:
             assert catalogue is not None
@@ -1194,6 +1194,18 @@ def packet_chars(map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | 
     return map_packet_chars(map_block) + (0 if slice_block is None else slice_packet_chars(slice_block))
 
 
+def _slice_reserve(max_chars: int) -> int:
+    """The characters that the slice holds back of `max_chars`: its share, or none where the share cannot hold
+    the description and the shortest line that any slice can have. It reads the budget alone, so the map is
+    still the same on every turn."""
+    reserve = int(max_chars * TURN_SLICE_SHARE)
+    # The shortest match and kind of their closed sets (an item is a map row's kind or a note), with a one-character
+    # title and ref.
+    kind = min((*MAP_KIND_SHARES, context_catalogue.KIND_NOTE), key=len)
+    shortest = slice_item_line({"match": min(MATCHES, key=len), "kind": kind, "title": "?", "ref": "?"})
+    return reserve if reserve - 1 - len(SLICE_DESCRIPTION) >= len(shortest) + 1 else 0
+
+
 def _turn_slice(
     prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, limit: int, reserve: int,
     timings: find_types.FindTimings | None,
@@ -1204,7 +1216,8 @@ def _turn_slice(
     states: dict[str, dict[str, Any]] = {}
     try:
         # The map's view: its release filter has already decided every page the map admitted.
-        leads = turn_leads(prepared.caller)
+        # A share with no room for a line skips the slice without compiling it.
+        leads = turn_leads(prepared.caller) if reserve else TurnLeads(SLICE_SKIPPED)
         state, evidence = leads.state, leads.evidence
         if state == READY:
             with find_types.timing_span(timings, "working_set.turn_slice"):

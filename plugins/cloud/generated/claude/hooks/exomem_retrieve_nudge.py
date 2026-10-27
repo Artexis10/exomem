@@ -2082,9 +2082,11 @@ def _map_render_overhead(block: dict, slice_block: object = None) -> int:
     overhead += 16 * len(block.get("items") or ())
     if block.get("state_available") is False:
         overhead += len("- State is unavailable.") + 1
-    if isinstance(slice_block, dict) and slice_block.get("state") == "ready":
-        # The slice's lead line, its "more not shown" marker and the same per-item margin as a map item.
-        overhead += len(_packet_line("turn", "", "")) + 1 + 10 + 16 * len(slice_block.get("items") or ())
+    if isinstance(slice_block, dict):
+        # The slice's lead line and its "more not shown" marker, whatever this turn's slice holds: the next
+        # turn's cap is the map's budget, so it must not follow this turn's leads. A slice line that the
+        # hook's labels make longer than the server's is cut and counted; the map renders first.
+        overhead += len(_packet_line("turn", "", "")) + 1 + 10
     return overhead
 
 

@@ -3713,6 +3713,9 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
+    if "map" not in guarded:
+        # A slice is restored only beside the map it was compiled with, so one without a map is never served.
+        guarded.pop("turn_slice", None)
     if "map" in guarded:
         from .. import context_views
 
