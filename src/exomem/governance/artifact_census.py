@@ -221,14 +221,15 @@ def _walk_listings(
     *,
     relist: Collection[str] = (),
     between: Callable[[], object] | None = None,
+    start: str = "",
 ) -> dict[str, _Listing]:
-    """List every directory under `root`, reading again only those that changed.
+    """List every directory under `root`, or under its relative `start`, reading again only those that changed.
 
     A directory in `relist` is read again whatever its stamp says. `between`
     runs before each directory, so a background owner can yield to requests.
     """
     listings: dict[str, _Listing] = {}
-    pending = [""]
+    pending = [start]
     while pending:
         relative = pending.pop()
         if between is not None:
@@ -396,9 +397,13 @@ def vault_census(vault_root: Path) -> ArtifactCensus:
     return _walk_census(vault_root)
 
 
+#: Whether this platform's file names differ by case, decided as `pathlib` decides it for `rglob`.
+_CASE_SENSITIVE = os.path.normcase("Aa") == "Aa"
+
+
 @dataclass(frozen=True, slots=True)
 class VaultListing:
-    """Every directory's file and subdirectory names under a vault, as of one walk.
+    """Every directory's file and subdirectory names under one vault directory, as of one walk.
 
     It builds none of the census's alias tables, so a walk after a file is added
     or removed costs the changed directories, not a pass over every name.
@@ -407,12 +412,14 @@ class VaultListing:
     listings: Mapping[str, _Listing]
 
     def files_named(self, name: str) -> tuple[str, ...]:
-        """The vault-relative files called exactly `name`."""
-        return tuple(
-            f"{directory}/{name}" if directory else name
-            for directory, listing in self.listings.items()
-            if name in listing.files
-        )
+        """The vault-relative files called `name`, by the platform's case rule as `rglob` matches."""
+        if _CASE_SENSITIVE:
+            return tuple(f"{directory}/{name}" if directory else name
+                         for directory, listing in self.listings.items() if name in listing.files)
+        wanted = os.path.normcase(name)
+        return tuple(f"{directory}/{found}" if directory else found
+                     for directory, listing in self.listings.items()
+                     for found in listing.files if os.path.normcase(found) == wanted)
 
     def files_under(self, directory: str) -> Iterator[str]:
         """The vault-relative files in `directory` and in the directories below it, as of the walk.
@@ -428,18 +435,22 @@ class VaultListing:
                 pending.extend(f"{current}/{name}" for name in listing.directories)
 
 
-_LISTINGS: OrderedDict[tuple[str, str], Mapping[str, _Listing]] = OrderedDict()
+_LISTINGS: OrderedDict[tuple[tuple[str, str], str], Mapping[str, _Listing]] = OrderedDict()
 
 
-def vault_listing(vault_root: Path) -> VaultListing:
-    """The vault's directory listings, read again only where a directory changed."""
-    key = _vault_key(vault_root)
+def vault_listing(vault_root: Path, directory: str | None = None) -> VaultListing:
+    """The listings under a vault directory (the Knowledge Base unless named), read again only where one changed.
+
+    `directory` is vault-relative with forward slashes; each directory walked keeps its own listings.
+    """
+    directory = kb_dirname() if directory is None else directory
+    key = (_vault_key(vault_root), directory)
     with _CENSUS_LOCK:
         previous = _LISTINGS.get(key, {})
     racy_after = time.time_ns() - _CENSUS_RACY_NS
-    if not os.path.isdir(vault_root):
+    if not os.path.isdir(os.path.join(vault_root, directory)):
         return VaultListing(MappingProxyType({}))
-    listings = MappingProxyType(_walk_listings(str(vault_root), previous, racy_after))
+    listings = MappingProxyType(_walk_listings(str(vault_root), previous, racy_after, start=directory))
     with _CENSUS_LOCK:
         _LISTINGS.pop(key, None)
         _LISTINGS[key] = listings

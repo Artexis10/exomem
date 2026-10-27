@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import re
 import stat
 import unicodedata
@@ -1238,8 +1239,8 @@ def discover_collections_with_errors(
     from .governance import artifact_census
 
     candidates = []
-    # The listing names files across the whole vault and only proposes: `_declared_candidate_rel` drops
-    # whatever lies outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
+    # The Knowledge Base's listing only proposes: `_declared_candidate_rel` still drops whatever lies
+    # outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
     proposed = sorted(root / rel for rel in artifact_census.vault_listing(root).files_named(MANIFEST_FILENAME))
     for candidate in proposed:
         rel = _declared_candidate_rel(root, candidate)
@@ -1306,10 +1307,11 @@ def discover_legacy_trackers(
 
     candidates = []
     # The listing only proposes; the guards below read the disk and decide. Sorted before the bound applies.
-    listing = artifact_census.vault_listing(root)
+    records_rel = records_root.relative_to(root).as_posix()
     proposed = sorted(
-        root / rel for rel in listing.files_under(records_root.relative_to(root).as_posix())
-        if rel.endswith(".md")
+        root / rel for rel in artifact_census.vault_listing(root, records_rel).files_under(records_rel)
+        # Like `rglob("*.md")`: the extension compares by the platform's case rule.
+        if os.path.normcase(rel).endswith(".md")
     )
     for candidate in proposed:
         if candidate.relative_to(root).as_posix() in owned_views:
