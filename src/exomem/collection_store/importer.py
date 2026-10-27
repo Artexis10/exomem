@@ -2876,7 +2876,8 @@ class _Applied:
     superseded: int
 
 
-def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: list[str], *, scope=None) -> _Applied:
+def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: list[str], *, scope=None,
+                   undo: derived_rows.Undo | None = None) -> _Applied:
     """Apply one batch to a derived collection's rows: the one path a live import and a rebuild share.
 
     The entries are each batch row in source order with its item key and payload hash, from
@@ -2884,7 +2885,7 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     """
     kept, superseded, prepared = _collapse(batch.rows, manifest, source_ref, logged=True)
     items, refused = _derived_items(batch, kept, prepared, manifest, source_ref, shas)
-    outcomes = derived_rows.apply(conn, goal, items, scope=scope)
+    outcomes = derived_rows.apply(conn, goal, items, scope=scope, undo=undo)
     entries = _logged(batch, kept, {"rows": [*outcomes, *refused]}, prepared, manifest.schema.version)
     rejections = [(row.ordinal, row.start, code, at) for row, code, at in batch.rejections] + [
         (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], "item")
@@ -2904,13 +2905,17 @@ def _with_member(progress: dict[str, Any], counts: dict[str, int]) -> dict[str, 
     return folded
 
 
-def _opened(job: _Job, index: int, rows: int) -> dict[str, Any]:
-    """A derived collection's progress record for a member a job opens."""
+def _opened(job: _Job, index: int, rows: int, floor: int) -> dict[str, Any]:
+    """A derived collection's progress record for a member a job opens.
+
+    ``row_floor`` is the largest row id before the member, and ``restored`` counts the earlier rows whose
+    pre-images the member holds, so a stop can revert the member alone (``derived_rows``).
+    """
     counts = dict.fromkeys(("inserted", "updated", "unchanged", "rejected", "duplicates", "read", "skipped",
                             "batches"), 0)
     sha256 = job.binding["source"]["members"]["sha256"][index]
     return {"job": job.id, "member": index, "sha256": sha256, "tally": _tally(), "counts": counts,
-            "rows": rows, "done": False, "eof": False, "checkpoint": None}
+            "rows": rows, "row_floor": floor, "restored": 0, "done": False, "eof": False, "checkpoint": None}
 
 
 def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> str:
@@ -2951,14 +2956,15 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
         return _settle_alone(root, writer, job, batch, guards, version=manifest.schema.version)
     index = read[0][1] if read else batch.checkpoint["member"]
     if record is None or record["member"] != index:
-        record = _opened(job, index, derived_rows.logged(writer.connection, cid)[1])
+        record = _opened(job, index, derived_rows.logged(writer.connection, cid)[1], store.row_floor(goal))
     with _snapshot(writer):
         _authorize(writer, job, prove=False)  # the store path rechecks inside its transaction
     _recheck(writer, guards)
     shas = job.binding["source"]["members"]["sha256"]
 
     def work(conn):
-        applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas, scope=store.write_scope)
+        undo = None if "row_floor" not in record else derived_rows.Undo(record["row_floor"])
+        applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas, scope=store.write_scope, undo=undo)
         tally, counts = dict(record["tally"]), dict(record["counts"])
         for _, key, payload in applied.entries:
             _extend(tally, key, payload)
@@ -2970,7 +2976,8 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
         counts["skipped"] += sum(event[0] == "skipped" for event in batch.members)
         counts["batches"] += 1
         rows = record["rows"] + sum(outcome["outcome"] == "inserted" for outcome in applied.outcomes)
-        done = {**record, "tally": tally, "counts": counts, "rows": rows, "done": bool(read),
+        restored = {} if undo is None else {"restored": record["restored"] + undo.copied}
+        done = {**record, **restored, "tally": tally, "counts": counts, "rows": rows, "done": bool(read),
                 "eof": batch.eof, "checkpoint": batch.checkpoint}
         return done, applied.rejections
 

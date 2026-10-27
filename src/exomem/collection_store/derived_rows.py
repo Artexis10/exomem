@@ -27,6 +27,12 @@ through the importer's own apply path, checks each member's counts, digest and r
 against the log, then checks the rollup mirrors against the store's buckets. Row queries
 refuse with ``QUERY_REBUILDING`` and the rebuild's progress until it ends; rollups and the
 summary page answer from the store throughout.
+
+A member records its ``row_floor``, the largest row id before it opened, and copies each earlier
+row into an undo table before its first update. When the job that held the open member is gone,
+``assess`` answers ``revert``: only that member's rows leave, the earlier rows return from the
+undo table and the touched rollup buckets return from the store, in bounded steps that a restart
+resumes. Anything the undo table cannot vouch for rebuilds from the log instead.
 """
 
 from __future__ import annotations
@@ -193,6 +199,11 @@ def ordered_key_refused(location, encodes: bool) -> collections.CollectionError 
                       "This collection, its import log and its sources stay as they are."})
 
 
+def _undo_table(collection_id: str) -> str:
+    """The open member's pre-images; its name starts with the collection's ``cq_<hex>_``, so ``_drop`` removes it."""
+    return f"cq_{uuid.UUID(collection_id).hex}_undo"
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -271,10 +282,11 @@ _AT_REST = frozenset({"ready", "live", "rebuilding"})
 class State:
     """What ``assess`` found: an action and the log positions it compared."""
 
-    action: str  # empty, ready, live, finalize, replay, rebuild, rebuilding
+    action: str  # empty, ready, live, finalize, replay, revert, rebuild, rebuilding
     applied: int
     logged: int
     stop: dict | None = None
+    revert: dict | None = None  # a revert's position while ``rebuilding`` is one
 
     @property
     def serves(self) -> bool:
@@ -287,6 +299,9 @@ class State:
         return self.action in _AT_REST
 
     def progress(self) -> dict[str, Any]:
+        if self.revert is not None:
+            return {"state": "reverting", "members_applied": self.applied, "members_logged": self.logged,
+                    "rows_remaining": self.revert["remaining"], "stop": self.stop}
         return {"state": "stopped" if self.stop else "rebuilding", "members_applied": self.applied,
                 "members_logged": self.logged, "stop": self.stop}
 
@@ -314,20 +329,27 @@ def _logs(main: sqlite3.Connection, collection_id: str, seq: int, record: dict[s
     return row == (record["job"], record["sha256"], tally["rows_digest"], tally["accepted"], tally["rejected"])
 
 
+def _rollups_ready(main: sqlite3.Connection, collection_id: str) -> bool:
+    """Whether every rollup of the collection is ready, so the store's buckets are what a revert restores."""
+    return main.execute("SELECT 1 FROM rollup_definitions WHERE collection_id=? AND state!='ready' LIMIT 1",
+                        (collection_id,)).fetchone() is None
+
+
 def assess(main: sqlite3.Connection, derived: sqlite3.Connection | None, schema: str, collection_id: str,
            contract: str | None) -> State:
     """A derived collection's state from the store's log and this file's bookkeeping under ``schema``."""
     seq = logged(main, collection_id)[0]
     row = None if derived is None else derived.execute(
-        f"SELECT contract,applied_seq,state,stop_json FROM {schema}.derived_collections WHERE collection_id=?",
-        (collection_id,)).fetchone()
+        f"SELECT contract,applied_seq,state,stop_json,cursor_json FROM {schema}.derived_collections "
+        "WHERE collection_id=?", (collection_id,)).fetchone()
     if row is None:
         return State("empty" if seq == 0 else "rebuild", 0, seq)
-    stored, applied, state, stop = row
+    stored, applied, state, stop, cursor = row
     if contract is None or stored != contract or applied > seq:
         return State("rebuild", 0, seq)
     if state == "rebuilding":
-        return State("rebuilding", applied, seq, None if stop is None else json.loads(stop))
+        return State("rebuilding", applied, seq, None if stop is None else json.loads(stop),
+                     json.loads(cursor).get("revert") if cursor else None)
     held = derived.execute(f"SELECT record_json FROM {schema}.derived_progress WHERE collection_id=?",
                            (collection_id,)).fetchone()
     if held is not None:
@@ -336,6 +358,8 @@ def assess(main: sqlite3.Connection, derived: sqlite3.Connection | None, schema:
             return State("finalize", applied, seq)
         if seq == applied and _holds(main, record):
             return State("live", applied, seq)
+        if seq == applied and "row_floor" in record and _rollups_ready(main, collection_id):
+            return State("revert", applied, seq)
         return State("rebuild", applied, seq)
     return State("ready" if seq == applied else "replay", applied, seq)
 
@@ -438,6 +462,10 @@ class Store:
                                 (collection_id,)).fetchone()
         return None if row is None else json.loads(row[0])
 
+    def row_floor(self, goal: Target) -> int:
+        """The largest row id in the collection's table: what a member that opens now must leave in place."""
+        return self.conn.execute(f"SELECT coalesce(max(row_id),0) FROM {goal.table}").fetchone()[0]  # noqa: S608
+
     def _drop(self, collection_id: str) -> None:
         """Remove a collection's rows, projection, mirrors and bookkeeping; the caller holds the transaction."""
         hexed = uuid.UUID(collection_id).hex
@@ -494,6 +522,9 @@ class Store:
                 self._install(goal, state="ready", applied=0, cursor=None)
             elif state.action == "finalize":
                 self._finish(collection_id, state.logged)
+            elif state.action == "revert":
+                if not self._begin_revert(goal):  # the undo table cannot vouch for the rows
+                    self._install(goal, state="rebuilding", applied=0, cursor=_cursor(main, collection_id, 1))
             elif state.action == "replay":
                 self.conn.execute("UPDATE derived_collections SET state='rebuilding',cursor_json=?,stop_json=NULL "
                                   "WHERE collection_id=?", (_json(_cursor(main, collection_id, state.applied + 1)),
@@ -506,6 +537,32 @@ class Store:
     def _release(self, collection_id: str) -> None:
         for table in ("derived_touched", "derived_rejections", "derived_progress"):
             self.conn.execute(f"DELETE FROM {table} WHERE collection_id=?", (collection_id,))  # noqa: S608
+        self.conn.execute(f"DROP TABLE IF EXISTS {_undo_table(collection_id)}")  # noqa: S608 - name from the UUID
+
+    def _undone(self, collection_id: str) -> int:
+        """How many pre-images the open member's undo table holds."""
+        table = _undo_table(collection_id)
+        if not _has_table(self.conn, table):
+            return 0
+        return self.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]  # noqa: S608 - name from the UUID
+
+    def _begin_revert(self, goal: Target) -> bool:
+        """Mark the collection reverting at its first phase, when the undo table holds exactly the pre-images the
+        open member counted; False leaves it for a full rebuild. The caller holds the transaction.
+
+        The count is checked here, once: afterwards ``assess`` reports ``rebuilding``, so no later step asks.
+        """
+        cid = goal.collection_id
+        record, undone = self.progress(cid), self._undone(cid)
+        if undone != record["restored"]:
+            return False
+        above = self.conn.execute(f"SELECT count(*) FROM {goal.table} WHERE row_id>?",  # noqa: S608
+                                  (record["row_floor"],)).fetchone()[0]
+        touched = self.conn.execute("SELECT count(*) FROM derived_touched WHERE collection_id=?", (cid,)).fetchone()[0]
+        revert = {"phase": "undo", "floor": record["row_floor"], "after": 0, "remaining": undone + above + touched}
+        self.conn.execute("UPDATE derived_collections SET state='rebuilding',cursor_json=?,stop_json=NULL "
+                          "WHERE collection_id=?", (_json({"revert": revert}), cid))
+        return True
 
     def _finish(self, collection_id: str, seq: int) -> None:
         self.conn.execute("UPDATE derived_collections SET applied_seq=? WHERE collection_id=?", (seq, collection_id))
@@ -641,14 +698,42 @@ def _key_rows(conn, goal: Target, keys, columns):
             f"WHERE item_key IN ({','.join('?' for _ in chunk)})", stored_keys)
 
 
-def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[dict[str, Any]]:
+@dataclass(slots=True)
+class Undo:
+    """The open member's pre-images: an earlier row, at or below ``floor``, is copied to the undo table
+    before its first update, and ``copied`` counts the copies new to this batch."""
+
+    floor: int
+    copied: int = 0
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _stored_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """A rows table's stored columns after ``row_id``; table_info leaves out the generated ones."""
+    return [name for _, name, *_ in conn.execute(f"PRAGMA table_info({table})").fetchall() if name != "row_id"]
+
+
+def _undo_copy(conn: sqlite3.Connection, goal: Target) -> str:
+    """Create the undo table when absent and return its copy statement, one row id as the parameter."""
+    undo, columns = _undo_table(goal.collection_id), _stored_columns(conn, goal.table)
+    # Columns without a declared type keep each value as the rows table stored it.
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {undo}(row_id INTEGER PRIMARY KEY,{','.join(columns)})")  # noqa: S608
+    return (f"INSERT OR IGNORE INTO {undo}(row_id,{','.join(columns)}) "  # noqa: S608
+            f"SELECT row_id,{','.join(columns)} FROM {goal.table} WHERE row_id=?")
+
+
+def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None, undo: Undo | None = None) -> list[dict[str, Any]]:
     """Upsert ``items`` (``(index, item_key, values)``, in source order) into the collection's rows.
 
     A row's typed columns and its projection keys are one row of the collection's table.
     Every rollup mirror moves with the batch, each touched bucket read and written once,
     and each touched bucket is recorded for the member's store commit. Returns one outcome
     per item: ``inserted``, ``updated`` or ``unchanged``, with its index and item key. The
-    caller holds the transaction.
+    caller holds the transaction. With ``undo``, an earlier row's first update in the member
+    keeps its pre-image in the same transaction.
     """
     items = list(items)
     if not items:
@@ -669,7 +754,7 @@ def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[
               f"VALUES (?,?{projection_parameter},{','.join('?' for _ in columns)})")
     update = (f"UPDATE {table} SET row_version=?,{projection_update}"  # noqa: S608
               f"{','.join(c + '=?' for c in columns)} WHERE row_id=?")
-    inserted = None
+    inserted, copy = None, None
     # Only new rows can precede upkeep; updates must see earlier members' current values.
     if native and not found and len(keys) == len(items):
         from .native_operands import FileRole, operand_snapshot
@@ -702,6 +787,9 @@ def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[
                 row_id, version, previous = conn.execute(insert, (stored_key, 1, *projected, *encoded)).lastrowid, 1, None
             else:
                 row_id, version, previous = before[0], before[1] + 1, decode(before[2])
+                if undo is not None and row_id <= undo.floor:
+                    copy = copy or _undo_copy(conn, goal)
+                    undo.copied += conn.execute(copy, (row_id,)).rowcount
                 conn.execute(update, (version, *projected, *encoded, row_id))
             found[key] = (row_id, version, encoded)
         for rollup_id, rollup in goal.rollups:
@@ -922,6 +1010,8 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str
     goal = target(main, collection_id)
     if goal is None:
         return "stopped"
+    if "revert" in cursor:
+        return _revert(store, main, goal, cursor["revert"])
     if stop is not None and stop["code"] == REBUILD_MISMATCH:
         return "mismatched"
     if cursor["seq"] > logged(main, collection_id)[0]:
@@ -998,6 +1088,113 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str
         store.readers.pop(collection_id).close()
     else:
         reader.marked = (cursor["seq"], cursor["member_row"])
+    return "advanced"
+
+
+# nosemgrep: ep-word-set -- a revert's phases are this module's closed state machine, in the order they run.
+_REVERT_PHASES = ("undo", "above", "buckets")
+
+
+def _memberships(conn: sqlite3.Connection, goal: Target, where: str, parameters: tuple, statement: str) -> None:
+    """Run ``statement`` (rollup, bucket, groups, row id) for each indexed rollup membership of the rows ``where`` picks."""
+    indexed = [(rollup_id, rollup) for rollup_id, rollup in goal.rollups if rollup.members]
+    if not indexed:
+        return
+    decode = _decoder(goal, conn)
+    columns = ",".join(f"d.{column}" for column in (*goal.layout.value_columns, "r"))
+    for row_id, key, *values in conn.execute(
+            f"SELECT d.row_id,d.item_key,{columns} FROM {goal.table} d WHERE {where}", parameters).fetchall():  # noqa: S608
+        if goal.layout.encoding == typed_storage.TYPED_V2:
+            key = native_identity.decode(key, goal.layout.identity)
+        row = decode(values)
+        for rollup_id, rollup in indexed:
+            place = rollups.membership(rollup, row, key)
+            if place is not None:
+                conn.execute(statement, (rollup_id, *place, row_id))
+
+
+_DROP_MEMBER = "DELETE FROM rollup_members WHERE rollup_id=? AND bucket=? AND groups=? AND row_id=?"
+_PLACE_MEMBER = "INSERT OR IGNORE INTO rollup_members(rollup_id,bucket,groups,row_id) VALUES (?,?,?,?)"
+
+
+def _restore_rows(conn: sqlite3.Connection, goal: Target, revert: dict) -> tuple[int, bool]:
+    """Phase ``undo``: put the next rows of the undo table back, with their rollup memberships."""
+    undo = _undo_table(goal.collection_id)
+    ids = [row_id for (row_id,) in conn.execute(
+        f"SELECT row_id FROM {undo} WHERE row_id>? ORDER BY row_id LIMIT ?",  # noqa: S608 - name from the UUID
+        (revert["after"], REBUILD_STEP_ROWS))] if _has_table(conn, undo) else []
+    if not ids:
+        return 0, True
+    where = f"d.row_id>? AND d.row_id<=? AND d.row_id IN (SELECT row_id FROM {undo})"  # noqa: S608
+    bounds = (revert["after"], ids[-1])
+    # A membership follows the row's values, so leave the current place before the values change.
+    _memberships(conn, goal, where, bounds, _DROP_MEMBER)
+    columns = _stored_columns(conn, goal.table)
+    conn.execute(f"UPDATE {goal.table} SET {','.join(f'{c}=u.{c}' for c in columns)} FROM {undo} u "  # noqa: S608
+                 f"WHERE {goal.table}.row_id=u.row_id AND u.row_id>? AND u.row_id<=?", bounds)
+    _memberships(conn, goal, where, bounds, _PLACE_MEMBER)
+    revert["after"] = ids[-1]
+    return len(ids), len(ids) < REBUILD_STEP_ROWS
+
+
+def _delete_new_rows(conn: sqlite3.Connection, goal: Target, revert: dict) -> tuple[int, bool]:
+    """Phase ``above``: delete the next rows above the floor, highest first, with their rollup memberships."""
+    ids = [row_id for (row_id,) in conn.execute(
+        f"SELECT row_id FROM {goal.table} WHERE row_id>? ORDER BY row_id DESC LIMIT ?",  # noqa: S608
+        (revert["floor"], REBUILD_STEP_ROWS))]
+    if not ids:
+        return 0, True
+    _memberships(conn, goal, "d.row_id>=?", (ids[-1],), _DROP_MEMBER)
+    conn.execute(f"DELETE FROM {goal.table} WHERE row_id>=?", (ids[-1],))  # noqa: S608
+    return len(ids), len(ids) < REBUILD_STEP_ROWS
+
+
+def _restore_buckets(conn: sqlite3.Connection, goal: Target, revert: dict, main: sqlite3.Connection) -> tuple[int, bool]:
+    """Phase ``buckets``: copy the next touched buckets from the store, or delete those it has none of."""
+    cid = goal.collection_id
+    touched = conn.execute("SELECT rollup_id,bucket,groups FROM derived_touched WHERE collection_id=? LIMIT ?",
+                           (cid, REBUILD_STEP_ROWS)).fetchall()
+    for rollup_id, bucket, groups in touched:
+        state = main.execute("SELECT state_json FROM rollup_buckets WHERE rollup_id=? AND bucket=? AND groups=?",
+                             (rollup_id, bucket, groups)).fetchone()
+        if state is None:
+            conn.execute("DELETE FROM rollup_buckets WHERE rollup_id=? AND bucket=? AND groups=?",
+                         (rollup_id, bucket, groups))
+        else:
+            conn.execute("INSERT INTO rollup_buckets(rollup_id,bucket,groups,state_json) VALUES (?,?,?,?) "
+                         "ON CONFLICT(rollup_id,bucket,groups) DO UPDATE SET state_json=excluded.state_json",
+                         (rollup_id, bucket, groups, state[0]))
+    conn.executemany("DELETE FROM derived_touched WHERE collection_id=? AND rollup_id=? AND bucket=? AND groups=?",
+                     [(cid, *place) for place in touched])
+    return len(touched), len(touched) < REBUILD_STEP_ROWS
+
+
+def _revert(store: Store, main: sqlite3.Connection, goal: Target, revert: dict) -> str:
+    """One bounded step of a revert: the open member's rows leave, the rows it changed return, and the rollup
+    buckets it touched return from the store. The collection's applied sequence does not change.
+
+    A step commits its rows and the position together, and repeating it changes nothing, so a restart resumes
+    at the step it lost. The last step releases the member's bookkeeping and marks the collection ready.
+    """
+    cid, revert = goal.collection_id, dict(revert)
+    phases = {"undo": lambda conn: _restore_rows(conn, goal, revert),
+              "above": lambda conn: _delete_new_rows(conn, goal, revert),
+              "buckets": lambda conn: _restore_buckets(conn, goal, revert, main)}
+    with store.transaction():
+        handled, exhausted = phases[revert["phase"]](store.conn)
+        revert["remaining"] = max(revert["remaining"] - handled, 0)
+        position = _REVERT_PHASES.index(revert["phase"])
+        if exhausted and position + 1 < len(_REVERT_PHASES):
+            revert["phase"] = _REVERT_PHASES[position + 1]
+        elif exhausted:
+            store.conn.executemany("UPDATE derived_flagged SET flagged=? WHERE rollup_id=?", main.execute(
+                "SELECT flagged,rollup_id FROM rollup_definitions WHERE collection_id=?", (cid,)).fetchall())
+            store._release(cid)
+            store.conn.execute("UPDATE derived_collections SET state='ready',cursor_json=NULL,stop_json=NULL "
+                               "WHERE collection_id=?", (cid,))
+            return "done"
+        store.conn.execute("UPDATE derived_collections SET cursor_json=? WHERE collection_id=?",
+                           (_json({"revert": revert}), cid))
     return "advanced"
 
 
