@@ -110,7 +110,7 @@ def _origin(entry: registry.Entry, topics: tuple[str, ...]) -> Mapping[str, str]
     return MappingProxyType(dict(value))
 
 
-def _identity(kind: str, match: str) -> tuple[str, str]:
+def identity_of(kind: str, match: str) -> tuple[str, str]:
     """What makes two carriers the same one: a project key exactly, a folder or tag casefolded."""
     return kind, match if kind == KIND_PROJECT else match.casefold()
 
@@ -149,7 +149,7 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
             f"CARRIER_TOPIC_REJECTED: {entry.key} rejected {overlap[0]!r}; a person turned it down"
         )
     for other_key, other in entries.items():
-        if other_key != entry.key and _identity(kind, match) == _identity(
+        if other_key != entry.key and identity_of(kind, match) == identity_of(
             str(other.attributes.get("kind")), str(other.attributes.get("match"))
         ):
             raise registry.RegistryError(
@@ -161,7 +161,7 @@ def _finding(code: str, entry: registry.Entry, detail: str) -> dict[str, str]:
     return {"code": code, "path": f"entries.{entry.key}", "severity": "error", "detail": detail}
 
 
-def _protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool]]:
+def protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool]]:
     """Every folder that groups by type or placement: `(casefolded segments, owner, split by project)`."""
     from . import entity_recurrence, entity_types, homes
 
@@ -181,18 +181,30 @@ def _protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, boo
     return out
 
 
+def protection(
+    protected: list[tuple[tuple[str, ...], str, bool]], mine: tuple[str, ...]
+) -> tuple[str, str] | None:
+    """Why a folder cannot carry a topic: `(finding code, reason)`, or None when it may.
+
+    `mine` is the folder's casefolded segments below the knowledge base; `protected` is `protected_folders`.
+    """
+    for parts, owner, split_by_project in protected:
+        if parts == mine:
+            return "CARRIER_FOLDER_TYPE", f"the folder of {owner}; it groups by type or placement, not subject"
+        if parts[: len(mine)] == mine:
+            return "CARRIER_FOLDER_ANCESTOR", f"a folder that contains the folder of {owner}; it would put every type into one topic"
+        if split_by_project and mine[: len(parts)] == parts:
+            return "CARRIER_FOLDER_PARTITIONED", f"inside the folder of {owner}, which splits by project; declare the project key instead"
+    return None
+
+
 def _folder_findings(vault_root: Path, entry: registry.Entry) -> list[dict[str, str]]:
     from .context_catalogue import ContextCatalogue
 
     match = str(entry.attributes["match"])
     mine = tuple(part.casefold() for part in PurePosixPath(match).parts)
-    for parts, owner, split_by_project in _protected_folders(vault_root):
-        if parts == mine:
-            return [_finding("CARRIER_FOLDER_TYPE", entry, f"{match} is the folder of {owner}; it groups by type or placement, not subject")]
-        if parts[: len(mine)] == mine:
-            return [_finding("CARRIER_FOLDER_ANCESTOR", entry, f"{match} contains the folder of {owner}; it would put every type into one topic")]
-        if split_by_project and mine[: len(parts)] == parts:
-            return [_finding("CARRIER_FOLDER_PARTITIONED", entry, f"{match} is inside the folder of {owner}, which splits by project; declare the project key instead")]
+    if (refused := protection(protected_folders(vault_root), mine)) is not None:
+        return [_finding(refused[0], entry, f"{match} is {refused[1]}")]
     catalogue = ContextCatalogue(vault_root)
     try:
         if not catalogue.built():
@@ -256,11 +268,13 @@ class _Adapter(registry.FixedPackAdapter):
         return findings
 
     def inspect_extra(self, vault_root: Path) -> dict[str, Any]:
-        """The hand-written project-key domains, which are read as `reviewed` and never written."""
-        from . import project_keys
+        """The hand-written project-key domains (read as `reviewed`, never written) and the owner's carrier considerations."""
+        from . import project_keys, topic_carrier_considerations
 
         keys = project_keys.load_project_registry(vault_root)
         return {
+            # Ranked across the vault for the owner only; any other caller gets an empty list.
+            "considerations": topic_carrier_considerations.summary(topic_carrier_considerations.publish(vault_root)),
             "hand_declared": [
                 {"kind": KIND_PROJECT, "match": key, "topics": list(keys.domains_for(key)),
                  "origin": {topic: ORIGIN_REVIEWED for topic in keys.domains_for(key)},

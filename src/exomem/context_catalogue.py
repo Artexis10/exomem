@@ -91,6 +91,9 @@ EDGES_WARMING = "warming"
 #: Folds one write retries when another writer commits first. A resource bound.
 WRITE_ATTEMPTS = 3
 
+#: Names bound in one SQL statement, below SQLite's lowest default limit of 999.
+SQL_VARIABLE_CHUNK = 500
+
 #: Most pages an inline update folds before leaving the rest to the background
 #: pass. A resource bound: a request thread folds a burst, not a vault.
 INLINE_FOLD_LIMIT = 200
@@ -255,6 +258,8 @@ class ContextCatalogue:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS entries_thread ON entries(thread_key)")
+        # The write path counts one page's own carriers by these columns, never by a scan.
+        conn.execute("CREATE INDEX IF NOT EXISTS entries_path ON entries(path)")
         for table, column in (
             ("declared_topics_raw", "raw"),
             ("entry_projects", "project_key"),
@@ -267,6 +272,7 @@ class ContextCatalogue:
                 f"CREATE TABLE IF NOT EXISTS {table} "
                 f"(entry_id TEXT NOT NULL, {column} TEXT NOT NULL, PRIMARY KEY (entry_id, {column}))"
             )
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_{column} ON {table}({column})")
         conn.execute("CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, reason TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS catalogue_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         sidecar_store.ensure_meta_table(conn, "entries", self.path.name)
@@ -356,35 +362,44 @@ class ContextCatalogue:
     def entries(self, kind: str | None = None) -> tuple[Entry, ...]:
         """Every entry with its raw declarations, ordered by id."""
         conn = self._connect()
+        return () if conn is None else _load(conn, kind=kind)
+
+    def entries_reached(self, kind: str, match: str, *, fold: bool = False) -> tuple[Entry, ...]:
+        """The entries one carrier reaches: a project key, a folder or a tag form.
+
+        A folder reaches its own entries and those below it. By default the folder is found by an indexed
+        range, spelled as the catalogue spells it, which is how a written page names its own folders.
+        `fold=True` compares folders casefolded, as a carrier does, by a scan of the paths.
+        Declarations come with the rows.
+        """
+        conn = self._connect()
         if conn is None:
             return ()
-        columns = _ENTRY_COLUMNS
-        sql = f"SELECT {', '.join(columns)} FROM entries"
-        params: tuple[str, ...] = ()
-        if kind is not None:
-            sql += " WHERE kind = ?"
-            params = (kind,)
-        declared = {
-            table: _grouped(conn, table, column)
-            for table, column in (
-                ("declared_topics_raw", "raw"), ("entry_projects", "project_key"), ("source_refs", "ref"),
-                ("entry_tags", "tag"),
-            )
-        }
-        out = []
-        for row in conn.execute(f"{sql} ORDER BY entry_id", params):
-            values = dict(zip(columns, row, strict=True))
-            entry_id = values["entry_id"]
-            out.append(
-                Entry(
-                    **values,
-                    topics=declared["declared_topics_raw"].get(entry_id, ()),
-                    projects=declared["entry_projects"].get(entry_id, ()),
-                    sources=declared["source_refs"].get(entry_id, ()),
-                    tags=declared["entry_tags"].get(entry_id, ()),
+        if kind == topic_carriers.KIND_PROJECT:
+            ids = [row[0] for row in conn.execute("SELECT entry_id FROM entry_projects WHERE project_key = ?", (match,))]
+        elif kind == topic_carriers.KIND_TAG:
+            ids = [row[0] for row in conn.execute("SELECT entry_id FROM entry_tags WHERE tag = ?", (match,))]
+        elif fold:
+            prefix = f"{kb_prefix()}{match.strip('/')}/".casefold()
+            ids = [row[0] for row in conn.execute("SELECT entry_id FROM entries") if row[0].casefold().startswith(prefix)]
+        else:
+            prefix = f"{kb_prefix()}{match.strip('/')}/"
+            ids = [
+                row[0] for row in conn.execute(
+                    "SELECT entry_id FROM entries WHERE path >= ? AND path < ?", (prefix, prefix[:-1] + "0")
                 )
-            )
-        return tuple(out)
+            ]
+        return _load(conn, ids=ids)
+
+    def membership_edges_of(self, ids: Iterable[str]) -> dict[str, tuple[str, ...]]:
+        """`membership_edges` for the named entries only."""
+        conn = self._connect()
+        return {} if conn is None else _grouped(conn, "membership_edges", "target_path", list(ids))
+
+    def entries_by_id(self, ids: Iterable[str]) -> tuple[Entry, ...]:
+        """The named entries with their declarations, ordered by id; an unknown id is skipped."""
+        conn = self._connect()
+        return () if conn is None else _load(conn, ids=list(ids))
 
     def membership_edges(self) -> dict[str, tuple[str, ...]]:
         """Entry id -> the page paths its authored membership relations name."""
@@ -432,7 +447,8 @@ class ContextCatalogue:
             project_keys.load_project_registry(self.vault_root) if projects else project_keys.ProjectRegistry({}, {})
         )
         entries = tuple(self.entries() if among is None else among)
-        edges = self.membership_edges()
+        # A relation to an entry outside `among` adds nothing, so only the edges of `among` are read.
+        edges = self.membership_edges() if among is None else self.membership_edges_of(entry.entry_id for entry in entries)
         carrier_set = topic_carriers.load(self.vault_root) if carriers else topic_carriers.CarrierSet()
         home_set = homes_module.load(self.vault_root) if homes else homes_module.HomeSet()
         carrier_topics = {
@@ -668,11 +684,69 @@ _ENTRY_COLUMNS = (
 )
 
 
-def _grouped(conn: sqlite3.Connection, table: str, column: str) -> dict[str, tuple[str, ...]]:
+def _grouped(
+    conn: sqlite3.Connection, table: str, column: str, ids: list[str] | None = None
+) -> dict[str, tuple[str, ...]]:
     out: dict[str, list[str]] = {}
-    for entry_id, value in conn.execute(f"SELECT entry_id, {column} FROM {table} ORDER BY entry_id, {column}"):
+    if ids is None:
+        rows: Iterable[tuple[str, str]] = conn.execute(
+            f"SELECT entry_id, {column} FROM {table} ORDER BY entry_id, {column}"
+        )
+    else:
+        rows = (
+            row
+            for start in range(0, len(ids), SQL_VARIABLE_CHUNK)
+            for row in conn.execute(
+                f"SELECT entry_id, {column} FROM {table} WHERE entry_id IN "
+                f"({', '.join('?' * len(ids[start : start + SQL_VARIABLE_CHUNK]))}) ORDER BY entry_id, {column}",
+                ids[start : start + SQL_VARIABLE_CHUNK],
+            )
+        )
+    for entry_id, value in rows:
         out.setdefault(entry_id, []).append(value)
     return {entry_id: tuple(values) for entry_id, values in out.items()}
+
+
+def _load(
+    conn: sqlite3.Connection, *, kind: str | None = None, ids: list[str] | None = None
+) -> tuple[Entry, ...]:
+    """Rows with their declarations: all of them, one kind, or the named ids."""
+    columns = _ENTRY_COLUMNS
+    declared = {
+        table: _grouped(conn, table, column, ids)
+        for table, column in (
+            ("declared_topics_raw", "raw"), ("entry_projects", "project_key"), ("source_refs", "ref"),
+            ("entry_tags", "tag"),
+        )
+    }
+    if ids is None:
+        sql = f"SELECT {', '.join(columns)} FROM entries" + ("" if kind is None else " WHERE kind = ?")
+        rows = list(conn.execute(sql + " ORDER BY entry_id", () if kind is None else (kind,)))
+    else:
+        rows = [
+            row
+            for start in range(0, len(ids), SQL_VARIABLE_CHUNK)
+            for row in conn.execute(
+                f"SELECT {', '.join(columns)} FROM entries WHERE entry_id IN "
+                f"({', '.join('?' * len(ids[start : start + SQL_VARIABLE_CHUNK]))})",
+                ids[start : start + SQL_VARIABLE_CHUNK],
+            )
+        ]
+        rows.sort(key=lambda row: row[0])
+    out = []
+    for row in rows:
+        values = dict(zip(columns, row, strict=True))
+        entry_id = values["entry_id"]
+        out.append(
+            Entry(
+                **values,
+                topics=declared["declared_topics_raw"].get(entry_id, ()),
+                projects=declared["entry_projects"].get(entry_id, ()),
+                sources=declared["source_refs"].get(entry_id, ()),
+                tags=declared["entry_tags"].get(entry_id, ()),
+            )
+        )
+    return tuple(out)
 
 
 class _Fold:
@@ -1067,6 +1141,29 @@ def _read_page(absolute: Path, vault_root: Path) -> Any:
 
 def _sorted_values(value: object) -> tuple[str, ...]:
     return tuple(sorted(set(working_set_index._strings(value))))  # noqa: SLF001 - activation's frontmatter string reader
+
+
+def page_tags(frontmatter: Mapping[str, Any]) -> tuple[str, ...]:
+    """A page's tags in carrier form: the rule the fold stores, for a page not yet folded."""
+    return _tags(frontmatter.get("tags"))
+
+
+def page_projects(frontmatter: Mapping[str, Any]) -> frozenset[str]:
+    """A page's project keys: the rule the fold stores, for a page not yet folded."""
+    return frozenset(find_corpus.all_projects(dict(frontmatter)))
+
+
+def carrier_keys(path: str, *, projects: Iterable[str], tags: Iterable[str]) -> list[tuple[str, str]]:
+    """Every carrier a page reaches as `(kind, match)`: each project key, each folder from the top down, each tag.
+
+    The folders are spelled as the path spells them. Whether a carrier may carry a topic is the registry's rule, not this.
+    """
+    found = [(topic_carriers.KIND_PROJECT, key) for key in projects]
+    kb = kb_prefix()
+    segments = path.removeprefix(kb).split("/")[:-1] if path.startswith(kb) else []
+    found.extend((topic_carriers.KIND_FOLDER, "/".join(segments[:depth])) for depth in range(1, len(segments) + 1))
+    found.extend((topic_carriers.KIND_TAG, tag) for tag in tags)
+    return found
 
 
 def _tags(value: object) -> tuple[str, ...]:

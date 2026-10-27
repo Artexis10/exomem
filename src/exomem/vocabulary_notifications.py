@@ -24,6 +24,7 @@ REVIEW_FAMILIES = MappingProxyType(
         "entity-instance/v1": "vocabulary_entity_instances",
         "entity-type/v1": "vocabulary_entity_types",
         "relation-type/v1": "vocabulary_relation_types",
+        "topic-carrier/v1": "vocabulary_topic_carriers",
     }
 )
 

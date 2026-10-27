@@ -1188,6 +1188,7 @@ def op_bootstrap(
             "entity-instance/v1",
             "entity-type/v1",
             "relation-type/v1",
+            "topic-carrier/v1",
         ],
         # The live wording is shorter to fund the `vocabulary` block.
         "consideration": (
@@ -1252,6 +1253,7 @@ def op_bootstrap(
                     "entity-instance/v1",
                     "entity-type/v1",
                     "relation-type/v1",
+                    "topic-carrier/v1",
                 )
             },
         },

@@ -18,6 +18,7 @@ from . import (
     envelope,
     mutation_terminal,
     tag_variants,
+    topic_carrier_considerations,
     vocabulary_notifications,
     vocabulary_projection,
     vocabulary_recovery,
@@ -109,6 +110,27 @@ def _with_tag_advisory(result: dict[str, Any], notice: Mapping[str, Any] | None)
     return {**result, "vocabulary_advisory": dict(notice)}
 
 
+def _with_carrier_advisory(vault_root: Path, result: dict[str, Any], path: str) -> Any:
+    """Offer the written page's own carrier when the single slot is free, never displacing a notice.
+
+    The slot is checked first because taking a notice reserves it for the conversation.
+    Optional guidance: a failure here cannot change the committed outcome.
+    """
+    if "vocabulary_advisory" in result:
+        return result
+    try:
+        if envelope.resolved()["classes"]["structural_suggestions"]["disposition"] == "off":
+            return result
+        work = topic_carrier_considerations.after_write(vault_root, path)
+        notice = vocabulary_notifications.take_advisory(vault_root, [work]) if work is not None else None
+    except Exception as exc:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+        _log_unavailable("carrier advisory", exc)
+        return result
+    if notice is None:
+        return result
+    return {**result, "vocabulary_advisory": notice, "_vocabulary_vault": str(vault_root)}
+
+
 def _tag_advisory(vault_root: Path, path: str) -> dict[str, Any] | None:
     try:
         if envelope.resolved()["classes"]["structural_suggestions"]["disposition"] == "off":
@@ -135,6 +157,7 @@ def after_commit(vault_root: Path, result: Any) -> Any:
         return result
     leaf = result.get("leaf_result")
     path = deferred_index._safe_markdown_rel_path(leaf.get("path"))
+    guided = _with_carrier_advisory(vault_root, guided, path)
     return _with_tag_advisory(guided, _tag_advisory(vault_root, path))
 
 
