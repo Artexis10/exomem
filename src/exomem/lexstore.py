@@ -2853,7 +2853,7 @@ def last_bm25_error_class() -> str | None:
 def search_bm25_result(
     vault_root: Path,
     query: str,
-    k: int,
+    k: int | Callable[[int], int],
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
@@ -2896,6 +2896,10 @@ def search_bm25_result(
     the scope's own document frequencies, before the MATCH is built.
     `term_selection`, when given, receives `terms_kept` and `terms_dropped`
     — counts only, never a term.
+
+    `k` may be a function of the number of pages the request admits, with a
+    `query_context`: it is applied to the count read in the ranking's own
+    snapshot, so a caller needs no second catalogue read to size the window.
     """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -8097,7 +8101,7 @@ class LexicalStore:
     def search_bm25_result(
         self,
         stemmed_tokens: list[str],
-        k: int,
+        k: int | Callable[[int], int],
         scope: str,
         freshness: tuple | None,
         allowed_paths: set[str] | None = None,
@@ -8634,7 +8638,7 @@ class LexicalStore:
         self,
         conn: sqlite3.Connection,
         tokens: list[str],
-        k: int,
+        k: int | Callable[[int], int],
         scope: str,
         allowed_paths: set[str] | None = None,
         *,
@@ -8658,6 +8662,10 @@ class LexicalStore:
             # row nor moves a score.
             current_paths = self._request_admitted_paths(conn, query_context, scope)
             admitted_paths = None if query_context.complete else current_paths
+            if callable(k):
+                k = k(len(current_paths))
+        if callable(k):
+            raise ValueError("a row limit sized on admitted pages needs the request's query context")
         admitted_entry, admitted_generation = (
             self._admitted_corpus_statistics(conn, scope, admitted_paths)
             if admitted_paths is not None
