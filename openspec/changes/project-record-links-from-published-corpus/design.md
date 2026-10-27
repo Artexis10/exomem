@@ -33,8 +33,18 @@ remains. The projector does not scan the vault to recover, because a scan would 
 ### `normalize_wikilink` step 2
 
 Step 2 tested `cleaned in resolver.kb_stripped`. That set also holds keys of pages outside the Knowledge Base.
-The step now tests that `Knowledge Base/<cleaned>` is itself a page, as the targeted branch already did. The
-same dead branch in the corpus resolver is removed.
+The step now tests that `Knowledge Base/<cleaned>` is itself a page, as the targeted branch already did.
+
+The corpus resolver had the same step, and a caller that passes `visible` could reach it. A hidden vault-root
+page `Reference/Hidden.md` then resolved `[[Reference/Hidden]]` to a `Knowledge Base/Reference/Hidden.md` that
+does not exist, while an absent page left the link unresolved. The step is removed, so a hidden page and an
+absent page give the same result.
+
+### Knowledge Base `trash/` on the walk
+
+The identity census prunes the Knowledge Base `trash/` directory, so the published corpus gives a page there no
+title or stem, but it keeps the page's identity. The fallback walk reads `trash/` too. It now skips titles and
+stems there and keeps identities, so the walk and the borrowed route give the same answer.
 
 ### Egress spelling walk
 
@@ -47,3 +57,7 @@ type instead of making a stat call per reference. A symlink leaf is followed, as
   the cost is latency, not disclosure.
 - A page that an outside edit has not yet published resolves by its old title or stem until the watcher
   publishes it. This is the existing freshness rule for titles and stems.
+- The borrowed route withholds a path-shaped link to a page outside the Knowledge Base and outside the
+  curated trees. The cost is a lost link, not disclosure.
+- The borrow takes the update lock without blocking, so a query that meets a busy lock takes the walk. In a
+  vault over the walk cap, that query withholds its bare titles and memory references.
