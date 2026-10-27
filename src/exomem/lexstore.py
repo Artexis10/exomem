@@ -8557,7 +8557,11 @@ class LexicalStore:
         The caller pinned the snapshot that the figures were read at.
         """
         postings = entry.postings
-        held = postings.kept(words)
+        document_frequency = entry.statistics.document_frequency
+        # The corpus's own count answers a word no admitted page holds, so it is neither queried nor kept:
+        # kept, it would cost no slot and escape the bound.
+        held: dict[str, Mapping[str, int]] = {word: MappingProxyType({}) for word in words if not document_frequency.get(word, 0)}
+        held.update(postings.kept(words - held.keys()))
         missing = sorted(words - held.keys())
         if missing:
             rows = conn.execute(
@@ -8569,8 +8573,7 @@ class LexicalStore:
                 ),
             )
             counted = postings.counted(
-                ((path, stemmed.split()) for path, stemmed in rows), missing,
-                entry.statistics.document_frequency,
+                ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
             )
             if counted is None:
                 return None

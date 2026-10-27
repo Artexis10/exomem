@@ -7621,8 +7621,12 @@ class _PageFiles:
     A ranking decides every catalogue page, and a stat each is most of what
     admission costs. A directory asked about a second time is listed once,
     and a name that the listing shows as a regular file is a file. Any other
-    name is stat'ed as before, so a listing saves stats and changes no answer.
-    Like the held set and tombstones, the listing is read once with the view.
+    name is stat'ed as before. Like the held set and tombstones, the listing
+    is read once with the view, so it answers for the tree as the view first
+    saw it: a page deleted later still counts as a file, and so does a file in
+    a folder that can be listed but not entered. Either only sends a reference
+    to the release verdict, so the listing can narrow what a reader sees,
+    never widen it.
     """
 
     def __init__(self, root: Path) -> None:
@@ -7651,7 +7655,7 @@ class _PageFiles:
             with os.scandir(self._root / folder) as entries:
                 # A symlink resolves on stat, so only a plain regular file is answered here.
                 return frozenset(entry.name for entry in entries if entry.is_file(follow_symlinks=False))
-        except OSError:
+        except (OSError, ValueError):  # ValueError: a NUL in the folder name, which `is_file` answers False for
             return frozenset()
 
 

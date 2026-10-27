@@ -147,8 +147,8 @@ def test_a_withheld_page_moves_no_score_of_a_kept_postings_ranking(tmp_path: Pat
 
 
 def test_an_edited_page_is_ranked_from_its_new_text_after_postings_were_kept(tmp_path: Path) -> None:
-    """Postings kept before an edit never score the page after it: a word that no page held is kept with no
-    pages, and the page that the edit gives it must still rank on it."""
+    """Postings kept before an edit never score the page after it: a word that no page held, once the edit
+    gives a page that word, must rank that page."""
     paths = _random_vault(tmp_path, 3, pages=30)
     admitted = set(paths)
     query = "quillon harbor"
@@ -158,3 +158,19 @@ def test_an_edited_page_is_ranked_from_its_new_text_after_postings_were_kept(tmp
     after = _admitted_ranking(tmp_path, admitted, query, 5, 1)
     assert after == _full_ranking(tmp_path, admitted, query, 5, 1)
     assert after[0][0] == paths[11], json.dumps(after)
+
+
+def test_words_no_admitted_page_holds_keep_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restricted caller's searches choose the words, so a word that no admitted page holds must not be kept:
+    kept, it would cost no slot, escape the postings bound and grow memory with every new word asked."""
+    kept: list[bm25.CorpusPostings] = []
+    init = bm25.CorpusPostings.__init__
+    monkeypatch.setattr(bm25.CorpusPostings, "__init__", lambda self, *a: kept.append(self) or init(self, *a))
+    paths = _random_vault(tmp_path, 5, pages=20)
+    admitted = set(paths[::2])
+    absent = [f"nonesuch{index}" for index in range(50)]
+    for word in absent:
+        query = f"{word} harbor"
+        assert _admitted_ranking(tmp_path, admitted, query, 5, 1) == _full_ranking(tmp_path, admitted, query, 5, 1)
+    assert kept  # the control: the rankings went through kept postings
+    assert all(postings.missing(absent) == sorted(absent) for postings in kept)
