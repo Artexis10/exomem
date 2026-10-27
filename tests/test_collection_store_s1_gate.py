@@ -1737,6 +1737,28 @@ def test_a_create_that_an_earlier_release_left_pending_finishes_after_the_upgrad
     assert ab.write_c(ROW, "After the upgrade")["outcome"] == "committed"
 
 
+
+def test_a_store_with_import_originals_from_an_earlier_release_is_admitted_after_the_upgrade(ab):
+    """Defect: the takeover migrates a store that holds import originals, then reads the replica the
+    earlier release published as if it were current; every retry refuses COLLECTION_STORE_SCHEMA_PENDING
+    and no collection is served."""
+    from exomem.collection_store import legacy_originals
+
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        assert create_c(ab)["status"] == "marker_admitted"
+        assert ab.write_c(ROW, "Canonical")["outcome"] == "committed"
+        with preview_store(ab.root, ab.manager._collection_store) as writer, \
+                ab.manager.mutation_guard(ab.root), writer.handle.transaction() as conn:
+            legacy_originals.put(conn, CID, "item", ROW, "Knowledge Base/Records/Work/Items/row.md",
+                                 b"imported bytes", ("transition", "hash"))
+        ab.release()
+    assert _schema(ab.session.path) == _schema(replica.replica_path(ab.root)) == 10
+
+    assert ab.open() == {"status": "admitted"}
+    assert ab.read_c() == ["Canonical"]
+    assert _schema(replica.replica_path(ab.root)) == schema.SCHEMA_VERSION
+
 def _copied(found, tmp_path):
     copy = tmp_path / "copy"
     shutil.copytree(found.root, copy)
