@@ -4608,11 +4608,13 @@ class LeaseManager:
         """
         return self._mutation_coordinator_for(vault_root).current_thread_holds_boundary()
 
-    def _log_lease_event(self, event: str, **fields: Any) -> None:
+    def _log_lease_event(
+        self, event: str, *, level: int = logging.INFO, **fields: Any
+    ) -> None:
         try:
             from .log_events import log_event
 
-            log_event(logger, logging.INFO, event, fields=fields)
+            log_event(logger, level, event, fields=fields)
         except Exception:  # noqa: BLE001 - observability must never break the caller
             pass
 
@@ -4781,7 +4783,9 @@ class LeaseManager:
                 # caller — e.g. the media worker's 5s availability probe —
                 # would suppress idle release forever without writing a byte.
                 self._last_activity_monotonic = time.monotonic()
-            self._log_lease_event("lease_acquired", cause=cause)
+            # A grant per governed write is routine (thousands an hour); reclaim,
+            # rejected renewal and idle release stay INFO as the diagnostic rows.
+            self._log_lease_event("lease_acquired", level=logging.DEBUG, cause=cause)
             return record
 
     def _renew_interval_seconds(self) -> float:

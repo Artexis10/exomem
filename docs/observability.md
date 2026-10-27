@@ -479,6 +479,12 @@ write's. Two knobs, neither changed by default:
   acquisitions while keeping the long-holder warnings, which is the right trade
   when the boundary is not what you are investigating.
 
+`lease_acquired` logs at DEBUG, because a governed write batch grants the writer
+lease thousands of times an hour. `lease_reclaimed`, `lease_renew_rejected`,
+`lease_idle_released` and `lease_released` stay at INFO. A mutation-lock hold
+from a command or lifecycle boundary keeps its INFO audit pair; the reserved
+and background holds are already DEBUG and counted by `mutation_lock_hold_summary`.
+
 Two log lines close loops the spans cannot: `lexical deferred upsert retry
 completed paths=… outcome=…` says what became of a lexical upsert the
 publication barrier was too busy to take, and `file watcher: startup graph

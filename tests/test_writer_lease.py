@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import multiprocessing
 import os
 import pickle
@@ -4793,6 +4794,27 @@ def test_probe_acquire_does_not_refresh_idle_activity(tmp_path: Path) -> None:
     manager._last_activity_monotonic = backdated
     manager.ensure_writer(cause="probe")
     assert manager._last_activity_monotonic == backdated
+
+
+def test_routine_lease_grant_does_not_log_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A grant per governed write would flood the INFO log and rotate real evidence out."""
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    with caplog.at_level(logging.DEBUG, logger="exomem.writer_lease"):
+        manager.ensure_writer()
+
+    grants = [r for r in caplog.records if getattr(r, "event", None) == "lease_acquired"]
+    assert [r.levelno for r in grants] == [logging.DEBUG]
 
 
 def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
