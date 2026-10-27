@@ -2997,6 +2997,8 @@ def op_find(
             ):
                 active_budget.note_skipped("graph_enrich")
                 graph_enrich = False
+            # One resolver for the assembler and the release gate, so a page is decided once.
+            strip_for = egress_module.release_strip_resolver(vault_root, purpose=purpose)
             with find_module._span(timings, "pack"):
                 pack_obj = context_pack_module.assemble_pack(
                     vault_root,
@@ -3006,6 +3008,7 @@ def op_find(
                     graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
                     timings=timings,
                     purpose=purpose,
+                    strip_for=strip_for,
                 )
                 if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
                     pack_obj.get("truncation") or []
@@ -3016,7 +3019,9 @@ def op_find(
                 ):
                     active_budget.note_skipped("graph_enrich")
                 if release.active:
-                    pack_obj = egress_module.annotate_pack(pack_obj, release)
+                    pack_obj = egress_module.annotate_pack(
+                        pack_obj, release, strip_for=strip_for
+                    )
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone

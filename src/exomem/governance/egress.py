@@ -1553,16 +1553,65 @@ def project_hits(
     return out
 
 
-def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[str, Any] | None:
+def _strip_bridge_pack_page(
+    pack: dict[str, Any], path: str, identities: tuple[bridges.StripIdentity, ...]
+) -> None:
+    """Remove the source trail of one released bridge page from the pack sections that hold it.
+
+    A released bridge page carries its claim, never its source trail. The terminal backstop only
+    recognises a pack's `parent` blocks (they carry a path and ref), so the claim text, unit text,
+    unit relations and block metadata of such a page are stripped here, where the page's own decision
+    is known. Each unit and block is stripped on its own: as a list entry, one that names a stripped
+    source anywhere would be dropped with its claim. The assembler withheld every value it would have
+    cut, so an excerpt is stripped line by line instead of dropped.
+    """
+
+    def strip(value: Any) -> Any:
+        return bridges.strip_provenance(value, identities, whole_excerpts=True)
+
+    claims = pack.get("claims")
+    if isinstance(claims, dict) and path in claims:
+        claims[path] = strip(claims[path])
+    units = pack.get("semantic_units")
+    if isinstance(units, dict) and isinstance(units.get(path), dict):
+        units[path] = {
+            **units[path],
+            "parent": strip(units[path].get("parent")),
+            "units": [strip(unit) for unit in units[path].get("units") or []],
+        }
+    blocks = pack.get("semantic_blocks")
+    if isinstance(blocks, dict) and isinstance(blocks.get(path), list):
+        blocks[path] = [strip(block) for block in blocks[path]]
+
+
+def annotate_pack(
+    pack: dict[str, Any] | None,
+    release: AnnotatedHits,
+    *,
+    strip_for: Callable[[str], tuple[bridges.StripIdentity, ...]],
+) -> dict[str, Any] | None:
     """Carry governance context in the pack header, never sub-notice content.
 
     `assemble_pack` already runs over released hits only, so `packed_paths`
     is clean by construction. What still needs scrubbing is everything the
     pack derives from the graph — neighbours, contradictions, claims — since
     those walk edges out of permitted pages and can land on a withheld one.
+    A page released under a bridge approval also loses its source trail here,
+    decided from that page's own release decision (`strip_for`, the request's
+    `release_strip_resolver`, shared with `assemble_pack`), whether a hit, a
+    correction counterpart or a neighbour brought it into the pack.
     """
     if pack is None:
         return None
+    keyed_by_path = (pack.get("claims"), pack.get("semantic_units"), pack.get("semantic_blocks"))
+    for path in sorted({key for section in keyed_by_path if isinstance(section, dict) for key in section}):
+        if identities := strip_for(path):
+            _strip_bridge_pack_page(pack, path, identities)
+    neighborhood = pack.get("neighborhood")
+    if isinstance(neighborhood, list):
+        for index, entry in enumerate(neighborhood):
+            if isinstance(entry, dict) and (identities := strip_for(str(entry.get("path") or ""))):
+                neighborhood[index] = bridges.strip_provenance(entry, identities)
     withheld = release.withheld_paths
     if withheld:
         for section in (
@@ -6741,6 +6790,52 @@ def release_level_for(
         size=artifact_copy.size if artifact_copy is not None else None,
     )
     return level
+
+
+def release_strip_resolver(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str], tuple[bridges.StripIdentity, ...]]:
+    """A caller's view of which source identities each page's own release decision strips.
+
+    The returned function answers, for one vault path, the identities of the sources that a bridge
+    approval holds back from this caller, or `()` when the page is released whole. It reads the same
+    decision as every other release gate, so a builder that cuts text and the gate that strips it
+    agree on which pages are bridges without sharing a list of paths.
+
+    It answers `()` for a page that cannot be decided and for every page of a blocked policy or an
+    unresolved caller, because none of those is released, and for every page of an open vault, which
+    has nothing to strip. Policy and caller are read once; each path is decided once.
+    One request builds one resolver and hands it to every pack stage, so they cannot disagree.
+    """
+    vault_root = Path(vault_root)
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    # An open vault has no release plane to strip under, and a pack asks this for every page it holds.
+    if policy.blocked or not who.resolved or _file_policy_empty(vault_root, policy):
+        return lambda _rel_path: ()
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    grants_hash = _grants_hash(policy)
+    decided: dict[str, tuple[bridges.StripIdentity, ...]] = {}
+
+    def strip_for(rel_path: str) -> tuple[bridges.StripIdentity, ...]:
+        if rel_path not in decided:
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                principal=who, audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+            decided[rel_path] = () if decision is None else decision.release_strip
+        return decided[rel_path]
+
+    return strip_for
 
 
 def unit_seed_parent_filter(

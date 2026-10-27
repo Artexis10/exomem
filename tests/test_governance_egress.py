@@ -3546,7 +3546,7 @@ def test_pack_governance_block_is_absent_when_there_are_no_notices() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack({"packed_paths": []}, release, strip_for=lambda _path: ())
     assert pack is not None
     assert "governance" not in pack
 
@@ -3559,7 +3559,7 @@ def test_pack_governance_block_is_present_when_a_notice_exists() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack({"packed_paths": []}, release, strip_for=lambda _path: ())
     assert pack is not None
     assert pack["governance"]["notices"]
 
