@@ -14,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+# The verdicts need SciPy's t quantile from the recall-benchmark group, which the gate's own CI job
+# installs; the core tier runs without it and skips this module.
+pytest.importorskip("scipy")
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
