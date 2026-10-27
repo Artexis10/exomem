@@ -793,11 +793,14 @@ VIEW_BATCH_PATHS = 16
 #: Longest run of edit-back windows in one checkout: it bounds how long that checkout's admission
 #: is reused and how long a publication waits for an idle instant.
 VIEW_SLICE_SECONDS = 0.05
-#: A tick never starts while a call is in flight or within this gap after one, so a call's
-#: response work does not share the GIL with a tick.
-FOREGROUND_GRACE_SECONDS = 0.05
-#: Under continuous demand a due tick still runs every 2 s, so due edit-back keeps bounded turns.
+#: Quiet a tick needs before it starts. A call in flight already shuts the gate (its foreground mark,
+#: then ``_served_at``), so the gap only parts back-to-back calls; it stays under a 50 ms client poll.
+FOREGROUND_GRACE_SECONDS = 0.02
+#: Under continuous demand a tick with work due still runs every 2 s, so due edit-back keeps bounded turns.
 MAINTENANCE_DEFER_SECONDS = 2.0
+#: A views tick with no view work due only checks history pages' release inputs; under continuous
+#: demand that check runs this often, which keeps its cost off most reads and still bounds its delay.
+VIEWS_POLL_DEFER_SECONDS = 10.0
 # Bound watcher metadata independently of collection size; overflow requests a later census.
 _VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
@@ -1112,8 +1115,8 @@ class StoreServer:
     service's. As the in-process owner, it also advances building projections and rollups
     and publishes pending views, one bounded batch at a time. Between two requests it
     runs one tick, the one that has waited longest, once foreground work has been quiet for
-    ``FOREGROUND_GRACE_SECONDS``; a tick that has waited ``MAINTENANCE_DEFER_SECONDS`` runs
-    regardless, so continuous demand still leaves it a turn. A request it cannot take within the
+    ``FOREGROUND_GRACE_SECONDS``; a tick that has starved (``_starved``) runs regardless, so
+    continuous demand still leaves it a turn. A request it cannot take within the
     mutation timeout refuses as retryable, so a running batch never holds an
     acknowledgement past that timeout. A vault it cannot open refuses store-routed
     requests with the reason and retries; file collections never wait on it.
@@ -1132,6 +1135,7 @@ class StoreServer:
         self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
+        self._views_owed = False  # a publication pass that a wake or a yielding tick left unstarted
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._edit_handle = None
         self._history_policy = None  # the handle and release inputs whose history pages the drain has queued
@@ -1241,7 +1245,7 @@ class StoreServer:
                     self._open()
                 if self._view_work_due(now):
                     self._ticks["views"] = min(self._ticks["views"], now)
-                name = min(self._ticks, key=self._ticks.get)
+                name = self._next_tick(now)
                 request = self._take(self._idle_wait(name, now))
                 if request is not None:
                     self._serve(request)
@@ -1250,9 +1254,10 @@ class StoreServer:
                         # The request may have started a job, revised a declaration or left views pending.
                         # A tick already overdue keeps its age: a stream of writes must not restart its starvation clock.
                         self._ticks = {tick: min(due, served) for tick, due in self._ticks.items()}
-                        self._views_after, self._views_passes = None, 0
-                    if self._view_work_due(served) and self._starved("views", served):
-                        # Saved views get one bounded turn per ``MAINTENANCE_DEFER_SECONDS`` even when requests never stop.
+                        # The wake's publication pass is views work until a tick starts it, even if no request ever pauses.
+                        self._views_after, self._views_passes, self._views_owed = None, 0, True
+                    if self._starved("views", served):
+                        # Saved views get one bounded turn per starvation bound even when requests never stop.
                         self._ticks["views"] = time.monotonic() + self._views_tick()
                 elif self._tick_may_start(name, time.monotonic()):
                     # One tick per turn, so a waiting request is taken between any two.
@@ -1260,17 +1265,32 @@ class StoreServer:
         finally:
             self._close()
 
+    def _starves_at(self, name, now):
+        """When a tick starves: ``MAINTENANCE_DEFER_SECONDS`` after it fell due, or, for a views tick
+        with no view work due, which only checks history pages' release inputs, ``VIEWS_POLL_DEFER_SECONDS``."""
+        polling = name == "views" and not self._view_work_due(now)
+        return self._ticks[name] + (VIEWS_POLL_DEFER_SECONDS if polling else MAINTENANCE_DEFER_SECONDS)
+
     def _starved(self, name, now):
-        """Whether a tick has been due for ``MAINTENANCE_DEFER_SECONDS`` without a quiet gap to run in."""
-        return now - self._ticks[name] >= MAINTENANCE_DEFER_SECONDS
+        """Whether a due tick has waited out its starvation bound without a quiet gap to run in."""
+        return now >= self._starves_at(name, now)
+
+    def _next_tick(self, now):
+        """The tick the gate is asked about: the most overdue starved one, else the most overdue.
+
+        A views poll starves later than other ticks, so the most overdue tick need not be the one starved.
+        """
+        starved = [name for name in self._ticks if self._starved(name, now)]
+        return min(starved or self._ticks, key=self._ticks.get)
 
     def _tick_may_start(self, name, now):
         """Whether the gate admits a due tick: foreground work has been quiet, or the tick starved.
 
         It runs outside every checkout and boundary, and no foreground thread waits on it. Quiet follows
         ``foreground_priority.bulk_free_since``, so a thread that awaits bulk work opens it after the gap,
-        and the gap also counts from the end of this thread's own last request. A lease handoff holds
-        back even a starved tick: the handoff drains the store first.
+        and the gap also counts from the end of this thread's own last request. Here a lease handoff
+        holds back even a starved tick, so the handoff drains the store first. The starved views turn
+        after a request (``_run``) does not ask about a handoff, as the views turn there never did.
         """
         if now < self._ticks[name]:
             return False
@@ -1287,14 +1307,17 @@ class StoreServer:
             return min(due, now + IMPORT_IDLE_SECONDS) - now
         if self._tick_may_start(name, now):
             return 0.0
-        # Closed: look again after one gap, or where the tick starves if that is sooner. A starved
-        # tick that a handoff holds back still waits one gap, or this loop would spin during the handoff.
-        starves = due + MAINTENANCE_DEFER_SECONDS - now
-        return FOREGROUND_GRACE_SECONDS if starves <= 0 else min(FOREGROUND_GRACE_SECONDS, starves)
+        # Closed: look again when the quiet gap ends. While foreground work holds bulk work, or when the
+        # gap has ended and the gate is still shut (a handoff, a writer at the boundary), look again after
+        # one gap, or this loop would spin. The loop's yield (``_yield_allowance``) ends at starvation.
+        free_since = foreground_priority.bulk_free_since()
+        quiet_in = (FOREGROUND_GRACE_SECONDS if free_since is None
+                    else max(free_since, self._served_at) + FOREGROUND_GRACE_SECONDS - now)
+        return quiet_in if quiet_in > 0 else FOREGROUND_GRACE_SECONDS
 
     def _yield_allowance(self, now):
-        """How long the loop may wait for foreground work to end: until the most overdue tick starves."""
-        starves = min(self._ticks.values()) + MAINTENANCE_DEFER_SECONDS - now
+        """How long the loop may wait for foreground work to end: until the first tick starves."""
+        starves = min(self._starves_at(name, now) for name in self._ticks) - now
         return max(0.0, min(foreground_priority.MAX_YIELD_SECONDS, starves))
 
     def _take(self, timeout):
@@ -1314,7 +1337,7 @@ class StoreServer:
         with self._condition:
             notified = any(not checked for checked in self._view_changes.values())
         return notified or (self._ticks["views"] <= now and (
-            self._views_after is not None or self._views_passes == 1
+            self._views_owed or self._views_after is not None or self._views_passes == 1
             or self._edit_back is not None and self._edit_back.wait(now) <= 0
         ))
 
@@ -1605,7 +1628,8 @@ class StoreServer:
             return _mutate(self.root, method, *args, **kwargs)
 
     def _views_tick(self):
-        """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
+        """Apply settled view edits, then publish pending views; returns the seconds until the next tick,
+        negative for a tick that yielded and stays overdue.
 
         It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
         unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
@@ -1626,9 +1650,11 @@ class StoreServer:
         The tick reads under one view of path placement and governance policy, opened per tick
         and never kept across two. Its store writes decide live (``_write``).
 
-        A tick that starts after a quiet gap (``_tick_may_start``) works as above. One that
-        ``MAINTENANCE_DEFER_SECONDS`` of demand starved runs a single bounded window and publishes
-        a single path, even beside a waiting request, so each pass still moves under continuous demand.
+        A tick that starts after a quiet gap (``_tick_may_start``) works as above, but returns
+        before its first publication path when a request waits. The pass then stays owed and the
+        tick keeps its age, so the starvation bound still counts from when it fell due. A starved
+        tick (``_starved``) runs a single bounded window and publishes a single path, even beside
+        a waiting request, so each pass still moves under continuous demand.
         """
         from ..governance import policy
 
@@ -1642,6 +1668,7 @@ class StoreServer:
 
         # A starved tick runs one bounded turn whatever else is going on; any other yields at its next seam.
         starved = self._starved("views", time.monotonic())
+        self._views_owed = False  # this tick runs the owed pass, unless it yields before publishing
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
@@ -1717,8 +1744,10 @@ class StoreServer:
                     self._views_after, self._views_passes = None, 0
                     return min(wait, IMPORT_IDLE_SECONDS)
             if not starved and self._aside():
-                # Leave the pass where it is: the next tick resumes it, and a starved one still publishes a path.
-                return 0.0
+                # Leave the pass where it is and owed, so it stays views work, and keep this tick's age, so
+                # a run of yields cannot reset the starvation clock: a starved tick still publishes a path.
+                self._views_owed = True
+                return self._ticks["views"] - time.monotonic()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 # Finish one path even under continuous demand; release its boundary before checking for readers.
                 for _ in range(VIEW_BATCH_PATHS):

@@ -1179,6 +1179,56 @@ def test_continuous_demand_does_not_starve_a_notified_view_edit(served, monkeypa
             holder.join(10)
 
 
+def test_a_view_edit_committed_beside_a_queued_request_re_renders_under_continuous_demand(served, monkeypatch):
+    """Defect: a views tick that yields to a request before publishing leaves the edit's re-render
+    unowed, so under continuous demand it waits for the next census."""
+    from exomem import file_watcher
+    from exomem.collection_store import runtime
+    from exomem.collection_store.writer import CollectionWriter
+
+    root = served.root
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 1.0)  # a tick that commits after a quiet gap is not starved
+    server = runtime._server(root)
+    until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    relative, path = published_view(root, "Busy", count=1)
+    demanding = threading.Event()
+    apply_edit, original_serve = CollectionWriter.apply_view_edit, server._serve
+
+    def queue_a_request():
+        with server._condition:
+            server._requests.append(runtime._Call(lambda: None, wake_maintenance=False))
+            server._condition.notify_all()
+
+    def edit_with_a_request_queued_at_the_commit(writer, *args, **kwargs):
+        result = apply_edit(writer, *args, **kwargs)
+        demanding.set()
+        queue_a_request()  # the tick that committed the edit now sees a waiting request
+        return result
+
+    def keep_requests_queued(request):
+        original_serve(request)
+        if demanding.is_set():
+            queue_a_request()
+            time.sleep(0.005)
+
+    monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_with_a_request_queued_at_the_commit)
+    monkeypatch.setattr(server, "_serve", keep_requests_queued)
+    try:
+        path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 2"))
+        file_watcher.FileWatcher(root)._record(path, deleted=False)
+        until(demanding.is_set)
+        assert store_rows(root, "SELECT row_version FROM items") == [(2,)]
+        pending = store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state='pending'")[0][0]
+        # Each starved turn publishes one path, a second pass confirms the view, and the census stays 60 s away.
+        until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("current",)],
+              seconds=(pending + 1) * runtime.MAINTENANCE_DEFER_SECONDS + 4)
+        assert b"count: 2" in path.read_bytes()
+        assert demanding.is_set()
+    finally:
+        demanding.clear()
+
+
 def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held(served):
     """Defect: the installed service never applies an edit made in a view, applies it twice, loses a
     stale-buffer save, or holds it where inspect, attention and discard cannot reach it."""
@@ -1194,7 +1244,8 @@ def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is
         try:
             return owner(root, "read_memory", path=relative)["frontmatter"]["count"]
         except ValueError as error:
-            # The edit commits first and the re-render follows a quiet gap; until then the edited bytes answer as absent.
+            # From the save until the re-render installs, the view's bytes are not the published ones and a
+            # read answers NOT_FOUND. That window opens in the settle window, before the edit commits.
             if "NOT_FOUND" not in str(error):
                 raise
 
