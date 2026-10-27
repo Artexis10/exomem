@@ -61,7 +61,7 @@ class Carrier:
     @property
     def folder_parts(self) -> tuple[str, ...]:
         """A folder carrier's casefolded segments below the knowledge base."""
-        return tuple(part.casefold() for part in PurePosixPath(self.match).parts)
+        return fold_folder(self.match)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +108,11 @@ def _origin(entry: registry.Entry, topics: tuple[str, ...]) -> Mapping[str, str]
             f"{' or '.join(sorted(ORIGINS))}"
         )
     return MappingProxyType(dict(value))
+
+
+def fold_folder(folder: str) -> tuple[str, ...]:
+    """A folder's segments casefolded: how a folder carrier names a folder and compares it."""
+    return tuple(part.casefold() for part in PurePosixPath(folder).parts)
 
 
 def identity_of(kind: str, match: str) -> tuple[str, str]:
@@ -170,14 +175,14 @@ def protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool
     snapshot = registry.load(note_types.SPEC, vault_root)
     for note_type in snapshot.typed.types.values():
         if note_type.folder:
-            parts = tuple(part.casefold() for part in PurePosixPath(note_type.folder).parts)
+            parts = fold_folder(note_type.folder)
             out.append((parts, f"note type {note_type.key}", note_type.partition == "project"))
     entities = entity_recurrence.entities_prefix().removeprefix(kb_prefix()).rstrip("/")
     for definition in entity_types.load_entity_types(vault_root).active_definitions:
-        parts = tuple(part.casefold() for part in PurePosixPath(entities, definition.folder).parts)
+        parts = fold_folder(str(PurePosixPath(entities, definition.folder)))
         out.append((parts, f"entity type {definition.id}", False))
     for home in homes.load(vault_root).homes:
-        out.append((tuple(part.casefold() for part in PurePosixPath(home.folder).parts), f"home {home.key}", False))
+        out.append((fold_folder(home.folder), f"home {home.key}", False))
     return out
 
 
@@ -202,14 +207,14 @@ def _folder_findings(vault_root: Path, entry: registry.Entry) -> list[dict[str, 
     from .context_catalogue import ContextCatalogue
 
     match = str(entry.attributes["match"])
-    mine = tuple(part.casefold() for part in PurePosixPath(match).parts)
+    mine = fold_folder(match)
     if (refused := protection(protected_folders(vault_root), mine)) is not None:
         return [_finding(refused[0], entry, f"{match} is {refused[1]}")]
     catalogue = ContextCatalogue(vault_root)
     try:
         if not catalogue.built():
             return [_finding("CARRIER_FOLDER_UNCHECKED", entry, "the context catalogue is still building, so the folder's entries cannot be counted; retry when it is ready")]
-        if catalogue.count_entries_under(f"{kb_prefix()}{match}") == 0:
+        if not catalogue.reached_ids(KIND_FOLDER, match):
             return [_finding("CARRIER_FOLDER_EMPTY", entry, f"{match} holds no catalogue entries")]
     finally:
         catalogue.close()
@@ -268,13 +273,17 @@ class _Adapter(registry.FixedPackAdapter):
         return findings
 
     def inspect_extra(self, vault_root: Path) -> dict[str, Any]:
-        """The hand-written project-key domains (read as `reviewed`, never written) and the owner's carrier considerations."""
-        from . import project_keys, topic_carrier_considerations
+        """The hand-written project-key domains, read as `reviewed` and never written.
 
+        They come from the project registry, so a caller who may not read that file gets no field:
+        an empty list would claim the registry declares nothing.
+        """
+        from . import context_views, project_keys
+
+        if not context_views.CallerView.current(vault_root).projects_admitted:
+            return {}
         keys = project_keys.load_project_registry(vault_root)
         return {
-            # Ranked across the vault for the owner only; any other caller gets an empty list.
-            "considerations": topic_carrier_considerations.summary(topic_carrier_considerations.publish(vault_root)),
             "hand_declared": [
                 {"kind": KIND_PROJECT, "match": key, "topics": list(keys.domains_for(key)),
                  "origin": {topic: ORIGIN_REVIEWED for topic in keys.domains_for(key)},

@@ -74,7 +74,7 @@ def _carrier_review_action(root: Path, kb_present: bool) -> dict | None:
         return None
     from . import context_catalogue
 
-    route = 'schema_memory(subject="topic-carriers", operation="inspect")'
+    route = 'review_memory(mode="vocabulary")'
     unknown = {
         "action": "review-topic-carriers",
         "status": "unknown",

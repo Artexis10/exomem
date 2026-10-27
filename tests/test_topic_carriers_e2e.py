@@ -1,7 +1,7 @@
 """An agent files undeclared entries under topics from the owner's considerations, and the maps show them.
 
 One fixture vault holds an undeclared project key, a topic folder and a tag on notes in a note-type
-folder. The considerations are read through `schema_memory`, the carriers are saved with inferred
+folder. The considerations are read through vocabulary review, the carriers are saved with inferred
 origins (the agent's choice, standing in), and the next maps packet and the domain maps read through
 `read_memory` file those entries with no page write. Per-rule checks live in `test_topic_carriers.py`.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 from test_context_catalogue import KB, _built, _page, _write
 from test_topic_carriers import AREA, _carrier, _inspect, _save
 
-from exomem import commands
+from exomem import commands, vocabulary_review
 from exomem import context_views as cv
 from exomem.governance.principal import library_scope
 
@@ -52,8 +52,10 @@ def test_inferred_carriers_put_unfiled_entries_on_the_map_and_domain_maps_return
     _built(vault)
     before = {path: (vault / path).read_bytes() for path in pages}
 
-    # The considerations name each carrier that would file unfiled entries.
-    considered = {item["carrier"] for item in _inspect(vault)["considerations"]}
+    # Vocabulary review names each carrier that would file unfiled entries.
+    with library_scope():
+        listed = vocabulary_review.review(vault, limit=16)["items"]
+    considered = {item["logical_identity"] for item in listed if item["signal"] == "topic-carrier"}
     assert {"folder:areas/harbour", f"tag:{TAG}", "project:fleet-ops"} <= considered
     assert not _topic_refs(vault)
 
@@ -90,7 +92,7 @@ def test_adoption_names_the_carrier_review_with_the_unfiled_count_and_writes_not
     action = _review_action(vault)
 
     assert action["status"] == "available"
-    assert 'subject="topic-carriers"' in action["description"]
+    assert 'review_memory(mode="vocabulary")' in action["description"]
     assert sorted(path.read_bytes() for path in (vault / KB).rglob("*.md")) == before
 
 

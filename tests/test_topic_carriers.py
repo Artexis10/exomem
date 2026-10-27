@@ -14,11 +14,14 @@ from typing import Any
 
 import pytest
 from test_context_catalogue import INSIGHTS, KB, _built, _page, _write
+from test_governance_egress import _external
+from test_working_set_withheld_twins import _withhold
 
-from exomem import commands
+from exomem import commands, project_keys
 from exomem import context_catalogue as cc
 from exomem import context_views as cv
-from exomem.governance.principal import library_scope
+from exomem.governance import egress
+from exomem.governance.principal import library_scope, request_scope
 from exomem.vocabulary import registry
 
 AREA = f"{KB}/Areas/Harbour"
@@ -144,6 +147,16 @@ def test_a_hand_written_project_domain_reads_reviewed(vault: Path, world: cc.Con
         {"kind": "project", "match": "fleet-ops", "topics": ["fleet"], "origin": {"fleet": "reviewed"},
          "source": f"{KB}/_Schema/project-keys.yaml"}
     ]
+
+
+def test_a_caller_denied_the_project_registry_sees_no_hand_declared_rows(vault: Path, world: cc.ContextCatalogue) -> None:
+    _withhold(vault, project_keys.registry_relpath(), ceiling=0)
+    with request_scope(_external()):
+        result = commands.op_schema_memory(vault, subject="topic-carriers", operation="inspect")
+        result = egress.postfilter("schema_memory", result, vault, request_kwargs={"subject": "topic-carriers"})
+
+    assert "hand_declared" not in result
+    assert "fleet-ops" not in str(result)
 
 
 def test_a_project_carrier_repeating_a_hand_written_domain_is_refused(vault: Path, world: cc.ContextCatalogue) -> None:
@@ -405,8 +418,8 @@ def test_coverage_counts_carriers_by_what_they_reach_and_names_unknown_tags(
     with library_scope():
         filling = cc.ContextCatalogue(vault).owner_coverage()["carriers"]
 
-    assert filled == {"declared": 4, "filing": 3, "dangling": 1, "unknown": 0}
-    assert filling == {"declared": 4, "filing": 2, "dangling": 0, "unknown": 2}
+    assert filled == {"declared": 4, "filing": 3, "no_resolved_topic": 0, "dangling": 1, "unknown": 0}
+    assert filling == {"declared": 4, "filing": 2, "no_resolved_topic": 0, "dangling": 0, "unknown": 2}
 
 
 def test_coverage_counts_unresolved_carrier_and_home_topics(vault: Path, world: cc.ContextCatalogue) -> None:
@@ -424,6 +437,8 @@ def test_coverage_counts_unresolved_carrier_and_home_topics(vault: Path, world: 
     )
 
     with library_scope():
-        unresolved = cc.ContextCatalogue(vault).owner_coverage()["unresolved_declarations"]
+        coverage = cc.ContextCatalogue(vault).owner_coverage()
 
-    assert (unresolved["carrier_topics"], unresolved["home_topics"]) == (1, 1)
+    assert (coverage["unresolved_declarations"]["carrier_topics"], coverage["unresolved_declarations"]["home_topics"]) == (1, 1)
+    # A carrier that matches entries but resolves no topic still counts in one bucket of `declared`.
+    assert coverage["carriers"] == {"declared": 1, "filing": 0, "no_resolved_topic": 1, "dangling": 0, "unknown": 0}
