@@ -82,6 +82,8 @@ _IDENTITY_FIELDS = frozenset(
     }
 )
 _REMOVE = object()
+# The mark every excerpt builder places where it cut, a convention fixed by those builders.
+_CUT_MARK = "…"
 
 
 class _CanonicalizationError(ValueError):
@@ -376,43 +378,10 @@ def _string_names_identity(
     return reference_context and bool(_embedded_identity_spans(value, patterns))
 
 
-def _trim_cut_identity_fragments(text: str, prefixes: tuple[str, ...]) -> str:
-    """Trim what a length cut left of a stripped identity at either end of an excerpt or truncated body.
-
-    Page builders cut an excerpt by length before release stripping, so the cut can end
-    inside a link or path to a stripped source, and the whole-alias match never sees the
-    fragment. This reads link syntax and alias prefixes (`prefixes` holds the aliases
-    lowercased), never what the prose means.
-    """
-    body = text.removesuffix("…").rstrip()
-    end = len(body)
-    reach = max(map(len, prefixes), default=0)
-    for opener, closer in (("[[", "]]"), ("](", ")")):
-        # A cut link opened further back than any alias is long has no fragment of one in it.
-        at = body.rfind(opener, max(0, len(body) - 4 * reach))
-        if at != -1 and closer not in body[at + len(opener) :]:
-            # An unclosed `](` reaches back to the `[` of its label; `[[` is its own start.
-            label = body.rfind("[", 0, at + 1)
-            end = min(end, label if label != -1 else at)
-    shadow, spans = _decoded_shadow(body[:end])
-    for index in range(max(0, len(shadow) - reach), len(shadow)):
-        after_word = index > 0 and (shadow[index - 1].isalnum() or shadow[index - 1] == "_")
-        if not after_word and any(a.startswith(shadow[index:].lower()) for a in prefixes):
-            end = spans[index][0]
-            break
-    start = 0
-    if body.startswith("…"):
-        # A leading cut leaves the end of a link: a `]]` with no `[[` before it.
-        close = body.find("]]")
-        if close != -1 and "[[" not in body[:close]:
-            start = close + len("]]")
-    if end == len(body) and not start:
-        return text
-    kept = body[start:end].strip()
-    if not kept:
-        return ""
-    cut_at_end = end < len(body) or body != text.rstrip()
-    return ("…" if start else "") + kept + ("…" if cut_at_end else "")
+def _is_cut(text: str) -> bool:
+    """Whether a builder marked this text as a cut of something longer."""
+    shown = text.strip()
+    return shown.startswith(_CUT_MARK) or shown.endswith(_CUT_MARK)
 
 
 def _entry_names_identity(
@@ -488,7 +457,6 @@ def strip_provenance(
     keys = _identity_keys(identities)
     aliases = _embedded_identity_aliases(identities)
     patterns = _embedded_identity_patterns(aliases)
-    prefixes = tuple(alias.lower() for alias in aliases)
 
     def walk(
         node: Any,
@@ -506,11 +474,7 @@ def strip_provenance(
                 node, keys, patterns, reference_context=reference_context
             ):
                 return _REMOVE
-            redacted = _redact_embedded_identities(node, patterns)
-            if field == "excerpt" and prefixes:
-                trimmed = _trim_cut_identity_fragments(redacted, prefixes)
-                return trimmed if trimmed or not redacted else _REMOVE
-            return redacted
+            return _redact_embedded_identities(node, patterns)
         if isinstance(node, Mapping):
             # Graph edges can name a removed source only through opaque node
             # keys.  Resolve that indirection before the generic recursion.
@@ -542,6 +506,13 @@ def strip_provenance(
                     continue
                 if _string_names_identity(
                     str(key), keys, patterns, reference_context=True
+                ):
+                    continue
+                # A builder cuts by length before this strip, so a cut can land inside a link or
+                # path to a stripped source and the whole-identity match never sees the fragment.
+                # Withhold what was cut rather than guess where the fragment starts.
+                if isinstance(value, str) and (
+                    (name == "excerpt" and _is_cut(value)) or (name == "body" and body_cut)
                 ):
                     continue
                 if name in {"nodes", "seeds"} and isinstance(value, list):
@@ -577,8 +548,6 @@ def strip_provenance(
                 )
                 if cleaned is _REMOVE:
                     continue
-                if body_cut and name == "body" and prefixes and isinstance(cleaned, str):
-                    cleaned = _trim_cut_identity_fragments(cleaned, prefixes)
                 out[key] = cleaned
             return out
         if isinstance(node, (list, tuple, set, frozenset)):

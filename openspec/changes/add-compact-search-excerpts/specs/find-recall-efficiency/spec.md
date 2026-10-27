@@ -14,6 +14,10 @@ followed by a trailing ellipsis marker when it was cut. It SHALL pass through th
 full-mode excerpt, and the cut SHALL follow every release strip, so a compact excerpt, without its marker, is a
 prefix of the whitespace-collapsed excerpt that full mode releases for the same hit.
 
+An excerpt that a builder cut by length SHALL carry an ellipsis marker at the cut end or ends. When a
+release strips a source from a hit, the strip SHALL withhold an excerpt that carries the marker, in compact and
+in full mode, and SHALL release an excerpt without it with each identity of the stripped source removed whole.
+
 #### Scenario: Compact mode omits token-heavy fields
 
 - **WHEN** `find` is called with compact detail mode
@@ -38,11 +42,16 @@ prefix of the whitespace-collapsed excerpt that full mode releases for the same 
 - **THEN** the compact hit for the same page is withheld, or carries the same stripped text cut to the compact limit
 - **AND** no text appears in a compact excerpt that the whitespace-collapsed full-mode excerpt does not carry
 
-#### Scenario: An excerpt cut inside a link to a stripped source leaves no fragment
+#### Scenario: An excerpt cut from a page under a release strip is withheld
 
-- **WHEN** a release strips a source from a hit, and the length cut of a page, unit or matched-unit excerpt starts or ends inside a link or path to that source
-- **THEN** the excerpt, in compact and in full mode, carries no part of that link or path
-- **AND** an excerpt that is complete or names no stripped source is unchanged
+- **WHEN** a release strips a source from a hit, and the length cut of a page, unit or matched-unit excerpt ends or starts anywhere in that excerpt
+- **THEN** the hit carries no `excerpt`, in compact and in full mode
+- **AND** no part of a link, path or reference to the stripped source reaches the caller
+
+#### Scenario: An uncut excerpt under a release strip loses the source whole
+
+- **WHEN** a release strips a source from a hit, and the excerpt is the whole text of its page
+- **THEN** the excerpt keeps its text, in compact and in full mode, with every identity of the stripped source removed
 
 #### Scenario: Full mode remains the default
 

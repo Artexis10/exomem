@@ -13,6 +13,7 @@ from . import (
     context_refs,
     epistemic_graph,
     evolution,
+    find_results,
     get_page,
     memory_refs,
     vault,
@@ -398,7 +399,7 @@ def _related_section(
         if parsed is None:
             continue
         parsed = _prose_page(vault_root, result, parsed)
-        excerpt = " ".join(parsed.body.split())[:320]
+        excerpt = find_results.head_excerpt(" ".join(parsed.body.split()), 320)
         rows.append(
             {
                 "path": result.path,

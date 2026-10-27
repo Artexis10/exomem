@@ -6194,7 +6194,7 @@ def _find_semantic(
                         keyword_excerpt = _make_excerpt(fpage, query_norm)
                 if keyword_excerpt is None:
                     body = page.body.strip()
-                    keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
+                    keyword_excerpt = find_results.head_excerpt(body)
             selected.append((rel_path, page, keyword_excerpt))
             if len(selected) >= target_n:
                 break
