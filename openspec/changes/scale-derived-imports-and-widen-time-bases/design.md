@@ -64,7 +64,8 @@ relative order, never a value. A location field never enters an ordered key at a
 The cost falls on such a principal: on an `ordered-v1` collection it loses row identity (no
 select, filter or sort by key) that `hashed-v1` gives it. An owner, and a principal that sees
 every natural-key field, keeps it. A cursor pads an ordered boundary key to its 512-character
-limit, so the cursor's length reveals nothing about the key.
+limit, so the cursor's length reveals nothing about the key. Each paged response of an
+`ordered-v1` collection pays for it: its cursor grows by about 640 characters.
 
 Rejected alternatives:
 

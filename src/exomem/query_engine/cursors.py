@@ -220,7 +220,9 @@ def execute_page(session, query, *, as_of=None):
         admitted = _resume(admitted, payload)
     page = execute_rows(admitted)
     boundary_position = next(n for n, (column, _) in enumerate(admitted.compiled.order_terms) if column == "p.item_key")
-    ordered = admitted.layout is not None and admitted.layout.identity == native_identity.ORDERED
+    # Only a native projection has an identity codec; typed-v1 and json-v1 layouts have none.
+    ordered = (isinstance(admitted.projection, NativeProjectionPlan)
+               and admitted.projection.layout.identity == native_identity.ORDERED)
     token = codec.mint(binding, as_of=admitted.compiled.as_of,
                        boundary=logical_item_key(admitted, page.last_order_key[boundary_position]),
                        pad_boundary=ordered) if page.has_more else None
