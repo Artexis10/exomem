@@ -82,8 +82,6 @@ _IDENTITY_FIELDS = frozenset(
     }
 )
 _REMOVE = object()
-# The mark every excerpt builder places where it cut, a convention fixed by those builders.
-_CUT_MARK = "…"
 
 
 class _CanonicalizationError(ValueError):
@@ -378,12 +376,6 @@ def _string_names_identity(
     return reference_context and bool(_embedded_identity_spans(value, patterns))
 
 
-def _is_cut(text: str) -> bool:
-    """Whether a builder marked this text as a cut of something longer."""
-    shown = text.strip()
-    return shown.startswith(_CUT_MARK) or shown.endswith(_CUT_MARK)
-
-
 def _entry_names_identity(
     value: Any,
     keys: frozenset[str],
@@ -508,12 +500,11 @@ def strip_provenance(
                     str(key), keys, patterns, reference_context=True
                 ):
                     continue
-                # A builder cuts by length before this strip, so a cut can land inside a link or
-                # path to a stripped source and the whole-identity match never sees the fragment.
-                # Withhold what was cut rather than guess where the fragment starts.
-                if isinstance(value, str) and (
-                    (name == "excerpt" and _is_cut(value)) or (name == "body" and body_cut)
-                ):
+                # Builders cut an excerpt or a bounded body by length before this strip, so a cut can
+                # start or end inside a link or path to a stripped source, and the whole-identity
+                # match never sees the fragment. Withhold every excerpt and every cut body rather than
+                # trust each builder to mark its cuts.
+                if name == "excerpt" or (name == "body" and body_cut):
                     continue
                 if name in {"nodes", "seeds"} and isinstance(value, list):
                     value = [

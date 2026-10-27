@@ -14,9 +14,8 @@ followed by a trailing ellipsis marker when it was cut. It SHALL pass through th
 full-mode excerpt, and the cut SHALL follow every release strip, so a compact excerpt, without its marker, is a
 prefix of the whitespace-collapsed excerpt that full mode releases for the same hit.
 
-An excerpt that a builder cut by length SHALL carry an ellipsis marker at the cut end or ends. When a
-release strips a source from a hit, the strip SHALL withhold an excerpt that carries the marker, in compact and
-in full mode, and SHALL release an excerpt without it with each identity of the stripped source removed whole.
+When a release strips a source from a hit, the hit SHALL carry no `excerpt`, in compact and in full mode,
+whether or not a length cut shortened the excerpt. This covers page, unit and matched-unit excerpts.
 
 #### Scenario: Compact mode omits token-heavy fields
 
@@ -38,20 +37,15 @@ in full mode, and SHALL release an excerpt without it with each identity of the 
 
 #### Scenario: A withheld excerpt stays withheld in compact mode
 
-- **WHEN** the release plane withholds a page, or strips an identity from its excerpt, in full mode
-- **THEN** the compact hit for the same page is withheld, or carries the same stripped text cut to the compact limit
+- **WHEN** the release plane withholds a page in full mode
+- **THEN** the compact hit for the same page is withheld
 - **AND** no text appears in a compact excerpt that the whitespace-collapsed full-mode excerpt does not carry
 
-#### Scenario: An excerpt cut from a page under a release strip is withheld
+#### Scenario: A hit under a release strip carries no excerpt
 
-- **WHEN** a release strips a source from a hit, and the length cut of a page, unit or matched-unit excerpt ends or starts anywhere in that excerpt
+- **WHEN** a release strips a source from a hit, whether the excerpt was cut by length or is the whole text of its page
 - **THEN** the hit carries no `excerpt`, in compact and in full mode
-- **AND** no part of a link, path or reference to the stripped source reaches the caller
-
-#### Scenario: An uncut excerpt under a release strip loses the source whole
-
-- **WHEN** a release strips a source from a hit, and the excerpt is the whole text of its page
-- **THEN** the excerpt keeps its text, in compact and in full mode, with every identity of the stripped source removed
+- **AND** the hit keeps its path, title and ref
 
 #### Scenario: Full mode remains the default
 

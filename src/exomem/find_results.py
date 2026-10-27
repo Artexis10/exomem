@@ -132,7 +132,7 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
     if body.isascii() and query_norm.isascii():
         query_stems = {bm25_module.stem_word(t) for t in query_norm.split() if t}
         if not query_stems:
-            return head_excerpt(body)
+            return collapse(body[:EXCERPT_MAX_LEN])
         for m in re.finditer(r"[A-Za-z0-9]+", body):
             word = m.group(0)
             if bm25_module.stem_word(word.lower()) in query_stems:
@@ -144,12 +144,12 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
         # in any indexed form (an accent-folded variant, a bigram of a run).
         query_stems = _query_stems_for_anchor(query_norm)
         if not query_stems:
-            return head_excerpt(body)
+            return collapse(body[:EXCERPT_MAX_LEN])
         span = bm25_module.first_stem_span(body, query_stems)
         if span is not None:
             anchor_idx, anchor_len = span
     if anchor_idx == -1:
-        return head_excerpt(body)
+        return collapse(body[:EXCERPT_MAX_LEN])
     start = max(0, anchor_idx - EXCERPT_RADIUS)
     end = min(len(body), anchor_idx + anchor_len + EXCERPT_RADIUS)
     snippet = body[start:end]
@@ -232,11 +232,13 @@ def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
     """Return a short snippet anchored to the query, or None when no token matches."""
     body = page.body_stripped
     if not query_norm:
-        return head_excerpt(body)
+        snippet = body[:EXCERPT_MAX_LEN]
+        return collapse(snippet)
     body_norm = page.body_norm
     tokens = query_norm.split()
     if not tokens:
-        return head_excerpt(body)
+        snippet = body[:EXCERPT_MAX_LEN]
+        return collapse(snippet)
     if not literal_tokens_present(page, query_norm):
         return None
     anchor_idx = -1
@@ -248,7 +250,8 @@ def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
             anchor_len = len(tok)
             break
     if anchor_idx == -1:
-        return head_excerpt(body)
+        snippet = body[:EXCERPT_MAX_LEN]
+        return collapse(snippet)
     start = max(0, anchor_idx - EXCERPT_RADIUS)
     end = min(len(body), anchor_idx + anchor_len + EXCERPT_RADIUS)
     snippet = body[start:end]
@@ -257,16 +260,6 @@ def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
     if end < len(body):
         snippet = snippet.rstrip() + "…"
     return collapse(snippet)
-
-
-def head_excerpt(body: str, limit: int = EXCERPT_MAX_LEN) -> str:
-    """The first `limit` characters of `body`, marked with `…` where the cut falls.
-
-    Release stripping withholds an excerpt that carries the mark, so a builder that cuts
-    must leave it.
-    """
-    head = collapse(body[:limit])
-    return head + "…" if len(body) > limit else head
 
 
 def collapse(s: str) -> str:

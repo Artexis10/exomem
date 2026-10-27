@@ -5497,10 +5497,12 @@ def _annotate_page(
             principal=who,
             purpose=declared_purpose,
         )
+        shown = _excerpt_of(body)
         excerpt = {
             "path": rel_path,
-            "body": _excerpt_of(body),
-            "body_truncated": True,
+            "body": shown,
+            # `_excerpt_of` collapses whitespace and, only when it cuts, adds a marker.
+            "body_truncated": shown != " ".join(body.split()),
             "release_level": level,
         }
         if decision.release_strip:

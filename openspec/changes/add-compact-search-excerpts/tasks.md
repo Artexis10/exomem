@@ -6,7 +6,7 @@
 - [x] 1.2 Add tests: a bounded compact excerpt, an excerpt that a ceiling withholds, and a compact excerpt that is a prefix of the stripped full excerpt.
 - [x] 1.3 Update the compact-shape tests and the `find` documentation that stated compact hits omit the excerpt.
 - [x] 1.4 Record the compact payload size before and after on the fixture vault.
-- [x] 1.5 Withhold, in the one strip step, an excerpt that a length cut left partial and a truncated read body; mark each builder cut with an ellipsis; add regression tests for compact and full mode.
+- [x] 1.5 Drop every excerpt, and a truncated read body, of a hit under a release strip in the one strip step; set the excerpt-level `body_truncated` only on a real cut; add regression tests for compact and full mode.
 
 ## 2. Delivery
 

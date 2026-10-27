@@ -16,7 +16,7 @@ from urllib.parse import quote, unquote
 
 import pytest
 
-from exomem import attention, commands, reserved_paths, review_state
+from exomem import attention, commands, embeddings, find_results, reserved_paths, review_state
 from exomem import find as find_module
 from exomem.governance import bridges, decisions, egress, membership, policy
 from exomem.governance.principal import (
@@ -1013,37 +1013,44 @@ def test_release_strips_dependency_provenance_from_direct_and_search_outputs(
 
 
 _SOURCE_STEM = SOURCE_PATH.rsplit("/", 1)[-1].removesuffix(".md")
-_MARKDOWN_LINK_TO_SOURCE = f"[the source]({SOURCE_PATH})"
+_PLAIN_MENTION = f"Compiled from {_SOURCE_STEM}.\n"
 
 
-def _words_before_zebra(count: int) -> str:
-    return " for detail. " + "filler " * count + "zebra\n"
+def _cap_bridge_page_at_excerpt_level(vault: Path) -> None:
+    """Cap the bridge page itself at L5, so a read of it returns the bounded body."""
+    _write_policy(vault, "scopes", "bridge", _scope_document(SCOPE_B, path=BRIDGE_PATH))
+    _write_policy(
+        vault,
+        "rules",
+        "bridge",
+        _rule_document(
+            scope_ids=(SCOPE_B,),
+            ceiling=egress.LEVEL_EXCERPT,
+            rule_id="01ARZ3NDEKTSV4RRFFQ69G5FBD",
+        ),
+    )
+    policy._CACHE.clear()
 
 
-# Each form puts a cut inside the way the bridge page names its stripped source. `capacity`
-# anchors the excerpt before the Relations link, so the cut ends inside it. `zebra` anchors it a
-# hundred characters after a mention, so the cut starts inside the mention, and the number of
-# filler words picks where.
-_CUT_EXCERPT_FORMS = [
-    pytest.param("capacity", "", id="end-of-wikilink"),
-    pytest.param("zebra", "\n" + _words_before_zebra(12), id="start-after-wikilink"),
+# `zebra` anchors the excerpt a hundred characters past the link, so a length cut starts inside it.
+# `capacity` on a short page gives an excerpt that is the whole page, with no cut at all.
+_EXCERPT_UNDER_STRIP = [
     pytest.param(
-        "zebra",
-        "\n" + _MARKDOWN_LINK_TO_SOURCE + _words_before_zebra(10),
-        id="start-inside-markdown-link",
+        "zebra", f"\n[the source]({SOURCE_PATH}) for detail. " + "filler " * 10 + "zebra\n", None,
+        id="cut-inside-a-link",
     ),
-    pytest.param("zebra", "\n" + SOURCE_PATH + _words_before_zebra(11), id="start-inside-basename"),
-    pytest.param("zebra", "\n" + SOURCE_PATH + _words_before_zebra(8), id="start-inside-directory"),
-    pytest.param("zebra", "\n" + SOURCE_REF + _words_before_zebra(8), id="start-inside-memory-ref"),
+    pytest.param("capacity", "", _PLAIN_MENTION, id="uncut"),
 ]
 
 
 @pytest.mark.parametrize("detail", ["compact", "full"])
-@pytest.mark.parametrize(("query", "suffix"), _CUT_EXCERPT_FORMS)
-def test_an_excerpt_cut_from_a_page_under_a_release_strip_is_withheld(
-    vault: Path, detail: str, query: str, suffix: str
+@pytest.mark.parametrize(("query", "suffix", "relations"), _EXCERPT_UNDER_STRIP)
+def test_a_hit_under_a_release_strip_carries_no_excerpt(
+    vault: Path, detail: str, query: str, suffix: str, relations: str | None
 ) -> None:
-    _write_bridge_fixture(vault, approval=True, bridge_suffix=suffix)
+    _write_bridge_fixture(
+        vault, approval=True, bridge_suffix=suffix, bridge_relations=relations
+    )
 
     with request_scope(_external()):
         found = commands.op_ask_memory(
@@ -1058,30 +1065,33 @@ def test_an_excerpt_cut_from_a_page_under_a_release_strip_is_withheld(
         assert _SOURCE_STEM[-length:] not in wire, _SOURCE_STEM[-length:]
 
 
-@pytest.mark.parametrize("detail", ["compact", "full"])
-def test_an_uncut_excerpt_of_a_released_bridge_keeps_its_claim_and_loses_the_source_whole(
-    vault: Path, detail: str
-) -> None:
-    _write_bridge_fixture(
-        vault, approval=True, bridge_relations=f"Compiled from {_SOURCE_STEM}.\n"
+def test_a_vector_chunk_that_starts_inside_a_link_is_withheld_under_a_release_strip() -> None:
+    # An unspaced paragraph is split at sentence marks and hard cuts, so a chunk can start inside
+    # a link, and the excerpt of such a chunk carries no cut mark.
+    body = "这是一个关于工作量约束的说明" * 32 + (
+        "见[[Knowledge Base/Notes/Research/Health/private source note]]之后的内容很短。"
+    )
+    chunk = embeddings.chunk_text("Workload constraint", body)[1]
+    page = SimpleNamespace(search_body="", body="", title="Workload constraint")
+    excerpt = find_results.semantic_excerpt(page, "", chunk, None)
+    assert excerpt.startswith("source note]]")
+    identity = bridges.StripIdentity(
+        path="Knowledge Base/Notes/Research/Health/private source note.md",
+        ref=SOURCE_REF,
+        title="Private source title",
     )
 
-    with request_scope(_external()):
-        found = commands.op_ask_memory(
-            vault, query="capacity", mode="keyword", limit=10, detail=detail
-        )
-
-    excerpt = next(hit for hit in found["hits"] if hit["path"] == BRIDGE_PATH)["excerpt"]
-    assert "Do not assume unlimited evening capacity" in excerpt
-    assert "Compiled from" in excerpt
-    assert "private" not in excerpt.casefold()
-    assert not excerpt.endswith("…")
+    assert bridges.strip_provenance({"excerpt": excerpt}, (identity,)) == {}
 
 
 def test_a_cut_excerpt_is_unchanged_in_an_ungoverned_vault(vault: Path) -> None:
     (vault / BRIDGE_PATH).parent.mkdir(parents=True, exist_ok=True)
     (vault / BRIDGE_PATH).write_text(
-        _bridge_text() + "\n" + SOURCE_PATH + _words_before_zebra(11), encoding="utf-8"
+        _bridge_text()
+        + f"\n{SOURCE_PATH} for detail. "
+        + "filler " * 11
+        + "zebra\n",
+        encoding="utf-8",
     )
     find_module.clear_cache()
 
@@ -1098,28 +1108,15 @@ def test_a_truncated_read_body_of_a_page_under_a_release_strip_is_withheld(
 ) -> None:
     # The source name holds spaces, so the whole-word cut of the bounded body ends inside it.
     source_path = "Knowledge Base/Notes/Research/Health/private source note.md"
-    padding = "filler " * 57 + "\n\n"
     bridge, _source = _write_bridge_fixture(
         vault,
         approval=True,
         source_path=source_path,
         source_ceiling=egress.LEVEL_EXCERPT,
-        bridge_padding=padding,
+        bridge_padding="filler " * 57 + "\n\n",
     )
-    # The source is readable at the excerpt level, so only the bridge strip removes it. The bridge
-    # page itself is capped at the excerpt level, so a read returns the bounded body.
-    _write_policy(vault, "scopes", "bridge", _scope_document(SCOPE_B, path=BRIDGE_PATH))
-    _write_policy(
-        vault,
-        "rules",
-        "bridge",
-        _rule_document(
-            scope_ids=(SCOPE_B,),
-            ceiling=egress.LEVEL_EXCERPT,
-            rule_id="01ARZ3NDEKTSV4RRFFQ69G5FBD",
-        ),
-    )
-    policy._CACHE.clear()
+    # The source is readable at the excerpt level, so only the bridge strip removes it.
+    _cap_bridge_page_at_excerpt_level(vault)
     cut = egress._excerpt_of(bridge.read_text(encoding="utf-8").split("\n---\n", 1)[1])
     assert cut.endswith("private source …")
 
@@ -1132,6 +1129,25 @@ def test_a_truncated_read_body_of_a_page_under_a_release_strip_is_withheld(
     stem = "private source note"
     for length in range(4, len(stem) + 1):
         assert stem[:length] not in wire, stem[:length]
+
+
+def test_an_uncut_read_body_of_a_page_under_a_release_strip_keeps_its_text_without_the_source(
+    vault: Path,
+) -> None:
+    _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_ceiling=egress.LEVEL_EXCERPT,
+        bridge_relations=_PLAIN_MENTION,
+    )
+    _cap_bridge_page_at_excerpt_level(vault)
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=BRIDGE_PATH)
+
+    assert page["body_truncated"] is False
+    assert "Do not assume unlimited evening capacity" in page["body"]
+    assert "private" not in page["body"].casefold()
 
 
 def test_due_bridge_is_in_default_attention_with_date_stable_signal(
@@ -2451,7 +2467,7 @@ def test_provenance_reference_context_uses_exact_aliases_not_substrings() -> Non
             {
                 "source_title": "ApolloX",
                 "candidate_id": "ApolloX",
-                "excerpt": "ApolloX is unrelated.",
+                "context": "ApolloX is unrelated.",
             },
             {"source_title": "Apollo"},
         ]
@@ -2463,7 +2479,7 @@ def test_provenance_reference_context_uses_exact_aliases_not_substrings() -> Non
         {
             "source_title": "ApolloX",
             "candidate_id": "ApolloX",
-            "excerpt": "ApolloX is unrelated.",
+            "context": "ApolloX is unrelated.",
         }
     ]
 
@@ -2562,7 +2578,7 @@ def test_provenance_compiles_alias_patterns_once_per_strip(
         for index in range(100)
     )
     aliases = bridges._embedded_identity_aliases(identities)
-    payload = {"entries": [{"excerpt": "ordinary prose"} for _ in range(30)]}
+    payload = {"entries": [{"context": "ordinary prose"} for _ in range(30)]}
     original_compile = bridges.re.compile
     calls = 0
 

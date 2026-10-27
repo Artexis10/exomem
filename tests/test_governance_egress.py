@@ -665,20 +665,13 @@ def test_op_find_compact_releases_nothing_of_a_page_the_ceiling_withholds(vault:
 
 
 def test_compact_excerpt_is_a_prefix_of_the_excerpt_full_mode_releases() -> None:
-    """The strip runs before the cut, so a cut cannot end inside a removed identity."""
-    identity = bridges.StripIdentity(
-        path=OPEN_PATH, ref="exomem://memory/open", title="Quarterly Acquisition Plan"
-    )
-    decision = Decision(level=egress.LEVEL_FULL, release_strip=(identity,))
-    # The cut falls after "Quarterly" and before the rest of the title.
-    excerpt = "filler " * 32 + "Quarterly Acquisition Plan outlines the next steps " * 3
-    hit = _hit(OPEN_PATH, excerpt=excerpt)
+    """A cut compact excerpt never reaches past what full mode releases for the hit."""
+    hit = _hit(OPEN_PATH, excerpt="filler words " * 40)
 
-    full = egress.project(hit, egress.LEVEL_FULL, decision=decision)
-    compact = egress.project(hit, egress.LEVEL_FULL, decision=decision, compact=True)
+    full = egress.project(hit, egress.LEVEL_FULL)
+    compact = egress.project(hit, egress.LEVEL_FULL, compact=True)
 
     assert full is not None and compact is not None
-    assert "Quarterly" not in full["excerpt"]
     assert compact["excerpt"].endswith("…")
     cut = compact["excerpt"].removesuffix(" …")
     assert len(cut) <= egress.COMPACT_HIT_EXCERPT_MAX
