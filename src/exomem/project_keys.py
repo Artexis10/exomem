@@ -25,6 +25,7 @@ from pathlib import Path
 
 import yaml
 
+from .held_fs import name_variants
 from .kbdir import kb_prefix
 from .vault import (
     PathGuard,
@@ -32,7 +33,6 @@ from .vault import (
     batch_atomic_write,
     kb_root,
     read_guarded_text,
-    vault_name_key,
 )
 
 log = logging.getLogger(__name__)
@@ -255,11 +255,10 @@ def reuse_folder_spelling(folder: str, existing: Iterable[str]) -> str:
 
     An exact match wins; among variants the first in sorted order is stable.
     """
-    names = sorted(set(existing))
+    names = set(existing)
     if folder in names:
         return folder
-    key = vault_name_key(folder)
-    return next((name for name in names if vault_name_key(name) == key), folder)
+    return next(iter(name_variants(names, folder)), folder)
 
 
 def child_folder_names(directory: Path) -> list[str]:

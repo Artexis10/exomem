@@ -244,11 +244,11 @@ Conditions where it's a regression.
 
 ## experiment
 
-**Location:** `Notes/Experiments/<Domain>/` where the folder is the title-cased
-spelling of the frontmatter `domain` key (`workflow` lives in `Workflow/`), or
-another sub-domain that emerges (`Research`, `Ops`, etc.). Reuse the spelling of a
-folder that already exists; never create a second folder that differs only in
-case. Add a new sub-domain only when the first experiment in that domain is being written.
+**Location:** `Notes/Experiments/<Domain>/`, where the folder is the domain's path
+label (`workflow` lives in `Workflow/`), or another sub-domain that emerges
+(`Research`, `Ops`, etc.). A write reuses a folder that differs only in case or
+Unicode form, and refuses with `AMBIGUOUS_DOMAIN_DESTINATION` while two such folders
+exist. Add a new sub-domain only when the first experiment in that domain is being written.
 **Naming:** `YYYY-MM-<slug>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
 **Mutability:** Editable while ongoing; once concluded, body is read-only except for supersession or follow-up notes that link back.
 **Required frontmatter:** `type: experiment`, `domain`, `status`, `created`, `updated`, `started`, `duration`, `tags`. Optional: `n` (sample size, default 1), `concluded`, `outcome`, `hypothesis`, `sources`, `supersedes`, `superseded_by`.

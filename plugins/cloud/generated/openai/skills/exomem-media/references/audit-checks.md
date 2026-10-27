@@ -68,3 +68,13 @@ discard either with a reason; a later edit of the view never resolves them. A
 `VIEW_INVALID` edit kept in place or a `VIEW_DELETED` view is resolved when the
 owner saves a valid edit of the view, or when you discard it. Discarding an
 invalid view that is still in place renders the view from the store again.
+
+## Path variants
+
+`path_variants` (opt-in: `categories=["path_variants"]`) lists sibling names
+that one portable filesystem would hold as a single entry. Names equal after
+Unicode NFC normalisation and casefolding are defects (`error`): the vault
+cannot be exported or opened on Windows or default macOS. Names equal only after
+NFKC folding and dropping separators are candidates (`info`) for a human call.
+Nothing merges automatically; join the folders by hand with `manage_memory_file`
+and keep the spelling that already holds most pages.

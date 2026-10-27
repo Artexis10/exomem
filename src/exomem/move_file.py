@@ -36,6 +36,7 @@ from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
+    FrontmatterError,
     InboundLink,
     LogWritePlan,
     PathGuard,
@@ -45,11 +46,14 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     find_inbound_wikilinks,
+    folder_split_warnings,
     in_append_only_tree,
     in_curated_tree,
+    parse_frontmatter,
     plan_log_entry,
     read_guarded_text,
     resolve_under_vault,
+    respell_new_path,
     walk_vault_md,
     write_log_entry,
 )
@@ -170,6 +174,11 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool
             ) from None
         if error.code == "DESTINATION_EXISTS":
             raise MoveFileError("DEST_EXISTS", "destination already exists") from None
+        if error.code == "PATH_VARIANT_EXISTS":
+            raise MoveFileError(
+                "PATH_VARIANT_EXISTS",
+                "a destination folder already exists in another case or Unicode form",
+            ) from None
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
@@ -233,7 +242,6 @@ def _repoint_artifact(old_binary: str, new_binary: str):
 
     def transform(text: str) -> str:
         from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
-        from .vault import parse_frontmatter
 
         frontmatter, _body, block = parse_frontmatter(text, strict=True)
         if block is None:
@@ -262,7 +270,7 @@ class InboundRewrite:
 
     path: str
     absolute: Path
-    #: The append-only tree that holds the page, or None for a mutable page.
+    #: The append-only tree that refuses the rewrite, or None when the move may write it.
     append_only: str | None
     #: Links whose bytes the move changes; zero leaves the page untouched.
     changes: int
@@ -300,8 +308,46 @@ def plan_inbound_rewrites(
         # the opposite of what the guard is for.
         if rel.rsplit("/", 1)[-1] == "index.md":
             append_tree = None
+        # Only Evidence takes this exception; a Sources page keeps the refusal.
+        elif append_tree == "Evidence" and n_changed:
+            repointed = _repoint_back_references(text, old_rel, new_rel, n_changed)
+            if repointed is not None:
+                new_text, append_tree = repointed, None
         plans.append(InboundRewrite(rel, abs_file, append_tree, n_changed, new_text, guard))
     return plans
+
+
+def _repoint_back_references(text: str, old_rel: str, new_rel: str, changes: int) -> str | None:
+    """`text` with the move applied to its `ingested_into` field alone, or None.
+
+    `ingested_into` is the back-reference that note writes maintain on captured
+    material; it is not captured content. When every one of the `changes` links
+    sits in that field, the field is patched where the YAML parser places it,
+    so the body and every other field keep their bytes. Any other link, or a
+    page the parser cannot read, leaves the page refused as append-only.
+    """
+    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+    try:
+        frontmatter, _body, block = parse_frontmatter(text, strict=True)
+    except FrontmatterError:
+        return None
+    entries = frontmatter.get("ingested_into") if block is not None else None
+    if not isinstance(entries, list):
+        return None
+    repointed: list[Any] = []
+    moved = 0
+    for entry in entries:
+        if isinstance(entry, str):
+            entry, count = _rewrite_wikilinks(entry, old_rel, new_rel)
+            moved += count
+        repointed.append(entry)
+    if moved != changes:
+        return None
+    try:
+        return splice_markdown_frontmatter(text, {"ingested_into": repointed})
+    except FrontmatterSpliceError:
+        return None
 
 
 def move_file(
@@ -417,6 +463,19 @@ def move_file(
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
+    respelled = respell_new_path(vault_root, new_rel, replacing=old_rel)
+    if respelled == old_rel != new_rel:
+        # Re-spelling led back to the file's own folder: only moving that
+        # folder can change its spelling.
+        raise MoveFileError(
+            code="PATH_VARIANT_EXISTS",
+            reason=(
+                f"folder already exists as '{old_rel.rsplit('/', 1)[0]}'; "
+                "move that folder to change its spelling"
+            ),
+        )
+    if respelled != new_rel:
+        new_abs, new_rel = vault_root / respelled, respelled
     from .governance import raw_protection
 
     if raw_protection.marked(old_rel) and not raw_protection.marked(new_abs.name):
@@ -641,7 +700,7 @@ def move_file(
     if limited_mover:
         inbound = [hit for hit in inbound if visible(hit.path)]
 
-    warnings: list[str] = []
+    warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
     files_touched: list[str] = []
     wikilinks_updated = 0
     # For any other mover, every linking page is rewritten, including pages the

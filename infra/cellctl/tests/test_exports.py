@@ -140,6 +140,7 @@ def test_a_larger_cell_gets_the_deadline_once_per_started_10_gib():
 # The controller branches only on whether the Job's token is a C6 code.
 @pytest.mark.parametrize(("reported", "recorded"), [
     ("SOURCE_CHANGED_DURING_EXPORT", "SOURCE_CHANGED_DURING_EXPORT"),
+    ("CASE_COLLISION", "CASE_COLLISION"),
     ("Traceback: /data/vault/Example note.md", "EXPORT_FAILED"),
 ])
 def test_a_failed_job_reaches_the_row_only_as_a_c6_code(reported, recorded):

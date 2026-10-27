@@ -90,6 +90,7 @@ from .vault import (
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
+    respell_new_path,
     rotate_log_if_needed,
     unique_path,
     writer_link_visibility,
@@ -1141,9 +1142,7 @@ def _type_default(
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
         registry = project_registry or _load_keys(vault_root)
-        folder /= registry.folder_for(project) or project_keys_module.reuse_folder_spelling(
-            project.capitalize(), project_keys_module.child_folder_names(folder)
-        )
+        folder /= registry.folder_for(project) or project.capitalize()
     elif definition.partition == "domain":
         assert domain  # validated above
         folder /= _domain_folder(domain)
@@ -1308,7 +1307,10 @@ def _resolve_path(
         topics=topics,
         predecessor=predecessor,
     )
-    folder, stem = placement.folder, placement.stem
+    folder = vault_root / respell_new_path(
+        vault_root, placement.folder.relative_to(vault_root).as_posix()
+    )
+    stem = placement.stem
     from .governance import connector_boundary
 
     try:
@@ -2061,8 +2063,11 @@ def note(
             root,
             home,
             destination=destination,
-            default_destination=canonical_vault_rel(
-                root, (default.folder / f"{default.stem}.md").relative_to(root).as_posix()
+            default_destination=respell_new_path(
+                root,
+                canonical_vault_rel(
+                    root, (default.folder / f"{default.stem}.md").relative_to(root).as_posix()
+                ),
             ),
             source=source,
         )

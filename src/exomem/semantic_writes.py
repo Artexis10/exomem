@@ -3149,6 +3149,8 @@ def _commit_existing(
                 committed = replace(committed, index_report=index_reports[0])
             return committed
         except vault.PathGuardError as error:
+            if error.code == "PATH_VARIANT_EXISTS":
+                raise SemanticWriteError(error.code, error.reason) from error
             # A caller-captured auxiliary guard (log/index) lost a race the
             # wide boundary used to prevent. The batch aborted atomically —
             # nothing was written — so surface the documented retryable
@@ -5009,6 +5011,8 @@ def _commit_creation(
                 ) if preflight.origin_inputs is not None else None,
             )
         except vault.PathGuardError as error:
+            if error.code == "PATH_VARIANT_EXISTS":
+                raise SemanticWriteError(error.code, error.reason) from error
             _recheck_origin_guards(root, origin_guards)
             if vocabulary_guards:
                 raise SemanticWriteError(

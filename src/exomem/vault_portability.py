@@ -28,8 +28,8 @@ from typing import Any, BinaryIO
 from . import __version__, reserved_paths, restore_journal, state_migration, state_paths
 from .governance import connector_boundary
 from .governance.principal import effective_principal
+from .held_fs import vault_name_key
 from .kbdir import kb_dirname
-from .vault import vault_name_key
 
 MANIFEST_NAME = "exomem-manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
@@ -47,16 +47,12 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 class PortabilityError(RuntimeError):
     """Stable, content-free portability failure. On RESOURCE_LIMIT_EXCEEDED,
-    `limit` names the PortabilityLimits field that was exceeded. On
-    CASE_COLLISION, `groups` counts the colliding path groups, never the paths."""
+    `limit` names the PortabilityLimits field that was exceeded."""
 
-    def __init__(
-        self, code: str, reason: str, *, limit: str | None = None, groups: int | None = None
-    ) -> None:
+    def __init__(self, code: str, reason: str, *, limit: str | None = None) -> None:
         self.code = code
         self.reason = reason
         self.limit = limit
-        self.groups = groups
         super().__init__(f"{code}: {reason}")
 
 
@@ -764,20 +760,20 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
                         limit="max_total_bytes",
                     )
     snapshots.sort(key=lambda snapshot: snapshot.path)
-    spellings: dict[str, set[str]] = {}
+    folded: set[str] = set()
+    directory_spellings: dict[str, str] = {}
     for snapshot in snapshots:
+        collision_key = vault_name_key(snapshot.path)
+        if collision_key in folded:
+            _fail("CASE_COLLISION", "vault paths collide on a case-insensitive filesystem")
+        folded.add(collision_key)
         parts = PurePosixPath(snapshot.path).parts
-        for index in range(1, len(parts) + 1):
+        for index in range(1, len(parts)):
             spelling = "/".join(parts[:index])
-            spellings.setdefault(vault_name_key(spelling), set()).add(spelling)
-    groups = sum(1 for variants in spellings.values() if len(variants) > 1)
-    if groups:
-        raise PortabilityError(
-            "CASE_COLLISION",
-            "vault paths collide on a case-insensitive filesystem; "
-            "run the path_variants audit in your own memory to see them",
-            groups=groups,
-        )
+            directory_key = vault_name_key(spelling)
+            prior = directory_spellings.setdefault(directory_key, spelling)
+            if prior != spelling:
+                _fail("CASE_COLLISION", "vault directories collide by case")
     return snapshots
 
 

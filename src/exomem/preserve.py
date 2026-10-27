@@ -51,7 +51,6 @@ from .vault import (
     PreparedBinaryContent,
     _is_reparse,
     batch_atomic_write,
-    canonical_vault_rel,
     content_hash,
     document_newline,
     folder_split_warnings,
@@ -59,6 +58,7 @@ from .vault import (
     parse_frontmatter,
     prepend_log_entry,
     read_guarded_text,
+    respell_new_path,
     with_newline,
     yaml_scalar,
 )
@@ -513,15 +513,15 @@ def admit_destination(
 def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
     """The Evidence family folder for already-valid destination segments.
 
-    A segment that matches an existing sibling by `vault_name_key` takes that
-    sibling's spelling, so `food` lands in an existing `Food`.
+    Each folder on the way takes an existing sibling's spelling when it matches
+    by `vault_name_key`, so scope `food` lands in an existing `Food`.
     """
     root = kb_root(vault_root)
-    relative = canonical_vault_rel(
+    relative = respell_new_path(
         vault_root, (root / "Evidence" / scope / category).relative_to(vault_root).as_posix()
     )
-    scope_spelled, category_spelled = relative.split("/")[-2:]
-    return root / "Evidence" / scope_spelled / category_spelled
+    evidence, scope_spelled, category_spelled = relative.split("/")[-3:]
+    return root / evidence / scope_spelled / category_spelled
 
 
 def evidence_artifact(

@@ -258,9 +258,6 @@ def main(argv: list[str] | None = None) -> int:
         result = {"error": error.code, "diagnostic": _failure_diagnostic(error), **usage}
     except vault_portability.PortabilityError as error:
         result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
-        if error.groups is not None:
-            # A count only: the owner reads the paths with the path_variants audit.
-            result["groups"] = error.groups
     except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
         result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")

@@ -815,9 +815,10 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
 
 
 def _destination(vault_root: Path, *parts: str) -> str:
-    from .vault import canonical_vault_rel
+    from .vault import respell_new_path
 
-    return canonical_vault_rel(
+    # The spelling the capture lands under, so a receipt names the folder written.
+    return respell_new_path(
         vault_root, kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix()
     )
 
