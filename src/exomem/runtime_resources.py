@@ -169,6 +169,20 @@ def configure_onnx_session_options(options: Any, *, default_threads: int | None 
     options.inter_op_num_threads = 1
 
 
+def configure_onnx_media_session_options(options: Any, *, default_threads: int) -> None:
+    """Size a media model session for a small, quiet footprint.
+
+    The arena and thread spinning stay off. Prepacking stays on unless weights
+    are shared, as for the embedder: prepacked copies are private to a process.
+    """
+    configure_onnx_session_options(options, default_threads=default_threads)
+    options.enable_cpu_mem_arena = False
+    if onnx_share_weights_enabled():
+        options.add_session_config_entry("session.disable_prepacking", "1")
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+
+
 def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Whether served ONNX sessions should retain file-backed shared weights.
 

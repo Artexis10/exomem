@@ -200,11 +200,7 @@ class OnnxWhisperBackend:
 
             raise ExtractionUnavailable(f"offline speech engine unavailable: {error}") from error
         options = ort.SessionOptions()
-        runtime_resources.configure_onnx_session_options(options, default_threads=2)
-        options.enable_cpu_mem_arena = False
-        options.add_session_config_entry("session.disable_prepacking", "1")
-        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        runtime_resources.configure_onnx_media_session_options(options, default_threads=2)
         runtime = dict(sess_options=options, providers=["CPUExecutionProvider"])
         model = onnx_asr.load_model(
             "whisper", artifact.root, quantization=artifact.spec["artifact"]["quantization"], **runtime,
