@@ -31,6 +31,7 @@ from typing import Any
 
 from release_arm import MeasurementRefused, extract_release, latest_release_tag, prepare_tag_runtime
 
+from exomem import latency_watch
 from exomem.request_latency_contract import load_contract
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,13 +50,8 @@ NO_ALLOWANCE = "allowance-not-set"
 
 
 def percentile(values: list[float], q: float) -> float | None:
-    ordered = sorted(values)
-    if not ordered:
-        return None
-    rank = (len(ordered) - 1) * q / 100
-    low = int(rank)
-    high = min(low + 1, len(ordered) - 1)
-    return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
+    # The live watcher's nearest-rank definition, so "meets target" here means what its p95 bar means.
+    return latency_watch.nearest_rank(sorted(values), q) if values else None
 
 
 def group_interval(medians: list[float], *, confidence: float, family: int) -> dict[str, Any]:

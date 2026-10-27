@@ -526,8 +526,8 @@ async def run_mcp_canary(
             for attempt in series["attempts"]
             if attempt["phase"] == "measured"
         )
-        series["p50_ms"] = round(latency_watch._percentile(measured, 50), 3) if measured else None
-        series["p95_ms"] = round(latency_watch._percentile(measured, 95), 3) if measured else None
+        series["p50_ms"] = round(latency_watch.nearest_rank(measured, 50), 3) if measured else None
+        series["p95_ms"] = round(latency_watch.nearest_rank(measured, 95), 3) if measured else None
     complete = all(
         series["availability"] != "incomplete"
         and series["measured_attempts"] == samples

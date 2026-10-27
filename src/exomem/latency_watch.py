@@ -205,8 +205,8 @@ def _key(sample: Sample) -> tuple:
     )
 
 
-def _percentile(sorted_values: list[float], pct: float) -> float:
-    """Nearest-rank percentile of an ascending list (non-empty)."""
+def nearest_rank(sorted_values: list[float], pct: float) -> float:
+    """Nearest-rank percentile of an ascending list (non-empty); every latency report and gate uses it."""
     rank = max(1, math.ceil(pct / 100.0 * len(sorted_values)))
     return sorted_values[rank - 1]
 
@@ -260,7 +260,7 @@ def summarize(
             and bar.covers(sample.tool, sample.deep)
         )
         ceiling = bar.threshold_ms if bar else None
-        percentile = _percentile(values, bar.percentile) if values and bar else None
+        percentile = nearest_rank(values, bar.percentile) if values and bar else None
         breach = bool(
             matches
             and ceiling is not None
@@ -337,9 +337,9 @@ def summarize(
                     for item in group
                 ),
                 "unavailable_joins": sum(not item.correlated for item in group),
-                "p50_ms": round(_percentile(values, 50), 3) if values else None,
-                "p90_ms": round(_percentile(values, 90), 3) if values else None,
-                "p95_ms": round(_percentile(values, 95), 3) if values else None,
+                "p50_ms": round(nearest_rank(values, 50), 3) if values else None,
+                "p90_ms": round(nearest_rank(values, 90), 3) if values else None,
+                "p95_ms": round(nearest_rank(values, 95), 3) if values else None,
                 "percentile": bar.percentile if bar else None,
                 "percentile_ms": round(percentile, 3) if percentile is not None else None,
                 "comparison": bar.comparison if bar else None,
