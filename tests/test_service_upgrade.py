@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -424,6 +425,39 @@ def test_retention_failure_is_reported_without_failing_the_upgrade(tmp_path: Pat
     retention = json.loads(result.stdout)["release_retention"]
     assert [failure["release"] for failure in retention["failures"]] == [stuck.name]
     assert stuck.name not in retention["removed"]
+    assert retention["bytes_freed_is_lower_bound"] is True
+
+
+def test_interrupted_retention_still_reports_what_it_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from exomem import service_upgrade
+
+    runtime = tmp_path / "managed"
+    runtime.mkdir(mode=0o700)
+    releases = tmp_path / "releases"
+    releases.mkdir(mode=0o700)
+    serving = _old_release(releases)
+    first, second = sorted(
+        (_old_release(releases), _old_release(releases)), key=lambda release: release.name
+    )
+    remove = shutil.rmtree
+
+    def interrupted_rmtree(path: str, *args: object, **kwargs: object) -> None:
+        if Path(path).name == second.name:
+            raise KeyboardInterrupt
+        remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(service_upgrade.shutil, "rmtree", interrupted_rmtree)
+    active = {"python": str(serving / "bin" / "python"), "version": "0.2.0"}
+
+    report = service_upgrade._retain_releases(runtime, {"active": active}, {"active": active}, active)
+
+    assert report["skipped"] == "interrupted"
+    assert report["bytes_freed_is_lower_bound"] is True
+    assert {release.name for release in releases.iterdir()} == {serving.name, second.name}
+    assert report["removed"] == [first.name]
+    assert "removing 2 unused release directories" in capsys.readouterr().err
 
 
 def test_operator_lock_refuses_symlink_without_touching_target(tmp_path: Path) -> None:
@@ -721,6 +755,7 @@ def test_wheel_package_mismatch_refuses_staging(tmp_path: Path) -> None:
     wheel = _wheel(tmp_path / "exomem-9.9.9-py3-none-any.whl", name="not-exomem")
     with pytest.raises(RuntimeError, match="not an Exomem wheel"):
         service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "", wheel, "a" * 40)
+    assert list((tmp_path / "releases").iterdir()) == []
 
 
 def test_wheel_source_mutation_refuses_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

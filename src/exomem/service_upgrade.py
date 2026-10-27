@@ -47,10 +47,6 @@ _BASIC_AUTH_RE = re.compile(r"(?i)(authorization\s*:\s*basic\s+)\S+")
 #: The `uuid4().hex` name `stage()` gives each release directory. A format
 #: check: only an entry this module could have created is ever removed.
 _RELEASE_NAME_RE = re.compile(r"[0-9a-f]{32}")
-
-
-def _new_release_name() -> str:
-    return uuid.uuid4().hex
 PROFILES = {
     "lean": "",
     "onnx": "embeddings-onnx",
@@ -404,7 +400,7 @@ def stage(
     releases.mkdir(mode=0o700, exist_ok=True)
     if releases.stat().st_uid != os.getuid() or releases.stat().st_mode & 0o077:
         raise RuntimeError("managed releases directory is not owner-only")
-    target_dir = releases / _new_release_name()
+    target_dir = releases / uuid.uuid4().hex  # the format _RELEASE_NAME_RE checks
     target_dir.mkdir(mode=0o700)
     try:
         return _stage_into(target_dir, launcher, profile, package_version, wheel, source_revision)
@@ -662,12 +658,20 @@ def _retain_releases(
     Runs once the staged target is confirmed active. Keeps the serving release,
     the one it replaced and any release the manager still records, and keeps
     every entry it cannot prove is an unused release this module created. The
-    launcher and the unit's initial worker live outside `releases/`. With a
-    failure, `bytes_freed` omits what a partial removal freed. Like
-    the hook refresh, it never fails an upgrade that already succeeded: a
-    problem is reported, not raised.
+    launcher and the unit's initial worker live outside `releases/`. A failed
+    or interrupted removal frees bytes it cannot count, so `bytes_freed` is then
+    a lower bound. An interrupt stops removal and still returns the report, so
+    the caller can print the upgrade result. Like the hook refresh, it never
+    fails an upgrade that already succeeded: a problem is reported, not raised.
     """
-    report: dict[str, Any] = {"removed": [], "bytes_freed": 0, "kept": {}, "failures": [], "skipped": None}
+    report: dict[str, Any] = {
+        "removed": [],
+        "bytes_freed": 0,
+        "bytes_freed_is_lower_bound": False,
+        "kept": {},
+        "failures": [],
+        "skipped": None,
+    }
     releases = _releases_directory(runtime_dir)
     try:
         info = releases.lstat()
@@ -680,26 +684,39 @@ def _retain_releases(
             _uv_stderr_tail(str(error).encode("utf-8", errors="replace")) or type(error).__name__
         )
         return report
+    unused: list[os.DirEntry[str]] = []
     for entry in entries:
         try:
             entry_info = entry.stat(follow_symlinks=False)
-            if not _RELEASE_NAME_RE.fullmatch(entry.name) or not stat.S_ISDIR(entry_info.st_mode):
-                report["kept"][entry.name] = "not a release directory"
-                continue
-            if entry_info.st_uid != os.getuid():
-                report["kept"][entry.name] = "foreign owner"
-                continue
-            if (entry_info.st_dev, entry_info.st_ino) in in_use:
-                report["kept"][entry.name] = "in use"
-                continue
-            freed = _bytes_freed_by_removing(Path(entry.path))
-            shutil.rmtree(entry.path)
-        except Exception as error:  # noqa: BLE001 - must never fail a completed upgrade
-            reason = getattr(error, "strerror", None) or type(error).__name__
-            report["failures"].append({"release": entry.name, "error": reason})
+        except OSError as error:
+            report["failures"].append({"release": entry.name, "error": error.strerror or type(error).__name__})
             continue
-        report["removed"].append(entry.name)
-        report["bytes_freed"] += freed
+        if not _RELEASE_NAME_RE.fullmatch(entry.name) or not stat.S_ISDIR(entry_info.st_mode):
+            report["kept"][entry.name] = "not a release directory"
+        elif entry_info.st_uid != os.getuid():
+            report["kept"][entry.name] = "foreign owner"
+        elif (entry_info.st_dev, entry_info.st_ino) in in_use:
+            report["kept"][entry.name] = "in use"
+        else:
+            unused.append(entry)
+    if unused:
+        print(f"managed upgrade: removing {len(unused)} unused release directories", file=sys.stderr)
+    try:
+        for entry in unused:
+            try:
+                freed = _bytes_freed_by_removing(Path(entry.path))
+                shutil.rmtree(entry.path)
+            except Exception as error:  # noqa: BLE001 - must never fail a completed upgrade
+                reason = getattr(error, "strerror", None) or type(error).__name__
+                report["failures"].append({"release": entry.name, "error": reason})
+                report["bytes_freed_is_lower_bound"] = True
+                continue
+            report["removed"].append(entry.name)
+            report["bytes_freed"] += freed
+    except KeyboardInterrupt:
+        # The upgrade already succeeded; the caller must still print its result.
+        report["skipped"] = "interrupted"
+        report["bytes_freed_is_lower_bound"] = True
     return report
 
 
