@@ -647,6 +647,17 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
     return stem or str(path)
 
 
+def vault_name_key(name: str, *, form: str = "NFC") -> str:
+    """The identity key of one vault path part: normalise, then casefold.
+
+    Path identity belongs to the vault, not the host filesystem. Two names with
+    one key cannot sit in one folder, because Windows and default macOS would
+    hold them as a single entry. This is the only spelling of that rule;
+    `form="NFKC"` serves the looser audit and vocabulary comparisons.
+    """
+    return unicodedata.normalize(form, name).casefold()
+
+
 def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
@@ -667,7 +678,7 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 
         connector_boundary.require_create(vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix())
     try:
-        taken = {entry.name.casefold() for entry in directory.iterdir()}
+        taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
     except OSError:
         # Unlistable, most often because it does not exist yet. `exists()` is
         # the weaker test -- case-sensitive on Linux -- but it is the only one
@@ -682,7 +693,7 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         return candidate
     candidate = f"{stem}{suffix}"
     i = 2
-    while candidate.casefold() in taken:
+    while vault_name_key(candidate) in taken:
         candidate = f"{stem}-{i}{suffix}"
         i += 1
     return directory / candidate
@@ -4757,6 +4768,45 @@ def _create_parent_dirs(parent: Path, created_dirs: list[Path | _CreatedDirector
         created_dirs.append(directory)
 
 
+def sibling_name_variants(parent: Path, name: str) -> list[str]:
+    """Names in `parent` that share `name`'s `vault_name_key` but not its spelling.
+
+    Sorted, empty when `parent` is unreadable or absent.
+    """
+    key = vault_name_key(name)
+    try:
+        with os.scandir(parent) as entries:
+            return sorted(
+                entry.name
+                for entry in entries
+                if entry.name != name and vault_name_key(entry.name) == key
+            )
+    except OSError:
+        return []
+
+
+def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
+    """One warning per folder on the way to `directory` that already has a variant sibling.
+
+    An old split never blocks a write; it is named so the owner can merge it.
+    """
+    try:
+        relative = Path(os.path.abspath(directory)).relative_to(os.path.abspath(vault_root))
+    except ValueError:
+        return []
+    warnings: list[str] = []
+    current = Path(vault_root)
+    for part in relative.parts:
+        variants = sibling_name_variants(current, part)
+        if variants and (current / part).is_dir():
+            warnings.append(
+                f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
+                "run maintain_memory(mode='audit', category='path_variants') to see the split"
+            )
+        current = current / part
+    return warnings
+
+
 def _create_parent_dirs_held(
     vault_root: Path,
     parent: Path,
@@ -4792,6 +4842,17 @@ def _create_parent_dirs_held(
             if existing.error is None or existing.error.code != "MISSING":
                 raise PathGuardError(
                     "PATH_GUARD_UNSAFE", "batch directory is unsafe"
+                )
+            # Local structural invariant, like a parser check: one folder holds
+            # no two names with one vault_name_key. It fires only on a name that
+            # is not portable anyway, and an existing exact spelling never gets here.
+            variants = sibling_name_variants(
+                root / Path(*relative_parent.parts[: index - 1]), relative_parent.parts[index - 1]
+            )
+            if variants:
+                raise PathGuardError(
+                    "PATH_VARIANT_EXISTS",
+                    f"folder already exists as '{variants[0]}'; use that spelling",
                 )
             created = filesystem.parent(
                 relative,
@@ -5131,7 +5192,7 @@ def _batch_atomic_write_locked(
     for write in writes:
         destination = os.path.abspath(write.path)
         portable_destination = "/".join(
-            unicodedata.normalize("NFC", part).casefold() for part in Path(destination).parts
+            vault_name_key(part) for part in Path(destination).parts
         )
         if portable_destination in destinations:
             raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
@@ -6002,6 +6063,9 @@ def _canonical_kb_segment(rel: str) -> str:
 def is_casing_only_rewrite(canonical: str, original: str) -> bool:
     """True when `canonical` differs from `original` in letter casing alone.
 
+    Both sides are compared in NFC, so a decomposed spelling of a name that the
+    vault holds precomposed counts as the same name.
+
     THIS IS A SECURITY GUARD, not a nicety. `Path.resolve()` re-spells a path
     to its real on-disk casing — but it also follows symlinks, expands Windows
     8.3 short names and junctions, and collapses `..`. Any of those rewrite
@@ -6030,25 +6094,24 @@ def is_casing_only_rewrite(canonical: str, original: str) -> bool:
     `swapcase()`.) The guard can only ever err toward returning the caller's
     literal form, which is the fail-open behavior this module already promises.
     """
-    return len(canonical) == len(original) and canonical.casefold() == original.casefold()
+    canonical = unicodedata.normalize("NFC", canonical)
+    original = unicodedata.normalize("NFC", original)
+    return len(canonical) == len(original) and vault_name_key(canonical) == vault_name_key(original)
 
 
 def _respelled_against_disk(root: Path, relative: str) -> str | None:
-    """Re-spell each existing component of *relative* with its on-disk casing.
+    """Re-spell each existing component of *relative* with its on-disk spelling.
 
-    `Path.resolve()` reports the true casing on Windows, so this module got the
-    re-spell for free there and assumed every platform behaved that way. macOS
-    folds case exactly as NTFS does, but `realpath()` only resolves symlinks --
-    it hands back whatever spelling it was given -- so `canonical_vault_rel`
-    was an identity transform on the one other platform that needs it, and two
-    spellings of one page kept two identities.
+    `Path.resolve()` reports the true casing on Windows only; `realpath()` on
+    other hosts hands back whatever spelling it was given. The vault owns path
+    identity, so this walks the components and takes each existing entry's real
+    name when its `vault_name_key` matches, on every platform.
 
-    Walks the components instead, taking each existing entry's real name. An
-    exact match always wins, so a genuinely case-sensitive volume is never
-    redirected to a differently-cased sibling. The first component that does
-    not exist ends the walk and the remainder is preserved verbatim, matching
-    the non-strict `resolve()` this supplements. Returns None if a directory
-    cannot be read, so the caller keeps its fail-open behaviour.
+    An exact match always wins. When several siblings share the key (an old
+    split) and none matches exactly, the first in sorted order is taken, so the
+    answer is stable. The first component that does not exist ends the walk and
+    the remainder is preserved verbatim. Returns None if a directory cannot be
+    read, so the caller keeps its fail-open behaviour.
     """
     parts = tuple(part for part in relative.split("/") if part)
     if not parts:
@@ -6056,16 +6119,19 @@ def _respelled_against_disk(root: Path, relative: str) -> str | None:
     current = root
     spelled: list[str] = []
     for index, part in enumerate(parts):
-        folded = part.casefold()
+        key = vault_name_key(part)
         match: str | None = None
         try:
             with os.scandir(current) as entries:
+                variants: list[str] = []
                 for entry in entries:
                     if entry.name == part:
                         match = part
                         break
-                    if match is None and entry.name.casefold() == folded:
-                        match = entry.name
+                    if vault_name_key(entry.name) == key:
+                        variants.append(entry.name)
+                if match is None and variants:
+                    match = min(variants)
         except OSError:
             return None
         if match is None:
@@ -6100,8 +6166,9 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
 
     Fails open: any `OSError`/`ValueError` (vault momentarily unreachable, a
     path that escapes the root) returns `rel` unchanged — exactly today's
-    behavior. On a case-sensitive filesystem this is an identity transform for
-    existing paths.
+    behavior. The re-spell happens on every platform: a case-sensitive volume
+    is redirected to an existing sibling whose `vault_name_key` matches, unless
+    the caller's spelling exists exactly.
     """
     try:
         root = Path(vault_root)
@@ -6114,11 +6181,10 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     # a leading `/`, and `as_posix()` has already normalized those away, so
     # comparing raw would reject a legitimate re-spell over pure spelling noise.
     cleaned = str(rel).replace("\\", "/").lstrip("/")
-    if canonical == cleaned and os.name != "nt" and vault_casefolds(root):
+    if canonical == cleaned and os.name != "nt":
         # `resolve()` handed back the caller's own spelling. Either it was
-        # already correct or this platform does not re-spell at all; only a
-        # folding volume can tell those apart, and only there are the extra
-        # directory reads worth taking.
+        # already correct or this host does not re-spell at all. The vault owns
+        # path identity, so re-spell against the siblings on every volume.
         respelled = _respelled_against_disk(root, canonical)
         if respelled:
             canonical = respelled

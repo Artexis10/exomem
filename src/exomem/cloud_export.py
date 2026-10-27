@@ -31,6 +31,7 @@ EXPORT_FAILED = "EXPORT_FAILED"
 EXPORT_TOO_LARGE = "EXPORT_TOO_LARGE"
 EXPORT_UPLOAD_FAILED = "EXPORT_UPLOAD_FAILED"
 SOURCE_CHANGED_DURING_EXPORT = "SOURCE_CHANGED_DURING_EXPORT"
+EXPORT_CASE_COLLISION = "CASE_COLLISION"
 # A part PUT is idempotent, so a transient failure is retried this often.
 UPLOAD_ATTEMPTS = 3
 # A socket idle this long fails the part; a 64 MiB part has minutes on a slow link.
@@ -181,6 +182,8 @@ def _portability_code(error: vault_portability.PortabilityError) -> str:
     # The portability module's own fixed codes, mapped onto C6's.
     if error.code == "SOURCE_CHANGED_DURING_EXPORT":
         return SOURCE_CHANGED_DURING_EXPORT
+    if error.code == "CASE_COLLISION":
+        return EXPORT_CASE_COLLISION
     if error.code == "RESOURCE_LIMIT_EXCEEDED" and error.limit == "max_file_bytes":
         return EXPORT_TOO_LARGE
     return EXPORT_FAILED
@@ -255,6 +258,9 @@ def main(argv: list[str] | None = None) -> int:
         result = {"error": error.code, "diagnostic": _failure_diagnostic(error), **usage}
     except vault_portability.PortabilityError as error:
         result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
+        if error.groups is not None:
+            # A count only: the owner reads the paths with the path_variants audit.
+            result["groups"] = error.groups
     except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
         result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")

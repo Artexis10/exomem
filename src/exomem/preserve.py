@@ -51,8 +51,10 @@ from .vault import (
     PreparedBinaryContent,
     _is_reparse,
     batch_atomic_write,
+    canonical_vault_rel,
     content_hash,
     document_newline,
+    folder_split_warnings,
     kb_root,
     parse_frontmatter,
     prepend_log_entry,
@@ -509,8 +511,17 @@ def admit_destination(
 
 
 def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
-    """The Evidence family folder for already-valid destination segments."""
-    return kb_root(vault_root) / "Evidence" / scope / category
+    """The Evidence family folder for already-valid destination segments.
+
+    A segment that matches an existing sibling by `vault_name_key` takes that
+    sibling's spelling, so `food` lands in an existing `Food`.
+    """
+    root = kb_root(vault_root)
+    relative = canonical_vault_rel(
+        vault_root, (root / "Evidence" / scope / category).relative_to(vault_root).as_posix()
+    )
+    scope_spelled, category_spelled = relative.split("/")[-2:]
+    return root / "Evidence" / scope_spelled / category_spelled
 
 
 def evidence_artifact(
@@ -640,7 +651,9 @@ def preserve(
         artifact_bytes = None
         artifact_text = content
 
-    warnings: list[str] = []
+    warnings: list[str] = folder_split_warnings(
+        vault_root, evidence_folder(vault_root, scope_safe, category_safe)
+    )
     written_artifact = False
     sidecar_rel: str | None = None
     sidecar_ref: str | None = None

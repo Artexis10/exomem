@@ -81,6 +81,7 @@ from .vault import (
     ensure_canonical_h1,
     escape_wikilinks_for_log,
     find_body_wikilinks,
+    folder_split_warnings,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
@@ -153,7 +154,10 @@ def _plan_project_registrations(
         close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
             raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
-        folder = project_keys_module._title_case_slug(candidate)
+        research_dir = kb_root(vault_root) / "Notes" / "Research"
+        folder = project_keys_module._title_case_slug(
+            candidate, [*folders.values(), *project_keys_module.child_folder_names(research_dir)]
+        )
         if not text.endswith("\n"):
             text += "\n"
         text += (
@@ -1137,7 +1141,9 @@ def _type_default(
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
         registry = project_registry or _load_keys(vault_root)
-        folder /= registry.folder_for(project) or project.capitalize()
+        folder /= registry.folder_for(project) or project_keys_module.reuse_folder_spelling(
+            project.capitalize(), project_keys_module.child_folder_names(folder)
+        )
     elif definition.partition == "domain":
         assert domain  # validated above
         folder /= _domain_folder(domain)
@@ -2093,6 +2099,7 @@ def note(
     warnings = (
         list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
+        + folder_split_warnings(root, note_path.parent)
     )
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)

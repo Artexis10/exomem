@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from .vault import (
     batch_atomic_write,
     kb_root,
     read_guarded_text,
+    vault_name_key,
 )
 
 log = logging.getLogger(__name__)
@@ -247,9 +250,33 @@ def _fallback_registry() -> ProjectRegistry:
     )
 
 
-def _title_case_slug(key: str) -> str:
-    """Auto-derive a folder name from a slug key (`project-alpha` → `Project Alpha`)."""
-    return " ".join(part.capitalize() for part in key.split("-"))
+def reuse_folder_spelling(folder: str, existing: Iterable[str]) -> str:
+    """The existing folder name that shares `folder`'s `vault_name_key`, else `folder`.
+
+    An exact match wins; among variants the first in sorted order is stable.
+    """
+    names = sorted(set(existing))
+    if folder in names:
+        return folder
+    key = vault_name_key(folder)
+    return next((name for name in names if vault_name_key(name) == key), folder)
+
+
+def child_folder_names(directory: Path) -> list[str]:
+    """Names of the folders already on disk directly under `directory`."""
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entry.name for entry in entries if entry.is_dir())
+    except OSError:
+        return []
+
+
+def _title_case_slug(key: str, existing: Iterable[str] = ()) -> str:
+    """Auto-derive a folder name from a slug key (`project-alpha` → `Project Alpha`).
+
+    A name in `existing` with the same `vault_name_key` is reused as spelled.
+    """
+    return reuse_folder_spelling(" ".join(part.capitalize() for part in key.split("-")), existing)
 
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
@@ -371,6 +398,7 @@ def plan_project_keys(
     introductions: list[ProjectKeyIntroduction] = []
     replay_by_key = {item.key: item for item in replay_introductions}
     seen: set[str] = set()
+    known_folders = sorted(set(proposed_folders.values()) | set(child_folder_names(kb_root(root) / "Notes" / "Research")))
     for raw in keys:
         if type(raw) is not str or not _SLUG_RE.fullmatch(raw):
             raise ValueError(
@@ -394,8 +422,16 @@ def plan_project_keys(
         if close is not None:
             raise ProjectKeyTypoError(raw, close[0], close[1])
         folder_name = replay.folder if replay is not None else (
-            (folders or {}).get(raw) or _title_case_slug(raw)
+            (folders or {}).get(raw) or _title_case_slug(raw, known_folders)
         )
+        variant = reuse_folder_spelling(folder_name, known_folders)
+        if variant != folder_name:
+            raise ValueError(
+                f"PATH_VARIANT_EXISTS: project folder {folder_name!r} matches the "
+                f"existing folder {variant!r} apart from case or Unicode form; "
+                "use that spelling"
+            )
+        known_folders.append(folder_name)
         item_category = replay.category if replay is not None else category
         introduction = ProjectKeyIntroduction(raw, folder_name, item_category)
         introductions.append(introduction)

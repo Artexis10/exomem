@@ -815,7 +815,11 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
 
 
 def _destination(vault_root: Path, *parts: str) -> str:
-    return kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix()
+    from .vault import canonical_vault_rel
+
+    return canonical_vault_rel(
+        vault_root, kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix()
+    )
 
 
 def _source_destination(

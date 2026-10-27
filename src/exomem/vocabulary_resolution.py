@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -639,7 +638,7 @@ def _snapshot(value: Any) -> str:
 
 
 def _fold(value: str) -> str:
-    return unicodedata.normalize("NFKC", value).casefold()
+    return vault.vault_name_key(value, form="NFKC")
 
 
 def _nearby_definitions(
