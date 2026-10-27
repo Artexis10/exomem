@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import uvicorn
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
-from recall_parity import cli, private
+from recall_parity import capture, cli, packet, private
 from starlette.middleware import Middleware
 
 from exomem import find as find_module
@@ -49,6 +49,12 @@ MISSING_FROM_CLOUD = (
     "retry-with-fixed-interval",
     "autovacuum-thresholds-prevent-table-bloat",
 )
+#: Both arms return this note; the source vault holds a different text for it, so the
+#: packet can show whether the judge's view comes from the source vault or from an arm.
+REWRITTEN_IN_SOURCE = "circuit-breaker-for-downstream-failures"
+SOURCE_ONLY_BODY = "Text that only the source vault holds, never any arm's answer."
+#: Both arms return this note; the source vault does not hold it.
+ABSENT_FROM_SOURCE = "kill-switch-for-risky-releases"
 
 
 class _RecordBearer:
@@ -109,12 +115,31 @@ def arms(tmp_path, monkeypatch):
             s.stop()
 
 
+def _source_vault(tmp_path: Path) -> Path:
+    """The vault the judge's view is read from: a copy of the fixture with two differences."""
+
+    source = tmp_path / "source-vault"
+    shutil.copytree(FIXTURE_VAULT, source)
+    note = next(source.rglob(f"{REWRITTEN_IN_SOURCE}.md"))
+    note.write_text(
+        f"---\ntitle: Source Vault Title\n---\n\n{SOURCE_ONLY_BODY}\n", encoding="utf-8"
+    )
+    next(source.rglob(f"{ABSENT_FROM_SOURCE}.md")).unlink()
+    return source
+
+
+def _tree_state(root: Path) -> list[tuple[str, int, int]]:
+    return sorted(
+        (str(p.relative_to(root)), p.stat().st_size, p.stat().st_mtime_ns) for p in root.rglob("*")
+    )
+
+
 def _write_queries_log(directory: Path, monkeypatch) -> Path:
     class Hit:
         def as_dict(self):
             return {"path": "Knowledge Base/Notes/a.md", "type": "pattern", "signals": {}}
 
-    queries = [*JUDGED, "retry  backoff with JITTER", "ok", "?????????"]
+    queries = [*JUDGED, "retry  backoff with JITTER", "x", "?????????"]
     with monkeypatch.context() as patch:
         patch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
         patch.delenv("EXOMEM_DISABLE_QUERY_LOG", raising=False)
@@ -166,11 +191,14 @@ def test_paired_run_from_query_log_to_scored_difference(tmp_path, monkeypatch, c
     log = _write_queries_log(tmp_path / "logs", monkeypatch)
     root = tmp_path / "private"
     base = ["--private-dir", str(root)]
+    source = _source_vault(tmp_path)
+    source_before = _tree_state(source)
 
     def run(*argv: str) -> int:
         return cli.main([argv[0], *base, *argv[1:]])
 
-    # 1. sample: three structural drops leave exactly the four invented queries
+    # 1. sample: three structural drops (a one-character query among them) leave exactly
+    # the four invented queries
     assert (
         run(
             "sample",
@@ -212,17 +240,63 @@ def test_paired_run_from_query_log_to_scored_difference(tmp_path, monkeypatch, c
     assert manifest["sample"]["seed"] == 5
     assert manifest["sample"]["split_sizes"] == {"tuning": 2, "heldout": 2}
     assert manifest["outcomes"] == {"local": {"ok": 4}, "cloud": {"ok": 4}}
+    sampled = {c["query"] for c in private.read_jsonl(root / "sample" / "cases.jsonl")}
+    assert manifest["warmup_query"] == capture.WARMUP_QUERY not in sampled
     assert len(private.read_json(root / "runs" / "held" / "manifest.json")["case_ids"]) == 2
     assert seen == {"local": {f"Bearer {LOCAL_TOKEN}"}, "cloud": {f"Bearer {CLOUD_TOKEN}"}}
 
-    # 3. packet: one line per distinct pair, with nothing that names an arm
-    assert run("packet", "--run", "all") == 0
+    # 3. packet: one line per distinct pair; title and body come from the source vault alone
+    assert run("packet", "--run", "all", "--vault", str(source)) == 0
     lines = private.read_jsonl(root / "runs" / "all" / "judge" / "packet.jsonl")
     assert {frozenset(line) for line in lines} == {
-        frozenset({"pair_id", "query", "title", "path", "snippets"})
+        frozenset({"pair_id", "query", "path", "title", "body", "body_truncated", "missing"})
     }
     assert not any(arm in json.dumps(lines) for arm in ("local", "cloud"))
     assert len({(line["query"], line["path"]) for line in lines}) == len(lines)
+    key = private.read_json(root / "runs" / "all" / "key" / "arm-key.json")["pairs"]
+
+    def lines_of(stem: str) -> list[dict]:
+        return [line for line in lines if Path(line["path"]).stem == stem]
+
+    # A note both arms returned is one pair, and its view is the source vault's text.
+    rewritten = lines_of(REWRITTEN_IN_SOURCE)
+    assert any(len(key[line["pair_id"]]["ranks"]) == 2 for line in rewritten)
+    assert {(line["title"], line["body"], line["missing"]) for line in rewritten} == {
+        ("Source Vault Title", SOURCE_ONLY_BODY, False)
+    }
+    arm_excerpts = {
+        r["snippet"]
+        for arm in ("local", "cloud")
+        for row in private.read_jsonl(root / "runs" / "all" / "capture" / f"{arm}.jsonl")
+        for r in row["results"]
+        if r["id"].endswith(f"{REWRITTEN_IN_SOURCE}.md")
+    }
+    assert arm_excerpts and None not in arm_excerpts  # the arms did send an excerpt for it
+    shown = " ".join(f"{line['title']} {line['body']}" for line in lines)
+    assert not [excerpt for excerpt in arm_excerpts if excerpt in shown]
+
+    # A note only the local arm returned gets the same kind of view: frontmatter stripped.
+    retry = lines_of("retry-with-full-jitter-backoff")
+    assert any(set(key[line["pair_id"]]["ranks"]) == {"local"} for line in retry)
+    original = next(source.rglob("retry-with-full-jitter-backoff.md")).read_text(encoding="utf-8")
+    expected = original.split("\n---\n", 1)[1].strip()[: packet.BODY_CHARS].rstrip()
+    assert {(line["title"], line["body"]) for line in retry} == {
+        ("retry-with-full-jitter-backoff", expected)
+    }
+
+    # A note the source vault lacks is shown as missing, and counted.
+    absent = lines_of(ABSENT_FROM_SOURCE)
+    assert {(line["title"], line["body"], line["missing"]) for line in absent} == {
+        (None, None, True)
+    }
+    counts = private.read_json(root / "runs" / "all" / "key" / "packet-manifest.json")
+    assert counts["view"]["pairs_missing_from_vault"] == sum(line["missing"] for line in lines)
+    assert counts["view"]["pairs_missing_from_vault"] == len(absent)
+    assert counts["view"]["pairs_missing_from_vault_returned_by"] == {
+        arm: sum(arm in key[line["pair_id"]]["ranks"] for line in absent)
+        for arm in ("local", "cloud")
+    }
+    assert _tree_state(source) == source_before  # the source vault was only read
 
     # 4. score: the judge sees the packet only; the scorer reads the arm key
     judgments = tmp_path / "judgments.jsonl"

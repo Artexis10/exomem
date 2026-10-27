@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from recall_parity import capture, private, sampling, scoring
+from recall_parity import capture, packet, private, sampling, scoring
 
 from exomem import query_log
 
@@ -111,16 +112,32 @@ def test_sample_is_deterministic_in_seed_and_independent_of_file_order(tmp_path,
     )  # the manifest carries counts, never query text
 
 
-def test_private_directory_must_not_be_a_tracked_place(tmp_path):
-    assert private.private_root(tmp_path) == tmp_path.resolve()
-    assert private.private_root(private.REPO_ROOT / "benchmarks" / "private" / "x")
-    with pytest.raises(private.PrivateDirError):
-        private.private_root(private.REPO_ROOT / "src")
+def test_private_directory_outside_every_work_tree_is_allowed_and_artifacts_are_immutable(
+    tmp_path,
+):
+    assert private.private_root(tmp_path / "not-yet-created" / "run") == (
+        tmp_path / "not-yet-created" / "run"
+    )
 
     private.write_json(tmp_path / "once.json", {})
     with pytest.raises(FileExistsError):
         private.write_json(tmp_path / "once.json", {})
     assert (tmp_path / "once.json").stat().st_mode & 0o077 == 0
+
+
+def test_private_directory_inside_another_work_tree_must_be_git_ignored(tmp_path):
+    repo = tmp_path / "other-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text("scratch/\n", encoding="utf-8")
+    (repo / "src").mkdir()
+
+    # The rule lives in that repository's .gitignore; this code keeps no copy of it.
+    assert private.private_root(repo / "scratch") == repo / "scratch"  # not created yet
+    assert private.private_root(repo / "scratch" / "run" / "deeper")
+    for tracked_place in (repo, repo / "src", repo / "not-ignored" / "run"):
+        with pytest.raises(private.PrivateDirError, match="not git-ignored"):
+            private.private_root(tracked_place)
 
 
 class _Client:
@@ -186,6 +203,101 @@ def test_ranked_results_identify_documents_by_path_and_count_what_they_skip():
         (2, "b.md", None),
     ]
     assert (dropped, repeated) == (1, 1)
+
+
+def test_warm_up_calls_send_a_fixed_query_and_never_a_sampled_one(monkeypatch):
+    class Recorder:
+        def __init__(self):
+            self.queries = []
+
+        async def call_tool(self, name, arguments, *, raise_on_error, timeout):
+            self.queries.append(arguments["query"])
+            return _answer(structured=[])
+
+    clients = {}
+
+    async def open_session(stack, arm, token, **options):
+        clients[arm.name] = Recorder()
+        return clients[arm.name], "schema-digest"
+
+    monkeypatch.setattr(capture, "_open_session", open_session)
+    arms = [
+        capture.Arm("a", "http://a.invalid/mcp", "A"),
+        capture.Arm("b", "http://b.invalid/mcp", "B"),
+    ]
+    cases = [{"case_id": "q-1", "query": "first sampled"}, {"case_id": "q-2", "query": "second"}]
+
+    asyncio.run(
+        capture.capture_arms(
+            arms,
+            {"a": "token-a", "b": "token-b"},
+            cases,
+            tool="search_memory",
+            arguments={},
+            timeout_s=1.0,
+            warmup=1,
+            record=lambda arm, row: None,
+        )
+    )
+
+    sampled = [case["query"] for case in cases]
+    for recorder in clients.values():
+        warm_up, *measured = recorder.queries
+        assert warm_up not in sampled  # a sampled query would prime the cache for its own case
+        assert measured == sampled
+
+
+def _note(vault: Path, path: str, text: str) -> None:
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(text, encoding="utf-8")
+
+
+def test_judge_view_takes_the_frontmatter_title_and_a_bounded_body_without_frontmatter(tmp_path):
+    vault = tmp_path / "vault"
+    _note(
+        vault, "Notes/titled.md", "---\ntitle: A  Chosen Title\ntype: pattern\n---\n\nbody line\n"
+    )
+    _note(vault, "Notes/long-note.md", "---\ntype: pattern\n---\n" + "word " * 1000)
+
+    titled = packet.document_view(vault.resolve(), "Notes/titled.md")
+    long = packet.document_view(vault.resolve(), "Notes/long-note.md")
+
+    assert titled == {
+        "title": "A  Chosen Title",
+        "body": "body line",
+        "body_truncated": False,
+        "missing": False,
+    }
+    assert long["title"] == "long-note"  # no frontmatter title: the file name
+    assert len(long["body"]) <= packet.BODY_CHARS
+    assert long["body"].startswith("word word") and "type: pattern" not in long["body"]
+    assert long["body_truncated"] is True
+
+
+def test_judge_view_marks_a_path_the_vault_does_not_hold_as_missing(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    view = packet.document_view(vault.resolve(), "Notes/absent.md")
+
+    assert view == {"title": None, "body": None, "body_truncated": False, "missing": True}
+
+
+@pytest.mark.parametrize("how", ["parent-segment", "absolute", "symlink-out"])
+def test_judge_view_refuses_a_path_that_leaves_the_vault(tmp_path, how):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside text", encoding="utf-8")
+    (vault / "link.md").symlink_to(outside)
+    path = {
+        "parent-segment": "../outside.md",
+        "absolute": str(outside),
+        "symlink-out": "link.md",
+    }[how]
+
+    with pytest.raises(ValueError, match="leaves the source vault"):
+        packet.document_view(vault.resolve(), path)
 
 
 def test_bootstrap_interval_on_known_inputs():
