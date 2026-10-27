@@ -6,7 +6,7 @@ import copy
 import inspect
 import json
 import sqlite3
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -288,9 +288,10 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
             if recorded or authority.read_marker(root) is not None:
                 raise unavailable()
             return Proof((placement, None), None)
+        from .runtime import reader_pool
+
         # Ownership declarations use the unchanged metadata wire; payload reads still require the current schema.
-        reader, _ = connection._open_read_only(path, connection.BUSY_TIMEOUT_MS)
-        with closing(reader):
+        with connection.ownership_reader(path, reader_pool(root, path)) as reader:
             reader.execute("BEGIN")
             return _canonical(root, reader, placement, recorded, private=private, manager=manager)
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, collections.CollectionError,
@@ -331,7 +332,8 @@ class ReadScope:
 
         manager = _manager(self.root)
         try:
-            # A fresh connection and fresh placement bypass the body's WAL snapshot and resolution memo.
+            # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
+            # so neither this proof nor the body's WAL snapshot is reused.
             with state_paths.outside_resolution_scope(), state_paths.resolution_scope(), \
                     manager.consistency_guard(self.root, operation="collection_ownership_release"):
                 writer = bound_writer(self.root)
