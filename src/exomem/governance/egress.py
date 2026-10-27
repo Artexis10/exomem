@@ -3728,7 +3728,19 @@ def guard_working_set(
                 who=who, purpose=purpose,
             )
             # The record holds the compiled display; release filtering only removes fields, text or items, so the cap holds.
-            guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
+            slice_block = None
+            if "turn_slice" in guarded:
+                # The slice stands beside the map: one with no record is replaced by a stub and leaves the map as it is.
+                slice_block = context_views.pinned_slice_block(vault_root, guarded, caller)
+                if slice_block is None:
+                    slice_block = context_views.unavailable_turn_slice()
+                else:
+                    slice_block["items"] = _guard_view_items(
+                        vault_root, {**slice_block, "ref": context_views.SLICE_REF}, caller=caller, policy=policy,
+                        release_gate_active=release_gate_active, who=who, purpose=purpose,
+                    )
+                guarded["turn_slice"] = slice_block
+            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block)
 
     ctx = _packet_release(
         vault_root,
@@ -4404,11 +4416,11 @@ def _working_set_paths(
             for item in value:
                 _collect(item, ref_strict=ref_strict)
 
-    map_block = packet.get("map")
-    if isinstance(map_block, Mapping):
-        for item in map_block.get("items") or ():
-            if isinstance(item, Mapping):
-                _collect(item, ref_strict=not _item_has_own_page_field(item))
+    for view_block in (packet.get("map"), packet.get("turn_slice")):
+        if isinstance(view_block, Mapping):
+            for item in view_block.get("items") or ():
+                if isinstance(item, Mapping):
+                    _collect(item, ref_strict=not _item_has_own_page_field(item))
 
     for section in (
         "recent_context",

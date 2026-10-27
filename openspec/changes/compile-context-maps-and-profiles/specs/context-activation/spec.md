@@ -33,6 +33,7 @@ Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected b
   - "Categorical anchor evidence and resolution";
   - "A band resolution on an ordinary word yields to a different carried page";
   - the packet shape of "Bounded role lanes and the working-memory packet".
+- The two resolution requirements above ("Categorical anchor evidence and resolution" and the band requirement) SHALL also bind the turn slice, because its leads are what the anchors compile selects.
 - The role lanes' bounds and lifecycle rules SHALL also bind profiles that are compiled through those lanes.
 - The `continuity` and `conversation` contracts of the conversation-aware activation and continuity capabilities, and the retrieve-inject-hook rendering contract, SHALL bind `anchors` mode. `maps` mode SHALL follow "The maps packet".
 
@@ -49,7 +50,7 @@ Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected b
 - **THEN** activation returns the disabled abstention and no map
 
 ### Requirement: The maps packet
-In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT resolve anchors, call a model other than retrieval scorers, or write to the vault. The map and any attached profile SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. Unless the turn-slice development probe is enabled, `conversation`, `focus` and `trigger` SHALL NOT change the map. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
+In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT call a model other than retrieval scorers, or write to the vault. It SHALL NOT resolve anchors, except for the turn slice, which only the setting `EXOMEM_ACTIVATION_TURN_SLICE` turns on, and which "The turn slice" governs. The map, any attached profile and the turn slice SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. `conversation`, `focus` and `trigger` SHALL NOT change the map, and neither SHALL the turn: the turn changes only the turn slice. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
 
 #### Scenario: An empty vault returns an empty map
 - **WHEN** no context-catalogue entry is visible to the caller
@@ -63,6 +64,10 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 - **WHEN** two `maps`-mode calls differ only in `conversation`
 - **THEN** both return the same map
 
+#### Scenario: With the setting off, the packet is unchanged
+- **WHEN** `EXOMEM_ACTIVATION_TURN_SLICE` is absent, `off` or invalid
+- **THEN** the `maps` packet carries no `turn_slice` block and is the packet that the packet mode alone gives for the same vault and turn
+
 #### Scenario: The episode advisory rides on a map
 - **WHEN** the conditions of the `episode_due` advisory hold and activation serves the `maps` packet
 - **THEN** the packet carries `episode_due`
@@ -71,6 +76,41 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 #### Scenario: The call ledger does not report a map as zero pages
 - **WHEN** activation serves the `maps` packet
 - **THEN** the call ledger records the released-item count as unknown, not zero
+
+### Requirement: The turn slice
+When `EXOMEM_ACTIVATION_TURN_SLICE` is `on`, a `maps` packet SHALL carry a `turn_slice` block beside the map. The setting is `off` by default and when its value is invalid, and it has no effect in `anchors` mode.
+- The slice SHALL list the leads that the guarded anchors compile selects for the user turn alone: resolved and partial anchors, the senses of an ambiguous turn, pages that the turn names by title, related pages and the carried page. It SHALL NOT list `recent_context`. The anchors compile SHALL be one helper that both packet modes call. In `maps` mode it SHALL run with no continuity, no `anchor` and no attribution, and SHALL NOT mint a token, learn or record heat.
+- The block SHALL carry `state`, one of `ready`, `empty`, `skipped` or `unavailable`, a generation that serves only as the guard's record key, a fixed description, the items and, when some do not fit, an overflow count. The description SHALL say that the block holds what the turn's words reached, with the evidence, and that it is not checked for relevance.
+- Each item SHALL carry its catalogue entry's kind, title, description and description origin, its ref, the profile ref and the state line for anchors and collections, `match` and `evidence`. `match` SHALL be one of `resolved`, `partial`, `ambiguous`, `named`, `related` or `carried`. `evidence` SHALL be the categorical evidence kinds that the evidence requirement fixes, with no score.
+- Display text SHALL come only from catalogue entries that the caller may see. A lead with no such entry SHALL be dropped. A turn with no admitted lead SHALL give `state: empty` and no item.
+- The map SHALL compile first, over the caller's view, at the request's `max_chars` less a reserve that one named constant fixes. A slice that fails or finds no room SHALL set its `state` and SHALL NOT remove or change the map. The slice SHALL NOT change `map_generation` or the `continuity` token. Slice lines SHALL be whole lines, lines that do not fit SHALL become the overflow count, and `used_chars` SHALL count the map and the slice together.
+- The terminal guard SHALL serve a slice item only from a record that the invocation pinned for the same caller and packet limit, and SHALL serve an `unavailable` slice otherwise.
+- The relevant-due-refs association SHALL read the resolved items of the slice as it reads resolved anchors.
+- The retrieve hook SHALL render the slice on a turn whose map generation is unchanged.
+
+#### Scenario: An irrelevant turn gets no slice items
+- **WHEN** the setting is `on` and the turn reaches no lead that the guard admits
+- **THEN** `turn_slice.state` is `empty` and the block holds no item
+
+#### Scenario: The slice does not change the map
+- **WHEN** the setting is `on` and two turns, one that resolves an anchor and one that reaches nothing, activate over the same vault
+- **THEN** both packets carry the same map block, the same `map_generation` and the same `continuity` token
+
+#### Scenario: A withheld anchor changes no byte for a restricted caller
+- **WHEN** a vault holds, beside a visible anchor, a withheld anchor of the same name and a withheld titled page, and the setting is `on`
+- **THEN** a restricted caller's packet is byte-identical to the packet from a vault without them
+
+#### Scenario: Due advice rides on a resolved lead
+- **WHEN** the setting is `on`, the turn resolves an anchor and a due item bears on that anchor
+- **THEN** the packet carries `relevant_due_refs` for it
+
+#### Scenario: A failed slice keeps the map
+- **WHEN** the slice cannot be built, or cannot be served
+- **THEN** `turn_slice.state` is `unavailable` or `skipped`, and the map block is the one that a turn with no slice gets
+
+#### Scenario: A forged slice is not served
+- **WHEN** a slice item was not pinned for this caller and packet limit, or the slice was built for a larger packet
+- **THEN** the packet carries an `unavailable` slice and the map is unchanged
 
 ### Requirement: A context catalogue with bounded projections
 The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, note, thread and collection.

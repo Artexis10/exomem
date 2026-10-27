@@ -78,6 +78,7 @@ log = logging.getLogger(__name__)
 CACHE_SIZE = 16
 
 _PACKET_WARNING_EMITTED = False
+_SLICE_WARNING_EMITTED = False
 
 
 def activation_packet_mode() -> str:
@@ -92,6 +93,24 @@ def activation_packet_mode() -> str:
             log.warning("invalid EXOMEM_ACTIVATION_PACKET; using maps")
             _PACKET_WARNING_EMITTED = True
     return "maps"
+
+
+def activation_turn_slice() -> bool:
+    """Whether the maps packet carries a turn slice; `off` is the default.
+
+    The slice lists what the turn's own words reached next to the map. It is built behind this
+    setting until a development round and an operator decision turn it on by default.
+    """
+    global _SLICE_WARNING_EMITTED
+    value = os.environ.get("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    # nosemgrep: ep-word-set -- The activation specification fixes both values of the setting.
+    if value in ("on", "off"):
+        return value == "on"
+    with _CACHE_LOCK:
+        if not _SLICE_WARNING_EMITTED:
+            log.warning("invalid EXOMEM_ACTIVATION_TURN_SLICE; using off")
+            _SLICE_WARNING_EMITTED = True
+    return False
 
 
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(

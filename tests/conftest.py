@@ -1099,6 +1099,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # The suite serves the shipped packet mode (`maps`). An exported rollback setting must not
     # decide it; a test or module that exercises `anchors` opts in with `anchors_packet` below.
     monkeypatch.delenv("EXOMEM_ACTIVATION_PACKET", raising=False)
+    # The turn slice is off by default. An exported setting must not decide it; a test that
+    # exercises the slice opts in with `turn_slice` below.
+    monkeypatch.delenv("EXOMEM_ACTIVATION_TURN_SLICE", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.
@@ -1131,6 +1134,12 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 def anchors_packet(monkeypatch: pytest.MonkeyPatch) -> None:
     """Serve the rollback `anchors` packet. Use as `pytestmark = pytest.mark.usefixtures("anchors_packet")`."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+
+
+@pytest.fixture
+def turn_slice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve the maps packet with its turn slice on. Use as `pytestmark = pytest.mark.usefixtures("turn_slice")`."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "on")
 
 
 @pytest.fixture

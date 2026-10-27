@@ -361,6 +361,45 @@ class ContextCatalogue:
             )
         return tuple(out)
 
+    def entries_for(self, names: Iterable[str]) -> tuple[Entry, ...]:
+        """The entries that `names` spell, by entry id or by ref, with their raw declarations.
+
+        A bounded read for a handful of names: it reads the declarations of the matched entries
+        only, never the table. A name matches by id or ref and never by `path`, which the items of
+        one collection share: a collection's path names the collection page and not its items.
+        """
+        wanted = sorted({name for name in names if name})
+        conn = self._connect()
+        if conn is None or not wanted:
+            return ()
+        columns = _ENTRY_COLUMNS
+        found: dict[str, dict[str, Any]] = {}
+        # SQLite caps the variables of one statement; a chunk stays far below it.
+        for start in range(0, len(wanted), 200):
+            chunk = wanted[start : start + 200]
+            marks = ", ".join("?" for _ in chunk)
+            sql = f"SELECT {', '.join(columns)} FROM entries WHERE entry_id IN ({marks}) OR ref IN ({marks})"
+            for row in conn.execute(sql, (*chunk, *chunk)):
+                values = dict(zip(columns, row, strict=True))
+                found[values["entry_id"]] = values
+        out = []
+        for entry_id in sorted(found):
+            declared = {
+                table: _grouped_for(conn, table, column, entry_id)
+                for table, column in (
+                    ("declared_topics_raw", "raw"), ("entry_projects", "project_key"), ("source_refs", "ref")
+                )
+            }
+            out.append(
+                Entry(
+                    **found[entry_id],
+                    topics=declared["declared_topics_raw"],
+                    projects=declared["entry_projects"],
+                    sources=declared["source_refs"],
+                )
+            )
+        return tuple(out)
+
     def membership_edges(self) -> dict[str, tuple[str, ...]]:
         """Entry id -> the page paths its authored membership relations name."""
         conn = self._connect()
@@ -575,6 +614,12 @@ def _grouped(conn: sqlite3.Connection, table: str, column: str) -> dict[str, tup
     for entry_id, value in conn.execute(f"SELECT entry_id, {column} FROM {table} ORDER BY entry_id, {column}"):
         out.setdefault(entry_id, []).append(value)
     return {entry_id: tuple(values) for entry_id, values in out.items()}
+
+
+def _grouped_for(conn: sqlite3.Connection, table: str, column: str, entry_id: str) -> tuple[str, ...]:
+    return tuple(
+        value for (value,) in conn.execute(f"SELECT {column} FROM {table} WHERE entry_id = ? ORDER BY {column}", (entry_id,))
+    )
 
 
 class _Fold:

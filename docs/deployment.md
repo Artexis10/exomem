@@ -1347,6 +1347,29 @@ A value other
 than `anchors` or `maps` logs one warning, `invalid EXOMEM_ACTIVATION_PACKET;
 using maps`, and serves `maps`. The working-set kill switch disables both modes.
 
+### The turn slice
+
+The `maps` packet is the same index on every turn. `EXOMEM_ACTIVATION_TURN_SLICE=on`
+adds a `turn_slice` block beside the map. It lists the leads that the words of
+this turn reached: resolved and partial anchors, the senses of an ambiguous
+turn, pages that the turn names by title, related pages and the carried page.
+Each item names the match and the kinds of evidence behind it. The slice is not
+checked for relevance, so the client reads a ref before it relies on it.
+
+The default is `off`, and the packet is then the same as before. With the setting
+on, the map compiles in a fixed share of the packet budget on every turn, so the
+map is the same on a turn that resolves nothing. The slice takes the rest. A turn
+that reaches nothing gets `turn_slice.state` of `empty`. A slice that cannot be
+built sets its `state` and leaves the map as it is.
+
+1. Add `EXOMEM_ACTIVATION_TURN_SLICE=on` to the service environment, in the same place as `EXOMEM_ACTIVATION_PACKET`.
+2. Restart the service in the same way.
+3. Call `recall_context` once with a turn that names a known page. The packet has a `turn_slice` block with `state` of `ready`.
+
+To turn the slice off, change the value to `off` and restart. A value other than
+`on` or `off` logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using off`,
+and serves the map alone. The setting has no effect in the `anchors` mode.
+
 ## Reranking and languages
 
 The cross-encoder reranker reorders a query's top candidates. It runs on explicit

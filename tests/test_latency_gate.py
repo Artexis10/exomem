@@ -132,6 +132,8 @@ WORKING_SET_RATIO_SLACK_MS = 50.0
 WORKING_SET_TURN = (
     "I'm planning to meet Activation Scale Contact — what are the constraints?"
 )
+#: A turn that names nothing in the vault: the turn slice must abstain on it, at the same cost bound.
+WORKING_SET_ABSTAINING_TURN = "What is a good way to spend a quiet afternoon?"
 
 
 def _seed_freshness_live(vault: Path) -> None:
@@ -924,49 +926,69 @@ def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free
     )
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 def test_maps_packet_stays_bounded_at_scale(
     tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An owner cache hit must not hide the cost of rebuilding an owner or restricted map."""
+    """An owner cache hit must not hide the cost of rebuilding an owner or restricted map.
+
+    The turn slice runs the anchors compile for the user turn beside the map, so it is held to the same
+    ceiling and the same linear bound, for a turn that reaches an anchor and for one that reaches nothing.
+    """
     from synth_vault import gen_entity_overlay
     from test_governance_egress import _external
 
     from exomem import commands, context_views, working_set_runtime
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+
+    def measure(vault: Path, mode: str, turn: str, slice_state: str | None) -> dict:
+        caller = _external() if mode == "restricted" else principal.owner_principal(surface="library")
+        with principal.request_scope(caller):
+            assert context_views.CallerView.current(vault).restricted == (mode == "restricted")
+            packets = []
+            for _ in range(3):
+                working_set_runtime.reset_caches_for_tests(packets_only=True)
+                if mode == "owner_cleared":
+                    with context_views._OWNER_MAPS_LOCK:
+                        context_views._OWNER_MAPS.clear()
+                gc.collect()
+                packet = commands.op_activate_context(vault, turn=turn, include_timings=True)
+                assert packet["abstained"] is False, packet.get("abstention")
+                assert packet["map"]["items"]
+                assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+                if slice_state is None:
+                    assert "turn_slice" not in packet
+                else:
+                    assert packet["turn_slice"]["state"] == slice_state, packet["turn_slice"]
+                    assert bool(packet["turn_slice"]["items"]) == (slice_state == "ready")
+                packets.append(packet)
+            return {
+                "median_ms": statistics.median(_compiler_ms(packet["timings"]) for packet in packets),
+                "stage_median_ms": {
+                    stage: statistics.median(packet["timings"]["stages"][stage]["ms"] for packet in packets)
+                    for stage in packets[0]["timings"]["stages"]
+                },
+            }
+
     measured = {}
     for notes, entities in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
         vault = _build_dense_vault(tmp_path, notes)
         gen_entity_overlay(vault, entities, seed=23)
         _prepare_working_set_vault(vault)
         commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup
-        measured[notes] = {}
-        for mode in ("owner_cache_hit", "owner_cleared", "restricted"):
-            caller = _external() if mode == "restricted" else principal.owner_principal(surface="library")
-            with principal.request_scope(caller):
-                assert context_views.CallerView.current(vault).restricted == (mode == "restricted")
-                packets = []
-                for _ in range(3):
-                    working_set_runtime.reset_caches_for_tests(packets_only=True)
-                    if mode == "owner_cleared":
-                        with context_views._OWNER_MAPS_LOCK:
-                            context_views._OWNER_MAPS.clear()
-                    gc.collect()
-                    packet = commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
-                    assert packet["abstained"] is False, packet.get("abstention")
-                    assert packet["map"]["items"]
-                    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
-                    packets.append(packet)
-                measured[notes][mode] = {
-                    "median_ms": statistics.median(_compiler_ms(packet["timings"]) for packet in packets),
-                    "stage_median_ms": {
-                        stage: statistics.median(packet["timings"]["stages"][stage]["ms"] for packet in packets)
-                        for stage in packets[0]["timings"]["stages"]
-                    },
-                }
+        measured[notes] = {
+            mode: measure(vault, mode, WORKING_SET_TURN, None)
+            for mode in ("owner_cache_hit", "owner_cleared", "restricted")
+        }
+        with monkeypatch.context() as slice_on:
+            slice_on.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "on")
+            commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # warm the slice's own inputs
+            for mode in ("owner_cleared", "restricted"):
+                measured[notes][f"{mode}_slice_resolving"] = measure(vault, mode, WORKING_SET_TURN, "ready")
+                measured[notes][f"{mode}_slice_abstaining"] = measure(vault, mode, WORKING_SET_ABSTAINING_TURN, "empty")
     print("maps activation latency " + json.dumps(measured, sort_keys=True))
-    for mode in ("owner_cleared", "restricted"):
+    for mode in ("owner_cleared", "restricted", *(f"{m}_slice_{t}" for m in ("owner_cleared", "restricted") for t in ("resolving", "abstaining"))):
         small_ms, large_ms = (measured[notes][mode]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
         assert max(small_ms, large_ms) < CEIL_WORKING_SET_MS, measured
         # A map walks the catalogue by design; the 8,609 ms decision-memo cliff still fails this linear bound.
