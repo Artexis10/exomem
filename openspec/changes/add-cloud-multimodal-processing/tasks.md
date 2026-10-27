@@ -31,8 +31,8 @@ Automatic ingestion is delivered. Manual `process_media` exposure is decided in 
 
 ## 3. Image search and optional captions
 
-- [ ] 3.1 Select the image model from published multilingual retrieval results under design D5. Record CPU speed, peak memory and shareable weights before implementation.
-- [ ] 3.2 Ship its pinned offline runtime through the shared-model contract. Verify same-precision parity where the existing vector space is retained.
+- [x] 3.1 Select the image model from published multilingual retrieval results under design D5. Record CPU speed, peak memory and shareable weights before implementation.
+- [x] 3.2 Ship its pinned offline runtime through the shared-model contract. Verify same-precision parity where the existing vector space is retained.
 - [ ] 3.3 Record model, width, precision and artifact identity in the image sidecar. Verify legacy-space reads, space-change backfill and refusal to mix spaces.
 - [x] 3.4 Add the aligned multilingual query encoder. Verify supported-language retrieval and that a space-preserving encoder change keeps stored image vectors.
 - [x] 3.5 Resolve HEIC decoder licensing before adding its dependency. Verify a real HEIC sample through the image gate and document the supported format.
@@ -43,7 +43,16 @@ HEIC uses the shared pinned decoder and the generated `ocr-eng.heic` sample.
 `tests/test_heic.py` verifies real decoding at the OCR and image-embedding boundaries.
 Delivery requires the existing offline Cloud image gate on both architectures.
 `tests/test_idle_clip.py` verifies disabled, empty, populated and failed-storage behavior through direct and prepared query paths.
-Image model selection and caption selection remain open decisions.
+Tasks 3.1 and 3.2 keep today's `clip-ViT-B-32` image space, so stored image vectors stay valid.
+The multilingual query encoder of task 3.4 supplies multilingual retrieval in that space.
+The image tower ships as a pinned fp32 ONNX artifact of the same model. Torch-free lanes select it, and torch lanes keep sentence-transformers.
+Parity through the real `embed_image` on both lanes covered 33 images: photographs, alpha, greyscale, palette, CMYK, 16-bit, HEIC, extreme sizes and EXIF rotation. The minimum cosine was 0.99999985.
+On 2 CPU threads, a warm encode took a median of 108 ms, and the peak resident set was 600 MB, against 1068 MB for the torch lane.
+The weights are one external-data file loaded with prepacking off, so cells can share its pages; task 5.2 measures that sharing.
+The Cloud image gate encodes a committed CC0 photograph offline and requires cosine 0.9999 against its recorded torch vector.
+Image tags keep the torch text tower, so they stay unavailable on torch-free lanes.
+Task 3.3 records the vector space, legacy-space reads and refusal to mix spaces; space-change backfill is not built.
+Caption selection remains an open decision.
 
 ## 4. Speech
 

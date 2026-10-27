@@ -41,9 +41,12 @@ Further candidate selection uses a fresh held-out run and does not block the sel
 Image queries use `sentence-transformers/clip-ViT-B-32-multilingual-v1` at fp32.
 Its complete ONNX graph includes the transformer, masked mean and learned 512-dimensional projection.
 The runtime normalizes the result and searches the existing OpenAI ViT-B/32 image space.
-Image extraction, image tags and stored image vectors keep their existing encoder and values.
-The query artifact alone does not enable image extraction or change the existing CLIP switch.
-Cloud keeps image search disabled until its separate acceptance passes.
+Image vectors come from `sentence-transformers/clip-ViT-B-32`, the model that wrote the stored vectors.
+Cloud runs it as a pinned fp32 ONNX build, with the vision tower and its projection in one graph, on CPU.
+The build reproduces the PyTorch vectors at cosine 0.9999 or above, so stored vectors stay valid and nothing is re-encoded.
+The image vector sidecar records the vector space it holds and refuses vectors from another space.
+Image tags need the PyTorch text tower, so they stay unavailable in the Cloud image.
+Cloud keeps image search disabled with `EXOMEM_DISABLE_CLIP` until its separate acceptance passes; a cell enables it by unsetting that variable.
 
 The [media model manifest](../../src/exomem/media_models.json) records source revisions, recipe versions and artifact digests.
 The Cloud build fetches those pinned release artifacts before its offline load gates.
