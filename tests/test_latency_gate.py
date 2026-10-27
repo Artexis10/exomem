@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import gc
 import json
+import random
 import statistics
 import sys
 import time
@@ -932,8 +933,9 @@ def test_maps_packet_stays_bounded_at_scale(
 ) -> None:
     """An owner cache hit must not hide the cost of rebuilding an owner or restricted map.
 
-    The turn slice runs the anchors compile for the user turn beside the map, so it is held to the same
-    ceiling and the same linear bound, for a turn that reaches an anchor and for one that reaches nothing.
+    The turn slice (on by default) runs the anchors compile for the user turn beside the map, so it is held
+    to the same ceiling and the same linear bound, for a turn that reaches an anchor and for one that reaches
+    nothing. The first three keys are the map alone, with the slice pinned off.
     """
     from synth_vault import gen_entity_overlay
     from test_governance_egress import _external
@@ -976,17 +978,17 @@ def test_maps_packet_stays_bounded_at_scale(
         vault = _build_dense_vault(tmp_path, notes)
         gen_entity_overlay(vault, entities, seed=23)
         _prepare_working_set_vault(vault)
-        commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup
-        measured[notes] = {
-            mode: measure(vault, mode, WORKING_SET_TURN, None)
-            for mode in ("owner_cache_hit", "owner_cleared", "restricted")
-        }
-        with monkeypatch.context() as slice_on:
-            slice_on.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "on")
-            commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # warm the slice's own inputs
-            for mode in ("owner_cleared", "restricted"):
-                measured[notes][f"{mode}_slice_resolving"] = measure(vault, mode, WORKING_SET_TURN, "ready")
-                measured[notes][f"{mode}_slice_abstaining"] = measure(vault, mode, WORKING_SET_ABSTAINING_TURN, "empty")
+        with monkeypatch.context() as slice_off:
+            slice_off.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")  # the map alone, as the rollback serves it
+            commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup
+            measured[notes] = {
+                mode: measure(vault, mode, WORKING_SET_TURN, None)
+                for mode in ("owner_cache_hit", "owner_cleared", "restricted")
+            }
+        commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # warm the slice's own inputs
+        for mode in ("owner_cleared", "restricted"):
+            measured[notes][f"{mode}_slice_resolving"] = measure(vault, mode, WORKING_SET_TURN, "ready")
+            measured[notes][f"{mode}_slice_abstaining"] = measure(vault, mode, WORKING_SET_ABSTAINING_TURN, "empty")
     print("maps activation latency " + json.dumps(measured, sort_keys=True))
     for mode in ("owner_cleared", "restricted", *(f"{m}_slice_{t}" for m in ("owner_cleared", "restricted") for t in ("resolving", "abstaining"))):
         small_ms, large_ms = (measured[notes][mode]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
@@ -994,6 +996,99 @@ def test_maps_packet_stays_bounded_at_scale(
         # A map walks the catalogue by design; the 8,609 ms decision-memo cliff still fails this linear bound.
         bound = small_ms * (N_NOTES_LARGE / N_NOTES) * CEIL_WORKING_SET_RATIO + WORKING_SET_RATIO_SLACK_MS
         assert large_ms < bound, {"mode": mode, "bound_ms": bound, "measurements": measured}
+
+
+#: What the turn slice may add to a maps activation, as the upper bound of the paired difference's 95% interval.
+#: A shared runner is too noisy for an absolute p95, so the slice is held to its own added cost, measured on the
+#: same turns, in one process, with the setting flipped between the two halves of each pair.
+SLICE_ADDED_MS_CEILING = 100.0
+#: The cost the slice is aimed at. It is reported with the measurement and never asserted.
+SLICE_ADDED_MS_TARGET = 50.0
+SLICE_PAIRS = 16
+
+
+def _paired_median_interval(differences: list[float], *, resamples: int = 2000, seed: int = 20261027) -> tuple[float, float]:
+    """The bootstrap 95% interval of the median paired difference; seeded, so a rerun on the same samples agrees."""
+    draw = random.Random(seed)
+    medians = sorted(statistics.median(draw.choices(differences, k=len(differences))) for _ in range(resamples))
+    return medians[int(0.025 * resamples)], medians[int(0.975 * resamples) - 1]
+
+
+@pytest.mark.timeout(900)
+def test_the_turn_slice_adds_a_bounded_paired_cost_to_a_maps_activation(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each pair is one maps activation with the slice off and one with it on, on the same turn and caller,
+    both from cold packet caches, in alternating order so drift cancels. The slice runs the anchors compile
+    for the user turn, so it is measured for a turn that reaches an anchor and for one that reaches nothing,
+    for the owner's rebuilt map and for a restricted caller's. The test gates the upper bound of the median
+    paired difference's 95% interval at `SLICE_ADDED_MS_CEILING`, and reports the stage split and the target."""
+    from synth_vault import gen_entity_overlay
+    from test_governance_egress import _external
+
+    from exomem import commands, context_views, working_set_runtime
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 125, seed=23)
+    _prepare_working_set_vault(vault)
+    for setting in ("off", "on"):
+        monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+        commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup of each path
+
+    def call(mode: str, turn: str, setting: str) -> dict:
+        monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+        working_set_runtime.reset_caches_for_tests(packets_only=True)
+        if mode == "owner_cleared":
+            with context_views._OWNER_MAPS_LOCK:
+                context_views._OWNER_MAPS.clear()
+        gc.collect()
+        packet = commands.op_activate_context(vault, turn=turn, include_timings=True)
+        assert packet["abstained"] is False, packet.get("abstention")
+        assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+        return packet
+
+    report: dict[str, dict] = {}
+    for mode in ("owner_cleared", "restricted"):
+        caller = _external() if mode == "restricted" else principal.owner_principal(surface="library")
+        for label, turn, state in (
+            ("resolving", WORKING_SET_TURN, "ready"),
+            ("abstaining", WORKING_SET_ABSTAINING_TURN, "empty"),
+        ):
+            samples: dict[str, list[dict]] = {"off": [], "on": []}
+            with principal.request_scope(caller):
+                for pair in range(SLICE_PAIRS):
+                    for setting in ("off", "on") if pair % 2 == 0 else ("on", "off"):
+                        packet = call(mode, turn, setting)
+                        if setting == "off":
+                            assert "turn_slice" not in packet
+                        else:
+                            assert packet["turn_slice"]["state"] == state, packet["turn_slice"]
+                        samples[setting].append(packet["timings"])
+            differences = [_compiler_ms(on) - _compiler_ms(off) for on, off in zip(samples["on"], samples["off"], strict=True)]
+            low, high = _paired_median_interval(differences)
+            report[f"{mode}/{label}"] = {
+                "pairs": SLICE_PAIRS,
+                "median_added_ms": round(statistics.median(differences), 1),
+                "mean_added_ms": round(statistics.fmean(differences), 1),
+                "ci95_added_ms": [round(low, 1), round(high, 1)],
+                "within_target": high <= SLICE_ADDED_MS_TARGET,
+                "off_median_ms": round(statistics.median(_compiler_ms(t) for t in samples["off"]), 1),
+                "on_median_ms": round(statistics.median(_compiler_ms(t) for t in samples["on"]), 1),
+                "stage_added_median_ms": {
+                    stage: round(
+                        statistics.median(
+                            (on["stages"].get(stage) or {"ms": 0.0})["ms"] - (off["stages"].get(stage) or {"ms": 0.0})["ms"]
+                            for on, off in zip(samples["on"], samples["off"], strict=True)
+                        ),
+                        1,
+                    )
+                    for stage in sorted({name for t in samples["on"] for name in t["stages"]})
+                },
+            }
+    print("turn slice paired latency " + json.dumps(report, sort_keys=True))
+    over = {key: row for key, row in report.items() if row["ci95_added_ms"][1] > SLICE_ADDED_MS_CEILING}
+    assert not over, {"ceiling_ms": SLICE_ADDED_MS_CEILING, "over": over, "report": report}
 
 
 @pytest.mark.timeout(900)

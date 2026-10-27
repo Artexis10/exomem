@@ -44,8 +44,10 @@ from membench.utility.context_activation_multilingual import (  # noqa: E402
 
 from exomem import (  # noqa: E402
     commands,
+    context_catalogue,
     embedding_backend,
     embeddings,
+    epistemic_graph,
     lexstore,
     ranking_config,
     readiness,
@@ -112,6 +114,8 @@ class Measured:
     dim: int
     incidental: dict[str, dict[str, dict]]
     incidental_carry: dict[str, tuple[str, ...]]
+    #: Each case's `turn_slice` from the maps packet, semantic evidence on.
+    slices: dict[str, dict]
 
 
 _MEASURED: dict[str, Measured] = {}
@@ -146,6 +150,22 @@ def _compile_arms(root: Path, turns: list[tuple[str, str, str]], monkeypatch) ->
             )
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     return packets
+
+
+def _turn_slices(root: Path, turns: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
+    """Each turn's `turn_slice` from the maps packet with the slice on, the
+    encoder loaded, and the catalogue the maps packet reads published first."""
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    context_catalogue.ContextCatalogue(root).rebuild()
+    slices: dict[str, dict] = {}
+    with monkeypatch.context() as scope:
+        scope.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+        scope.delenv("EXOMEM_ACTIVATION_TURN_SLICE", raising=False)
+        scope.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        for case_id, turn in turns:
+            working_set_runtime.reset_caches_for_tests()
+            slices[case_id] = commands.op_activate_context(root, turn=turn)["turn_slice"]
+    return slices
 
 
 def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
@@ -189,6 +209,8 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             working_set_runtime.reset_caches_for_tests()
             packet = commands.op_activate_context(root, turn=case.turn, include_timings=True)
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
+
+    slices = _turn_slices(root, [(case.case_id, case.turn) for case in CASES], monkeypatch)
 
     # The same vault with an ordinary note beside each named gold that shares
     # a phrase with its turn, so the retrieval carry names that note instead.
@@ -258,6 +280,7 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
         dim,
         incidental,
         incidental_carry,
+        slices,
     )
 
 
@@ -463,3 +486,46 @@ def test_a_bare_shared_first_name_is_ambiguous_with_and_without_the_band(measure
         ref_to_path = {item["ref"]: item["path"] for item in packet["anchors"]}
         senses = {ref_to_path.get(item["ref"], item["ref"]) for item in packet["ambiguity"]}
         assert senses == gold, (senses, gold)
+
+
+#: How a lead was reached, from the packet's own closed set, for the leads that
+#: the harness counts as the turn activating a page (`_surfaced`): a resolved
+#: anchor or an ambiguity sense. The slice also lists weaker leads (`partial`,
+#: `named`, `related`), which it labels as not checked for relevance.
+_ACTIVATING_MATCHES = frozenset({"resolved", "ambiguous"})
+
+
+def _slice_leads(measured: Measured, case_id: str) -> dict[str, dict]:
+    block = measured.slices[case_id]
+    assert block["state"] in ("ready", "empty"), (case_id, block)
+    return {item["ref"]: item for item in block["items"]}
+
+
+def test_every_named_positive_gold_is_a_resolved_turn_slice_lead(measured: Measured) -> None:
+    """The maps packet's slice lists what the anchors packet resolves: the rare
+    name plus the band reaches the gold, so the gold leads its slice."""
+    for case in CASES:
+        if case.case_id not in NAMED_GOLDS:
+            continue
+        (gold,) = (measured.manifest.key_to_path[key] for key in case.gold)
+        lead = _slice_leads(measured, case.case_id).get(gold)
+        assert lead is not None and lead["match"] == "resolved", (case.case_id, measured.slices[case.case_id])
+
+
+def test_no_twin_or_guarded_page_is_an_unsound_turn_slice_lead(measured: Measured) -> None:
+    """A twin activates nothing beyond its own gold, and a page the case guards
+    (poison, or never resolved) is never a resolved, ambiguous or carried lead
+    nor reached by the band. A guarded page that the turn names by its title may
+    still appear as a `named` lead: that lead is labelled as unchecked, and the
+    anchors packet serves the same page the same way."""
+    for case in CASES:
+        leads = _slice_leads(measured, case.case_id)
+        own_gold = {measured.manifest.key_to_path[key] for key in case.gold}
+        guarded = {measured.manifest.key_to_path[key] for key in (*case.poison, *case.never_resolved)}
+        if case.kind in TWIN_OF:
+            activated = {ref for ref, item in leads.items() if item["match"] in _ACTIVATING_MATCHES}
+            assert activated <= own_gold, (case.case_id, activated - own_gold)
+        for ref in guarded & set(leads):
+            item = leads[ref]
+            assert item["match"] not in (*_ACTIVATING_MATCHES, "carried"), (case.case_id, item)
+            assert "vector_band" not in item["evidence"], (case.case_id, item)

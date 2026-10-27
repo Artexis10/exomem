@@ -106,7 +106,7 @@ A `maps` packet SHALL carry a `turn_slice` block beside the map, unless `EXOMEM_
 
 #### Scenario: A failed slice keeps the map
 - **WHEN** the slice cannot be built, or cannot be served
-- **THEN** `turn_slice.state` is `unavailable` or `skipped`, and the map block is the one that a turn with no slice gets
+- **THEN** `turn_slice.state` is `unavailable` or `skipped`, and the map block is the one that any other turn gets
 
 #### Scenario: A forged slice is not served
 - **WHEN** a slice item was not pinned for this caller and packet limit, or the slice was built for a larger packet

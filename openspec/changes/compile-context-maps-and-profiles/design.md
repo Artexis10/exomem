@@ -41,7 +41,7 @@ The strongest result is an agent that sees what exists and pulls. A server-side 
    - A **topic profile** compiles the same lanes over a topic's members: the topic's standing stances, preferences, constraints and conventions, the anchors active now, open loops and recent changes.
    Profiles are compiled per request over the caller's candidate entries; no profile is cached.
 5. **First-answer workflow.** The agent reads the map, opens the domain maps and profiles that the turn needs, searches with its own words when the map does not cover the need, then answers and cites refs.
-6. **Turn slice.** The leads that this turn's own words reached, labelled with their evidence and attached to the map. D13 fixes it. It is built behind a setting that is off by default, and it is not an arm of the switch evaluation. Default-on waits for a development round and an operator decision.
+6. **Turn slice.** The leads that this turn's own words reached, labelled with their evidence and attached to the map. D13 fixes it. It is on by default, by operator ruling, with a setting as the rollback, and it is not an arm of the switch evaluation.
 
 ## Decisions
 
@@ -118,6 +118,7 @@ The `maps` packet is one index on every turn, so in a vault with no topic domain
 - **Budget.** The reserve is one named constant, `TURN_SLICE_SHARE`, next to the map's kind shares, with its reason. The owner's map cache is keyed on the characters the map compiles at. Slice lines are whole lines; those that do not fit become the overflow count. The packet limit stays the record's limit, and the budget report charges the map and the slice together.
 - **Safety.** The guard serves a slice item only from a record that this invocation pinned for this caller and this packet limit. A forged item, or a slice built for a larger packet, is replaced by an `unavailable` slice. The slice's paths are collected with the map's. A withheld anchor or page changes no byte of what a restricted caller receives.
 - **Due advice.** `relevant_due_refs` reads resolved slice items as it reads resolved anchors, so a `maps` user with the slice on gets that advice again.
+- **Latency.** The slice is a second guarded compile beside the map, so it has a cost of its own. The latency gate measures it as a paired difference: the same turn and caller with the slice on, minus the slice off, in one process. It holds the upper bound of that difference's 95% interval at 100 ms, for a turn that reaches an anchor and for one that reaches nothing, for the owner's rebuilt map and for a restricted caller. 50 ms is the target; it is reported and never asserted. No absolute p95 gates the slice, because a shared runner is too noisy for one.
 - **Setting.** `EXOMEM_ACTIVATION_TURN_SLICE` is `on` or `off`. The slice is on by default, by operator ruling, and `off` is the one-line rollback: any other value is `on`, as an invalid `EXOMEM_ACTIVATION_PACKET` serves its default. With the setting off, the packet is the one that the packet mode alone gives. The setting has no effect in `anchors` mode.
 
 ## Evaluation
