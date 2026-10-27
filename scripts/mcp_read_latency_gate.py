@@ -424,13 +424,11 @@ class Arm:
         return {"ready_s": ready, "quiescent_s": await self.quiesce(limit=quiescence_limit)}
 
     @staticmethod
-    def _port_open(port: int, process: subprocess.Popen):
-        async def check() -> bool:
-            if process.poll() is not None:
-                raise MeasurementRefused("coordinator-exited", phase="coordinator-start")
-            with socket.socket() as probe:
-                return probe.connect_ex(("127.0.0.1", port)) == 0
-        return check
+    async def _port_open(port: int, process: subprocess.Popen) -> bool:
+        if process.poll() is not None:
+            raise MeasurementRefused("coordinator-exited", phase="coordinator-start")
+        with socket.socket() as probe:
+            return probe.connect_ex(("127.0.0.1", port)) == 0
 
     @staticmethod
     async def _wait(phase: str, limit: float, check) -> None:
@@ -495,19 +493,43 @@ class Arm:
         result = await self.client.call_tool(name, arguments, raise_on_error=False, timeout=120)
         data = result.structured_content
         if result.is_error or not isinstance(data, dict) or data.get("success") is False:
+            # The product's error code goes to the log only; the summary keeps the runner's closed code.
+            error = data.get("error", {}) if isinstance(data, dict) else {}
+            print(f"{self.name} arm: {name} {arguments['operation']['kind']} failed with "
+                  f"{error.get('code')}: {error.get('message')}", file=sys.stderr)
             raise MeasurementRefused("collection-load-failed", phase="fixture-load")
         return data
 
     async def load_collections(self, fixture: dict) -> None:
-        """Create every collection and add its rows through this arm's own write tools."""
-        for kind, tool, row_kind in (("records", "change_records", "append"), ("planning", "change_plans", "add")):
+        """Create every collection and load its rows through this arm's own write tools.
+
+        Records rows go in as chained bulk upserts, because one guarded append per row costs
+        about a second of worker time. Planning has no bulk action, so it adds row by row.
+        Each collection is read back and must hold exactly the rows the generator authored.
+        """
+        from exomem.records import BULK_UPSERT_MAX_ROWS
+
+        why = "latency gate fixture"
+        for kind, read_tool, write_tool in (("records", "read_records", "change_records"),
+                                            ("planning", "read_plans", "change_plans")):
             for collection in fixture[kind]:
-                await self.tool(tool, {"operation": {"kind": "create", "manifest_path": collection["manifest_path"],
-                                                     "manifest_text": collection["manifest_text"],
-                                                     "why": "latency gate fixture"}})
-                for item in collection["items"]:
-                    await self.tool(tool, {"operation": {"kind": row_kind, "collection": collection["manifest_path"],
-                                                         "item": item, "why": "latency gate fixture"}})
+                path = collection["manifest_path"]
+                created = await self.tool(write_tool, {"operation": {
+                    "kind": "create", "manifest_path": path, "manifest_text": collection["manifest_text"], "why": why}})
+                if kind == "records":
+                    guard = created["after_container_hash"]
+                    for start in range(0, len(collection["items"]), BULK_UPSERT_MAX_ROWS):
+                        rows = [{"item": item} for item in collection["items"][start:start + BULK_UPSERT_MAX_ROWS]]
+                        await self.tool(write_tool, {"operation": {
+                            "kind": "bulk_upsert", "collection": path, "rows": rows, "expected_container_hash": guard,
+                            "source": fixture["source_page"]["path"], "why": why}})
+                        guard = (await self.tool(read_tool, {"operation": {"kind": "inspect", "collection": path}}))["snapshot"]
+                else:
+                    for item in collection["items"]:
+                        await self.tool(write_tool, {"operation": {"kind": "add", "collection": path, "item": item, "why": why}})
+                held = await self.tool(read_tool, {"operation": {"kind": "query", "collection": path, "limit": 1}})
+                if held["total_matched"] != len(collection["items"]):
+                    raise MeasurementRefused("collection-load-incomplete", phase="fixture-load")
 
 
 async def time_cases(arms: dict[str, Arm], cases: list, *, repeats: int, timeout: float = 120.0) -> list[dict]:
@@ -534,6 +556,18 @@ async def time_cases(arms: dict[str, Arm], cases: list, *, repeats: int, timeout
     return samples
 
 
+async def stop_arms(arms: dict[str, Arm]) -> None:
+    """Stop every arm and remove the short socket directory that `build_arms` created."""
+    await asyncio.gather(*(arm.stop() for arm in arms.values()))
+    for directory in {arm.socket.parent for arm in arms.values()}:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
+    await arm.load_collections(fixture)
+    await arm.quiesce(limit=1800)
+
+
 async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, repeats: int) -> dict[str, Any]:
     """Prepare each arm, restart it and time the cases; returns the samples and arm timings.
 
@@ -543,9 +577,7 @@ async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, re
     try:
         if fixture is not None:
             await asyncio.gather(*(arm.start(quiescence_limit=1800) for arm in arms.values()))
-            for arm in arms.values():
-                await arm.load_collections(fixture)
-                await arm.quiesce(limit=1800)
+            await asyncio.gather(*(load_and_quiesce(arm, fixture) for arm in arms.values()))
             await asyncio.gather(*(arm.stop() for arm in arms.values()))
         started = await asyncio.gather(*(arm.start(quiescence_limit=900) for arm in arms.values()))
         timings = dict(zip(arms, started, strict=True))
@@ -558,7 +590,7 @@ async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, re
         return {"samples": samples, "timings": timings,
                 "environment": {"cpu_pressure_start": pressure_start, "cpu_pressure_end": cpu_pressure()}}
     finally:
-        await asyncio.gather(*(arm.stop() for arm in arms.values()))
+        await stop_arms(arms)
 
 
 # --- Public fixture runs and the private sandbox ------------------------------
@@ -585,6 +617,13 @@ def select_cases(cases: list[dict], *, per_group: int | None, shard: int, shards
 
 def resolve_commit(tag: str) -> str:
     return subprocess.check_output(["git", "rev-parse", f"{tag}^{{commit}}"], cwd=ROOT, text=True).strip()
+
+
+def prepare_release(tag: str, scratch: Path) -> tuple[Path, Path]:
+    """Extract the tagged tree and install its locked runtime; the archive is dropped once extracted."""
+    base_src = extract_release(ROOT, tag, scratch)
+    (scratch / "release.tar").unlink()
+    return base_src, prepare_tag_runtime(base_src, scratch)
 
 
 def worker_settings(*, embeddings: bool, passthrough: list[str]) -> dict[str, str]:
@@ -654,10 +693,11 @@ def prepare_notes(arms: dict[str, Arm], base_src: Path, base_python: Path, *, no
     return rels
 
 
-def write_trackers(arm: Arm, trackers: list[dict]) -> None:
-    for tracker in trackers:
-        (arm.vault / tracker["path"]).parent.mkdir(parents=True, exist_ok=True)
-        (arm.vault / tracker["path"]).write_text(tracker["text"], encoding="utf-8")
+def write_fixture_files(arm: Arm, fixture: dict) -> None:
+    """Write the legacy trackers and the preserved source page, which are files rather than collections."""
+    for page in (*fixture["legacy_trackers"], fixture["source_page"]):
+        (arm.vault / page["path"]).parent.mkdir(parents=True, exist_ok=True)
+        (arm.vault / page["path"]).write_text(page["text"], encoding="utf-8")
 
 
 def fragment_of(result: dict, *, cases: list[dict], total: int, shard: int, shards: int, header: dict) -> dict:
@@ -706,8 +746,7 @@ def run_paired(args: argparse.Namespace) -> dict:
     reduced = bool(args.max_cases or args.notes_pages)
     with scratch_directory(args.scratch) as temporary:
         scratch = Path(temporary)
-        base_src = extract_release(ROOT, tag, scratch)
-        base_python = prepare_tag_runtime(base_src, scratch)
+        base_src, base_python = prepare_release(tag, scratch)
         recall_profile = json.loads((RECALL_BENCHMARK / "profile.json").read_text())
         arms = build_arms({"head": scratch / "arms/head", "base": scratch / "arms/base"},
                           {"head": sys.executable, "base": base_python},
@@ -719,7 +758,7 @@ def run_paired(args: argparse.Namespace) -> dict:
         cases, total = select_cases(everything, per_group=args.max_cases, shard=args.shard, shards=profile["shards"])
         loaded = load_cases(json.dumps(cases).encode())
         for arm in arms.values():
-            write_trackers(arm, fixture["legacy_trackers"])
+            write_fixture_files(arm, fixture)
         result = asyncio.run(measure(arms, loaded, fixture, repeats=REFERENCE["repeats"]))
     return fragment_of(result, cases=cases, total=total, shard=args.shard, shards=profile["shards"], header={
         "profile_sha256": digest, "cases_sha256": case_digest(everything), "tag": tag,
@@ -739,8 +778,7 @@ def run_private(args: argparse.Namespace) -> dict:
     base_commit = resolve_commit(tag)
     with scratch_directory(args.scratch) as temporary:
         scratch = Path(temporary)
-        base_src = extract_release(ROOT, tag, scratch)
-        base_python = prepare_tag_runtime(base_src, scratch)
+        base_src, base_python = prepare_release(tag, scratch)
         if args.prepare:
             for root in roots.values():
                 if root.exists():
@@ -772,7 +810,7 @@ async def warm(arms: dict[str, Arm]) -> None:
     try:
         await asyncio.gather(*(arm.start(quiescence_limit=3600) for arm in arms.values()))
     finally:
-        await asyncio.gather(*(arm.stop() for arm in arms.values()))
+        await stop_arms(arms)
 
 
 # --- Commands -------------------------------------------------------------------

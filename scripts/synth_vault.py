@@ -301,6 +301,25 @@ def _record_item(fields: list[dict], rng: random.Random, ordinal: str) -> dict:
     return item
 
 
+def _planning_item(title: str, governed: list[str], values: dict[str, list[str]], rng: random.Random) -> dict:
+    """Draw governed values until the product's own validator accepts the combination.
+
+    Status, commitment and horizon constrain each other, so independent draws are often refused.
+    The shipped validator is the oracle; the generator holds no copy of its rules.
+    """
+    from exomem import planning
+    from exomem.structured_collections import CollectionError
+
+    for _ in range(500):
+        item = {"title": title, **{name: rng.choice(values[name]) for name in governed}}
+        try:
+            planning.normalize_item(item, vault_root=None)
+        except CollectionError:
+            continue
+        return item
+    raise ValueError("planning-item-unsatisfiable")
+
+
 def gen_collection_fixture(profile: dict) -> dict:
     """Records and Planning collections with skewed row counts, plus manifest-less trackers.
 
@@ -334,13 +353,14 @@ def gen_collection_fixture(profile: dict) -> dict:
     for index, size in enumerate(_skewed_sizes(planning_spec, rng)):
         title = f"{planning_spec['title']} {index:02d}"
         identity = str(uuid.uuid5(_COLLECTION_NAMESPACE, f"{profile['seed']}:planning:{index}"))
+        # `lifecycle` is a core Planning field that the manifest must declare (planning.require_planning_profile);
+        # the registry governs the others.
         fields = {name: {"type": "string", **({"required": True} if name == "title" else {})}
-                  for name in ("title", *registry.fields(), *planning_spec["free_fields"])}
+                  for name in dict.fromkeys(("title", "lifecycle", *registry.fields(), *planning_spec["free_fields"]))}
         planning.append({
             "id": identity, "title": title, "manifest_path": f"Knowledge Base/Planning/{title}/_collection.md",
             "manifest_text": _manifest_text("planning", identity, title, fields, "title", "Items"),
-            "items": [{"title": f"{title} item {row:04d}", **{name: rng.choice(values[name]) for name in governed}}
-                      for row in range(size)],
+            "items": [_planning_item(f"{title} item {row:04d}", governed, values, rng) for row in range(size)],
         })
     trackers = []
     for index in range(profile["legacy_trackers"]["count"]):
@@ -350,7 +370,10 @@ def gen_collection_fixture(profile: dict) -> dict:
                          # `tracker` is the frontmatter type the legacy reader accepts.
                          "text": f"---\ntype: tracker\ntitle: Legacy tracker {index}\n---\n\n"
                                  f"| date | note |\n| --- | --- |\n{rows}\n"})
-    return {"records": records, "planning": planning, "legacy_trackers": trackers}
+    # bulk_upsert needs one preserved page under the Evidence lane to name as the rows' provenance.
+    source_page = {"path": "Knowledge Base/Evidence/latency-fixture-source.md",
+                   "text": "---\ntitle: Latency fixture source\n---\n\nGenerated rows for the latency gate.\n"}
+    return {"records": records, "planning": planning, "legacy_trackers": trackers, "source_page": source_page}
 
 
 def _case(group: str, number: int, tool: str, arguments: dict, *, state_path: list, state,

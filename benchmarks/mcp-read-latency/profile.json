@@ -38,9 +38,9 @@
   },
   "planning": {
     "collections": 24,
-    "rows": 360,
+    "rows": 150,
     "skew": 1.1,
-    "minimum_rows": 6,
+    "minimum_rows": 4,
     "title": "Plan",
     "governed_fields": [
       "status",
