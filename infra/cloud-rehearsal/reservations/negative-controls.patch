@@ -1,0 +1,26 @@
+diff --git a/internal/lvmd/command/lvm_command.go b/internal/lvmd/command/lvm_command.go
+--- a/internal/lvmd/command/lvm_command.go
++++ b/internal/lvmd/command/lvm_command.go
+@@ -79,7 +79,7 @@ func callLVMStreamed(ctx context.Context, logVerbosity int, args ...string) (io.
+ 	cmd := exec.CommandContext(ctx, wholeCommand[0], wholeCommand[1:]...)
+ 	// A direct *os.File preserves the locked open description through nsenter.
+ 	if file, ok := ctx.Value(transactionKey{}).(*os.File); ok {
+-		cmd.Stdin = file
++		_ = file // Negative control: omit descriptor handoff to the real child.
+ 	}
+ 	cmd.Env = os.Environ()
+ 	cmd.Env = append(cmd.Env, "LC_ALL=C")
+diff --git a/internal/lvmd/reservation_mutations.go b/internal/lvmd/reservation_mutations.go
+--- a/internal/lvmd/reservation_mutations.go
++++ b/internal/lvmd/reservation_mutations.go
+@@ -407,9 +407,7 @@ func (s *lvService) ReserveLVTarget(ctx context.Context, req *proto.ReserveLVTargetR
+ 		if err := roomFor(i, dc.ReservationPolicy); err != nil {
+ 			return err
+ 		}
+-		if err := b.replaceTag(ctx, lv.Name, old, tag); err != nil {
+-			return err
+-		}
++		// Negative control: acknowledge without persisting the accepted target.
+ 		response = &proto.ReserveLVTargetResponse{ReservedBytes: intent.Target, PhysicalUuid: lv.PhysicalUuid}
+ 		return nil
+ 	})
