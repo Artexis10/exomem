@@ -113,7 +113,8 @@ def _with_tag_advisory(result: dict[str, Any], notice: Mapping[str, Any] | None)
 def _with_carrier_advisory(vault_root: Path, result: dict[str, Any], path: str) -> Any:
     """Offer the written page's own carrier when the single slot is free, never displacing a notice.
 
-    The slot is checked first because taking a notice reserves it for the conversation.
+    It runs after the tag advisory, so a tag variant keeps the slot. The slot is checked first
+    because taking a notice reserves it for the conversation.
     Optional guidance: a failure here cannot change the committed outcome.
     """
     if "vocabulary_advisory" in result:
@@ -157,8 +158,9 @@ def after_commit(vault_root: Path, result: Any) -> Any:
         return result
     leaf = result.get("leaf_result")
     path = deferred_index._safe_markdown_rel_path(leaf.get("path"))
-    guided = _with_carrier_advisory(vault_root, guided, path)
-    return _with_tag_advisory(guided, _tag_advisory(vault_root, path))
+    # A tag variant outranks a carrier: the carrier fills the slot only when the tag notice left it free.
+    guided = _with_tag_advisory(guided, _tag_advisory(vault_root, path))
+    return _with_carrier_advisory(vault_root, guided, path)
 
 
 def _after_commit(vault_root: Path, result: Any) -> Any:
