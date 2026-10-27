@@ -59,7 +59,8 @@ def _progress_path(vault_root: Path, binary_rel: str) -> Path:
     return state_paths.vault_state_dir(vault_root) / "media-progress" / "speech" / f"{name}.json"
 
 
-def _binary_rel(vault_root: Path, path: Path) -> str | None:
+def binary_rel(vault_root: Path, path: Path) -> str | None:
+    """The vault-relative path that keys a file's speech progress; None outside the vault."""
     try:
         return path.resolve().relative_to(vault_root.resolve()).as_posix()
     except ValueError:
@@ -278,8 +279,8 @@ class OnnxWhisperBackend:
                 self._load()
                 rate = self.spec["sample_rate"]
                 chunk_samples = int(rate * self.spec["chunk_seconds"])
-                binary_rel = _binary_rel(vault_root, path) if vault_root is not None else None
-                progress = _progress_path(vault_root, binary_rel) if binary_rel is not None else None
+                rel = binary_rel(vault_root, path) if vault_root is not None else None
+                progress = _progress_path(vault_root, rel) if rel is not None else None
                 identity = _file_sha256(path) if progress is not None else None
                 record = _read_progress(progress) if progress is not None else None
                 if record is not None and (

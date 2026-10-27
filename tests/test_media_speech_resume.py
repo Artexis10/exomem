@@ -31,7 +31,7 @@ def _enqueue_speech(vault: Path):
 
 def _transcribed(vault: Path, binary: Path, windows: int) -> Path:
     """Leave the progress record the engine writes after `windows` windows of `binary`."""
-    path = onnx_asr_runtime._progress_path(vault, onnx_asr_runtime._binary_rel(vault, binary))
+    path = onnx_asr_runtime._progress_path(vault, onnx_asr_runtime.binary_rel(vault, binary))
     onnx_asr_runtime._write_progress(
         vault,
         path,
@@ -247,7 +247,7 @@ def test_a_worker_restart_mid_job_resumes_from_the_saved_offset(
     resumed_from: list[int] = []
 
     def engine(path: Path, *, vault_root: Path, **_kwargs):
-        rel = onnx_asr_runtime._binary_rel(vault_root, path)
+        rel = onnx_asr_runtime.binary_rel(vault_root, path)
         done = onnx_asr_runtime.progress_offset(vault_root, rel) // _WINDOW
         resumed_from.append(done)
         for window in range(done + 1, 7):

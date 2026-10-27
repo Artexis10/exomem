@@ -35,7 +35,7 @@ def _sqlite_connect_owned(
 CLIP_DIM = 512
 
 #: The recorded vector space. A writer's artifact identity is recorded beside it.
-SPACE_KEYS = ("space", "width", "precision")
+SPACE_KEYS = ("space", "width", "precision")  # nosemgrep: ep-word-set -- the keys of this module's own space record schema.
 
 
 class ClipSpaceMismatch(ValueError):

@@ -528,7 +528,7 @@ class MediaWorker:
         from . import onnx_asr_runtime
 
         # The engine's own key for the original: the offset is read from the record it names.
-        rel = onnx_asr_runtime._binary_rel(self._vault_root, job.binary_path)
+        rel = onnx_asr_runtime.binary_rel(self._vault_root, job.binary_path)
         return None if rel is None else onnx_asr_runtime.progress_offset(self._vault_root, rel)
 
     def _discard_speech_progress(self, job: _Job) -> None:
@@ -541,7 +541,7 @@ class MediaWorker:
             return
         from . import onnx_asr_runtime
 
-        rel = onnx_asr_runtime._binary_rel(self._vault_root, job.binary_path)
+        rel = onnx_asr_runtime.binary_rel(self._vault_root, job.binary_path)
         if rel is not None:
             with contextlib.suppress(OSError):
                 onnx_asr_runtime.discard_progress(self._vault_root, rel)
