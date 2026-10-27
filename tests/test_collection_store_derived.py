@@ -102,7 +102,8 @@ def _preserve(root, data):
 def _projections(conn, cid=DERIVED):
     """The names of a collection's query projection tables in one file."""
     return [name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? "
-                                             "ESCAPE '!'", (f"cq!_{cid.replace('-', '')}!_%",))]
+                                             "ESCAPE '!' AND name NOT LIKE '%!_undo' ESCAPE '!'",
+                                             (f"cq!_{cid.replace('-', '')}!_%",))]
 
 
 def _rows_file(found, cid=DERIVED):
@@ -845,3 +846,122 @@ def test_a_revise_cannot_convert_a_derived_collection_and_the_store_refuses_the_
     assert refused.value.code == "VIEW_MODE_CHANGE_UNSUPPORTED" and refused.value.details["derived"] is True
     with pytest.raises(sqlite3.IntegrityError, match="derived only at creation"):
         writer.connection.execute("UPDATE collections SET derived=0 WHERE collection_id=?", (DERIVED,))
+
+
+# A stopped import reverts only the member it had open (design D3).
+
+_FIRST = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", ("08:00", 100), ("09:00", 500),
+                                                                ("10:00", 200)))),
+          "samples/2026-11-02.json": samples(("2026-11-02", at("2026-11-02", ("08:00", 600))))}
+# The re-export's open member adds 07:00 and lowers the 09:00 peak, so its first batch inserts and updates.
+_AGAIN = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", ("07:00", 400), ("08:00", 90),
+                                                                ("09:00", 50), ("10:00", 200)))),
+          "samples/2026-11-02.json": _FIRST["samples/2026-11-02.json"]}
+
+
+def _mirror(writer):
+    """The derived file's rows, rollup mirrors and flagged counts, as a reader of that file sees them."""
+    with closing(sqlite3.connect(derived_rows.path(writer.handle.path))) as conn:
+        return (_rows_file(derived_rows.path(writer.handle.path)),
+                conn.execute("SELECT * FROM rollup_buckets ORDER BY rollup_id,bucket,groups").fetchall(),
+                conn.execute("SELECT * FROM rollup_members ORDER BY rollup_id,bucket,groups,row_id").fetchall(),
+                conn.execute("SELECT * FROM derived_flagged ORDER BY rollup_id").fetchall())
+
+
+def _cancelled_mid_member(derived, monkeypatch, name):
+    """A collection holding a first export, then a re-export cancelled after the open member's first batch."""
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
+    writer, job = derived(name, _FIRST)
+    assert finish(writer, job)["state"] == "complete"
+    before = _mirror(writer)
+    job = agent(writer, mode="start", source_ref=_preserve(writer.root, _archive(_AGAIN))["path"],
+                format="json-document", members="samples/*", mapping=SAMPLES)
+    run_jobs(writer, max_batches=1)
+    assert derived_rows.Store.progress(derived_rows.open_store(writer), DERIVED)["restored"] == 2
+    assert _mirror(writer) != before  # the open member moved rows, rollup buckets and members
+    agent(writer, mode="cancel", continuation=job["continuation"])
+    return writer, before
+
+
+def _revert_to_rest(writer):
+    with preview_store(writer.root, writer.handle):
+        for _ in range(16):
+            if derived_rows.step(writer.root, writer) == "idle":
+                return
+    raise AssertionError("the derived collection did not come to rest")
+
+
+def _no_rebuild(monkeypatch):
+    """Record each full rebuild's start: a revert never installs an empty rows table."""
+    installs = []
+    original = derived_rows.Store._install
+    monkeypatch.setattr(derived_rows.Store, "_install",
+                        lambda self, goal, *, state, **kwargs: (installs.append(state), original(self, goal, state=state, **kwargs))[1])
+    return installs
+
+
+def test_a_cancel_mid_member_restores_the_rows_buckets_and_members_without_a_rebuild(derived, monkeypatch):
+    """Defect: a stop dropped the whole collection and replayed its import log, so cancelling the one
+    open member of a re-export cost as much as importing every earlier member again."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "revert")
+    installs = _no_rebuild(monkeypatch)
+
+    _revert_to_rest(writer)
+
+    assert _mirror(writer) == before
+    assert installs == []
+    assert derived_rows.rebuild_status(writer.connection, writer.handle.path, DERIVED)["state"] == "ready"
+    assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(writer.handle.path))
+
+
+def test_a_revert_cut_short_resumes_after_a_restart_to_the_same_rows(derived, monkeypatch):
+    """Defect: a restart in the middle of a revert left the collection half reverted, with its earlier rows
+    back and the cancelled member's new rows still there, or sent it to a full rebuild."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "resume")
+    monkeypatch.setattr(derived_rows, "REBUILD_STEP_ROWS", 1)
+    with preview_store(writer.root, writer.handle):
+        assert derived_rows.step(writer.root, writer) == "advanced"
+    status = derived_rows.rebuild_status(writer.connection, writer.handle.path, DERIVED)
+    assert (status["state"], status["rows_remaining"] > 0) == ("reverting", True)
+    root, path = writer.root, writer.handle.path
+    writer.handle.close()
+    installs = _no_rebuild(monkeypatch)
+
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = CollectionWriter(root, handle)
+        with preview_store(root, handle):
+            outcomes = [derived_rows.step(root, restarted) for _ in range(64)]
+        assert outcomes[-1] == "idle" and "done" in outcomes
+        assert installs == []
+        assert _mirror(restarted) == before
+
+
+def test_a_member_opened_by_an_older_release_rebuilds_in_full(derived, monkeypatch):
+    """Defect: a record without ``row_floor`` was reverted from an undo table its member never filled,
+    which keeps the member's updates and drops nothing."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "older")
+    with closing(sqlite3.connect(derived_rows.path(writer.handle.path), isolation_level=None)) as raw:
+        record = json.loads(raw.execute("SELECT record_json FROM derived_progress").fetchone()[0])
+        del record["row_floor"]
+        raw.execute("UPDATE derived_progress SET record_json=?", (json.dumps(record),))
+    installs = _no_rebuild(monkeypatch)
+
+    _revert_to_rest(writer)
+
+    assert installs == ["rebuilding"]
+    assert _mirror(writer) == before
+
+
+def test_an_undo_table_that_disagrees_with_the_member_count_rebuilds_in_full(derived, monkeypatch):
+    """Defect: a revert trusted an undo table that lost a pre-image, and left that row at the cancelled
+    member's value."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "short")
+    with closing(sqlite3.connect(derived_rows.path(writer.handle.path), isolation_level=None)) as raw:
+        raw.execute(f"DELETE FROM {derived_rows._undo_table(DERIVED)} WHERE row_id=(SELECT max(row_id) FROM "
+                    f"{derived_rows._undo_table(DERIVED)})")
+    installs = _no_rebuild(monkeypatch)
+
+    _revert_to_rest(writer)
+
+    assert installs == ["rebuilding"]
+    assert _mirror(writer) == before
