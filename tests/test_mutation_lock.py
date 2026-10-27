@@ -1811,6 +1811,34 @@ def test_routine_reserved_state_holds_are_not_info_rows(
     )
 
 
+def test_collection_ownership_read_hold_is_declared_collection_read(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ownership read guard names its own kind, so a quick hold stays at DEBUG."""
+    from exomem.collection_store import ownership
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    manager = SimpleNamespace(
+        consistency_guard=lambda root, **kwargs: coordinator.hold(**kwargs)
+    )
+    monkeypatch.setattr(ownership, "_manager", lambda root: manager)
+    monkeypatch.setattr(ownership, "resolve", lambda root, **kwargs: "proof")
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: 1.0, time=time.time, sleep=time.sleep),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+        assert ownership.current(vault, private=True) == "proof"
+
+    released = _events(caplog, "mutation_lock_released")
+    assert [r.fields["holder_kind"] for r in released] == ["collection-read"]
+    assert [r.levelno for r in released] == [logging.DEBUG]
+
+
 def test_attributable_command_holds_stay_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

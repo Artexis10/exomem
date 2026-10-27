@@ -74,7 +74,8 @@ _STATUS_TIMEOUT_SECONDS = 0.25
 # about every fifteen minutes. Tens to hundreds of milliseconds is their normal
 # cost, so only a hold past this bound reports itself on its own row; the rest
 # are folded into the periodic hold summary below.
-_MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker"})
+# Closed set of the boundary's own holder kinds, judged on hold time and contention instead of logging every row.
+_MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "collection-read"})
 _BACKGROUND_QUIET_HOLD_MS = 250.0
 # One INFO `mutation_lock_hold_summary` row per window stands in for every
 # demoted hold in it, so the log keeps hours of boundary evidence.

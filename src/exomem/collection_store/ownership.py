@@ -233,7 +233,8 @@ def read_snapshot(root):
     root = Path(root).resolve()
     with ExitStack() as stack:
         manager = _manager(root)
-        stack.enter_context(manager.consistency_guard(root, operation="collection_ownership_read"))
+        stack.enter_context(manager.consistency_guard(
+            root, operation="collection_ownership_read", holder_kind="collection-read"))
         try:
             placement, recorded = enrollment(root)
             path = connection.store_path(root)
@@ -317,7 +318,8 @@ class ReadScope:
 
             writer = bound_writer(self.root)
             manager = _manager(self.root)
-            with manager.consistency_guard(self.root, operation="collection_ownership_read"):
+            with manager.consistency_guard(
+                self.root, operation="collection_ownership_read", holder_kind="collection-read"):
                 self.initial = resolve(self.root, conn=None if writer is None else writer.connection,
                     private=writer is not None and not production_bound(self.root),
                     path=writer.handle.path if writer is not None and not production_bound(self.root) else None)
@@ -381,7 +383,8 @@ def current(root, *, conn=None, private=False):
         return scope.proof()
     if conn is None and not private:
         return ReadScope(root).proof()
-    with _manager(root).consistency_guard(root, operation="collection_ownership_read"):
+    with _manager(root).consistency_guard(
+            root, operation="collection_ownership_read", holder_kind="collection-read"):
         return resolve(root, conn=conn, private=private)
 
 
