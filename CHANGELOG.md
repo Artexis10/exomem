@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.148.0](https://github.com/Artexis10/exomem/compare/v0.147.0...v0.148.0) (2026-10-27)
+
+
+### Features
+
+* **cloud:** reserve local growth and online backups in the provider ([#2145](https://github.com/Artexis10/exomem/issues/2145)) ([808543b](https://github.com/Artexis10/exomem/commit/808543bb5c6385f3ed43c689294f2b2122e9671b))
+* **collections:** ordered derived item keys, open-member revert and wider import time bases ([#2166](https://github.com/Artexis10/exomem/issues/2166)) ([2ce15ac](https://github.com/Artexis10/exomem/commit/2ce15acfddb48f6e8d18b6b18f4cf7c2c1b89f6b))
+* **maps:** let the agent declare topics on project keys, folders and tags ([#2164](https://github.com/Artexis10/exomem/issues/2164)) ([a0d4a26](https://github.com/Artexis10/exomem/commit/a0d4a2636cdb2aabdb2535f64000032cc049fb16))
+* **media:** ship offline speech, image vectors and multilingual image queries ([#2142](https://github.com/Artexis10/exomem/issues/2142)) ([aa37605](https://github.com/Artexis10/exomem/commit/aa37605237711d8005de3d8a7dedf06d2382d4b2))
+
+
+### Bug Fixes
+
+* **bench:** show the judge the same source text for both arms ([#2155](https://github.com/Artexis10/exomem/issues/2155)) ([970aace](https://github.com/Artexis10/exomem/commit/970aace97b0861774d5585a390efad2262999fd1))
+* **collections:** republish a replica that an earlier schema published ([#2175](https://github.com/Artexis10/exomem/issues/2175)) ([7c87d57](https://github.com/Artexis10/exomem/commit/7c87d57f1afa425569ba1e8b3b704f019bb1ca29))
+* **governance:** strip the source trail from context packs under a bridge release ([#2157](https://github.com/Artexis10/exomem/issues/2157)) ([50dcef8](https://github.com/Artexis10/exomem/commit/50dcef8e07c6a82bcaa4ad60e4d238e792288db2))
+* **graph:** let background callers stop at queued instead of rebuilding the vault ([#2150](https://github.com/Artexis10/exomem/issues/2150)) ([11e431c](https://github.com/Artexis10/exomem/commit/11e431c837625be7a09122485a385a7d59e46b04))
+* **relations:** keep untouched registry entries as saved on a delta save ([#2169](https://github.com/Artexis10/exomem/issues/2169)) ([2f55460](https://github.com/Artexis10/exomem/commit/2f554608157a211c1d6de8e61cb574c06e69e22f))
+* remove unused managed release directories after a verified upgrade ([#2171](https://github.com/Artexis10/exomem/issues/2171)) ([050f0d3](https://github.com/Artexis10/exomem/commit/050f0d31ec438a55a1a50e0cb9d3a84cdcb067bb))
+* **semantic:** name the calling operation's validate form in disposition refusals ([#2172](https://github.com/Artexis10/exomem/issues/2172)) ([ca1b5c4](https://github.com/Artexis10/exomem/commit/ca1b5c41f17aed0fad4c8bb8f14b244ab2f32180))
+
+
+### Performance
+
+* **collections:** skip store-owned views before building paths in the records inventory ([#2170](https://github.com/Artexis10/exomem/issues/2170)) ([8c5f918](https://github.com/Artexis10/exomem/commit/8c5f91876966417c980f4c56b7093b97494a730a))
+* keep store reads from waiting behind maintenance ticks ([#2153](https://github.com/Artexis10/exomem/issues/2153)) ([db3ce86](https://github.com/Artexis10/exomem/commit/db3ce86efee0ad798a14a529d554d6004532b833))
+* **records:** project record links from the published corpus, not a per-query vault walk ([#2159](https://github.com/Artexis10/exomem/issues/2159)) ([ececce3](https://github.com/Artexis10/exomem/commit/ececce3df200b87f5a904c7666644751ec06e0ee))
+
 ## [0.147.0](https://github.com/Artexis10/exomem/compare/v0.146.1...v0.147.0) (2026-10-27)
 
 
