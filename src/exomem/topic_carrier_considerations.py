@@ -5,7 +5,8 @@ reads a consideration and saves a carrier through `schema_memory`, a plain regis
 producer is owner-only because its evidence aggregates the whole vault and only the owner saves.
 
 Two entry points keep the write path cheap. `after_write` reads the written page's own
-carriers and serves their counts from a briefly cached recount. `rank` walks every entry, so it
+carriers and serves their counts from a recount that is cached for up to half an hour and
+dropped when a registry changes. `rank` walks every entry, so it
 serves explicit review only.
 """
 
