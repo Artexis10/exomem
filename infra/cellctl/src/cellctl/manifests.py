@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import ipaddress
+import json
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -30,7 +31,34 @@ GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
 ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
+MEDIA_EDGE_PORT = 8768
+MEDIA_EDGE_POD_LABEL_VALUE = "exomem-media-edge"
 STORAGE_CLASS = LEGACY_CLASS
+CELL_VAULT_PATH = "/data/vault"
+# add-cloud-media-store D4-D6: a media edge cell's Secret keys, the files its runtime reads
+# them from, and the names the runtime looks them up by. The first two names are the
+# interface to the media edge adapter; the store config file is the one #2140's runtime reads.
+MEDIA_DIR = "/run/exomem/media"
+MEDIA_VOLUME = "media"
+MEDIA_CREDENTIAL_KEY = "media-edge-credential"
+MEDIA_IDENTITY_KEY = "media-age-identity"
+MEDIA_NAME_KEY_KEY = "media-name-key"
+MEDIA_STORE_CONFIG_KEY = "media-store.json"
+MEDIA_FILES = {
+    MEDIA_CREDENTIAL_KEY: "edge-credential",
+    MEDIA_IDENTITY_KEY: "age-identity",
+    MEDIA_NAME_KEY_KEY: "name-key",
+    MEDIA_STORE_CONFIG_KEY: "store.json",
+}
+MEDIA_ADAPTER = "media-edge"
+# The store settings cellctl renders itself. The chart's policy may add to them and never replace one.
+MEDIA_STORE_OWNED_KEYS = frozenset(
+    {"store", "enabled", "adapter", "key_version", "name_key_path", "identity_path", "recipient",
+     "max_object_bytes", "root"}
+)
+MEDIA_STORE_CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
+MEDIA_EDGE_URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
+MEDIA_EDGE_CREDENTIAL_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
 JOB_KIND_LABEL = "exomem.io/cell-job"
@@ -74,7 +102,7 @@ def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
 
 
-def check_artifact_broker_url(endpoint: str) -> None:
+def _check_literal_service_url(endpoint: str, port: int, name: str) -> None:
     """The preflighted Service IPv4 address needs neither runtime DNS nor discovery."""
     if not endpoint:
         return
@@ -84,14 +112,19 @@ def check_artifact_broker_url(endpoint: str) -> None:
         private = any(address in ipaddress.IPv4Network(cidr) for cidr in (
             "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
         ))
-        valid = private and endpoint in (
-            f"http://{address}:{ARTIFACT_BROKER_PORT}",
-            f"http://{address}:{ARTIFACT_BROKER_PORT}/",
-        )
+        valid = private and endpoint in (f"http://{address}:{port}", f"http://{address}:{port}/")
     except ValueError:
         valid = False
     if not valid:
-        raise ValueError("artifact broker endpoint must be literal RFC1918 IPv4 HTTP on port 8767")
+        raise ValueError(f"{name} endpoint must be literal RFC1918 IPv4 HTTP on port {port}")
+
+
+def check_artifact_broker_url(endpoint: str) -> None:
+    _check_literal_service_url(endpoint, ARTIFACT_BROKER_PORT, "artifact broker")
+
+
+def check_media_edge_url(endpoint: str) -> None:
+    _check_literal_service_url(endpoint, MEDIA_EDGE_PORT, "media edge")
 
 
 @dataclass(frozen=True)
@@ -191,9 +224,26 @@ class CellManifestSpec:
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
+    # add-cloud-media-store D4-D6: a cell the media edge serves. The URL selects the
+    # cell; the rest is its standard-mode key bundle and edge credential, all or none.
+    media_edge_url: str = ""
+    media_edge_credential: str = ""
+    media_age_identity: str = ""
+    media_recipient: str = ""
+    media_name_key: bytes = b""
+    media_key_version: int = 0
+    media_max_object_bytes: int = 0
+    # Operator-set eviction and hydration settings the runtime reads from the same file.
+    media_store_policy: dict[str, bool | int | float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
+        check_media_edge_url(self.media_edge_url)
+        if self.media_edge_url and not (
+            self.media_edge_credential and self.media_age_identity and self.media_recipient
+            and len(self.media_name_key) == 32 and self.media_key_version > 0 and self.media_max_object_bytes > 0
+        ):
+            raise ValueError("a media edge cell needs its credential, key bundle, key version and object bound")
 
     @property
     def namespace(self) -> str:
@@ -297,8 +347,8 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
 
 
 def render_network_policies(spec: CellManifestSpec) -> list[dict]:
-    """Default deny, gateway-only runtime ingress, optional broker-only egress,
-    and backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
+    """Default deny, gateway-only runtime ingress, optional broker and media edge
+    egress, and backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
 
     default_deny = {
         "apiVersion": "networking.k8s.io/v1",
@@ -342,13 +392,21 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
         },
     }
     if spec.artifact_broker_url:
-        runtime_ingress["spec"]["egress"] = [{
+        runtime_ingress["spec"]["egress"].append({
             "to": [{
                 "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
                 "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: ARTIFACT_BROKER_POD_LABEL_VALUE}},
             }],
             "ports": [{"protocol": "TCP", "port": ARTIFACT_BROKER_PORT}],
-        }]
+        })
+    if spec.media_edge_url:
+        runtime_ingress["spec"]["egress"].append({
+            "to": [{
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
+                "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: MEDIA_EDGE_POD_LABEL_VALUE}},
+            }],
+            "ports": [{"protocol": "TCP", "port": MEDIA_EDGE_PORT}],
+        })
     # L4: a bare `ports: [443]` rule with no `to:` reaches any in-cluster
     # listener and the node's hostPort on 443, not just object storage. An
     # ipBlock of 0.0.0.0/0 that excepts the cluster/private/CGNAT/link-local
@@ -394,6 +452,23 @@ def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
+def _media_store_config(spec: CellManifestSpec) -> str:
+    """The file #2140's runtime reads: one store per vault, keyed by the vault's path.
+    The store identity is per cell, so a reference restored into another cell counts as none."""
+    store = {
+        **spec.media_store_policy,
+        "store": f"media-edge:{spec.cell_id}",
+        "enabled": True,
+        "adapter": MEDIA_ADAPTER,
+        "key_version": str(spec.media_key_version),
+        "name_key_path": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_NAME_KEY_KEY]}",
+        "identity_path": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_IDENTITY_KEY]}",
+        "recipient": spec.media_recipient,
+        "max_object_bytes": spec.media_max_object_bytes,
+    }
+    return json.dumps({"vaults": {CELL_VAULT_PATH: store}}, sort_keys=True, separators=(",", ":"))
+
+
 def render_secret(spec: CellManifestSpec) -> dict:
     data = {
         "cell-token": _b64(spec.bearer_current),
@@ -406,6 +481,13 @@ def render_secret(spec: CellManifestSpec) -> dict:
         data["cell-token-previous"] = _b64(spec.bearer_previous)
     if spec.local_volume and spec.backed_up:
         data[BACKED_UP_KEY] = _b64("true")
+    if spec.media_edge_url:
+        data.update({
+            MEDIA_CREDENTIAL_KEY: _b64(spec.media_edge_credential),
+            MEDIA_IDENTITY_KEY: _b64(spec.media_age_identity),
+            MEDIA_NAME_KEY_KEY: base64.b64encode(spec.media_name_key).decode("ascii"),
+            MEDIA_STORE_CONFIG_KEY: _b64(_media_store_config(spec)),
+        })
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -494,6 +576,8 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         "EXOMEM_KB_DIRNAME",
         # Rendered per cell from the media engine selection, never chart-wide.
         MEDIA_ENGINES_ENV,
+        # Names the cell's media store and holds its key paths; cellctl renders it per cell.
+        MEDIA_STORE_CONFIG_ENV,
         # `inline` would run media extraction inside the serving process, which a
         # cell must never do (cloud-multimodal-processing): media stays in its child.
         "EXOMEM_MEDIA_WORKER_MODE",
@@ -516,6 +600,7 @@ MODEL_ENV_FORBIDDEN_PREFIXES = (
     "LD_",
     "PYTHON",
     "EXOMEM_CLOUD_",
+    "EXOMEM_MEDIA_EDGE_",
     "EXOMEM_HOSTED_",
     "EXOMEM_WRITER_LEASE_",
     "EXOMEM_LEASE_",
@@ -598,9 +683,15 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": "EXOMEM_CLOUD_READ_ONLY", "value": "1"})
     if spec.artifact_broker_url:
         env.append({"name": "EXOMEM_CLOUD_ARTIFACT_BROKER_URL", "value": spec.artifact_broker_url})
+    if spec.media_edge_url:
+        env.extend([
+            {"name": MEDIA_STORE_CONFIG_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_STORE_CONFIG_KEY]}"},
+            {"name": MEDIA_EDGE_URL_ENV, "value": spec.media_edge_url},
+            {"name": MEDIA_EDGE_CREDENTIAL_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_CREDENTIAL_KEY]}"},
+        ])
     env.extend(
         [
-            {"name": "EXOMEM_VAULT_PATH", "value": "/data/vault"},
+            {"name": "EXOMEM_VAULT_PATH", "value": CELL_VAULT_PATH},
             {"name": "TMPDIR", "value": "/data/scratch/tmp"},
             {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"},
         ]
@@ -630,6 +721,25 @@ def _init_env(spec: CellManifestSpec) -> list[dict]:
             "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": BACKED_UP_KEY, "optional": True}},
         })
     return env
+
+
+def _media_mounts(spec: CellManifestSpec) -> list[dict]:
+    return [{"name": MEDIA_VOLUME, "mountPath": MEDIA_DIR, "readOnly": True}] if spec.media_edge_url else []
+
+
+def _media_volumes(spec: CellManifestSpec) -> list[dict]:
+    """Only the media keys of the cell's Secret, never its bearer or backup keys. The keys are
+    required: a cell that has lost its store identity must not start and read evicted originals as deleted."""
+    if not spec.media_edge_url:
+        return []
+    return [{
+        "name": MEDIA_VOLUME,
+        "secret": {
+            "secretName": spec.secret_name,
+            "defaultMode": 0o440,
+            "items": [{"key": key, "path": path} for key, path in MEDIA_FILES.items()],
+        },
+    }]
 
 
 def dedicated_placement(cell_id: str) -> dict:
@@ -792,6 +902,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                             "volumeMounts": [
                                 {"name": "data", "mountPath": "/data"},
                                 {"name": "tmp", "mountPath": "/tmp"},
+                                *_media_mounts(spec),
                             ],
                         }
                     ],
@@ -801,6 +912,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                             "persistentVolumeClaim": {"claimName": spec.pvc_name},
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
+                        *_media_volumes(spec),
                     ],
                 },
             },
