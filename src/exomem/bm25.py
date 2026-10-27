@@ -34,13 +34,15 @@ The same stemmer is exposed to find.py for its stem-aware gates.
 
 from __future__ import annotations
 
+import heapq
 import logging
 import math
 import re
+import sys
 import threading
 import unicodedata
-from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections import Counter, OrderedDict
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -421,13 +423,27 @@ class CorpusStatistics:
         candidates: Mapping[str, Sequence[str]],
         query_tokens: Sequence[str],
         k: int,
+        **filters: Any,
+    ) -> list[tuple[str, float]]:
+        """Rank candidates of this corpus that hold a query token, best first."""
+        return self.score_counts(
+            ((path, len(document), Counter(document)) for path, document in candidates.items()),
+            query_tokens, k, **filters,
+        )
+
+    def score_counts(
+        self,
+        documents: Iterable[tuple[str, int, Mapping[str, int]]],
+        query_tokens: Sequence[str],
+        k: int,
         *,
         min_matched_terms: int = 1,
         term_units: Sequence[Sequence[object]] | None = None,
         corroboration_tokens: Sequence[str] | None = None,
         corroboration_groups: Sequence[Sequence[str]] | None = None,
     ) -> list[tuple[str, float]]:
-        """Rank candidates of this corpus that hold a query token, best first."""
+        """`score` over `(path, length, counts)`, where `counts` holds every word the
+        query and its filters name that the page holds, and no word it lacks."""
         if not query_tokens or not self.average_length:
             return []
         wanted = set(query_tokens)
@@ -439,8 +455,7 @@ class CorpusStatistics:
         counted = set(corroboration_tokens) if corroboration_tokens is not None else wanted
         groups = [frozenset(group) for group in corroboration_groups or () if group]
         scored = []
-        for path, document in candidates.items():
-            counts = Counter(document)
+        for path, length, counts in documents:
             if not wanted.intersection(counts):
                 continue
             if min_matched_terms > 1 or groups:
@@ -456,13 +471,119 @@ class CorpusStatistics:
                     or any(group.issubset(counts) for group in groups)
                 ):
                     continue
-            norm = self.k1 * (1 - self.b + self.b * len(document) / self.average_length)
+            norm = self.k1 * (1 - self.b + self.b * length / self.average_length)
             total = 0.0
             for word, idf in idfs:
                 frequency = counts.get(word) or 0
                 total += idf * (frequency * (self.k1 + 1) / (frequency + norm))
             scored.append((path, float(total)))
-        return sorted(scored, key=lambda item: (-item[1], item[0]))[:max(0, k)]
+        # The k smallest by this key are `sorted(...)[:k]`; paths are unique, so no tie is left open.
+        return heapq.nsmallest(max(0, k), scored, key=lambda item: (-item[1], item[0]))
+
+
+def query_words(
+    query_tokens: Sequence[str],
+    *,
+    term_units: Sequence[Sequence[object]] | None = None,
+    corroboration_tokens: Sequence[str] | None = None,
+    corroboration_groups: Sequence[Sequence[str]] | None = None,
+) -> frozenset[str]:
+    """Every word `CorpusStatistics.score_counts` reads from a page's counts."""
+    return frozenset((
+        *query_tokens,
+        *(str(stem) for stem, *_rest in term_units or ()),
+        *(corroboration_tokens or ()),
+        *(word for group in corroboration_groups or () for word in group),
+    ))
+
+
+#: Postings slots one `CorpusPostings` keeps: a slot is one page that holds one
+#: word. A slot costs one dictionary entry, about 50 bytes, because its path is
+#: the length map's own interned string, so 2^18 slots is about 13 MB. That holds the
+#: words of a few turns even where every page holds them: about a hundred such
+#: words at 2,000 pages, five at 50,000. A word past the limit is counted for the
+#: request that asks and not kept.
+POSTINGS_SLOTS_MAX = 1 << 18
+
+
+class CorpusPostings:
+    """Each page's length in one admitted corpus and, for the words asked so
+    far, the pages holding each word with its count.
+
+    The counts are those `Counter(stemmed.split())` gives, so ranking from
+    them equals ranking from each candidate's text. A ranking then reads no
+    page text for a word it has met before, however many pages hold that
+    word. It belongs to one admitted corpus's rows: whoever adds counts reads
+    them from the rows that corpus's statistics were built on.
+    """
+
+    def __init__(self, lengths: Mapping[str, int]) -> None:
+        # Interned, so every kept slot shares its page's one path string.
+        self.lengths = MappingProxyType({sys.intern(path): length for path, length in lengths.items()})
+        self._postings: OrderedDict[str, Mapping[str, int]] = OrderedDict()
+        self._slots = 0
+        self._lock = threading.Lock()
+
+    def missing(self, words: Iterable[str]) -> list[str]:
+        """The words with no kept postings, in sorted order."""
+        with self._lock:
+            return sorted(word for word in set(words) if word not in self._postings)
+
+    def counted(
+        self,
+        documents: Iterable[tuple[str, Sequence[str]]],
+        words: Iterable[str],
+        document_frequency: Mapping[str, int],
+    ) -> dict[str, Mapping[str, int]] | None:
+        """Count `words` over `documents`, pages of the corpus that should include
+        every page holding any of them, and keep what fits.
+
+        A word's postings are complete when they name as many pages as the
+        corpus's own `document_frequency` says hold it. Returns the postings of
+        every word given, or None when some word's are not complete: those are
+        never kept, and the caller counts from each candidate's text instead.
+        """
+        wanted = set(words)
+        found: dict[str, dict[str, int]] = {word: {} for word in wanted}
+        for path, document in documents:
+            key = sys.intern(path)
+            for word in wanted.intersection(document):
+                found[word][key] = document.count(word)
+        if any(len(pages) != document_frequency.get(word, 0) for word, pages in found.items()):
+            return None
+        postings = {word: MappingProxyType(pages) for word, pages in found.items()}
+        with self._lock:
+            for word, pages in postings.items():
+                if word in self._postings or len(pages) > POSTINGS_SLOTS_MAX:
+                    continue
+                while self._postings and self._slots + len(pages) > POSTINGS_SLOTS_MAX:
+                    self._slots -= len(self._postings.popitem(last=False)[1])
+                self._postings[word] = pages
+                self._slots += len(pages)
+        return postings
+
+    def kept(self, words: Iterable[str]) -> dict[str, Mapping[str, int]]:
+        """The kept postings of `words`, marked as recently used."""
+        with self._lock:
+            held = {}
+            for word in set(words):
+                pages = self._postings.get(word)
+                if pages is not None:
+                    self._postings.move_to_end(word)
+                    held[word] = pages
+            return held
+
+    def documents(
+        self, paths: Iterable[str], postings: Mapping[str, Mapping[str, int]],
+    ) -> Iterator[tuple[str, int, dict[str, int]]]:
+        """`(path, length, counts)` of each path, for `CorpusStatistics.score_counts`."""
+        for path in paths:
+            counts = {}
+            for word, pages in postings.items():
+                frequency = pages.get(path)
+                if frequency:
+                    counts[word] = frequency
+            yield path, self.lengths[path], counts
 
 
 def score_token_corpus(
