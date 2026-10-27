@@ -1155,7 +1155,7 @@ def test_uploads_are_default_off_with_no_env_signing_key_route_or_timeout() -> N
         assert not any("UPLOAD" in key for key in _container_env(documents, name)), name
     assert "EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY" not in _container_env(documents, "exomem-cloud-gateway")
     routes = _find(documents, "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
-    assert not any("/upload" in route["match"] for route in routes)
+    assert not any("/upload" in route["match"] or "/download" in route["match"] for route in routes)
     traefik_args = _find(documents, "Deployment", TRAEFIK)["spec"]["template"]["spec"]["containers"][0]["args"]
     assert not any("readTimeout" in arg for arg in traefik_args)
     assert _helm_template("--set-json", "cloudGateway.uploadCellIds=[]") == documents
@@ -1226,6 +1226,15 @@ def test_the_upload_route_posts_to_the_gateway_without_buffering_and_traefik_wai
     assert not [doc for doc in documents if doc.get("kind") == "Middleware" and "buffering" in doc["spec"]]
     traefik_args = _find(documents, "Deployment", TRAEFIK)["spec"]["template"]["spec"]["containers"][0]["args"]
     assert "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=900s" in traefik_args
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_download_route_reaches_the_gateway_for_selected_cells() -> None:
+    routes = _find(_helm_template(*UPLOAD_ARGS), "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
+    (download,) = [route for route in routes if "/download" in route["match"]]
+    assert download["match"] == "Host(`mcp.example.test`) && Path(`/download`) && Method(`GET`)"
+    assert download["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
+    assert download["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

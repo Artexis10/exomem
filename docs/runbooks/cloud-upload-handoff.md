@@ -30,7 +30,7 @@ list into both consumers, so the two lists cannot differ:
 | Gateway | `EXOMEM_CLOUD_UPLOAD_ENABLED=true`, `EXOMEM_CLOUD_UPLOAD_CELL_IDS` with the list, and `EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY` from the private signing-key Secret. |
 | cellctl | `CELLCTL_UPLOAD_CELL_IDS` with the same list, and `CELLCTL_UPLOAD_PUBLIC_KEY` from the public-key Secret. |
 | Selected cell | `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`: the PEM public half of the gateway's Ed25519 artifact signing pair. cellctl sets it only on listed cells. |
-| Ingress | One route for `POST /upload` on the gateway host. It adds only the trusted-ingress header and sets no body limit, so the Traefik edge stays a pass-through for large bodies. |
+| Ingress | One route for `POST /upload` and one for `GET /download` on the gateway host. Each adds only the trusted-ingress header and sets no body limit or buffering, so the Traefik edge stays a pass-through for large bodies. |
 
 The cell reads the public half from `artifactBroker.publicKeySecretName` /
 `publicKeySecretKey`, the Secret that the artifact broker also uses. The private
