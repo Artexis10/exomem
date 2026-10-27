@@ -1328,12 +1328,22 @@ the service:
 EXOMEM_ACTIVATION_PACKET=anchors
 ```
 
-1. If the install is managed (`--seamless`), add the line to `service.env`, usually `~/.config/exomem/service.env`, and run `bash scripts/upgrade.sh`. The next worker re-reads `service.env`.
+1. If the install is managed (`--seamless`), add the line to `service.env`, usually `~/.config/exomem/service.env`, and run `bash scripts/upgrade.sh --package-version <the serving version>`. The next worker re-reads `service.env`. Without `--package-version`, the command also stages a newer release when one exists.
 2. If the install is a release install that is not managed, add the line to the dotenv file that you gave to the installer, and run the same `bash scripts/install-service.sh --release` command again.
 3. If the service runs from a source checkout, add the line to the checkout's `.env` and run `bash scripts/restart.sh`.
 4. Call `recall_context` once. The packet has no `map` block.
 
-To return to `maps`, remove the line and restart in the same way. A value other
+To return to `maps`, change the line to `EXOMEM_ACTIVATION_PACKET=maps` and
+restart in the same way, then call `recall_context` once: the packet has a
+`map` block. Do not only remove the line. A managed supervisor that started
+while the line was present keeps the value in its own environment, and each
+new worker inherits it.
+
+A cloud cell reads no `.env` file. Set the same variable in the cell model
+environment that `cellctl` renders (`CELLCTL_CELL_MODEL_ENV`), then roll the
+cell.
+
+A value other
 than `anchors` or `maps` logs one warning, `invalid EXOMEM_ACTIVATION_PACKET;
 using maps`, and serves `maps`. The working-set kill switch disables both modes.
 
