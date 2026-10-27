@@ -156,17 +156,18 @@
       ]
     },
     "recipe": {
-      "version": 1,
+      "version": 2,
       "script": "scripts/build-media-artifacts.py",
-      "pipeline": "external data with1024byte threshold; upstream int8 weights unchanged; fp32 Silero VAD"
+      "pipeline": "external data with 1024-byte threshold; upstream int8 weights unchanged; decoder constants folded at ONNX Runtime basic level into file-backed initializers; fp32 Silero VAD",
+      "offline_optimized": ["onnx/decoder_model_merged_int8.onnx"]
     },
     "artifact": {
       "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
       "source": [],
       "quantization": "int8",
       "file_format": "onnx-external-data",
-      "digest": "6f7c2223acb3b4c07b4f2021db0a2a23f34cfa1f9f460f8a078c4fc54b2d5b66",
-      "asset_digest": "571670ac7a8e9090cf6e6b66d2e4c80f8bc289e0049e6884228ce210609d6f5f",
+      "digest": "34b91be0730d62f43110f993586d0171fa4a920a1063899f3799c55f76a4dfab",
+      "asset_digest": "36255d00220a6e22d5dee169e48f9e73d7bfd1163968238464bf89831023e94a",
       "files": [
         "onnx/encoder_model_int8.onnx",
         "onnx/encoder_model_int8.data",

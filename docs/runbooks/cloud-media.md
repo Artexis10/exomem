@@ -51,6 +51,8 @@ Cloud keeps image search disabled with `EXOMEM_DISABLE_CLIP` until its separate 
 The [media model manifest](../../src/exomem/media_models.json) records source revisions, recipe versions and artifact digests.
 The Cloud build fetches those pinned release artifacts before its offline load gates.
 Runtime loads file-backed weights with prepacking disabled and network access off.
+The speech decoder ships with its constants already folded, so a load folds nothing large into private memory and concurrent jobs share the folded tables.
+Rebuilding that artifact needs `onnxruntime>=1.31` in the build environment; the runtime pin does not change.
 New media artifacts never build on a serving host when published bytes are missing or invalid.
 The existing `EXOMEM_MODEL_ARTIFACT_URL` selects the artifact publication or mirror.
 The existing `EXOMEM_MODEL_ARTIFACT_DIR` selects its local cache root.

@@ -82,6 +82,11 @@ The weights follow the rule of the `shared-model-runtime` capability (change `sh
 
 This change applies that rule to the media engines, and its spec references the capability. So `ship-models-as-shared-onnx` lands first, or in the same delivery.
 
+A file-backed weight file is not enough on its own. At load, ONNX Runtime folds constant expressions into private memory in every process. In the Whisper decoder, it folds the transposes of the tied embedding table: 316 MiB per process.
+So the speech artifact saves its decoder already folded, at ONNX Runtime's hardware-independent basic level, with the folded tables as file-backed initializers. The registry recipe names the graphs that the build folds.
+The transcripts stay byte-identical. Measured on 2026-10-27 at 2 threads, one extra concurrent speech job then adds about 0.45 GiB of private memory instead of 0.78 GiB.
+Two concurrent cells hold one copy of every weight mapping, and the first cell to fault a page carries it in its cgroup.
+
 ### D4. Documents
 
 Cloud reads every type a personal install reads: PDF through PyMuPDF, DOCX, XLSX, PPTX, HTML, TXT, EML and ICS. Every install gains EPUB, ODT, ODS, ODP and RTF.

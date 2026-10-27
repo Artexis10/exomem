@@ -17,6 +17,37 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+#: Earlier releases write every If-branch initializer twice when they save an
+#: optimized model with external initializers, and the saved model does not load.
+OFFLINE_OPTIMIZER_MIN = (1, 31)
+
+
+def optimize_offline(graph: Path) -> None:
+    """Save the graph with its constants folded at basic level, as file-backed initializers.
+
+    ONNX Runtime otherwise folds them at load into private memory in every process;
+    saved folded, they map from the file and all processes share them. Basic level
+    holds only hardware-independent rewrites, so any CPU can load the result.
+    """
+    import onnxruntime as ort
+
+    if tuple(int(part) for part in ort.__version__.split(".")[:2]) < OFFLINE_OPTIMIZER_MIN:
+        raise SystemExit(f"offline optimization needs onnxruntime>=1.31; this is {ort.__version__}")
+    staging = graph.parent / ".offline-optimized"
+    staging.mkdir()
+    data = graph.with_suffix(".data").name
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+    options.optimized_model_filepath = str(staging / graph.name)
+    options.add_session_config_entry("session.optimized_model_external_initializers_file_name", data)
+    options.add_session_config_entry("session.optimized_model_external_initializers_min_size_in_bytes", "1024")
+    session = ort.InferenceSession(str(graph), sess_options=options, providers=["CPUExecutionProvider"])
+    del session
+    shutil.move(staging / graph.name, graph)
+    shutil.move(staging / data, graph.parent / data)
+    staging.rmdir()
+
+
 def pack(root: Path, spec: dict, destination: Path) -> dict:
     from exomem.embedding_backend import artifact_sha256, write_artifact_asset
     from exomem.media_models import artifact_spec
@@ -137,6 +168,8 @@ def main() -> None:
             else:
                 model = onnx.load(args.source / name, load_external_data=False)
                 onnx.save_model(model, target, save_as_external_data=True, all_tensors_to_one_file=True, location=target.with_suffix(".data").name, size_threshold=1024)
+        for name in spec["recipe"].get("offline_optimized", []):
+            optimize_offline(root / name)
         if args.vad_source is None:
             raise ValueError("speech requires its pinned VAD source")
         for name, expected in spec["source"]["vad"]["files"].items():
@@ -151,6 +184,7 @@ def main() -> None:
         "source": spec["source"], "recipe": spec["recipe"],
         "qualified_external_input": args.externalized, "onnx": onnx.__version__,
         **({"torch": __import__("torch").__version__, "transformers": __import__("transformers").__version__} if args.kind == "image" else {}),
+        **({"onnxruntime": __import__("onnxruntime").__version__} if spec["recipe"].get("offline_optimized") else {}),
         "recipe_sha256": sha256(Path(__file__)),
     }
     (root / "source.json").write_text(json.dumps(provenance, sort_keys=True, indent=2) + "\n")
