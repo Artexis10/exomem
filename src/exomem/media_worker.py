@@ -468,6 +468,8 @@ class MediaWorker:
 
     def _process(self, job: _Job) -> _ProcessOutcome:
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+            if job.binary_path.exists():  # a removal's transcript went with it, in the deletion fan-out
+                self._discard_speech_progress(job)
             if self._store is not None:
                 self._store.complete(job)
             return _ProcessOutcome(_COMPLETE)
@@ -518,6 +520,31 @@ class MediaWorker:
             log.exception("re-embed failed for %s", job.sidecar_path.name)
         except Exception:  # noqa: BLE001 — enrichment, never fatal
             log.exception("re-embed failed for %s", job.sidecar_path.name)
+
+    def _speech_progress(self, job: _Job) -> int | None:
+        """How many audio samples of a speech job's original the engine transcribed, else None."""
+        if not _speech_job(job):
+            return None
+        from . import onnx_asr_runtime
+
+        # The engine's own key for the original: the offset is read from the record it names.
+        rel = onnx_asr_runtime._binary_rel(self._vault_root, job.binary_path)
+        return None if rel is None else onnx_asr_runtime.progress_offset(self._vault_root, rel)
+
+    def _discard_speech_progress(self, job: _Job) -> None:
+        """Forget the partial transcript of a speech job that leaves the queue with its file kept.
+
+        A removed file loses its transcript in the deletion fan-out; this covers the
+        other ends: a purged sidecar, a terminal failure and a replaced input.
+        """
+        if not _speech_job(job):
+            return
+        from . import onnx_asr_runtime
+
+        rel = onnx_asr_runtime._binary_rel(self._vault_root, job.binary_path)
+        if rel is not None:
+            with contextlib.suppress(OSError):
+                onnx_asr_runtime.discard_progress(self._vault_root, rel)
 
     def _run_extraction(self, job: _Job) -> _ProcessOutcome:
         # A startup/watcher race may complete the transcript after this job was
@@ -624,6 +651,7 @@ class MediaWorker:
         except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
             error = f"{type(e).__name__}: {e}"
             log.exception("extraction failed for %s", job.binary_path.name)
+            self._discard_speech_progress(job)
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
@@ -862,17 +890,16 @@ class MediaWorker:
             return False
 
     def _context_for(self, cell: media_brakes.CellMemory, config: media_brakes.Settings):
-        def context(media_type: str) -> str:
-            budget = config.budget_for(media_engines.engine_for(media_type))
-            return media_brakes.context(cell, budget, config)
+        def context(job: _Job) -> str:
+            return media_brakes.context(cell, _budget_for(job, config), config)
 
         return context
 
     def _verdict_lifted(self, cell: media_brakes.CellMemory, config: media_brakes.Settings):
         context = self._context_for(cell, config)
 
-        def lifted(media_type: str, recorded: str | None) -> bool:
-            return media_brakes.verdict_lifted(recorded, current=context(media_type), config=config)
+        def lifted(job: _Job, recorded: str | None) -> bool:
+            return media_brakes.verdict_lifted(recorded, current=context(job), config=config)
 
         return lifted
 
@@ -941,7 +968,12 @@ class MediaWorker:
         if kind == media_brakes.TIMEOUT:
             exceeded = media_brakes.timeout_context(config)
             for job in self._store.running_jobs():
-                verdict = self._store.record_timeout_stop(job, stop_limit=config.stop_limit, context=exceeded)
+                verdict = self._store.record_timeout_stop(
+                    job,
+                    stop_limit=config.stop_limit,
+                    context=exceeded,
+                    progress=self._speech_progress(job),
+                )
                 if verdict == media_jobs.OVER_BUDGET:
                     log.warning(
                         "media worker: %s ran past the job timeout %d times; now over budget",
@@ -956,7 +988,8 @@ class MediaWorker:
                 job,
                 kind=kind,
                 stop_limit=config.stop_limit,
-                context=context(job.media_type),
+                context=context(job),
+                progress=self._speech_progress(job),
             )
         self._memory_hold_until = _clock() + _MEMORY_WAIT_SECONDS
 
@@ -2023,9 +2056,25 @@ class MediaWorker:
         return n
 
 
+def _speech_job(job: _Job) -> bool:
+    """Whether the job's extraction stage runs the speech engine, which resumes a stopped run."""
+    return job.do_ocr and media_engines.engine_for(job.media_type) == media_engines.SPEECH
+
+
+def _engines_loaded(job: _Job) -> list[str | None]:
+    """The budget entries of what the job's child loads: the stage's engine and the CLIP tower.
+
+    The tower loads when the CLIP stage runs and image search is on, as `_run_clip` decides.
+    """
+    engines: list[str | None] = [media_engines.engine_for(job.media_type)] if job.do_ocr else []
+    if job.do_clip and embeddings.clip_enabled():
+        engines.append(media_brakes.CLIP_BUDGET_KEY)
+    return engines
+
+
 def _budget_for(job: _Job, config: media_brakes.Settings) -> media_brakes.Budget:
-    """The budget of the engine the job's extraction stage runs, or the default."""
-    return config.budget_for(media_engines.engine_for(job.media_type if job.do_ocr else None))
+    """The budget of everything the job's child loads, or the default."""
+    return config.budget_for_loaded(_engines_loaded(job))
 
 
 def _reap_group(pgid: int, timeout: float = 2.0) -> None:
@@ -2086,6 +2135,10 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
         assert config is not None
         return _budget_for(job, config)
 
+    def fail(job: _Job, error: str | None) -> None:
+        worker._discard_speech_progress(job)
+        store.mark(job, FAILED, error)
+
     def admit(job: _Job) -> bool:
         """Claim only what fits in the cell now; the supervisor checked before spawning."""
         assert config is not None
@@ -2138,7 +2191,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 assert job.id is not None
                 if config is None:
                     log.exception("media child job crashed: %s", job.binary_path)
-                    store.mark(job, FAILED, f"{type(exc).__name__}: {exc}")
+                    fail(job, f"{type(exc).__name__}: {exc}")
                     continue
                 context = media_brakes.context(media_brakes.read_cell(), budget_of(job), config)
                 verdict = store.record_memory_stop(
@@ -2146,6 +2199,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     kind=media_brakes.HARD_LIMIT,
                     stop_limit=config.stop_limit,
                     context=context,
+                    progress=worker._speech_progress(job),
                 )
                 log.warning(
                     "media worker: %s hit the data limit (%s); job now %s",
@@ -2174,7 +2228,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         return _LOCK_UNAVAILABLE_EXIT_CODE
                     return _TRANSIENT_EXIT_CODE
                 log.exception("media child job crashed: %s", job.binary_path)
-                store.mark(job, FAILED, f"{type(exc).__name__}: {exc}")
+                fail(job, f"{type(exc).__name__}: {exc}")
             except PermissionError as exc:
                 assert job.id is not None
                 error = f"{type(exc).__name__}: {exc}"
@@ -2191,11 +2245,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     )
                 else:
                     log.exception("media child job crashed: %s", job.binary_path)
-                store.mark(job, FAILED, error)
+                fail(job, error)
             except Exception as exc:  # noqa: BLE001 - preserve worker availability
                 log.exception("media child job crashed: %s", job.binary_path)
                 assert job.id is not None
-                store.mark(job, FAILED, f"{type(exc).__name__}: {exc}")
+                fail(job, f"{type(exc).__name__}: {exc}")
             else:
                 assert job.id is not None
                 if outcome.state == _HANDOFF:
@@ -2208,7 +2262,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 if outcome.state == BLOCKED:
                     store.mark(job, BLOCKED, outcome.error)
                 elif outcome.state == FAILED:
-                    store.mark(job, FAILED, outcome.error)
+                    fail(job, outcome.error)
                 elif outcome.state == _STALE:
                     try:
                         current_content = job.sidecar_path.read_text(encoding="utf-8")
@@ -2227,13 +2281,10 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         # stage queued while it ran stays.
                         store.complete(job)
                     elif binary_only_stale:
+                        worker._discard_speech_progress(job)
                         store.discard(job)
                     else:
-                        store.mark(
-                            job,
-                            FAILED,
-                            outcome.error or "stale extraction commit",
-                        )
+                        fail(job, outcome.error or "stale extraction commit")
                 else:
                     store.complete(job)
             if brakes:

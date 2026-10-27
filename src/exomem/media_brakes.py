@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +39,10 @@ STOP_LIMIT_ENV = "EXOMEM_MEDIA_STOP_LIMIT"
 JOB_TIMEOUT_ENV = "EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS"
 #: The budget entry that applies to media whose kind needs no engine.
 DEFAULT_BUDGET_KEY = "default"
+#: The budget entry of the CLIP image tower. It is no media engine: it has no switch of
+#: its own and serves no kind, but a child that embeds an image loads it beside the
+#: extraction engine and needs its memory too.
+CLIP_BUDGET_KEY = "clip"
 
 #: Stop kinds the job ledger records. Hard-limit failures can mark a file over the
 #: memory budget and watchdog stops over the time budget; a pressure stop never marks
@@ -111,6 +115,21 @@ class Settings:
     def budget_for(self, engine: str | None) -> Budget:
         return self.budgets.get(engine or "", self.default_budget)
 
+    def budget_for_loaded(self, engines: Iterable[str | None]) -> Budget:
+        """The budget of one child that loads every one of `engines` (none: the default).
+
+        Anonymous memory adds: each engine keeps its own heap until the child exits.
+        VmData does not: it counts clean file mappings of model weights, and the child's
+        limit is its largest entry. The runbook records the measured child that holds the
+        speech engine and the tower, which fits the speech entry; adding the entries
+        would grant more than any measurement needs.
+        """
+        budgets = [self.budget_for(engine) for engine in engines] or [self.default_budget]
+        return Budget(
+            sum(budget.anon_bytes for budget in budgets),
+            max(budget.vmdata_bytes for budget in budgets),
+        )
+
 
 @dataclass(frozen=True)
 class CellMemory:
@@ -155,7 +174,8 @@ def _budgets(raw: str, cell_max: int | None) -> dict[str, Budget]:
     budgets: dict[str, Budget] = {}
     for key, entry in parsed.items():
         engine = str(key)
-        if engine != DEFAULT_BUDGET_KEY and engine not in media_engines.ENGINES:
+        # A closed set the code implements: each engine, the CLIP tower and the default.
+        if engine not in (DEFAULT_BUDGET_KEY, CLIP_BUDGET_KEY, *media_engines.ENGINES):
             _warn_once(f"{BUDGETS_ENV} names unknown engine {engine!r}; ignored")
             continue
         try:

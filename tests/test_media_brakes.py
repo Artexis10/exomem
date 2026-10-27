@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import media_brakes
+from exomem import media_brakes, media_jobs, media_worker
 
 _GIB = 1 << 30
 _MIB = 1 << 20
@@ -106,3 +106,32 @@ def test_file_backed_speech_accepts_virtual_data_above_the_physical_cell_limit(t
 
     assert config.budget_for("speech") == media_brakes.Budget(_GIB, 4 * _GIB)
     assert media_brakes.admits(cell, config.budget_for("speech"), config)
+
+
+def test_a_child_that_embeds_an_image_budgets_the_clip_tower_only_while_image_search_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = '{"ocr": {"anon_mib": 640, "vmdata_mib": 1024}, "clip": {"anon_mib": 256, "vmdata_mib": 1536}}'
+    config = media_brakes.settings({media_brakes.BUDGETS_ENV: raw})
+    job = media_jobs.MediaJob(
+        binary_path=Path("photo.png"), sidecar_path=Path("photo.png.md"), media_type="image", do_clip=True
+    )
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    assert media_worker._budget_for(job, config) == media_brakes.Budget(896 * _MIB, 1536 * _MIB)
+
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    assert media_worker._budget_for(job, config) == media_brakes.Budget(640 * _MIB, 1024 * _MIB)
+
+
+def test_a_child_that_loads_speech_and_the_clip_tower_adds_their_heaps_but_not_their_mappings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = '{"speech": {"anon_mib": 1024, "vmdata_mib": 4096}, "clip": {"anon_mib": 256, "vmdata_mib": 1536}}'
+    config = media_brakes.settings({media_brakes.BUDGETS_ENV: raw})
+    job = media_jobs.MediaJob(
+        binary_path=Path("talk.mp4"), sidecar_path=Path("talk.mp4.md"), media_type="video", do_clip=True
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+
+    assert media_worker._budget_for(job, config) == media_brakes.Budget(1280 * _MIB, 4096 * _MIB)
