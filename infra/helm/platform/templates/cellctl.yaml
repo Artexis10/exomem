@@ -319,6 +319,16 @@ spec:
               value: "true"
             {{- end }}
             {{- end }}
+            {{- if .Values.mediaSlotLease.enabled }}
+            - name: CELLCTL_MEDIA_SLOT_URL
+              value: {{ .Values.mediaSlotLease.endpoint | quote }}
+            - name: CELLCTL_MEDIA_SLOT_CELL_IDS
+              value: {{ .Values.mediaSlotLease.cellIds | toJson | quote }}
+            {{- if .Values.mediaSlotLease.allCells }}
+            - name: CELLCTL_MEDIA_SLOT_ALL_CELLS
+              value: "true"
+            {{- end }}
+            {{- end }}
             {{- if .Values.cells.jobEgressExcept }}
             - name: CELLCTL_JOB_EGRESS_EXCEPT
               value: {{ join "," .Values.cells.jobEgressExcept | quote }}
@@ -806,12 +816,15 @@ spec:
           !has(variables.np.podSelector.matchExpressions) &&
           ((!has(variables.np.egress) || size(variables.np.egress) == 0)
           {{- if .Values.mediaEdge.enabled }}
-          {{- /* The broker and the media edge each add one egress rule to a selected cell. Each rule is exactly one peer on one port. */}}
+          {{- /* The platform schema fixes these service peers and ports; each rule admits one configured peer. */}}
           {{- $peers := list }}
           {{- if .Values.artifactBroker.enabled }}
           {{- $peers = append $peers (dict "name" "exomem-artifact-broker" "port" 8767 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.artifactBroker.cellIds)) .Values.artifactBroker.allCells)) }}
           {{- end }}
           {{- $peers = append $peers (dict "name" "exomem-media-edge" "port" 8769 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.mediaEdge.cellIds)) .Values.mediaEdge.allCells)) }}
+          {{- if .Values.mediaSlotLease.enabled }}
+          {{- $peers = append $peers (dict "name" "exomem-media-slot-lease" "port" 8768 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.mediaSlotLease.cellIds)) .Values.mediaSlotLease.allCells)) }}
+          {{- end }}
             || (size(variables.np.egress) <= {{ len $peers }} && variables.np.egress.all(e,
               size(e.to) == 1 && !has(e.to[0].ipBlock) &&
               e.to[0].namespaceSelector.matchLabels ==
@@ -825,18 +838,19 @@ spec:
           {{- else if .Values.artifactBroker.enabled }}
             || ({{ if not .Values.artifactBroker.allCells }}variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
               {{ end }}size(variables.np.egress) == 1 &&
-              size(variables.np.egress[0].to) == 1 &&
-              !has(variables.np.egress[0].to[0].ipBlock) &&
-              variables.np.egress[0].to[0].namespaceSelector.matchLabels ==
-                {'kubernetes.io/metadata.name': {{ .Values.cellctl.namespace | quote }}} &&
-              !has(variables.np.egress[0].to[0].namespaceSelector.matchExpressions) &&
-              variables.np.egress[0].to[0].podSelector.matchLabels ==
-                {'app.kubernetes.io/name': 'exomem-artifact-broker'} &&
-              !has(variables.np.egress[0].to[0].podSelector.matchExpressions) &&
-              size(variables.np.egress[0].ports) == 1 &&
-              variables.np.egress[0].ports[0].protocol == 'TCP' &&
-              variables.np.egress[0].ports[0].port == 8767 &&
-              !has(variables.np.egress[0].ports[0].endPort))
+              {{ include "exomem.cellctl.egressRule" (dict "index" 0 "namespace" .Values.cellctl.namespace "pod" "exomem-artifact-broker" "port" 8767) }})
+          {{- end }}
+          {{- if and .Values.mediaSlotLease.enabled (not .Values.mediaEdge.enabled) }}
+            || ({{ if not .Values.mediaSlotLease.allCells }}variables.namespaceName.substring(9) in {{ .Values.mediaSlotLease.cellIds | toJson }} &&
+              {{ end }}size(variables.np.egress) == 1 &&
+              {{ include "exomem.cellctl.egressRule" (dict "index" 0 "namespace" .Values.cellctl.namespace "pod" "exomem-media-slot-lease" "port" 8768) }})
+          {{- end }}
+          {{- if and .Values.artifactBroker.enabled .Values.mediaSlotLease.enabled (not .Values.mediaEdge.enabled) }}
+            || ({{ if not .Values.artifactBroker.allCells }}variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
+              {{ end }}{{ if not .Values.mediaSlotLease.allCells }}variables.namespaceName.substring(9) in {{ .Values.mediaSlotLease.cellIds | toJson }} &&
+              {{ end }}size(variables.np.egress) == 2 &&
+              {{ include "exomem.cellctl.egressRule" (dict "index" 0 "namespace" .Values.cellctl.namespace "pod" "exomem-artifact-broker" "port" 8767) }} &&
+              {{ include "exomem.cellctl.egressRule" (dict "index" 1 "namespace" .Values.cellctl.namespace "pod" "exomem-media-slot-lease" "port" 8768) }})
           {{- end }}
           ) && size(variables.np.ingress) == 1 &&
           size(variables.np.ingress[0].from) == 1 &&
@@ -851,7 +865,7 @@ spec:
           variables.np.ingress[0].ports[0].protocol == 'TCP' &&
           variables.np.ingress[0].ports[0].port == 8765 &&
           !has(variables.np.ingress[0].ports[0].endPort))
-      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767{{ if .Values.mediaEdge.enabled }} and media edge egress on TCP 8769{{ end }}.
+      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767{{ if .Values.mediaEdge.enabled }} and media edge egress on TCP 8769{{ end }}{{ if .Values.mediaSlotLease.enabled }} and media slot egress on TCP 8768{{ end }}.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
         variables.target.metadata.name != 'job-egress' ||

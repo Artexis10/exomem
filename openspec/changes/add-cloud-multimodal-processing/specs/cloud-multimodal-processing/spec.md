@@ -117,6 +117,54 @@ A job that runs longer than the configured job timeout SHALL be stopped by the s
 - **THEN** the admission ceiling, and the fallback stop that uses it, follow the new limit without a configuration change
 - **AND** every memory-blocked or over-budget job in that cell returns to pending
 
+### Requirement: A node media-slot lease caps heavy media work across cells
+
+Where a node media-slot lease is switched on for a cell, the cell's supervisor SHALL hold a slot from the lease service before it starts a media child, and SHALL release the slot when the child exits. The service SHALL grant slots so that the anonymous-memory bytes it has granted add up to at most the node media pool, in strict first-in first-out order across cells, with at most one queued or held entry for each cell and for each source address.
+
+The cell SHALL send the byte count and the job timeout of the job its child will claim, computed with the same function the child uses, which covers every engine the child loads. The service SHALL hold no copy of the cell's budgets or timeout. It SHALL refuse a byte count above the pool and a timeout above its configured maximum, with a logged reason, and it SHALL NOT shorten a timeout. A lease SHALL last the stated timeout plus a margin, counted from the first reply that tells the cell about the grant. After a restart the service SHALL grant nothing for the longest possible lease.
+
+The child SHALL claim no job that needs more anonymous memory than its slot reserves. It SHALL exit with a code that counts no stop, and the supervisor SHALL release the slot and ask again for the size it now sees.
+
+A job whose slot is not granted, or whose service does not answer, SHALL wait as a memory-blocked job waits: no stop is counted and the tenant sees nothing. A cell that is not switched on SHALL behave as it did before the lease existed.
+
+#### Scenario: Granted budgets never exceed the pool
+
+- **WHEN** a cell holds a slot that fills most of the pool and another cell asks for a slot that does not fit beside it
+- **THEN** the second cell waits until the first releases or its lease ends
+
+#### Scenario: A lease outlasts the child it was granted for
+
+- **WHEN** a cell learns of its grant up to the queue window after the grant, and starts its child then
+- **THEN** its slot lasts the stated job timeout plus the margin from that moment
+- **AND** the next cell is granted nothing while the child may still run
+
+#### Scenario: An unreachable service leaves the job pending
+
+- **WHEN** the lease service does not answer
+- **THEN** the job stays pending and no child starts
+- **AND** no stop is counted
+
+#### Scenario: An interrupted heavier job asks for its own slot
+
+- **WHEN** a cell restarts, and the child it starts under a slot sized for a lighter job recovers a heavier interrupted job
+- **THEN** the child claims nothing and exits without counting a stop
+- **AND** the supervisor releases the slot and the heavier job runs under a slot sized for it
+
+#### Scenario: A job that loads the image tower reserves the tower
+
+- **WHEN** the next job loads the CLIP tower beside its stage engine
+- **THEN** the cell asks for the anonymous bytes of both
+
+#### Scenario: A restart grants nothing for one longest lease
+
+- **WHEN** the lease service restarts while a child holds a slot from the earlier service
+- **THEN** it grants nothing until the longest possible lease has ended
+
+#### Scenario: One address cannot fill the queue
+
+- **WHEN** a source address that already has an entry asks under another cell ID
+- **THEN** the service refuses the request
+
 ### Requirement: Cloud reads every document type a personal install reads
 
 A Cloud cell SHALL extract every document type that a personal install extracts: PDF, Word, Excel, PowerPoint, HTML, plain text, email and calendar files. It SHALL also extract the formats that every install gains under the `automatic-media-processing` capability. Formats that extract without a shipped dependency (plain text, email and calendar files) SHALL stay on and SHALL NOT depend on the documents switch, so they do not regress.

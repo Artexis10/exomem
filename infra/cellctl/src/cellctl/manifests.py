@@ -34,6 +34,8 @@ ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
 MEDIA_EDGE_PORT = 8769
 MEDIA_EDGE_POD_LABEL_VALUE = "exomem-media-edge"
+MEDIA_SLOT_PORT = 8768
+MEDIA_SLOT_POD_LABEL_VALUE = "exomem-media-slot-lease"
 STORAGE_CLASS = LEGACY_CLASS
 CELL_VAULT_PATH = "/data/vault"
 # add-cloud-media-store D4-D6: a media edge cell's Secret keys, the files its runtime reads
@@ -127,6 +129,10 @@ def check_artifact_broker_url(endpoint: str) -> None:
 
 def check_media_edge_url(endpoint: str) -> None:
     _check_literal_service_url(endpoint, MEDIA_EDGE_PORT, "media edge")
+
+
+def check_media_slot_url(endpoint: str) -> None:
+    _check_literal_service_url(endpoint, MEDIA_SLOT_PORT, "media slot")
 
 
 @dataclass(frozen=True)
@@ -225,6 +231,8 @@ class CellManifestSpec:
     # otherwise-0.0.0.0/0 rule to object storage on 443.
     job_egress_except: tuple[str, ...] = ()
     artifact_broker_url: str = ""
+    # cloud-multimodal-processing D10: the node media-slot lease a cell asks before a media child.
+    media_slot_url: str = ""
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
@@ -247,6 +255,7 @@ class CellManifestSpec:
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
         check_media_edge_url(self.media_edge_url)
+        check_media_slot_url(self.media_slot_url)
         if self.media_edge_url and not (
             self.media_edge_credential and self.media_age_identity and self.media_recipient
             and len(self.media_name_key) == 32 and self.media_key_version > 0 and self.media_max_object_bytes > 0
@@ -406,22 +415,20 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
             "egress": [],
         },
     }
-    if spec.artifact_broker_url:
-        runtime_ingress["spec"]["egress"].append({
-            "to": [{
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
-                "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: ARTIFACT_BROKER_POD_LABEL_VALUE}},
-            }],
-            "ports": [{"protocol": "TCP", "port": ARTIFACT_BROKER_PORT}],
-        })
-    if spec.media_edge_url:
-        runtime_ingress["spec"]["egress"].append({
-            "to": [{
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
-                "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: MEDIA_EDGE_POD_LABEL_VALUE}},
-            }],
-            "ports": [{"protocol": "TCP", "port": MEDIA_EDGE_PORT}],
-        })
+    # These peers and ports are the closed services implemented by the platform schema.
+    for url, pod_label_value, port in (
+        (spec.artifact_broker_url, ARTIFACT_BROKER_POD_LABEL_VALUE, ARTIFACT_BROKER_PORT),
+        (spec.media_edge_url, MEDIA_EDGE_POD_LABEL_VALUE, MEDIA_EDGE_PORT),
+        (spec.media_slot_url, MEDIA_SLOT_POD_LABEL_VALUE, MEDIA_SLOT_PORT),
+    ):
+        if url:
+            runtime_ingress["spec"]["egress"].append({
+                "to": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
+                    "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: pod_label_value}},
+                }],
+                "ports": [{"protocol": "TCP", "port": port}],
+            })
     # L4: a bare `ports: [443]` rule with no `to:` reaches any in-cluster
     # listener and the node's hostPort on 443, not just object storage. An
     # ipBlock of 0.0.0.0/0 that excepts the cluster/private/CGNAT/link-local
@@ -711,6 +718,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
             {"name": MEDIA_EDGE_URL_ENV, "value": spec.media_edge_url},
             {"name": MEDIA_EDGE_CREDENTIAL_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_CREDENTIAL_KEY]}"},
         ])
+    if spec.media_slot_url:
+        env.append({"name": "EXOMEM_CLOUD_MEDIA_SLOT_URL", "value": spec.media_slot_url})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": CELL_VAULT_PATH},
