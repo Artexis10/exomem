@@ -282,7 +282,7 @@ Collection is new lifecycle logic. No existing sweep supplies it: the archive me
 
 Each cell has a media allowance, separate from its volume size. It is a configured value in the one limits source; its first value is 100 GB. Paid blocks follow the existing paid-storage observation.
 
-- **Metering.** The cell meters media storage from the versions its sidecars reference, each counted once. Versions kept only for retained backups are not charged to the owner. cellctl separately meters physical bytes per prefix from the bucket listing, for the operator.
+- **Metering.** The cell meters original plaintext bytes from the versions its live and trash sidecars reference, each version counted once. Trash counts until it is emptied. A version kept only for retained backups does not count against the owner. cellctl separately meters physical ciphertext bytes per prefix from the bucket listing, for the operator.
 - **Admission.** An upload or import whose declared media bytes exceed the remaining allowance is refused before any byte arrives, with a code that names the limit.
 - **Overflow.** An original that the allowance cannot cover stays local and is reported in status.
 - **Two meters.** Status and the Home display report two figures, each named for what it counts:

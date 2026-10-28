@@ -28,7 +28,7 @@
   - eviction skips pending and unconfirmed originals;
   - a vault restore that brings back a reference to a destroyed version re-offloads the original and never evicts it on that reference.
 - [ ] 3.6 Report evicted originals as stored in processing status, and hydrate before an explicit re-process. Verify: processing tests for both.
-- [ ] 3.7 Close the recorded pre-canary repairs: terminal verification refusals and targeted retry, current-bound recovery, indexed protections and scoped pins, local staging errors, catalog admission before hydration, and bounded partial status. Verify: retained-ledger migration, repaired-input recovery, live capacity exclusion, refused and successful moves, and restricted status through the real dispatcher. Record query plans against a populated temporary ledger. These repairs follow the disabled foundation as one rollout-dependent batch.
+- [ ] 3.7 Close the recorded pre-canary repairs: terminal verification refusals and targeted retry, current-bound recovery, indexed protections and scoped pins, local staging errors, catalog admission before hydration, bounded partial overview, and exact-path job and index status. Verify: retained-ledger migration, repaired-input recovery, live capacity exclusion, refused and successful moves, and restricted local and evicted-original status through the real dispatcher. Record query plans against a populated temporary ledger. These repairs follow the disabled foundation as one rollout-dependent batch.
 
 ## 4. Platform (D4–D7, D9, D10)
 

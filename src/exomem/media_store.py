@@ -372,9 +372,14 @@ def _processing_status_row(vault: Path, path: str | Path) -> dict[str, object]:
         fields, _body, _marker = parse_frontmatter(text, strict=True)
         processing = fields.get("processing_state")
         media_type = fields.get("media_type")
-        if processing is None and isinstance(media_type, str) and media_processing.has_completed_transcript(text, media_type=media_type):
-            processing = "completed"
-        return {"path": relative,
+        if originals.bound_path(fields) != relative:
+            return _unavailable_original(relative)
+        completed = isinstance(media_type, str) and media_processing.has_completed_transcript(text, media_type=media_type)
+        if processing == "completed" and not completed:
+            processing = "unknown"
+        elif processing is None:
+            processing = "completed" if completed else "unknown"
+        return {"path": relative, "sidecar_path": snapshot.sidecar_path.relative_to(vault).as_posix(),
                 # 'stored' is the processing-status state fixed by the spec.
                 "state": "stored" if snapshot.state == "evicted" else snapshot.state,
                 "original_state": snapshot.state, "processing_state": processing}

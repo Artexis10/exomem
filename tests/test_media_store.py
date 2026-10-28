@@ -583,8 +583,9 @@ def test_stored_status_is_partial_and_exact_paths_survive_custody_loss(vault: Pa
     overview = media_jobs.tool_status(vault)
     assert overview["stored_originals"] == []
     assert overview["media_inventory"]["stored_originals"]["state"] == "unavailable"
-    exact = commands.op_process_media(vault, operation="status", path=relative)
-    assert exact["stored_originals"] == [{"path": relative, "state": "stored", "original_state": "evicted",
+    [exact] = commands.op_process_media(vault, operation="status", path=relative)["results"]
+    assert exact["processing"] == {"state": "completed", "source": "sidecar", "freshness": "unknown"}
+    assert exact["stored_originals"] == [{"path": relative, "sidecar_path": relative + ".md", "state": "stored", "original_state": "evicted",
                                           "processing_state": "completed"}]
     with sqlite3.connect(ledger.path) as connection:
         assert connection.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache'").fetchone() is None
@@ -593,6 +594,22 @@ def test_stored_status_is_partial_and_exact_paths_survive_custody_loss(vault: Pa
     assert lost["stored_originals"] == exact["stored_originals"]
     assert lost["media_inventory"]["offload_refusals"]["state"] == "unavailable"
     assert not ledger.path.exists()
+
+
+def test_exact_status_distinguishes_extraction_from_offload(vault: Path, selected_store):
+    """Offload demand preserves a completed transcript; new extraction demand reports pending."""
+    from exomem import commands, media_jobs
+
+    path = _preserved(vault)
+    relative = path.relative_to(vault).as_posix()
+    ledger = media_jobs.MediaJobStore(vault)
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is not None
+    [offload] = commands.op_process_media(vault, operation="status", path=relative)["results"]
+    assert offload["processing"] == {"state": "completed", "source": "sidecar", "freshness": "unknown"}
+    ledger.enqueue(media_jobs.MediaJob(binary_path=path, sidecar_path=path.with_name(path.name + ".md"),
+                                     media_type="text", do_ocr=True, do_clip=False))
+    [extraction] = commands.op_process_media(vault, operation="status", path=relative)["results"]
+    assert extraction["processing"] == {"state": "pending", "source": "job"}
 
 
 def test_status_path_stays_inside_the_knowledge_base(vault: Path):
@@ -640,6 +657,37 @@ def test_withheld_candidates_do_not_change_status_coverage(vault: Path, selected
     assert after["media_inventory"] == before["media_inventory"]
     assert after["stored_originals"] == before["stored_originals"]
     assert len(after["stored_originals"]) == 1
+
+
+@pytest.mark.parametrize("evicted", [False, True])
+def test_exact_status_withholds_all_facts_for_a_restricted_original(vault: Path, selected_store, evicted):
+    """A selector must not disclose private counts or index work beside a filtered job list."""
+    from test_governance_egress import _external, _reset_governance_caches, write_rule, write_scope
+
+    from exomem import commands, deferred_index, media_jobs, media_store, writer_lease
+    from exomem.governance.principal import request_scope
+
+    path = _preserved(vault, category="restricted")
+    _offload(vault, path)
+    if evicted:
+        assert media_store.evict(vault, path)
+    relative = path.relative_to(vault).as_posix()
+    deferred_index.add_full(vault, [relative + ".md"])
+    write_scope(vault, paths="Evidence/Test/restricted/**")
+    write_rule(vault, ceiling=0)
+    _reset_governance_caches()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "process_media")
+    with request_scope(_external()):
+        before = writer_lease.invoke_command(command, vault, operation="status", path=relative)
+    assert before["results"] == []
+    ledger = media_jobs.MediaJobStore(vault)
+    other = _preserved(vault, category="unrelated")
+    ledger.enqueue(media_jobs.MediaJob(binary_path=other, sidecar_path=other.with_name(other.name + ".md"),
+                                     media_type="audio", do_ocr=True, do_clip=False))
+    deferred_index.add_full(vault, [other.relative_to(vault).as_posix() + ".md"])
+    with request_scope(_external()):
+        after = writer_lease.invoke_command(command, vault, operation="status", path=relative)
+    assert after == before
 
 
 def test_uncertain_publication_keeps_protection_until_confirmed(vault: Path, selected_store, monkeypatch):
@@ -756,7 +804,7 @@ def test_status_and_explicit_retry_keep_stored_processing_state(vault: Path, sel
     assert media_store.evict(vault, path)
     status = commands.op_process_media(vault, operation="status")
     assert status["stored_originals"] == [{"path": path.relative_to(vault).as_posix(),
-        "state": "stored", "original_state": "evicted", "processing_state": "completed"}]
+        "sidecar_path": path.relative_to(vault).as_posix() + ".md", "state": "stored", "original_state": "evicted", "processing_state": "completed"}]
     assert media_processing.retry_media(vault, path).state == "completed"
     assert path.read_bytes() == expected
     assert not media_jobs.MediaJobStore(vault).has_binary(path)

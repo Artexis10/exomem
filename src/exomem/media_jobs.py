@@ -2302,14 +2302,17 @@ class MediaJobStore:
 
 
 def _read_status_rows(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, *, binary_rel: str | None = None,
 ) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
+    selector = " WHERE binary_rel = ?" if binary_rel is not None else ""
+    parameters = (binary_rel,) if binary_rel is not None else ()
     # PRAGMA table_info rows are (cid, name, ...); read by position on any row factory.
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     # A retained store from before the column existed has no typed reasons.
     reason = "blocked_reason" if "blocked_reason" in columns else "NULL AS blocked_reason"
     rows = conn.execute(
-        f"SELECT state, count(*) AS n, {reason} FROM jobs GROUP BY state, blocked_reason"
+        f"SELECT state, count(*) AS n, {reason} FROM jobs{selector} GROUP BY state, blocked_reason",
+        parameters
     ).fetchall()
     runtime = conn.execute(
         "SELECT worker_pid, idle_seconds FROM runtime WHERE singleton = 1"
@@ -2317,23 +2320,30 @@ def _read_status_rows(
     waiting = ",".join(f"'{value}'" for value in sorted(_WAITING_REASONS))
     # Waiting rows are not errors to the tenant; doctor reports their reasons.
     errors = conn.execute(
-        f"SELECT state, last_error FROM (SELECT state, last_error, updated_at, {reason} FROM jobs) "
+        f"SELECT state, last_error FROM (SELECT state, last_error, updated_at, {reason} FROM jobs{selector}) "
         "WHERE state IN ('blocked', 'failed') AND NOT (state = 'blocked' AND "
-        f"coalesce(blocked_reason, '') IN ({waiting})) ORDER BY updated_at DESC LIMIT 5"
+        f"coalesce(blocked_reason, '') IN ({waiting})) ORDER BY updated_at DESC LIMIT 5",
+        parameters
     ).fetchall()
     jobs = conn.execute(
         f"SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error, {reason} "
-        "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
-        (STATUS_JOB_LIMIT,),
+        f"FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
+        (*parameters, STATUS_JOB_LIMIT),
     ).fetchall()
     reconciliation_required_count = sum(
         _classify_batch_write_failure(row["last_error"]) is not None
-        for row in conn.execute("SELECT last_error FROM jobs WHERE state IN ('blocked', 'failed')")
+        for row in conn.execute(
+            f"SELECT last_error FROM jobs{selector}"
+            + (" AND " if selector else " WHERE ") + "state IN ('blocked', 'failed')",
+            parameters,
+        )
     )
     compute_runtime_count = sum(
         is_compute_runtime_error(row["last_error"])
         for row in conn.execute(
-            "SELECT last_error FROM jobs WHERE state IN ('blocked', 'failed')"
+            f"SELECT last_error FROM jobs{selector}"
+            + (" AND " if selector else " WHERE ") + "state IN ('blocked', 'failed')",
+            parameters,
         )
     )
     return rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count
@@ -2356,6 +2366,7 @@ def _diagnostic_snapshot_rows(
     path: Path,
     *,
     vault_root: Path,
+    binary_rel: str | None = None,
 ) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
     target = Path(os.path.abspath(path))
     with reserved_paths._subsystem_authority_scope("media_jobs"):
@@ -2371,12 +2382,12 @@ def _diagnostic_snapshot_rows(
                 create=False,
             ) as retained_path:
                 return _diagnostic_snapshot_rows_retained(
-                    retained_path,
+                    retained_path, binary_rel=binary_rel,
                 )
 
 
 def _diagnostic_snapshot_rows_retained(
-    path: Path,
+    path: Path, *, binary_rel: str | None = None,
 ) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
     sidecars = _sqlite_sidecars(path)
     if _sqlite_sidecar_exists(sidecars):
@@ -2394,7 +2405,7 @@ def _diagnostic_snapshot_rows_retained(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
         conn.execute("PRAGMA busy_timeout=5000")
-        result = _read_status_rows(conn)
+        result = _read_status_rows(conn, binary_rel=binary_rel)
     finally:
         conn.close()
 
@@ -2404,11 +2415,12 @@ def _diagnostic_snapshot_rows_retained(
 
 
 def status(
-    vault_root: Path | None, *, diagnostic_snapshot: bool = False
+    vault_root: Path | None, *, diagnostic_snapshot: bool = False, path: str | None = None
 ) -> dict[str, Any]:
     """Read ledger state without creating a DB or importing model modules."""
     empty = {
         "store": "missing",
+        "available": False,
         "healthy": True,
         "counts": {state: 0 for state in STATES},
         "worker_active": False,
@@ -2424,19 +2436,19 @@ def status(
     }
     if vault_root is None:
         return empty
-    path = job_store_path(vault_root)
-    if not path.exists():
+    store_path = job_store_path(vault_root)
+    if not store_path.exists():
         return empty
     try:
         if diagnostic_snapshot:
             rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _diagnostic_snapshot_rows(
-                path, vault_root=Path(vault_root)
+                store_path, vault_root=Path(vault_root), binary_rel=path
             )
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)
             try:
-                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _read_status_rows(conn)
+                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _read_status_rows(conn, binary_rel=path)
             finally:
                 conn.close()
         counts = {state: 0 for state in STATES}
@@ -2450,7 +2462,8 @@ def status(
         pid = int(runtime["worker_pid"]) if runtime and runtime["worker_pid"] else None
         active = pid_alive(pid)
         return {
-            "store": str(path),
+            "store": str(store_path),
+            "available": True,
             "healthy": reconciliation_required_count == 0,
             "counts": counts,
             "worker_active": active,
@@ -2468,7 +2481,7 @@ def status(
             "errors": [_status_error(row) for row in errors],
         }
     except (OSError, sqlite3.Error) as exc:
-        return {**empty, "store": str(path), "healthy": False, "errors": [str(exc)]}
+        return {**empty, "store": str(store_path), "healthy": False, "errors": [str(exc)]}
 
 
 #: The `status` fields a tool caller sees. The worker process, the store path and
@@ -2479,7 +2492,7 @@ TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "job
 
 def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str, Any]:
     """The `process_media status` view of `status`, without operator detail."""
-    full = status(vault_root)
+    full = status(vault_root, path=path)
     result = {field: full[field] for field in TOOL_STATUS_FIELDS}
     if vault_root is not None:
         from . import media_store, originals
@@ -2488,6 +2501,33 @@ def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str
             result["stored_originals"], stored_coverage = media_store.processing_status(vault_root, path=path)
             result["offload_refusals"], refusal_coverage = media_store.offload_refusals(vault_root, path=path)
             result["media_inventory"] = {"stored_originals": stored_coverage, "offload_refusals": refusal_coverage}
+    if vault_root is not None and path is not None:
+        from . import media_store, originals
+
+        if "stored_originals" in result:
+            [recorded] = result["stored_originals"]
+        else:
+            [recorded], _coverage = media_store.processing_status(vault_root, path=path)
+        result["path"] = path
+        result["sidecar_path"] = recorded.get(
+            "sidecar_path", originals.sidecar_path(Path(path)).as_posix(),
+        )
+        result["processing"] = {
+            "state": recorded.get("processing_state", "unknown"),
+            "source": "sidecar", "freshness": "unknown",
+        }
+        for job in result["jobs"]:
+            if job["media_type"] != OFFLOAD_MEDIA_TYPE:
+                result["processing"] = {"state": job["state"], "source": "job"}
+                break
+        result["job_inventory"] = {
+            "source": "jobs", "coverage": "exact-path",
+            "state": "available" if full["available"] else "unavailable",
+        }
+        if not full["available"]:
+            result["healthy"] = None
+            result["counts"] = None
+            result["reconciliation_required_count"] = None
     return result
 
 

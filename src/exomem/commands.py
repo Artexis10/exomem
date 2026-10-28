@@ -8804,9 +8804,16 @@ def _process_media(
                 "process_media paths is only supported for process or retry",
             )
         selected = _selected_media_paths(vault_root, path=None, paths=[path]) if path is not None else None
+        if selected is not None:
+            from . import deferred_index
+
+            row = media_jobs.tool_status(vault_root, path=selected[0][1])
+            row["index_refresh"] = deferred_index.exact_full_status(vault_root, row["sidecar_path"])
+            # All exact-path facts stay in the row that terminal governance can withhold.
+            return {"operation": operation, "results": [row]}
         return {
             "operation": operation,
-            **media_jobs.tool_status(vault_root, path=selected[0][1] if selected else None),
+            **media_jobs.tool_status(vault_root),
             "index_refresh": index_sync.deferred_work_status(vault_root)["full_upserts"],
         }
 

@@ -11,6 +11,12 @@ It SHALL report unavailable custody without creating or repairing the ledger.
 Candidate failures SHALL stay in path-bearing rows, so terminal governance can withhold them.
 Sibling metadata SHALL NOT reveal candidate counts, truncation flags or failures derived from withheld paths.
 An exact-path status request SHALL resolve its sidecar even when the candidate ledger is absent.
+It SHALL select exact job rows before counts, errors and bounded projections, and query index demand only for the bound sidecar.
+It SHALL return all path-derived facts inside one path-bearing result row that terminal governance can withhold.
+It SHALL report unavailable job or index custody as unknown counts, and an empty index queue SHALL NOT imply index freshness.
+A current extraction job SHALL supply processing state; an offload-only job SHALL NOT override the sidecar's recorded extraction state.
+A completed sidecar state SHALL require a valid transcript marker and an exact original binding.
+Sidecar status SHALL identify its source and SHALL NOT imply verification of the current original bytes.
 This overview SHALL NOT claim exhaustive enumeration or pagination.
 
 An offload verification failure SHALL remain terminal for the same path and sidecar digest.
@@ -40,6 +46,19 @@ A refusal before ciphertext is measured SHALL report its ciphertext size as unkn
 - **THEN** the sidecar supplies the stored state and last processing state
 - **AND** overview inventory coverage remains unavailable or partial, never a claim that no stored originals exist
 - **AND** status creates no ledger
+
+#### Scenario: Exact status outlives the global job prefix
+
+- **WHEN** a requested recording has an older job outside the global status limit
+- **THEN** exact status reports only that recording's jobs, counts, errors and sidecar index demand
+- **AND** unrelated jobs or index demand do not change its result
+
+#### Scenario: A restricted caller reads exact status
+
+- **WHEN** release policy or a content floor withholds the requested original
+- **THEN** terminal governance removes its entire result row, including scalar facts and index demand
+- **AND** the same rule applies when the original is evicted
+
 
 #### Scenario: A restricted caller reads a bounded overview
 
