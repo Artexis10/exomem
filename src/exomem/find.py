@@ -21,7 +21,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date
-from functools import wraps
+from functools import partial, wraps
 from inspect import signature as inspect_signature
 from pathlib import Path
 from typing import Any
@@ -1628,6 +1628,42 @@ def find(
 
     catalog_view = lexstore._admitted_catalog_view(vault_root)
     managed_runtime = readiness.runtime_managed()
+    if catalog_view is not None:
+        from .governance import egress
+        from .published_admission import admission_of
+
+        visible = egress.visible_page_filter(vault_root)
+        offered = admission_of(visible)
+        if offered is not None:
+            catalog_view.retain_withheld_verdicts(offered)
+
+    def _reportable_projection_lag(checkpoints) -> bool:
+        from .governance import egress
+        from .published_admission import admission_of
+
+        lagging = {
+            projection_scope: checkpoint for projection_scope, checkpoint in checkpoints.items()
+            if freshness.live_recall_checkpoint(vault_root, projection_scope) != checkpoint
+        }
+        if not lagging:
+            return False
+        # Rebuild the release predicate: retained row proof never freezes live authority.
+        visible = egress.visible_page_filter(vault_root)
+        offered = admission_of(visible)
+        for projection_scope, checkpoint in lagging.items():
+            if visible is None:
+                return True
+            proof = None
+            if catalog_view is not None and offered is not None:
+                proof = partial(
+                    catalog_view.published_withheld_paths, projection_scope, checkpoint, offered,
+                )
+            if view_lag.recall_withheld_lag(
+                vault_root, projection_scope, checkpoint, visible, withheld_before=proof,
+            ) is None:
+                return True
+        return False
+
     # Trustworthy pending suppression precedes every persistent catalogue read.
     # Incomplete bodies reduce coverage; unknown custody refuses managed recall.
     # An offline/CLI caller keeps its
@@ -1695,7 +1731,8 @@ def find(
                     stale_recall_scopes = frozenset(admitted.lagging_scopes)
                     # Exact admissions also pin the request before later live events.
                     lexstore.bind_admitted_catalog(vault_root, catalog_proof)
-                    if stale_recall_scopes and degraded_out is not None:
+                    if (stale_recall_scopes and degraded_out is not None
+                            and _reportable_projection_lag(catalog_proof)):
                         # Rides the existing warming disclosure: the envelope
                         # already projects `warming.components`, so a stale
                         # answer is disclosed without a new envelope field.
@@ -1873,9 +1910,8 @@ def find(
                 if not interpretation_current:
                     raise RetrievalIndexWarming(site="catalog_proof_incomplete")
             incomplete = catalog_view is not None and catalog_view.incomplete
-            lagging = _catalog_admission is not None and any(
-                freshness.live_recall_checkpoint(vault_root, projection_scope) != checkpoint
-                for projection_scope, checkpoint in _catalog_admission.checkpoints.items()
+            lagging = _catalog_admission is not None and _reportable_projection_lag(
+                _catalog_admission.checkpoints
             )
             if (incomplete or lagging) and _RECALL_PROJECTION_STALE_COMPONENT not in degraded:
                 degraded.append(_RECALL_PROJECTION_STALE_COMPONENT)

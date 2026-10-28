@@ -97,11 +97,43 @@ class _CatalogReadView:
     page_hashes: dict[str, str | None] = field(default_factory=dict)
     incomplete: bool = False
     owner_thread: int = field(default_factory=threading.get_ident)
+    withheld_verdicts: dict[tuple, _PublishedVerdicts] = field(default_factory=dict)
 
     def capture_page_hashes(self, paths: Iterable[str]) -> None:
         missing = list(dict.fromkeys(path for path in paths if path not in self.page_hashes))
         if missing and self.connection is not None and self.owner_thread == threading.get_ident():
             self.page_hashes.update(self.store.page_content_hashes(missing))
+
+    def retain_withheld_verdicts(self, admission: Admission) -> None:
+        """Keep existing exact verdict maps through deferred finalization, without copying them."""
+        identity = admission.identity()
+        if identity is None or self.connection is None or self.owner_thread != threading.get_ident():
+            return
+        with self.store._term_frequency_cache_lock:
+            entries = {
+                (scope, identity): self.store._published_verdicts.get((scope, identity))
+                for scope in self.checkpoints
+            }
+        if not any(entry is not None for entry in entries.values()):
+            return
+        generation = self.store._snapshot_generation(self.connection)
+        # Published maps are replaced, never patched; a reference preserves this SQL generation.
+        self.withheld_verdicts.update(
+            (key, entry) for key, entry in entries.items()
+            if entry is not None and entry.generation == generation
+        )
+
+    def published_withheld_paths(
+        self, scope: str, checkpoint: object, admission: Admission, paths: Set[str],
+    ) -> frozenset[str]:
+        """Prove only held rows, using the caller's current admission identity."""
+        identity = admission.identity()
+        if identity is None or checkpoint != self.checkpoints.get(scope):
+            return frozenset()
+        entry = self.withheld_verdicts.get((scope, identity))
+        if entry is None:
+            return frozenset()
+        return frozenset(path for path in paths if entry.allowed.get(path) is False)
 
     def close(self) -> None:
         conn, self.connection = self.connection, None
