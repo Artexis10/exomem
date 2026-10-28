@@ -36,15 +36,24 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import asyncpg
 import boto3
+import yaml
 from botocore.config import Config
 from cellctl.alerts import GROWTH_ALERT
 from cellctl.control_test_contract import control_test_sql, export_test_sql, import_test_sql
-from cellctl.k8s_client import MOVE_VOLUME_ANNOTATION, OUT_OF_SERVICE_TAINT, VOLUME_LOST_ANNOTATION
+from cellctl.k8s_client import (
+    DELETION_SECRET_NAME_ANNOTATION,
+    DELETION_SECRET_NAMESPACE_ANNOTATION,
+    MOVE_VOLUME_ANNOTATION,
+    OUT_OF_SERVICE_TAINT,
+    VOLUME_LOST_ANNOTATION,
+)
 from cellctl.manifests import (
+    BACKUP_FAMILY_ANNOTATION,
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
     HOLD_ANNOTATION,
@@ -54,6 +63,8 @@ from cellctl.manifests import (
     SNAPSHOT_NAME,
     hold_job_name,
     namespace_name,
+    render_backup_family_secret,
+    snapshot_backup_name,
 )
 from cellctl.state import (
     BACKUP_FAILED,
@@ -64,6 +75,7 @@ from cellctl.state import (
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
 )
+from cellctl.storage.topolvm import FamilyRequest
 from cellctl.storage_config import LocalStorage
 
 from . import build, drill_cluster, images, infra, platform, substrate
@@ -237,6 +249,7 @@ class Drill:
     storage_label: str
     # The host image the cell image was loaded from, for an agent started later.
     cell_tag: str
+    provider_tag: str | None = None
     cells: dict[str, Cell] = field(default_factory=dict)
     # PVs a relocation or an operator step set to Retain on a live agent.
     retained_pvs: list[str] = field(default_factory=list)
@@ -378,7 +391,7 @@ class Drill:
         store = self.stack.object_store
         client = boto3.client(
             "s3", endpoint_url=store.endpoint(from_host=True), aws_access_key_id=store.access_key,
-            aws_secret_access_key=store.secret_key, region_name="us-east-1",
+            aws_secret_access_key=store.secret_key, region_name="us-east-1", verify=str(store.ca_path),
             config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
         objects: dict[str, int] = {}
@@ -542,7 +555,13 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
             seen["hold_started_at"] = annotations.get(HOLD_STARTED_ANNOTATION)
         started = seen["hold_started_at"]
         if started:
-            snapshot = drill.maybe_json("get", "volumesnapshot", hold_job_name(SNAPSHOT_NAME, started), "--namespace", cell.namespace)
+            # cellctl clears the family annotation at closure; the last observed names still apply.
+            raw = annotations.get(BACKUP_FAMILY_ANNOTATION)
+            request = FamilyRequest.parse(raw) if raw else None
+            if request is not None or "snapshot_name" not in seen:
+                seen["snapshot_name"] = snapshot_backup_name(SNAPSHOT_NAME, cell.cell_id, started, request)
+                seen["clone_name"] = snapshot_backup_name(CLONE_CLAIM_NAME, cell.cell_id, started, request)
+            snapshot = drill.maybe_json("get", "volumesnapshot", seen["snapshot_name"], "--namespace", cell.namespace)
             error = ((snapshot or {}).get("status") or {}).get("error")
             if error:
                 seen["snapshot_error"] = str(error.get("message"))[:600]
@@ -550,7 +569,9 @@ async def observe_backup(drill: Drill, cell: Cell, previous_snapshot: str | None
                 seen["snapshot"] = {"name": snapshot["metadata"]["name"],
                                     "created_at": snapshot["status"].get("creationTime"),
                                     "content": snapshot["status"].get("boundVolumeSnapshotContentName")}
-            clone = drill.maybe_json("get", "persistentvolumeclaim", hold_job_name(CLONE_CLAIM_NAME, started), "--namespace", cell.namespace)
+                if request is not None and "secret_permissions" not in seen:
+                    seen["secret_permissions"] = check_snapshot_secret_permissions(drill, cell, seen["snapshot_name"])
+            clone = drill.maybe_json("get", "persistentvolumeclaim", seen["clone_name"], "--namespace", cell.namespace)
             if clone and clone["spec"].get("volumeName") and seen["clone"] is None:
                 pv = drill.maybe_json("get", "persistentvolume", clone["spec"]["volumeName"])
                 if pv:
@@ -596,6 +617,8 @@ async def check_hourly_backups(drill: Drill, record: StepRecord) -> None:
     row = await drill.wait_row(x, serving, timeout=900, description="cell X to serve")
     first_pod = pod_identity(drill.cell_pod(x))
     record.evidence["cell"] = {"id": x.cell_id, "first_pod": first_pod, "volume": drill.claim_volume(x), "row": row_summary(row)}
+    if drill.provider_tag:
+        record.evidence["reservation_permissions"] = check_reservation_permissions(drill, x)
     drill.write(x, "seed")
 
     backups = []
@@ -660,6 +683,77 @@ async def check_hourly_backups(drill: Drill, record: StepRecord) -> None:
         raise StepFailure("; ".join(problems))
 
 
+def check_reservation_permissions(drill: Drill, cell: Cell) -> dict[str, Any]:
+    """Exercise the request-only permission with server dry-runs on this fixture's LV."""
+    handle = drill.claim_volume(cell)["volume_id"]
+    volumes = drill.kube_json("get", "logicalvolumes.topolvm.io")["items"]
+    volume = next(item for item in volumes if (item.get("status") or {}).get("volumeID") == handle)
+    physical_uuid = volume["status"]["physicalUUID"]
+    policy_name = "exomem-cellctl-reservations"
+    policy = drill.kube_json("get", "validatingadmissionpolicy", policy_name)
+    warnings = (policy.get("status") or {}).get("typeChecking", {}).get("expressionWarnings", [])
+    if warnings:
+        raise StepFailure(f"the request-only admission policy has type errors: {warnings}")
+    identity = f"system:serviceaccount:{platform.CLOUD_NAMESPACE}:cellctl"
+
+    def patch(changes: dict[str, Any]):
+        return drill.kubectl("patch", "logicalvolumes.topolvm.io", volume["metadata"]["name"],
+                             "--type=merge", "--dry-run=server", "--as", identity,
+                             "--patch", json.dumps({"spec": changes}), check=False)
+
+    # cellctl's own renderer builds the family capability it would write for a backup of this volume.
+    family = FamilyRequest(volume["metadata"]["name"], physical_uuid, 0, uuid.uuid4().hex)
+    probe_spec = SimpleNamespace(cell_id=cell.cell_id, hold_started_at=dt.datetime.now(dt.UTC).isoformat(),
+                                 backup_family_request=family.annotation())
+    family_secret = render_backup_family_secret(probe_spec, namespace=LOCAL.reservation_namespace,
+                                                token="drill-probe-token", physical_uuid=physical_uuid)
+
+    def ready() -> dict[str, Any] | None:
+        allowed = patch({"reservationTargetBytes": LOCAL.default_cell_gib * drill_cluster.GIB,
+                         "reservationTargetPhysicalUUID": physical_uuid})
+        forbidden = patch({"nodeName": "invented-other-node"})
+        secret = drill.kubectl("apply", "--server-side", "--field-manager=cellctl", "--force-conflicts",
+                               "--dry-run=server", "--as", identity, "--filename=-",
+                               input_text=json.dumps(family_secret), check=False)
+        if (allowed.returncode == 0 and forbidden.returncode != 0 and policy_name in forbidden.stderr
+                and secret.returncode == 0):
+            return {"source_physical_uuid": physical_uuid, "target_request": "allowed",
+                    "node_rewrite": "denied", "family_secret_write": "allowed",
+                    "source": "Kubernetes server dry-runs as the cellctl service account"}
+        # The timeout reports the last attempt, so a failure names which case the server decided wrongly.
+        raise RuntimeError(f"target request exit {allowed.returncode}: {allowed.stderr.strip()[-400:]}; "
+                           f"node rewrite exit {forbidden.returncode}: {forbidden.stderr.strip()[-400:]}; "
+                           f"family Secret exit {secret.returncode}: {secret.stderr.strip()[-600:]}")
+
+    return wait_for(ready, timeout=60, interval=2, description="the request-only admission policy to enforce both cases")
+
+
+def check_snapshot_secret_permissions(drill: Drill, cell: Cell, secret_name: str) -> dict[str, Any]:
+    """Read only resource names while checking the actual snapshotter account."""
+    deployment = drill.kube_json("get", "deployment", "exomem-platform-topolvm-controller",
+                                 "--namespace", platform.PLATFORM_NAMESPACE)
+    account = deployment["spec"]["template"]["spec"]["serviceAccountName"]
+    identity = f"system:serviceaccount:{platform.PLATFORM_NAMESPACE}:{account}"
+    snapshot_class = drill.kube_json("get", "volumesnapshotclass", LOCAL.snapshot_class)
+    namespace = snapshot_class["parameters"]["csi.storage.k8s.io/snapshotter-secret-namespace"]
+    allowed = drill.kubectl("get", "secret", secret_name, "--namespace", namespace,
+                            "--as", identity, "--output=name", check=False)
+    cell_secrets = drill.kubectl("get", "secrets", "--namespace", cell.namespace, "--output=name").stdout.splitlines()
+    if not cell_secrets:
+        raise StepFailure("the cell has no credential Secret for the isolation check")
+    forbidden = drill.kubectl("get", cell_secrets[0], "--namespace", cell.namespace,
+                              "--as", identity, "--output=name", check=False)
+    decisions = {verb: drill.kubectl("auth", "can-i", verb, "secrets", "--namespace", namespace,
+                                     "--as", identity, "--quiet", check=False).returncode for verb in ("list", "watch")}
+    # Forbidden is Kubernetes' fixed Status.reason; auth can-i uses exit 1 for a negative decision.
+    if (allowed.returncode or forbidden.returncode == 0 or "Forbidden" not in forbidden.stderr
+            or any(code != 1 for code in decisions.values())):
+        raise StepFailure("the snapshotter account does not have exactly scoped Secret access")
+    return {"service_account": identity, "namespace": namespace, "secret_name": secret_name,
+            "family_get": "allowed", "cell_secret_get": "denied", "list": "denied", "watch": "denied",
+            "source": "actual Kubernetes get requests and authorization reviews"}
+
+
 def leftovers_gone(drill: Drill, cell: Cell, agent: drill_cluster.Agent, backup: dict[str, Any]) -> float | None:
     """Seconds after the hold ended until its clone claim, clone PV, snapshot
     and their logical volumes were gone from the cluster and the disk; None
@@ -672,10 +766,24 @@ def leftovers_gone(drill: Drill, cell: Cell, agent: drill_cluster.Agent, backup:
     began = time.monotonic()
 
     def gone() -> bool:
-        if drill.maybe_json("get", "persistentvolumeclaim", hold_job_name(CLONE_CLAIM_NAME, started), "--namespace", cell.namespace):
+        clone_name = backup.get("clone_name") or hold_job_name(CLONE_CLAIM_NAME, started)
+        snapshot_name = backup.get("snapshot_name") or hold_job_name(SNAPSHOT_NAME, started)
+        if drill.maybe_json("get", "persistentvolumeclaim", clone_name, "--namespace", cell.namespace):
             return False
-        if drill.maybe_json("get", "volumesnapshot", hold_job_name(SNAPSHOT_NAME, started), "--namespace", cell.namespace):
+        if drill.maybe_json("get", "volumesnapshot", snapshot_name, "--namespace", cell.namespace):
             return False
+        permissions = backup.get("secret_permissions")
+        if permissions:
+            # The snapshotter still reads this capability before deleting its content.
+            for content in drill.kube_json("get", "volumesnapshotcontents")["items"]:
+                annotations = content["metadata"].get("annotations") or {}
+                if (annotations.get(DELETION_SECRET_NAME_ANNOTATION) == permissions["secret_name"]
+                        and annotations.get(DELETION_SECRET_NAMESPACE_ANNOTATION) == permissions["namespace"]):
+                    return False
+            secret = drill.kubectl("get", "secret", permissions["secret_name"], "--namespace", permissions["namespace"],
+                                   "--ignore-not-found", "--output=name", check=False)
+            if secret.returncode or secret.stdout.strip():
+                return False
         if clone_pv and drill.maybe_json("get", "persistentvolume", clone_pv):
             return False
         cell_volume = drill.claim_volume(cell)["volume_id"]
@@ -1064,21 +1172,21 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
     growth["filesystem_after"] = drill.filesystem(x)
     growth["quota_storage"] = wait_for(quota_storage, timeout=300, interval=5, description="cell X's quota to cover the grown claim")
     growth["quota_seconds_after_hold"] = round(time.monotonic() - hold_ended, 1)
-    # D6 on agent B's pool: (pool - reserve) // default size, less a grown
-    # cell's extra slots. The reserve is twice the largest cell per
-    # concurrent backup, and the grown cell is now the largest. The reading
-    # before can lag: 2.9 renamed volumes outside TopoLVM's lvmd, which
-    # publishes free bytes from its last own read of the pool.
-    def d6_slots(largest: int) -> int:
+    # Guarded capacity also charges retained physical volumes. Legacy mode
+    # keeps the earlier pool/reserve calculation and its cached observation.
+    async def d6_slots(largest: int) -> int:
         reserve = 2 * largest * LOCAL.backup_concurrency_per_node
         extra = -(-largest // LOCAL.default_cell_gib) - 1
+        if drill.provider_tag:
+            return await guarded_slots_from_observation(drill, agent_b)
         return (drill_cluster.POOL_GIB - reserve) // LOCAL.default_cell_gib - extra
 
     deadline = time.monotonic() + 180
-    while (slots_after := await drill.slots(agent_b)) != d6_slots(grown) and time.monotonic() < deadline:
+    while (slots_after := await drill.slots(agent_b)) != await d6_slots(grown) and time.monotonic() < deadline:
         await asyncio.sleep(5)
     growth["slots"] = {"before": slots_before, "after": slots_after,
-                       "d6_before": d6_slots(size), "d6_after": d6_slots(grown),
+                       "d6_before": None if drill.provider_tag else await d6_slots(size),
+                       "d6_after": await d6_slots(grown),
                        "source": "exomem_cloud_capacity.cell_slots for agent B as cellctl published it; d6_ from "
                        f"design D6 on the drill's {drill_cluster.POOL_GIB} GiB pool"}
 
@@ -1111,10 +1219,11 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
         problems.append(f"the backups measured {measured}, not a growth and then a larger filesystem at the cap")
     if growth["filesystem_after"]["total_bytes"] <= growth["filled"]["total_bytes"]:
         problems.append("the filesystem inside the cell did not grow")
-    if (at_cap["backup"].get("clone") or {}).get("size") != f"{grown}Gi":
+    # A guarded clone requests its family's exact byte size, not a GiB quantity.
+    if (at_cap["backup"].get("clone") or {}).get("size") != str(grown * drill_cluster.GIB):
         problems.append(f"the next backup's clone is {(at_cap['backup'].get('clone') or {}).get('size')}")
-    if slots_after != d6_slots(grown):
-        problems.append(f"the published slots read {slots_after} after the growth, not D6's {d6_slots(grown)}")
+    if slots_after != await d6_slots(grown):
+        problems.append(f"the published slots read {slots_after} after the growth, not D6's {await d6_slots(grown)}")
     if at_cap["claim_capacity"] != f"{grown}Gi":
         problems.append(f"the claim at the cap reads {at_cap['claim_capacity']}")
     if problems:
@@ -1143,7 +1252,12 @@ async def check_planned_move(drill: Drill, record: StepRecord) -> None:
     loaded = build.load_into_k3s(agent_c.container, drill.cell_tag)
     if loaded != drill.cell_image:
         raise StepFailure(f"agent C holds cell image {loaded}, the cluster runs {drill.cell_image}")
-    run(["docker", "exec", agent_c.container, "crictl", "pull", drill.report.inputs["topolvm_image"]], timeout=600)
+    if drill.provider_tag:
+        loaded_provider = build.load_into_k3s(agent_c.container, drill.provider_tag)
+        if loaded_provider != drill.report.inputs["reservation_provider_image"]:
+            raise StepFailure("the destination agent loaded a different reservation provider")
+    else:
+        run(["docker", "exec", agent_c.container, "crictl", "pull", drill.report.inputs["topolvm_image"]], timeout=600)
 
     # Cell Y's volume is in B's pool too, which must be inactive before C's
     # pool can be active.
@@ -1267,6 +1381,104 @@ async def check_planned_move(drill: Drill, record: StepRecord) -> None:
 # --- setup --------------------------------------------------------------------------------
 
 
+async def guarded_slots_from_observation(drill: Drill, agent: drill_cluster.Agent) -> int:
+    """Compare published slots with the provider frame and this drill's actual claims."""
+    node = drill.kube_json("get", "node", agent.name)
+    frame = json.loads(node["metadata"]["annotations"][LOCAL.reservation_annotation])
+    rows = await drill.fetch("SELECT cell_id, storage_gib, grown_storage_gib FROM exomem_cloud_cells "
+                             "WHERE desired_state <> 'deleted'")
+    volumes = drill.kube_json("get", "logicalvolumes.topolvm.io")["items"]
+    allocations = {(item["name"], item["physical_uuid"]): item["reserved_bytes"] for item in frame["allocations"]}
+    cells = {cell.cell_id: cell for cell in drill.cells.values()}
+    credited = set()
+    credit = 0
+    extra = 0
+    largest = LOCAL.default_cell_gib
+    for row in rows:
+        gib = max(row["storage_gib"], row["grown_storage_gib"] or 0)
+        largest = max(largest, gib)
+        extra += max(0, -(-gib // LOCAL.default_cell_gib) - 1)
+        cell = cells[row["cell_id"]]
+        claim = drill.maybe_json("get", "persistentvolumeclaim", "cell-data", "--namespace", cell.namespace)
+        pv_name = (claim or {}).get("spec", {}).get("volumeName")
+        if not pv_name:
+            continue
+        pv = drill.kube_json("get", "persistentvolume", pv_name)
+        if pinned_node(pv) != agent.name:
+            continue
+        handle = pv["spec"]["csi"]["volumeHandle"]
+        matching = [volume for volume in volumes if volume.get("status", {}).get("volumeID") == handle]
+        if len(matching) == 1:
+            volume = matching[0]
+            identity = (volume["metadata"]["name"], volume["status"].get("physicalUUID"))
+            if identity in allocations and identity not in credited:
+                credit += min(allocations[identity], gib * drill_cluster.GIB)
+                credited.add(identity)
+    reserve = max(frame["effective_backup_reserve_bytes"],
+                  2 * largest * drill_cluster.GIB * LOCAL.backup_concurrency_per_node)
+    available = frame["pool_size_bytes"] - reserve - (frame["ordinary_bytes"] - credit)
+    expected = max(0, available // (LOCAL.default_cell_gib * drill_cluster.GIB) - extra)
+    drill.report.measurements["guarded_capacity_observation"] = {
+        "node": agent.name, "provider_frame": frame, "counted_rows": rows,
+        "credited_physical_identities": sorted(credited), "credited_bytes": credit,
+        "prospective_reserve_bytes": reserve, "expected_slots": expected,
+        "source": "one node provider frame, current PVC/PV/LogicalVolume bindings and non-deleted database rows",
+    }
+    return expected
+
+
+def check_provider_process_chain(cluster: drill_cluster.Cluster, agent: drill_cluster.Agent,
+                                 provider_root: Path, run_id: str) -> dict[str, Any]:
+    """Repeat the fence proof with the provider pod's nsenter and the node's LVM."""
+    pods = json.loads(cluster.server.kubectl("get", "pods", "--namespace", platform.PLATFORM_NAMESPACE,
+                                            "--output=json").stdout)["items"]
+    pod = next(item for item in pods if item["spec"].get("nodeName") == agent.name
+               and any(container["name"] == "lvmd" for container in item["spec"]["containers"]))
+    name = pod["metadata"]["name"]
+    host_root = run(["docker", "exec", agent.container, "mktemp", "-d", "/tmp/reservation-chain.XXXXXXXX"]).stdout.strip()
+    created = False
+    try:
+        for directory in ("lvm", "native-locks", "evidence"):
+            run(["docker", "exec", agent.container, "mkdir", "-p", f"{host_root}/{directory}"])
+        # The same node device filter limits this probe to the drill's own loop device.
+        config = drill_cluster.LVM_CONF.format(device=agent.loop_device)
+        config += f'\nglobal {{ wait_for_locks = 1 locking_dir = "{host_root}/native-locks" use_lvmlockd = 0 }}\n'
+        run(["docker", "exec", "--interactive", agent.container, "sh", "-c", 'cat > "$1"',
+             "_", f"{host_root}/lvm/lvm.conf"], input_text=config)
+        run(["docker", "cp", str(provider_root / "build/reservation-host-proof"),
+             f"{agent.container}:{host_root}/proof"])
+        run(["docker", "exec", agent.container, "chmod", "0755", f"{host_root}/proof"])
+        drill_cluster.agent_shell(agent, "lvcreate --yes --thin --virtualsize 16m --name fence cells/pool0")
+        created = True
+        prefix = ("exec", "--namespace", platform.PLATFORM_NAMESPACE, name, "--container", "lvmd", "--")
+        identities = {
+            "nsenter_version": cluster.server.kubectl(*prefix, "/usr/bin/nsenter", "--version").stdout.strip(),
+            "binary_hashes": cluster.server.kubectl(*prefix, "sha256sum", "/usr/bin/nsenter",
+                                                     "/proc/1/root/sbin/lvm").stdout.strip(),
+            "lvm_version": drill_cluster.agent_shell(agent, "/sbin/lvm version").stdout.strip(),
+        }
+        result = cluster.server.kubectl(
+            *prefix, "env", "EXOMEM_RESERVATION_RUNNER=disposable-github-runner",
+            "PROOF_VG=cells", "PROOF_POOL=pool0", f"PROOF_FENCE_TAG=proof.{run_id}",
+            "PROOF_PROVIDER_LOCKS=/run/topolvm", f"PROOF_NATIVE_LOCKS=/proc/1/root{host_root}/native-locks",
+            f"PROOF_EVIDENCE=/proc/1/root{host_root}/evidence", f"LVM_SYSTEM_DIR={host_root}/lvm",
+            "PROOF_LVM_BINARY=/proc/1/root/sbin/lvm", f"/proc/1/root{host_root}/proof",
+            "-test.run=^TestReservationHostLVMParentDeath$", "-test.v", "-test.timeout=120s", check=False,
+        )
+        identities.update({"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+        if result.returncode:
+            raise StepFailure(f"the actual provider process chain failed its fence proof: {identities}")
+        return identities
+    finally:
+        diagnostics = cluster.stack.workdir / "diagnostics" / "provider-process-chain"
+        diagnostics.mkdir(parents=True, exist_ok=True)
+        copied = run(["docker", "cp", f"{agent.container}:{host_root}/evidence/.", str(diagnostics)], check=False)
+        (diagnostics / "capture-status.txt").write_text(f"returncode={copied.returncode}\n{copied.stderr}")
+        if created:
+            drill_cluster.agent_shell(agent, "lvremove --yes cells/fence")
+        run(["docker", "exec", agent.container, "rm", "-rf", "--", host_root])
+
+
 async def control_database(stack: infra.Stack) -> None:
     await substrate.bootstrap_database(stack)
     owner = await asyncpg.connect(stack.postgres.dsn("substrate_owner", from_host=True))
@@ -1282,7 +1494,8 @@ async def control_database(stack: infra.Stack) -> None:
         await owner.close()
 
 
-def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport) -> str:
+def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport,
+                     *, provider_image: str | None = None) -> str:
     """Renders the platform chart with local storage and applies what the
     drill runs: TopoLVM, the snapshot CRDs and controller, the classes,
     cellctl with its RBAC and admission. Returns the node label TopoLVM's
@@ -1293,6 +1506,10 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
         "cells": {"jobEgressExcept": [infra.K3S_POD_CIDR, infra.K3S_SERVICE_CIDR]},
         "cellStorage": {"domain": "local", "local": {"enabled": True, "maxCellGib": DRILL_MAX_CELL_GIB}},
     }
+    if provider_image:
+        repository, digest = provider_image.split("@", 1)
+        values["cellStorage"]["local"]["reservations"] = True
+        values["topolvm"] = {"image": {"repository": repository, "reference": f"{stack.run_id}@{digest}"}}
     rendered = platform.render_chart(stack, values, dependencies=True, api_versions=(platform.SNAPSHOT_CLASS_API,))
     documents = [
         doc for source, doc in rendered
@@ -1301,7 +1518,13 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
         or (source == "templates/namespaces.yaml" and doc["kind"] == "Namespace"
             and doc["metadata"]["name"] == platform.PLATFORM_NAMESPACE)
     ]
+    if provider_image:
+        # Use the shipped Helm post-renderer; the drill owns no second schema transform.
+        renderer = platform.PLATFORM_CHART / "reservation-post-renderer.py"
+        rendered_schema = run([sys.executable, str(renderer)], input_text=yaml.safe_dump_all(documents))
+        documents = [doc for doc in yaml.safe_load_all(rendered_schema.stdout) if doc]
     report.overlays.append(platform.overlay_cellctl(documents))
+    report.overlays.append(platform.trust_storage_ca(stack, documents))
     report.adaptations.append(
         f"the chart is rendered with --api-versions {platform.SNAPSHOT_CLASS_API}, standing in for the second upgrade "
         "after which its VolumeSnapshotClass renders"
@@ -1368,13 +1591,19 @@ async def run_drill(args: argparse.Namespace) -> int:
     stack: infra.Stack | None = None
     cluster: drill_cluster.Cluster | None = None
     drill: Drill | None = None
+    provider_root = Path(os.environ["RESERVATION_PROVIDER_ROOT"]) if os.environ.get("RESERVATION_PROVIDER_ROOT") else None
+    provider_tag = None
+    provider_image = None
     code = 2
     try:
         with stage(report, "images"):
             cell_tag = f"{build.CELL_REPOSITORY}:{run_id}"
-            build.build_cell_image(cell_tag)
+            build.build_cell_image(cell_tag, labels=infra.docker_labels(run_id, image=True))
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode="dockerfile")
             agent_image = drill_cluster.build_agent_image(run_id, workdir)
+            if provider_root:
+                provider_tag = build.build_reservation_provider_image(run_id, workdir, provider_root)
+                report.inputs["reservation_provider"] = json.loads((provider_root / "provenance.json").read_text())
         with stage(report, "infrastructure"):
             # The agents' LVM cannot load modules from their containers; a real
             # agent would load these on demand. LVM asks for the snapshot
@@ -1384,25 +1613,40 @@ async def run_drill(args: argparse.Namespace) -> int:
             stack = infra.Stack(run_id=run_id, workdir=workdir, network=network, subnet=drill_cluster.SUBNET,
                                 k3s=None, postgres=None, object_store=None)  # type: ignore[arg-type]
             stack.postgres = infra._start_postgres(stack)
-            stack.object_store = infra._start_object_store(stack)
+            # Import Jobs accept only HTTPS transfer URLs, so storage serves TLS from the run CA, as in production.
+            stack.object_store = infra._start_object_store(stack, serve_tls=True)
+            cell_tag = build.trust_rehearsal_ca(cell_tag, stack.object_store.ca_path, workdir, run_id=run_id)
             cluster = drill_cluster.start_server(stack)
             cluster.agent_image = agent_image
             cellctl_image = build.load_into_k3s(stack.k3s.container, cellctl_tag)
+            if provider_tag:
+                provider_image = build.load_into_k3s(stack.k3s.container, provider_tag)
+                report.inputs["reservation_provider_image"] = provider_image
         with stage(report, "control_database"):
             await control_database(stack)
         with stage(report, "platform"):
-            storage_label = install_platform(stack, cellctl_image, report)
+            storage_label = install_platform(stack, cellctl_image, report, provider_image=provider_image)
         with stage(report, "agents"):
             agent_a, agent_b = (drill_cluster.start_agent(cluster, name, ip) for name, ip in drill_cluster.AGENTS.items())
             cell_images = {build.load_into_k3s(agent.container, cell_tag) for agent in (agent_a, agent_b)}
             if len(cell_images) != 1:
                 raise RuntimeError(f"the agents hold different cell image digests: {cell_images}")
             [cell_image] = cell_images
-            run(["docker", "exec", agent_b.container, "crictl", "pull", report.inputs["topolvm_image"]], timeout=600)
+            if provider_tag:
+                for agent in (agent_a, agent_b):
+                    loaded_provider = build.load_into_k3s(agent.container, provider_tag)
+                    if loaded_provider != provider_image:
+                        raise RuntimeError("the agents loaded different reservation providers")
+            else:
+                run(["docker", "exec", agent_b.container, "crictl", "pull", report.inputs["topolvm_image"]], timeout=600)
             drill = Drill(cluster=cluster, report=report, cell_image=cell_image, storage_label=storage_label,
-                          cell_tag=cell_tag)
+                          cell_tag=cell_tag, provider_tag=provider_tag)
             report.stages["agents"]["agent_a_volume_group"] = drill_cluster.create_volume_group(agent_a)
             drill.label_storage(agent_a)
+            if provider_root:
+                with stage(report, "provider_process_chain"):
+                    report.stages["provider_process_chain"]["evidence"] = check_provider_process_chain(
+                        cluster, agent_a, provider_root, run_id)
             await drill.sql("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', $1)", json.dumps(cell_image))
             report.inputs.update({"cell_image": cell_image, "cellctl_image": cellctl_image, "agent_image": agent_image,
                                   "storage_label": storage_label})
@@ -1417,6 +1661,10 @@ async def run_drill(args: argparse.Namespace) -> int:
             ("2.10 online growth, then the cap", check_growth),
             ("6.4 and 7.3 a planned move to another agent", check_planned_move),
         ]
+        if provider_root:
+            from .local_import_growth import check_import_growth
+
+            checks.append(("5.1 guarded local import growth and stored counts", check_import_growth))
         for number, (name, body) in enumerate(checks, start=1):
             await run_check(drill, number, name, body)
         harness_errors = [c.number for c in report.checks if c.failure and "traceback" in c.failure]

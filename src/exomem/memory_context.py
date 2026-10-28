@@ -88,15 +88,17 @@ def assemble_context(
         for hit in hits
         if (page := find_module._CACHE.get(vault_root / hit.path, vault_root)) is not None
     ]
+    strip_for = egress.release_strip_resolver(vault_root)
     pack = context_pack.assemble_pack(
         vault_root,
         hits,
         max_hits=limit,
         max_neighbors=max_nodes,
         max_tension=min(max_edges, 20),
+        strip_for=strip_for,
     )
     if release is not None:
-        pack = egress.annotate_pack(pack, release) or pack
+        pack = egress.annotate_pack(pack, release, strip_for=strip_for) or pack
     ref_index = memory_refs.ReferenceIndex(vault_root)
     documents: list[dict[str, Any]] = []
     provenance: list[dict[str, Any]] = []

@@ -5,12 +5,13 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
+from exomem.collection_store import typed_storage
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.query_engine import cursors, runtime, validation
+from exomem.query_engine import cursors, route, runtime, validation
 
 AS_OF = "2026-10-04T00:00:00Z"
 THIRD = "33333333-3333-4333-8333-333333333333"
@@ -168,3 +169,25 @@ def test_byte_truncated_page_resumes_first_unemitted_row(store):
     second = page(store, after(intent, first))
     assert first["rows"][0]["count"] == 1 and second["rows"][0]["count"] == 2
     assert not second["has_more"]
+
+
+def test_a_typed_v1_collection_pages_through_its_cursors(store):
+    """Defect: the cursor reads an identity codec from a typed-v1 layout, which has none, so a second page crashes."""
+    create(store)
+    for n, key in enumerate(["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+                             "33333333-3333-4333-8333-333333333333"]):
+        store.append_record(CID, item={"title": f"t{n}"}, item_key=key, why="three rows")
+    assert "ready" in [store.migrate_typed_encoding(CID, encoding=typed_storage.TYPED_V1) for _ in range(10)]
+    assert store.connection.execute("SELECT encoding FROM collections WHERE collection_id=?", (CID,)).fetchone() == (
+        typed_storage.TYPED_V1,)
+    titles, cursor = [], None
+    while True:
+        with request_scope(owner_principal(surface="mcp")):
+            page = route.run(store, CID, {"version": 1, "select": ["title"],
+                                          "page": {"limit": 1, **({"after": cursor} if cursor else {})}},
+                             facade_profile="records")
+        titles += [row["title"] for row in page["rows"]]
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert titles == ["t0", "t1", "t2"]

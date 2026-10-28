@@ -1,42 +1,25 @@
-# Self-driving release evidence — no manual dispatch, no manual re-run.
-#
-# ci.yml's `release-evidence` job is deliberately a seconds-class check: it
-# requires one green scheduled-or-dispatched full CI run on main at the release
-# PR's base revision, and fails fast when none exists. That preserves the lean
-# PR tier (test_expensive_ci_runs_nightly_and_manually_only pins the measured
-# stampede this replaced), but it used to leave two manual cranks: somebody had
-# to dispatch the full run, and somebody had to re-run the failed evidence
-# check after it finished. This workflow removes both cranks without
-# reintroducing the stampede:
-#
-#   1. Enabling auto-merge on the release PR is the one explicit "release now"
-#      signal. It dispatches the full-tier run automatically when no eligible
-#      run already exists — one dispatch per release intent, never one per
-#      push to main.
-#   2. Whenever a scheduled or dispatched full run completes green on main,
-#      the open release PR at that revision gets its failed checks re-run
-#      automatically. The nightly schedule therefore turns a waiting release
-#      PR green with zero human action. The full run signals this by
-#      dispatching this workflow from its last job (ci.yml
-#      `release-evidence-landed`): a run that step 1 dispatched with
-#      GITHUB_TOKEN raises no workflow_run event when it completes, and
-#      workflow_dispatch is the one event GITHUB_TOKEN may raise. The
-#      dispatched job waits for the evidence run's recorded green completion,
-#      which the release evidence check requires, before re-running anything.
-#
-# Together: enable auto-merge on the release PR and walk away — evidence is
-# produced, the checks re-evaluate, and GitHub merges when they pass.
-
+# Explicit release intent supplies evidence and refreshes checks. Only the
+# guarded local merge command merges; long-lived auto-merge is not release intent.
 name: release evidence automation
 
 on:
-  pull_request:
-    types: [auto_merge_enabled]
   workflow_dispatch:
     inputs:
+      release_pr:
+        description: Release PR number requesting source evidence
+        required: false
+        type: string
+      expected_base:
+        description: Exact main source commit selected for the release PR
+        required: false
+        type: string
       evidence_run:
-        description: Full CI run on main whose green completion re-runs the release PR's failed checks
-        required: true
+        description: Full CI producer run whose completion refreshes release checks
+        required: false
+        type: string
+      evidence_attempt:
+        description: Exact Full CI producer attempt
+        required: false
         type: string
 
 permissions:
@@ -44,100 +27,42 @@ permissions:
   contents: read
   pull-requests: read
 
-# These jobs deliberately have no checkout for gh to infer a repository from.
 env:
   GH_REPO: ${{ github.repository }}
 
-# A disable/re-enable pair (or a double-click) fires auto_merge_enabled twice;
-# without serialization both jobs can pass the eligibility check before either
-# dispatch is visible, yielding two full-tier runs. Queue, don't cancel — a
-# cancelled rerun job would drop the re-run silently.
+# Duplicate intent for one PR must not dispatch concurrent Full fallback runs.
 concurrency:
-  group: release-evidence-automation-${{ github.event.pull_request.number || inputs.evidence_run }}
+  group: release-evidence-automation-${{ inputs.release_pr || inputs.evidence_run }}
 
 jobs:
   dispatch-evidence:
     name: dispatch evidence run on release intent
-    if: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.ref == 'release-please--branches--main' }}
+    if: ${{ inputs.release_pr != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Dispatch a full CI run when no eligible evidence exists
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Reuse complete evidence or dispatch the Full fallback
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          main_sha=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
-          if test "$main_sha" != "$BASE_SHA"; then
-            echo "main has moved past the release base; release-please will resync and re-trigger"
-            exit 0
-          fi
-          # Filter the API result by source; post-filtering a bounded history
-          # can miss an existing run and dispatch duplicate evidence.
-          eligible=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&head_sha=$BASE_SHA&per_page=100" \
-            --jq "[.workflow_runs[] | select((.event == \"workflow_dispatch\" or .event == \"schedule\") and .head_sha == \"$BASE_SHA\" and (.conclusion == \"success\" or .status == \"queued\" or .status == \"in_progress\"))] | length")
-          if test "$eligible" -ge 1; then
-            echo "an eligible evidence run already exists or is in flight at $BASE_SHA"
-            exit 0
-          fi
-          gh workflow run ci.yml --ref main
-          echo "dispatched a full CI run on main at $BASE_SHA"
+          PR_NUMBER: ${{ inputs.release_pr }}
+          BASE_SHA: ${{ inputs.expected_base }}
+        run: python3 scripts/release_evidence.py intent --pr "$PR_NUMBER" --expected-base "$BASE_SHA"
 
   rerun-evidence-check:
     name: re-run release checks when evidence lands
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ inputs.evidence_run != '' && inputs.release_pr == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Re-run the release PR's failed checks at this evidence revision
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Refresh release checks after the exact Full attempt completes
         env:
           GH_TOKEN: ${{ github.token }}
           EVIDENCE_RUN: ${{ inputs.evidence_run }}
-        run: |
-          case "$EVIDENCE_RUN" in
-            ''|*[!0-9]*) echo "evidence_run must be a workflow run id" >&2; exit 1 ;;
-          esac
-          # The dispatching run is still finishing its last job. The release
-          # evidence check counts only completed green runs, so wait for that
-          # recorded completion before re-running anything.
-          for attempt in $(seq 1 40); do
-            fields=$(gh api "repos/${{ github.repository }}/actions/runs/$EVIDENCE_RUN" \
-              --jq '[.status, .conclusion, .event, .head_branch, .path, .head_sha] | map(. // "-") | join(" ")')
-            set -- $fields
-            test "$1" = completed && break
-            sleep 15
-          done
-          status=$1 conclusion=$2 event=$3 branch=$4 path=$5 EVIDENCE_SHA=$6
-          if test "$status $conclusion $branch $path" != "completed success main .github/workflows/ci.yml"; then
-            echo "run $EVIDENCE_RUN is not a completed green CI run on main; nothing to re-run"
-            exit 0
-          fi
-          case "$event" in
-            workflow_dispatch|schedule) ;;
-            *) echo "run $EVIDENCE_RUN is not full-tier evidence; nothing to re-run"; exit 0 ;;
-          esac
-          pr=$(gh api "repos/${{ github.repository }}/pulls?state=open&head=${{ github.repository_owner }}:release-please--branches--main" \
-            --jq '.[0] // empty')
-          if test -z "$pr"; then
-            echo "no open release PR; nothing to re-run"
-            exit 0
-          fi
-          base_sha=$(echo "$pr" | jq -r .base.sha)
-          head_sha=$(echo "$pr" | jq -r .head.sha)
-          if test "$base_sha" != "$EVIDENCE_SHA"; then
-            echo "release PR base $base_sha does not match evidence revision $EVIDENCE_SHA; skipping"
-            exit 0
-          fi
-          # head_sha is both a query param and a jq filter: if the API ever
-          # ignores the param, the filter still prevents re-running an
-          # unrelated PR's failing run.
-          run_id=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=10" \
-            --jq "[.workflow_runs[] | select(.head_sha == \"$head_sha\" and .status == \"completed\" and .conclusion == \"failure\")] | .[0].id // empty")
-          if test -z "$run_id"; then
-            echo "no completed failing CI run on the release PR head; nothing to re-run"
-            exit 0
-          fi
-          gh run rerun "$run_id" --failed
-          echo "re-ran failed checks of run $run_id for the release PR"
+          EVIDENCE_ATTEMPT: ${{ inputs.evidence_attempt }}
+        run: python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"

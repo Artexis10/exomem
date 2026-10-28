@@ -44,10 +44,12 @@ from . import (
     context_catalogue,
     context_roles,
     find_types,
+    homes,
     lifecycle_statuses,
     project_keys,
     source_taxonomy,
     state_paths,
+    topic_carriers,
     vocabulary_resolution,
     working_set,
     working_set_index,
@@ -58,6 +60,7 @@ from .activation_result import AMBIGUOUS, INDEX_WARMING, UNRESOLVED, WITHHELD
 from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
+from .vocabulary import registry
 from .working_set_resolve import AnchorFacts, ResolvedAnchor, anchor_ref, anchor_visible
 from .working_set_runtime import CACHE_SIZE, READY, UNAVAILABLE
 
@@ -131,7 +134,7 @@ SLICE_DESCRIPTION = (
 SLICE_EMPTY = "empty"
 SLICE_SKIPPED = "skipped"
 #: How a lead was reached, strongest first: the closed set of a slice item's `match`, in listing order.
-MATCHES = ("resolved", "ambiguous", "carried", "partial", "named", "related")
+MATCHES = ("resolved", "ambiguous", "carried", "partial", "named", "related")  # nosemgrep: ep-word-set -- The packet specification fixes this set.
 #: The anchor statuses that make a lead, and the match each one is. The packet specification fixes both sets.
 _MATCH_OF_STATUS = {  # nosemgrep: ep-word-set -- Fixed anchor statuses of the activation packet.
     "resolved": "resolved",
@@ -244,6 +247,10 @@ class CallerView:
     domains_admitted: bool
     #: Whether the caller may read the project registry. Without it no view reads that registry.
     projects_admitted: bool
+    #: Whether the caller may read the `topic-carriers` overlay. Without it no carrier files an entry.
+    carriers_admitted: bool = False
+    #: Whether the caller may read the `homes` overlay. Without it no home files an entry.
+    homes_admitted: bool = False
 
     @property
     def restricted(self) -> bool:
@@ -275,21 +282,26 @@ class CallerView:
         projects_admitted = visible is None or egress.release_level_for_path_only(
             root, project_keys.registry_relpath(), principal=principal, purpose=declared
         ) >= egress.LEVEL_FULL
-        return cls(visible, declared, binding, _domains_admitted(root, principal, purpose), projects_admitted)
+        return cls(
+            visible, declared, binding, _registry_admitted(root, principal, purpose, source_taxonomy.DOMAIN_SPEC),
+            projects_admitted, _registry_admitted(root, principal, purpose, topic_carriers.SPEC),
+            _registry_admitted(root, principal, purpose, homes.SPEC),
+        )
 
 
-def _domains_admitted(
-    vault_root: Path, principal: principal_module.RequestPrincipal | None, purpose: str | None
+def _registry_admitted(
+    vault_root: Path, principal: principal_module.RequestPrincipal | None, purpose: str | None,
+    spec: registry.RegistrySpec,
 ) -> bool:
-    """Whether the caller may read the domain registry: the admission that `schema_memory` asks for."""
+    """Whether the caller may read one registry: the admission that `schema_memory` asks for."""
     from .vocabulary.contract import selected_admission_refusal
 
     if principal is None and purpose is None:
-        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
+        return selected_admission_refusal(vault_root, spec) is None
     # The admission reads the bound principal, so it is bound with the purpose, as `read_view` binds it.
     who = principal if principal is not None else principal_module.effective_principal()
     with principal_module.request_scope(who.with_purpose(purpose)):
-        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
+        return selected_admission_refusal(vault_root, spec) is None
 
 
 def _digest(text: str) -> str:
@@ -316,7 +328,7 @@ class _Registries:
 
     @property
     def digest(self) -> str:
-        """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys.
+        """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys, the carriers and the homes.
 
         Only the owner's map cache keys on it, and only an owner's request reads it, because it reads the
         project registry whatever the caller may read. A generation never does: it covers the served rows alone.
@@ -325,7 +337,8 @@ class _Registries:
             domains = [self.taxonomy.domains[key].as_dict() for key in sorted(self.taxonomy.domains)]
             aliases = sorted(self.taxonomy.domain_aliases.items())
             projects = project_keys.load_project_registry(self.vault_root).content_hash
-            payload = json.dumps([domains, aliases, projects], sort_keys=True)
+            carriers = topic_carriers.load(self.vault_root).content_hash
+            payload = json.dumps([domains, aliases, projects, carriers, homes.load(self.vault_root).content_hash], sort_keys=True)
             self._digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return self._digest
 
@@ -523,7 +536,11 @@ def _world(
     # The join runs over the visible entries only: a relation to an entry the caller cannot see adds nothing.
     # It resolves through the domain registry, so a caller who may not read the registry joins no topic.
     joined = (
-        catalogue.memberships(entries, projects=caller.projects_admitted).topics if caller.domains_admitted else {}
+        catalogue.memberships(
+            entries, projects=caller.projects_admitted, carriers=caller.carriers_admitted, homes=caller.homes_admitted,
+        ).topics
+        if caller.domains_admitted
+        else {}
     )
     # An entry with no activity of its own (a project anchor) takes its project's newest visible page.
     project_activity: dict[str, str] = {}
@@ -742,7 +759,9 @@ def _profile_candidates(
     if prepared.target.kind == PROFILE_ANCHOR:
         chosen = [entry for entry in entries if _names_anchor(_row(entry, (), entry.activity), prepared.key)]
     else:
-        joined = catalogue.memberships(entries, projects=caller.projects_admitted).topics
+        joined = catalogue.memberships(
+            entries, projects=caller.projects_admitted, carriers=caller.carriers_admitted, homes=caller.homes_admitted,
+        ).topics
         chosen = [entry for entry in entries if prepared.key in joined.get(entry.entry_id, ())]
     ids = {entry.entry_id for entry in chosen}
     threads = {entry.thread_key for entry in chosen if entry.kind == KIND_THREAD}
@@ -926,16 +945,18 @@ def map_within(
 @dataclass(frozen=True, slots=True)
 class _ActivationMap:
     view: View
+    world: _World
     selected: tuple[int, ...]
     overflow: str
     empty: bool
 
 
-def _activation_map(prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None) -> _ActivationMap:
+def _activation_map(
+    prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None, world: _World,
+) -> _ActivationMap:
     """Budget before reading state; only candidate rows pay the current-state resolver's cost."""
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None
-    world = _world(catalogue, caller)
     rows = tuple(_view_rows(prepared.target, prepared.key, world, prepared.registries))
     states: dict[str, dict[str, Any]] = {}
     view = View(
@@ -969,10 +990,11 @@ def _activation_map(prepared: _Prepared, max_chars: int, timings: find_types.Fin
     # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
     items = [_map_item(view, rows[index]) for index in selected]
     generation = _digest(json.dumps([items, available, overflow, not world.rows, view.stale, view.graph], sort_keys=True))
-    return _ActivationMap(replace(view, generation=generation, state_available=available), selected, overflow, not world.rows)
+    return _ActivationMap(replace(view, generation=generation, state_available=available), world, selected, overflow, not world.rows)
 
 
-# The activation cache shares the existing packet cache's resource bound. Restricted builds never enter it.
+# The bounded owner cache retains the admitted world so warm slices reuse the map's membership joins.
+# Restricted builds never enter it.
 _OWNER_MAPS: OrderedDict[tuple[Any, ...], _ActivationMap] = OrderedDict()
 _OWNER_MAPS_LOCK = threading.Lock()
 
@@ -1036,7 +1058,8 @@ def _activation_packet(
                     _OWNER_MAPS.move_to_end(key)
             with find_types.timing_span(timings, "working_set.map", source="cache" if compiled else "computed"):
                 if compiled is None:
-                    compiled = _activation_map(prepared, map_chars, timings)
+                    world = _world(catalogue, prepared.caller)
+                    compiled = _activation_map(prepared, map_chars, timings, world)
                     if key is not None and compiled.view.state_available and catalogue.token() == key[1]:
                         with _OWNER_MAPS_LOCK:
                             _OWNER_MAPS[key] = compiled
@@ -1067,7 +1090,7 @@ def _activation_packet(
         packet["budget"]["used_chars"] = map_packet_chars(block)
         if turn_leads is not None:
             slice_block = _turn_slice(
-                prepared, turn_leads, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
+                prepared, turn_leads, world=compiled.world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
             )
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
@@ -1207,7 +1230,7 @@ def _slice_reserve(max_chars: int) -> int:
 
 
 def _turn_slice(
-    prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, limit: int, reserve: int,
+    prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, world: _World | None, limit: int, reserve: int,
     timings: find_types.FindTimings | None,
 ) -> dict[str, Any]:
     """The turn slice for this caller, in the `reserve` that the map left. It never raises and never touches the map."""
@@ -1221,7 +1244,8 @@ def _turn_slice(
         state, evidence = leads.state, leads.evidence
         if state == READY:
             with find_types.timing_span(timings, "working_set.turn_slice"):
-                rows, extras = _slice_rows(prepared, leads)
+                # A lead has the same membership, project activity and thread head as in the caller's full map view.
+                rows, extras = _slice_rows(prepared, leads, world)
                 if rows:
                     chosen, overflow = _slice_within(prepared, rows, extras, states, reserve - 1 - len(SLICE_DESCRIPTION))
                 # No admitted lead is an empty turn; leads with no room for one whole line are a skipped slice.
@@ -1249,7 +1273,9 @@ def _turn_slice(
     return block
 
 
-def _slice_rows(prepared: _Prepared, leads: TurnLeads) -> tuple[tuple[Row, ...], dict[str, dict[str, Any]]]:
+def _slice_rows(
+    prepared: _Prepared, leads: TurnLeads, world: _World | None,
+) -> tuple[tuple[Row, ...], dict[str, dict[str, Any]]]:
     """The caller's rows for the leads, in lead order, with how each was reached.
 
     A lead names a catalogue entry by its id or its ref. A lead the caller may not see, or that names no
@@ -1257,8 +1283,7 @@ def _slice_rows(prepared: _Prepared, leads: TurnLeads) -> tuple[tuple[Row, ...],
     """
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None  # `_usable` returned None
-    entries = catalogue.entries_for(lead.ref for lead in leads.leads)
-    world = _world(catalogue, caller, among=entries)
+    world = world if world is not None else _world(catalogue, caller)
     by_name: dict[str, Row] = {}
     for row in world.rows:
         by_name.setdefault(row.entry_id, row)
@@ -1495,7 +1520,7 @@ def _served_key(
     # The admissions are part of the key: a guard that decides under other admissions finds no record.
     return (
         str(Path(vault_root)), ref, caller.binding, caller.domains_admitted, caller.projects_admitted,
-        generation, continuation,
+        caller.carriers_admitted, caller.homes_admitted, generation, continuation,
     )
 
 

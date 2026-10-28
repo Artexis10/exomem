@@ -12,7 +12,7 @@ import base64
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
 import httpx
 from kubernetes import client as k8s
@@ -29,9 +29,11 @@ from .capacity import (
     PodReservation,
     SharedWorkerPolicy,
     effective_pod_requests,
+    parse_budget_frame,
     quantity,
 )
 from .manifests import (
+    BACKUP_FAMILY_ANNOTATION,
     BACKUP_JOB_NAME,
     BACKUP_OUTCOME_ANNOTATION,
     BACKUP_RETRY_AFTER_ANNOTATION,
@@ -55,13 +57,17 @@ from .manifests import (
     TARGET_APPLIED_ANNOTATION,
     hold_job_name,
     namespace_name,
+    snapshot_backup_name,
 )
 from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
-from .storage.topolvm import LocalVolumeState, LogicalVolume
+from .storage.topolvm import FamilyRequest, LocalVolumeState, LogicalVolume
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
 FIELD_MANAGER = "cellctl"
 SNAPSHOT_GROUP = "snapshot.storage.k8s.io"
+# The pinned snapshotter uses these fixed annotations before DeleteSnapshot.
+DELETION_SECRET_NAME_ANNOTATION = "snapshot.storage.kubernetes.io/deletion-secret-name"
+DELETION_SECRET_NAMESPACE_ANNOTATION = "snapshot.storage.kubernetes.io/deletion-secret-namespace"
 CELL_LABEL = "exomem.io/cloud-cell"
 REVISION_LABEL = "controller-revision-hash"
 logger = logging.getLogger(__name__)
@@ -198,6 +204,15 @@ class ClusterClient:
         except ApiException as error:
             if error.status != 404:
                 raise
+        return True
+
+    def delete_family_secret(self, local: LocalStorage, *, cell_id: str, request: FamilyRequest) -> bool:
+        """Delete only this request's immutable family capability; an API failure remains pending."""
+        name = snapshot_backup_name(SNAPSHOT_NAME, cell_id, None, request)
+        try:
+            self._core.delete_namespaced_secret(name, local.reservation_namespace)
+        except ApiException as error:
+            return error.status == 404
         return True
 
     def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool:
@@ -443,6 +458,21 @@ class ClusterClient:
         nodes = self._core.list_node().items if self._storage_config.local is not None else None
         node_presence = _node_presence(nodes)
 
+        family_secret_references: frozenset[tuple[str, str]] | None = frozenset()
+        if any((sts.metadata.annotations or {}).get(BACKUP_FAMILY_ANNOTATION) for sts in statefulsets.values()):
+            try:
+                contents = self._custom.list_cluster_custom_object(SNAPSHOT_GROUP, "v1", "volumesnapshotcontents")
+                if (not isinstance(contents.get("items"), list)
+                        or (contents.get("metadata") or {}).get("continue")):
+                    raise ValueError("snapshot content observation is incomplete")
+                family_secret_references = frozenset(
+                    (annotations[DELETION_SECRET_NAMESPACE_ANNOTATION], annotations[DELETION_SECRET_NAME_ANNOTATION])
+                    for content in contents["items"]
+                    if (annotations := (content.get("metadata") or {}).get("annotations") or {})
+                    and annotations.get(DELETION_SECRET_NAMESPACE_ANNOTATION) and annotations.get(DELETION_SECRET_NAME_ANNOTATION))
+            except Exception as error:  # noqa: BLE001 - unknown references delay only family cleanup
+                logger.warning("cellctl: family deletion references are unknown: %s", type(error).__name__)
+                family_secret_references = None
         observations: dict[str, ClusterObservation | Exception] = {}
         for cell_id, namespace in cells.items():
             namespace_obj = namespaces.get(namespace)
@@ -460,13 +490,15 @@ class ClusterClient:
                     statefulsets.get(namespace),
                     pods.get(namespace, []),
                     node_presence,
+                    family_secret_references,
                 )
             except Exception as error:  # noqa: BLE001 - H4: one cell's failure is that cell's alone
                 observations[cell_id] = error
         return observations
 
     def _observation(
-        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None
+        self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None,
+        family_secret_references: frozenset[tuple[str, str]] | None = frozenset(),
     ) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
         namespace_annotations = getattr(namespace_obj.metadata, "annotations", None) or {}
@@ -476,6 +508,12 @@ class ClusterClient:
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
         pvc_version = getattr(pvc.metadata, "resource_version", None) if pvc and pvc.metadata else None
+        resources = getattr(pvc.spec, "resources", None) if pvc and pvc.spec else None
+        requested = (getattr(resources, "requests", None) or {}).get("storage")
+        try:
+            pvc_requested = int(quantity(str(requested))) if requested is not None else None
+        except (ValueError, ArithmeticError):
+            pvc_requested = None
         raw_capacity = (getattr(pvc.status, "capacity", None) or {}).get("storage") if pvc and pvc.status else None
         try:
             pvc_capacity = int(quantity(str(raw_capacity))) if raw_capacity is not None else None
@@ -486,6 +524,9 @@ class ClusterClient:
             condition.type in {"Resizing", "FileSystemResizePending"} and condition.status == "True"
             for condition in (getattr(pvc.status, "conditions", None) or [])
         ) if pvc and pvc.status else False
+        # Expansion conditions may lag an accepted request; keep its mount until actual capacity catches up.
+        resize_pending = resize_pending or (pvc_requested is not None and pvc_capacity is not None
+                                            and pvc_requested > pvc_capacity)
         pvc_volume_id = None  # the underlying Hetzner volume id (PV spec.csi.volumeHandle), not the PV's own K8s name
         pv_claim_ref_uid = None
         pv_storage_class = None
@@ -511,6 +552,7 @@ class ClusterClient:
         update_revision = None
         hold_kind = hold_started_at = previous_image = pre_upgrade_snapshot = None
         target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
+        backup_family_request = None
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
         started_raw = None
         if statefulset is not None:
@@ -526,6 +568,7 @@ class ClusterClient:
                 update_revision = status.update_revision
             annotations = statefulset.metadata.annotations or {}
             hold_kind = annotations.get(HOLD_ANNOTATION) or None
+            backup_family_request = annotations.get(BACKUP_FAMILY_ANNOTATION) or None
             started_raw = annotations.get(HOLD_STARTED_ANNOTATION)
             hold_started_at = _parse_timestamp(started_raw) if started_raw else None
             previous_image = annotations.get(PREVIOUS_IMAGE_ANNOTATION) or None
@@ -580,8 +623,8 @@ class ClusterClient:
         backup_job = restore_job = None
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
         snapshot_steps: dict[str, bool] = {}
-        if started_raw and hold_kind == SNAPSHOT_BACKUP:
-            snapshot_steps = self._snapshot_steps(namespace, started_raw)
+        if backup_family_request or (started_raw and hold_kind == SNAPSHOT_BACKUP):
+            snapshot_steps = self._snapshot_steps(namespace, started_raw, backup_family_request)
         if started_raw:
             backup_name = hold_job_name(BACKUP_JOB_NAME, started_raw)
             backup_job = self._get_job(namespace, backup_name)
@@ -593,6 +636,13 @@ class ClusterClient:
                 message = self._job_pod_termination_message(namespace, backup_name, succeeded=False)
                 backup_failure_code = message if message in BACKUP_FAILURE_CODES else None
 
+        secret_referenced = False
+        if backup_family_request:
+            local = self._storage_config.local
+            request = FamilyRequest.parse(backup_family_request)
+            name = snapshot_backup_name(SNAPSHOT_NAME, namespace.removeprefix(NAMESPACE_PREFIX), None, request)
+            secret_referenced = (None if family_secret_references is None or local is None else
+                                 (local.reservation_namespace, name) in family_secret_references)
         return ClusterObservation(
             namespace_exists=True,
             namespace_cell_label=namespace_cell_label,
@@ -601,6 +651,7 @@ class ClusterClient:
             pvc_uid=pvc_uid,
             pvc_resource_version=pvc_version,
             pvc_capacity_bytes=pvc_capacity,
+            pvc_requested_bytes=pvc_requested,
             pvc_resize_pending=resize_pending,
             pv_claim_ref_uid=pv_claim_ref_uid,
             pv_storage_class=pv_storage_class,
@@ -626,6 +677,8 @@ class ClusterClient:
             statefulset_target_applied_at=target_applied_at,
             statefulset_restored_snapshot=restored_snapshot,
             statefulset_backup_outcome=backup_outcome,
+            statefulset_backup_family_request=backup_family_request,
+            backup_family_secret_referenced=secret_referenced,
             statefulset_relocation_volume=relocation_volume,
             statefulset_grow_storage_gib=grow_storage_gib,
             statefulset_backup_retry_after=backup_retry_after,
@@ -652,20 +705,23 @@ class ClusterClient:
             **snapshot_steps,
         )
 
-    def _snapshot_steps(self, namespace: str, started_raw: str) -> dict[str, object]:
+    def _snapshot_steps(self, namespace: str, started_raw: str | None, family_raw: str | None = None) -> dict[str, object]:
         """D3: the current hourly hold's snapshot and clone, by the names its
         start gave them; an earlier hold's never answer."""
 
+        request = FamilyRequest.parse(family_raw) if family_raw else None
+        cell_id = namespace.removeprefix(NAMESPACE_PREFIX)
         try:
             snapshot = self._custom.get_namespaced_custom_object(
-                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", hold_job_name(SNAPSHOT_NAME, started_raw)
+                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", snapshot_backup_name(SNAPSHOT_NAME, cell_id, started_raw, request)
             )
         except ApiException as error:
             if not _not_found(error):
                 raise
             snapshot = None
         try:
-            clone = self._core.read_namespaced_persistent_volume_claim(hold_job_name(CLONE_CLAIM_NAME, started_raw), namespace)
+            clone = self._core.read_namespaced_persistent_volume_claim(
+                snapshot_backup_name(CLONE_CLAIM_NAME, cell_id, started_raw, request), namespace)
         except ApiException as error:
             if not _not_found(error):
                 raise
@@ -843,10 +899,11 @@ class ClusterClient:
 
 
     def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation:
-        """D6: each node's published free bytes and the LogicalVolumes that
-        hold the rest of its pool (read-only `list`), and which node each
-        cell's volume is on. A node that is not open to general cells
-        publishes zero, as on Hetzner volumes."""
+        """Read provider frames and current cell bindings for each node.
+
+        Unguarded mode also exposes the earlier free-space observation.
+        Nodes reserved from general cells publish no general slots.
+        """
 
         nodes = self._core.list_node().items
         free: dict[str, int | None] = {}
@@ -867,20 +924,64 @@ class ClusterClient:
             )
             for item in listed.get("items") or []
         )
+        budgets = {node.metadata.name: parse_budget_frame(
+            (node.metadata.annotations or {}).get(local.reservation_annotation),
+            node_uid=getattr(node.metadata, "uid", "") or "", now=datetime.now(UTC)) for node in nodes}
+        current_claims = ({(claim.metadata.namespace, claim.metadata.name): claim
+                           for claim in self._core.list_persistent_volume_claim_for_all_namespaces(
+                               field_selector="metadata.name=cell-data").items} if local.reservations else {})
+        cell_allocations = {}
+        cell_volume_ids = {}
         cell_nodes: dict[str, str] = {}
         for pv in self._core.list_persistent_volume().items:
             claim = pv.spec.claim_ref if pv.spec else None
             cell_id = _capacity_cell_id(claim.namespace) if claim else None
             node = _pinned_node(pv, local.topology_key) if pv.spec.storage_class_name == local.class_name else None
             if cell_id and node and claim.name == "cell-data":
+                current = current_claims.get((claim.namespace, claim.name))
+                if (local.reservations and (current is None or current.spec.volume_name != pv.metadata.name
+                        or not current.metadata.uid or current.metadata.uid != getattr(claim, "uid", None))):
+                    continue
+                csi = getattr(pv.spec, "csi", None)
+                if local.reservations and getattr(csi, "driver", None) != local.driver:
+                    continue
                 cell_nodes[cell_id] = node
+                handle = getattr(csi, "volume_handle", None)
+                matches = [item for item in listed.get("items") or []
+                           if (item.get("status") or {}).get("volumeID") == handle and handle
+                           and (item.get("spec") or {}).get("nodeName") == node
+                           and (item.get("spec") or {}).get("deviceClass") == local.device_class]
+                if len(matches) == 1:
+                    item = matches[0]
+                    physical_uuid = (item.get("status") or {}).get("physicalUUID")
+                    if isinstance(physical_uuid, str) and physical_uuid:
+                        cell_allocations[cell_id] = (item["metadata"]["name"], physical_uuid, node)
+                        cell_volume_ids[cell_id] = handle
         return LocalCapacityObservation(
             free_bytes=free,
+            budgets=budgets,
+            cell_allocations=cell_allocations,
+            cell_volume_ids=cell_volume_ids,
             volumes=volumes,
             reserved_nodes=frozenset(node.metadata.name for node in nodes if not _general_node(node)),
             cell_nodes=cell_nodes,
         )
 
+
+    def source_logical_volume(self, local: LocalStorage, volume_id: str, node: str | None) -> dict:
+        items = self._custom.list_cluster_custom_object(local.driver, "v1", "logicalvolumes").get("items") or []
+        matches = [item for item in items if (item.get("status") or {}).get("volumeID") == volume_id
+                   and (item.get("spec") or {}).get("nodeName") == node
+                   and (item.get("spec") or {}).get("deviceClass") == local.device_class]
+        if len(matches) != 1:
+            raise ValueError("local source identity is unavailable or ambiguous")
+        return matches[0]
+
+    def logical_volume(self, local: LocalStorage, name: str) -> dict:
+        return self._custom.get_cluster_custom_object(local.driver, "v1", "logicalvolumes", name)
+
+    def patch_logical_volume(self, local: LocalStorage, name: str, spec: dict) -> None:
+        self._custom.patch_cluster_custom_object(local.driver, "v1", "logicalvolumes", name, {"spec": spec})
 
     def local_volume_state(self, local: LocalStorage) -> LocalVolumeState:
         """D4/2.5: every object that can still hold a deleted cell's local

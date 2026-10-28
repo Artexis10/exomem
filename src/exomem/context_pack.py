@@ -30,6 +30,7 @@ import math
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -145,12 +146,20 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def _cap(text: str, n: int) -> str:
+def _cap(text: str, n: int, *, whole: bool = False) -> str:
+    """`text` cut to `n` characters, with a marker.
+
+    `whole` withholds a value that would be cut (returns ""), for a page under a release strip: a
+    cut can end inside a link or path to a stripped source, and the strip then no longer recognises
+    the fragment.
+    """
     text = text.strip()
     if n <= 0:
         return ""
     if len(text) <= n:
         return text
+    if whole:
+        return ""
     return text[:n].rstrip() + "…"
 
 
@@ -199,7 +208,7 @@ def _lede(lines: list[str]) -> str:
     return _collapse(" ".join(buf))
 
 
-def _sections(lines: list[str]) -> list[str]:
+def _sections(lines: list[str], *, whole: bool = False) -> list[str]:
     """`"Heading: lead text"` for each recognized headline section, in document order."""
     out: list[str] = []
     i, n = 0, len(lines)
@@ -222,7 +231,7 @@ def _sections(lines: list[str]) -> list[str]:
                 break
             buf.append(stripped.lstrip("-*+ ").strip())
             i += 1
-        text = _cap(_collapse(" ".join(buf)), _SECTION_CHARS)
+        text = _cap(_collapse(" ".join(buf)), _SECTION_CHARS, whole=whole)
         if text:
             out.append(f"{heading}: {text}")
         if len(out) >= _MAX_SECTIONS:
@@ -241,14 +250,16 @@ def _outline(lines: list[str]) -> list[str]:
     return out
 
 
-def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS) -> dict:
+def _extract_claims(
+    page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS, whole: bool = False
+) -> dict:
     # Packs serve every audience: a carrier pushed into code is withheld too.
     lines = _strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path))
     return {
         "title": page.title,
         "type": page.page_type,
-        "lede": _cap(_lede(lines), claim_chars),
-        "sections": _sections(lines),
+        "lede": _cap(_lede(lines), claim_chars, whole=whole),
+        "sections": _sections(lines, whole=whole),
         "outline": _outline(lines),
     }
 
@@ -293,24 +304,40 @@ def _load_parent_snapshot(
     return page, state
 
 
-def _bounded_values(value: Any, *, limit: int, chars: int) -> tuple[list[str], int]:
+def _bounded_values(
+    value: Any, *, limit: int, chars: int, whole: bool = False
+) -> tuple[list[str], int]:
     if value is None:
         values: list[Any] = []
     elif isinstance(value, list):
         values = value
     else:
         values = [value]
-    cap = max(0, limit)
-    shown = [_cap(str(item), chars) for item in values[:cap]]
-    clipped = sum(len(str(item).strip()) > chars for item in values[:cap])
+    window = values[: max(0, limit)]
+    shown = [_cap(str(item), chars, whole=whole) for item in window]
+    if whole:
+        # A withheld value is not shown, so it is counted once, with the values past the limit.
+        shown = [text for text in shown if text]
+    clipped = 0 if whole else sum(len(str(item).strip()) > chars for item in window)
     return shown, max(0, len(values) - len(shown)) + clipped
 
 
-def _parent_context(page: ParsedPage, parent_ref: str | None) -> tuple[dict, int]:
+def _lifecycle_links(values: list[str], *, whole: bool) -> list[str]:
+    shown = [
+        _cap(value, _MAX_PARENT_PROVENANCE_CHARS, whole=whole)
+        for value in values[:_MAX_PARENT_PROVENANCE]
+    ]
+    return [text for text in shown if text] if whole else shown
+
+
+def _parent_context(
+    page: ParsedPage, parent_ref: str | None, *, whole: bool = False
+) -> tuple[dict, int]:
     sources, dropped_sources = _bounded_values(
         page.frontmatter.get("sources"),
         limit=_MAX_PARENT_PROVENANCE,
         chars=_MAX_PARENT_PROVENANCE_CHARS,
+        whole=whole,
     )
     evidence_values: list[Any] = []
     for key in ("evidence", "evidence_file"):
@@ -323,40 +350,56 @@ def _parent_context(page: ParsedPage, parent_ref: str | None) -> tuple[dict, int
         evidence_values,
         limit=_MAX_PARENT_PROVENANCE,
         chars=_MAX_PARENT_PROVENANCE_CHARS,
+        whole=whole,
     )
+    supersedes = _lifecycle_links(page.supersedes, whole=whole)
+    superseded_by = _lifecycle_links(page.superseded_by, whole=whole)
     return (
         {
             "path": page.rel_path,
             "ref": parent_ref,
-            "title": _cap(page.title, _MAX_PARENT_PROVENANCE_CHARS),
+            "title": _cap(page.title, _MAX_PARENT_PROVENANCE_CHARS, whole=whole),
             "type": _cap(page.page_type, 64) if page.page_type else None,
             "status": _cap(page.status or "active", 64),
             "updated": _cap(page.updated, 64),
-            "supersedes": [
-                _cap(value, _MAX_PARENT_PROVENANCE_CHARS)
-                for value in page.supersedes[:_MAX_PARENT_PROVENANCE]
-            ],
-            "superseded_by": [
-                _cap(value, _MAX_PARENT_PROVENANCE_CHARS)
-                for value in page.superseded_by[:_MAX_PARENT_PROVENANCE]
-            ],
+            "supersedes": supersedes,
+            "superseded_by": superseded_by,
             "sources": sources,
             "evidence": evidence,
         },
         dropped_sources
         + dropped_evidence
-        + max(0, len(page.supersedes) - _MAX_PARENT_PROVENANCE)
-        + max(0, len(page.superseded_by) - _MAX_PARENT_PROVENANCE),
+        + max(0, len(page.supersedes) - len(supersedes))
+        + max(0, len(page.superseded_by) - len(superseded_by)),
     )
+
+
+def _shown_relations(
+    unit: semantic_units.SemanticUnit, *, whole: bool
+) -> list[semantic_units.SemanticRelation]:
+    """The authored relations a pack shows: within the count bound and, under a release strip, uncut."""
+    return [
+        relation
+        for relation in unit.relations[:_MAX_UNIT_RELATIONS]
+        if not (
+            whole
+            and (
+                len(relation.target.strip()) > _MAX_UNIT_RELATION_TARGET_CHARS
+                or len(relation.raw.strip()) > _MAX_UNIT_RELATION_RAW_CHARS
+            )
+        )
+    ]
 
 
 def _pack_unit(
     unit: semantic_units.SemanticUnit,
     *,
     unit_chars: int,
+    whole: bool = False,
 ) -> tuple[dict, int]:
+    shown_relations = _shown_relations(unit, whole=whole)
     relations: list[dict] = []
-    for relation in unit.relations[:_MAX_UNIT_RELATIONS]:
+    for relation in shown_relations:
         relations.append(
             {
                 "kind": relation.kind,
@@ -378,7 +421,7 @@ def _pack_unit(
     )
     clipped_fields += sum(
         len(relation.target.strip()) > _MAX_UNIT_RELATION_TARGET_CHARS
-        for relation in unit.relations[:_MAX_UNIT_RELATIONS]
+        for relation in shown_relations
     )
     return (
         {
@@ -391,9 +434,9 @@ def _pack_unit(
             "category_key": unit.category_key,
             "category": unit.category,
             "kind": unit.kind,
-            "excerpt": _cap(unit.content, max(0, unit_chars)),
+            "excerpt": _cap(unit.content, max(0, unit_chars), whole=whole),
             "tags": tags,
-            "context": _cap(unit.context, _MAX_UNIT_CONTEXT_CHARS)
+            "context": (_cap(unit.context, _MAX_UNIT_CONTEXT_CHARS, whole=whole) or None)
             if unit.context
             else None,
             "source_anchor": unit.anchor,
@@ -414,34 +457,40 @@ def _pack_unit(
     )
 
 
-def _bounded_legacy_metadata(unit: semantic_units.SemanticUnit) -> tuple[dict[str, str], int]:
+def _bounded_legacy_metadata(
+    unit: semantic_units.SemanticUnit, *, whole: bool = False
+) -> tuple[dict[str, str], int]:
     items = list(unit.metadata.items())
+    window = items[:_MAX_LEGACY_METADATA]
+    cut = [
+        len(str(key).strip()) > _MAX_LEGACY_METADATA_KEY_CHARS
+        or len(str(value).strip()) > _MAX_LEGACY_METADATA_VALUE_CHARS
+        for key, value in window
+    ]
     shown = {
         _cap(str(key), _MAX_LEGACY_METADATA_KEY_CHARS): _cap(
             str(value), _MAX_LEGACY_METADATA_VALUE_CHARS
         )
-        for key, value in items[:_MAX_LEGACY_METADATA]
+        for (key, value), was_cut in zip(window, cut, strict=True)
+        if not (whole and was_cut)
     }
-    clipped = sum(
-        len(str(key).strip()) > _MAX_LEGACY_METADATA_KEY_CHARS
-        or len(str(value).strip()) > _MAX_LEGACY_METADATA_VALUE_CHARS
-        for key, value in items[:_MAX_LEGACY_METADATA]
-    )
-    return shown, max(0, len(items) - len(shown)) + clipped
+    return shown, max(0, len(items) - len(shown)) + (0 if whole else sum(cut))
 
 
 def _legacy_block_from_packed_unit(
     unit: semantic_units.SemanticUnit,
     packed: dict,
+    *,
+    whole: bool = False,
 ) -> tuple[dict | None, int]:
     if unit.form != "rich":
         return None, 0
-    metadata, dropped = _bounded_legacy_metadata(unit)
+    metadata, dropped = _bounded_legacy_metadata(unit, whole=whole)
     relations: list[dict[str, Any]] = []
     for authored, relation in zip(
-        unit.relations,
+        _shown_relations(unit, whole=whole),
         packed["relations"],
-        strict=False,
+        strict=True,
     ):
         relations.append(
             {
@@ -454,7 +503,7 @@ def _legacy_block_from_packed_unit(
         dropped += int(len(authored.raw.strip()) > _MAX_UNIT_RELATION_RAW_CHARS)
     out: dict[str, Any] = {
         "type": unit.kind,
-        "title": _cap(unit.title, 160) if unit.title else None,
+        "title": (_cap(unit.title, 160, whole=whole) or None) if unit.title else None,
         "level": unit.level,
         "line": packed["source_span"]["start_line"],
         "end_line": packed["source_span"]["end_line"],
@@ -474,6 +523,8 @@ class _UnitPackPlan:
     selected: list[tuple[int, int, semantic_units.SemanticUnit]]
     fillers: list[semantic_units.SemanticUnit]
     dropped_provenance: int = 0
+    #: The page is under a release strip: a value that would be cut is withheld instead.
+    whole: bool = False
     packed_units: list[dict[str, Any]] = field(default_factory=list)
     legacy_blocks: list[dict[str, Any]] = field(default_factory=list)
     chosen_units: list[tuple[semantic_units.SemanticUnit, dict[str, Any]]] = field(
@@ -487,7 +538,11 @@ class _UnitPackPlan:
 
 
 def _neighborhood(
-    vault_root: Path, packed_pages: list[ParsedPage], max_neighbors: int
+    vault_root: Path,
+    packed_pages: list[ParsedPage],
+    max_neighbors: int,
+    *,
+    under_strip: Callable[[str], bool],
 ) -> tuple[list[dict], int, list[str]]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
     excluded, ranked by co-citation (distinct packed notes linked), capped.
@@ -569,16 +624,18 @@ def _neighborhood(
         page = find_module._CACHE.get(vault_root / entry["path"], vault_root)
         directions = entry["directions"]
         direction = "both" if len(directions) > 1 else next(iter(directions))
-        lede = (
-            _cap(
-                _first_sentence(
-                    _lede(_strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path)))
-                ),
-                _NEIGHBOR_LEDE_CHARS,
+        lede = ""
+        if page:
+            paragraph = _lede(
+                _strip_fences(provenance.withheld_prose(page.body, owner_path=page.rel_path))
             )
-            if page
-            else ""
-        )
+            # The sentence split ends a lede wherever a full stop falls, even inside a link, so a
+            # neighbour under a release strip shows its whole first paragraph or nothing.
+            lede = (
+                _cap(paragraph, _NEIGHBOR_LEDE_CHARS, whole=True)
+                if under_strip(entry["path"])
+                else _cap(_first_sentence(paragraph), _NEIGHBOR_LEDE_CHARS)
+            )
         out.append(
             {
                 "path": entry["path"],
@@ -797,6 +854,7 @@ def assemble_pack(
     graph_enrich_reserve_seconds: float = 0.0,
     timings: find_module.FindTimings | None = None,
     purpose: str | None = None,
+    strip_for: Callable[[str], tuple[Any, ...]] | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -809,6 +867,9 @@ def assemble_pack(
     packed; what was packed stays a prefix of the full pack, in `find` order,
     and `truncation` names `DEADLINE_TRUNCATION`. Reporting stays the caller's
     job so this function keeps no side effect of its own.
+
+    `strip_for` is the request's `egress.release_strip_resolver`, which `annotate_pack` must share so both
+    decide a page once; without one this builds its own.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
@@ -841,8 +902,19 @@ def assemble_pack(
 
     truncation: list[str] = []
     from . import unit_corrections, working_set
+    from .governance import egress
 
     original_paths = {_hit_parent_path(hit) for hit in hits}
+    # A released bridge page strips its dependencies' identities from what the caller receives, and
+    # the strip sees only whole identities, so every value of such a page that would be cut is
+    # withheld whole. Each page's own release decision says so, for every page this pack builds text
+    # from (hit, correction counterpart and neighbour); `annotate_pack` asks the same by page path.
+    if strip_for is None:
+        strip_for = egress.release_strip_resolver(vault_root, purpose=purpose)
+
+    def under_strip(rel_path: str) -> bool:
+        return bool(strip_for(rel_path))
+
     parent_reads = find_module.UnitParentReads()
     references = tuple(reference for hit in hits for reference in _selected_unit_refs(hit))
     visible = unit_corrections.reader_view(vault_root, purpose) if references else None
@@ -859,17 +931,16 @@ def assemble_pack(
             return False
         held = parent_reads.parents[hit.parent_path]
         unit = held.state.document.resolve_unit(hit.unit_ref).unit
-        packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+        whole = under_strip(hit.parent_path)
+        packed, dropped = _pack_unit(unit, unit_chars=unit_chars, whole=whole)
         packed.update({key: candidate[key] for key in ("corrects", "relation", "family")})
-        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
-        parent, _dropped_parent = _parent_context(held.page, held.state.parent_ref)
+        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed, whole=whole)
+        parent, _dropped_parent = _parent_context(held.page, held.state.parent_ref, whole=whole)
         # Membership uses the prose actually emitted, not clipped-away source bytes.
         prose_hit = replace(hit, content=packed["excerpt"], excerpt=packed["excerpt"])
         if not working_set.hits_in_view([prose_hit], visible):
             return False
         bundle = {"unit": packed, "legacy_block": block, "parent": parent}
-        from .governance import egress
-
         if isinstance(visible, egress.ReaderView):
             bundle = visible.project_pack(bundle)
         tentative[hit.unit_ref] = hit
@@ -943,8 +1014,15 @@ def assemble_pack(
 
     units_span = find_module._span(timings, "pack.units")
     with units_span:
-        claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars)
-                  for p in packed_pages if p.rel_path in original_paths}
+        claims = {
+            p.rel_path: _extract_claims(
+                p,
+                claim_chars=claim_chars,
+                whole=under_strip(p.rel_path),
+            )
+            for p in packed_pages
+            if p.rel_path in original_paths
+        }
         semantic_unit_map: dict[str, dict[str, Any]] = {}
         semantic_block_map: dict[str, list[dict]] = {}
         plans: list[_UnitPackPlan] = []
@@ -968,9 +1046,12 @@ def assemble_pack(
                 )
 
             selected_ids = {id(item[2]) for item in selected}
+            whole = under_strip(page.rel_path)
             parent, dropped_provenance = _parent_context(
-                page, semantic_states[page.rel_path].parent_ref
+                page, semantic_states[page.rel_path].parent_ref, whole=whole
             )
+            # The bundle parent is the only one that went through the reader view, and `admit_counterpart`
+            # built it with the page's own whole-value rule, so it serves every page that hosts a counterpart.
             parent = correction_parents.get(page.rel_path, parent)
             plans.append(
                 _UnitPackPlan(
@@ -981,6 +1062,7 @@ def assemble_pack(
                         unit for unit in units if id(unit) not in selected_ids
                     ] if page.rel_path in original_paths else [],
                     dropped_provenance=dropped_provenance,
+                    whole=whole,
                 )
             )
 
@@ -1004,8 +1086,10 @@ def assemble_pack(
                 dropped = projected_drops[unit.unit_ref]
                 dropped_metadata = 0
             else:
-                packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
-                block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
+                packed, dropped = _pack_unit(unit, unit_chars=unit_chars, whole=plan.whole)
+                block, dropped_metadata = _legacy_block_from_packed_unit(
+                    unit, packed, whole=plan.whole
+                )
             candidate_unit_map = {
                 **semantic_unit_map,
                 plan.page.rel_path: {
@@ -1088,7 +1172,7 @@ def assemble_pack(
 
     with find_module._span(timings, "pack.neighborhood"):
         neighborhood, n_dropped, incomplete = _neighborhood(
-            vault_root, packed_pages, max_neighbors
+            vault_root, packed_pages, max_neighbors, under_strip=under_strip
         )
     truncation.extend(incomplete)
     if n_dropped > 0:

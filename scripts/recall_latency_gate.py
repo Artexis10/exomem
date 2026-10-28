@@ -15,7 +15,7 @@ import statistics
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
@@ -888,10 +888,10 @@ def validate_document(document: dict, schema: str, *, directory: Path = BENCHMAR
 
     shape = json.loads((directory / schema).read_text())
     if definition is not None:
-        shape = shape["$defs"][definition]
+        shape = {"$defs": shape["$defs"], "$ref": f"#/$defs/{definition}"}
     validator = Draft202012Validator(shape, format_checker=FormatChecker())
     validator.validate(document)
-    if definition is None and schema == "summary.schema.json":
+    if schema == "summary.schema.json" and definition in (None, "paired_fragment"):
         if any(sample["repeat"] >= PAIRING["repeats"] for sample in document["samples"]):
             raise MeasurementRefused("sample-repeat-outside-contract")
 
@@ -1224,8 +1224,13 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
     source_terms = {word.strip(string.punctuation).casefold() for word in source_words}
     sizes, links, transcript_sizes = [], [], []
     terms: set[str] = set()
-    for rel in rels:
+    corpus_digest = hashlib.sha256()
+    for rel in sorted(rels):
         raw = (vault_root / rel).read_bytes()
+        path_bytes = rel.encode("utf-8")
+        corpus_digest.update(len(path_bytes).to_bytes(8, "big"))
+        corpus_digest.update(path_bytes)
+        corpus_digest.update(hashlib.sha256(raw).digest())
         sizes.append(len(raw))
         frontmatter, body, _ = vault.parse_frontmatter(raw.decode("utf-8"))
         links.append(len(find_results.wikilink_targets(body)))
@@ -1246,7 +1251,7 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
     return {"pages": pages, "chunks": chunks, "units": units, "unit_pages": unit_pages,
             "vector_units": vector_units, "median_page_bytes": median, "spot_checks": 6,
             "vocabulary_terms": vocabulary, "wikilinks_min": min(links), "wikilinks_max": max(links),
-            "transcript_pages": len(transcript_sizes)}
+            "transcript_pages": len(transcript_sizes), "content_digest": corpus_digest.hexdigest()}
 
 
 def _prepare_worker(vault_root: Path, startup: dict) -> dict:
@@ -1489,14 +1494,164 @@ class _Worker:
         self.process.stdout.close()
 
 
+def _git_bytes(*arguments: str) -> bytes:
+    import subprocess
+
+    return subprocess.check_output(["git", *arguments], cwd=ROOT, stderr=subprocess.DEVNULL)
+
+
+def _document_digest(value: Any) -> str:
+    import hashlib
+
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def _verify_pinned_base(tag: str, commit: str) -> None:
+    if _git_bytes("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}").decode().strip() != commit:
+        raise MeasurementRefused("pinned-release-tag-mismatch")
+
+
+def _paired_identity(profile: dict, cases: list[dict], *, tag: str, base_commit: str) -> dict:
+    return {"tag": tag, "base_commit": base_commit,
+            "head_commit": _git_bytes("rev-parse", "HEAD").decode().strip(),
+            "contract_revision": CONTRACT.revision,
+            "contract_digest": _document_digest(CONTRACT.model_dump(mode="json")),
+            "profile_digest": _document_digest(profile), "cases_digest": _document_digest(cases),
+            "source_digest": profile["source"]["sha256"]}
+
+
+def _case_partition(cases: list[dict], shard: int, shards: int) -> list[tuple[int, dict]]:
+    if not 1 <= shard <= shards <= len(cases):
+        raise MeasurementRefused("paired-shard-outside-case-range")
+    return list(enumerate(cases))[len(cases) * (shard - 1) // shards:len(cases) * shard // shards]
+
+
+def _paired_report(samples: list[dict], *, tag: str, profile: dict, accept_path: Path) -> dict:
+    accept, accept_state = read_accept(tag, accept_path)
+    reports = compare_pairs(samples, tag=tag, accept=accept)
+    return {"schema_version": 1, "mode": "paired", "tag": tag,
+            "state": "failed" if not any(row["gating"] for row in reports) or any(
+                row["gating"] and row["state"] not in ("passed", "accepted") for row in reports
+            ) else "passed",
+            "contract_revision": CONTRACT.revision, "accept_record": accept_state,
+            "source_digest": profile["source"]["sha256"], "unmeasured": profile["unmeasured"],
+            "series": reports, "samples": samples}
+
+
+def aggregate_paired(fragments: list[dict], *, series: str, tag: str, base_commit: str,
+                     producer_outcome: str | None,
+                     accept_path: Path = BENCHMARK / "accept.json") -> dict:
+    """Refuse incomplete or mixed experiments before computing one complete comparison.
+
+    A false mismatch delays the benchmark owner; accepting mixed evidence would
+    make the release's statistical verdict unsupported. No manual gate is added.
+    """
+    import hashlib
+
+    # The Actions matrix result covers current attempts that emitted no raw report.
+    if not producer_outcome:
+        raise MeasurementRefused("paired-producer-result-unavailable")
+    if producer_outcome != "success":
+        raise MeasurementRefused("paired-producer-result-not-success")
+    profile = json.loads((BENCHMARK / "profile.json").read_text())
+    all_cases, _digest = reference_cases(profile)
+    cases = [case for case in all_cases if case["series"] == series]
+    if not cases:
+        raise MeasurementRefused("paired-series-unknown")
+    _verify_pinned_base(tag, base_commit)
+    expected = _paired_identity(profile, cases, tag=tag, base_commit=base_commit)
+    shards = profile["paired_shards"]
+    latest, versions = {}, set()
+    for fragment in fragments:
+        validate_document(fragment, "summary.schema.json", definition="paired_fragment")
+        attempt = fragment["run_attempt"]
+        if (fragment["series"] != series or fragment["shards"] != shards
+            or not 1 <= fragment["shard"] <= shards
+            or fragment["run_id"] != os.environ.get("GITHUB_RUN_ID") or attempt is None
+            or int(attempt) > int(os.environ["GITHUB_RUN_ATTEMPT"])):
+            raise MeasurementRefused("paired-fragment-producer-mismatch")
+        version = (fragment["shard"], int(attempt))
+        if version in versions:
+            raise MeasurementRefused("paired-fragment-version-ambiguous")
+        versions.add(version)
+        if fragment["shard"] not in latest or int(attempt) > int(latest[fragment["shard"]]["run_attempt"]):
+            latest[fragment["shard"]] = fragment
+    if set(latest) != set(range(1, shards + 1)):
+        raise MeasurementRefused("paired-fragments-incomplete")
+    # Select a whole latest attempt, including a refusal; never combine or fall back between versions.
+    fragments = [latest[shard] for shard in sorted(latest)]
+    locks = {"head": _runtime_lock_digest(ROOT),
+             "base": hashlib.sha256(_git_bytes("show", f"{base_commit}:uv.lock")).hexdigest()}
+    # These are the worker launch recipes implemented by this benchmark, not authored vocabulary.
+    policies = {"head": "parent-benchmark", "base": "frozen-tag-runtime"}
+    rows = []
+    environments = None
+    for fragment in fragments:
+        if (fragment["state"] != "collected"
+            or any(fragment.get(key) != value for key, value in expected.items())):
+            raise MeasurementRefused("paired-fragment-identity-mismatch")
+        assigned = _case_partition(cases, fragment["shard"], shards)
+        if fragment["case_indices"] != [index for index, _case in assigned]:
+            raise MeasurementRefused("paired-fragment-assignment-mismatch")
+        expected_tuples = Counter(
+            (series, case["id"], principal, repeat, arm)
+            for _index, case in assigned for principal in PAIRED_PRINCIPALS
+            for repeat in range(PAIRING["repeats"]) for arm in ("base", "head")
+        )
+        if Counter((row["series"], row["case"], row["principal"], row["repeat"], row["arm"])
+                   for row in fragment["samples"]) != expected_tuples:
+            raise MeasurementRefused("paired-fragment-samples-incomplete")
+        stable = {}
+        for arm, environment in fragment["environment"].items():
+            if (environment["runtime_lock_digest"] != locks[arm]
+                or environment["runtime_policy"] != policies[arm]
+                or len(set(environment["cpus"])) != REFERENCE["reference_cpus"]
+                or environment["sqlite_version"] not in profile["sqlite_versions"]):
+                raise MeasurementRefused("paired-fragment-runtime-mismatch")
+            stable[arm] = {key: value for key, value in environment.items() if key != "cpus"}
+        # CPU IDs agree within a pair; the schema's other fields agree across runners.
+        if (set(fragment["environment"]["head"]["cpus"]) != set(fragment["environment"]["base"]["cpus"])
+            or any(stable["head"][key] != stable["base"][key]
+                for key in ("corpus", "encoder_digest", "encoder_identity", "sqlite_version"))
+            or (environments is not None and stable != environments)):
+            raise MeasurementRefused("paired-fragment-environment-mismatch")
+        environments = stable
+        rows.extend(fragment["samples"])
+    order = [(series, case["id"], principal, repeat, arm)
+             for index, case in enumerate(cases) for principal in PAIRED_PRINCIPALS
+             for repeat in range(PAIRING["repeats"])
+             for arm in (("base", "head") if index % 2 == 0 else ("head", "base"))]
+    if len(set(order)) != len(order):
+        raise MeasurementRefused("paired-case-identities-duplicate")
+    by_tuple = {(row["series"], row["case"], row["principal"], row["repeat"], row["arm"]): row
+                for row in rows}
+    report = _paired_report([by_tuple[key] for key in order], tag=tag, profile=profile,
+                            accept_path=accept_path)
+    # Raw fragments retain actual CPU IDs and the original producer attempt on every runner.
+    report["raw_fragments"] = sorted(fragments, key=lambda fragment: fragment["shard"])
+    return report
+
+
 def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
                cases: list[dict], accept_path: Path = BENCHMARK / "accept.json",
-               series: str | None = None) -> dict:
+               series: str | None = None, shard: int | None = None,
+               shards: int | None = None, base_commit: str | None = None) -> dict:
     if series is not None:
         # One CI job per series keeps each paired comparison inside its job budget.
         cases = [case for case in cases if case["series"] == series]
         if not cases:
             raise MeasurementRefused("paired-series-unknown")
+    shard_count = profile["paired_shards"] if shard is not None and shards is None else shards
+    assigned = (list(enumerate(cases)) if shard is None else
+                _case_partition(cases, shard, shard_count))
+    if shard is not None and (series is None or not base_commit):
+        raise MeasurementRefused("paired-shard-requires-pinned-series")
+    if shard is not None and shard_count != profile["paired_shards"]:
+        raise MeasurementRefused("paired-shard-count-differs-profile")
+    # Bind raw Actions evidence before preparing either expensive runtime.
+    if shard is not None and not all(os.environ.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")):
+        raise MeasurementRefused("paired-producer-identity-unavailable")
     if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < REFERENCE["reference_cpus"]:
         raise MeasurementRefused("two-cpu-reference-unavailable")
     cpus = sorted(os.sched_getaffinity(0))[:REFERENCE["reference_cpus"]]
@@ -1527,7 +1682,7 @@ def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
                                          "rows": REFERENCE["stage_rows"]})
             finally:
                 worker.pause()
-        for case_index, case in enumerate(cases):
+        for case_index, case in assigned:
             order = ("base", "head") if case_index % 2 == 0 else ("head", "base")
             for principal_name in PAIRED_PRINCIPALS:
                 for repeat in range(PAIRING["repeats"]):
@@ -1541,16 +1696,15 @@ def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
                         samples.append({"case": case["id"], "series": case["series"],
                                         "principal": principal_name, "arm": arm, "repeat": repeat,
                                         "load": one_minute_load(), **measured})
-        accept, accept_state = read_accept(tag, accept_path)
-        reports = compare_pairs(samples, tag=tag, accept=accept)
-        return {"schema_version": 1, "mode": "paired", "tag": tag,
-                # A selection with no gating series measured nothing and cannot pass.
-                "state": "failed" if not any(row["gating"] for row in reports) or any(
-                    row["gating"] and row["state"] not in ("passed", "accepted") for row in reports
-                ) else "passed",
-                "contract_revision": CONTRACT.revision, "accept_record": accept_state,
-                "source_digest": profile["source"]["sha256"], "environment": environments,
-                "unmeasured": profile["unmeasured"], "series": reports, "samples": samples}
+        if shard is not None:
+            return {"schema_version": 1, "mode": "paired_fragment", "state": "collected",
+                    "series": series, "shard": shard, "shards": shard_count,
+                    "case_indices": [index for index, _case in assigned],
+                    **_paired_identity(profile, cases, tag=tag, base_commit=base_commit),
+                    "environment": environments, "samples": samples,
+                    "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"]}
+        return {**_paired_report(samples, tag=tag, profile=profile, accept_path=accept_path),
+                "environment": environments}
     finally:
         for worker in workers.values():
             worker.close()
@@ -1651,8 +1805,10 @@ def live_cli(transport: ServedTransport, *, cases_path: Path, corpus_path: Path 
     return 0
 
 
-def paired_cli(output: Path, *, series: str | None = None) -> int:
-    """Resolve the most recent release tag and measure both arms on this runner."""
+def paired_cli(output: Path, *, series: str | None = None, base_tag: str | None = None,
+               base_commit: str | None = None, shard: int | None = None,
+               shards: int | None = None) -> int:
+    """Measure a pinned release baseline, resolving it once for unsharded use."""
     import subprocess
     import tempfile
 
@@ -1660,24 +1816,59 @@ def paired_cli(output: Path, *, series: str | None = None) -> int:
 
     report: dict = {"schema_version": 1, "mode": "paired", "state": "refused",
                     "contract_revision": CONTRACT.revision, "series": [], "samples": []}
+    if shard is not None:
+        report.update(mode="paired_fragment", series=series, shard=shard, shards=shards,
+                      run_id=os.environ.get("GITHUB_RUN_ID"), run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT"))
     phase = "reference-preparation"
     try:
         profile = json.loads((BENCHMARK / "profile.json").read_text())
         cases, digest = reference_cases(profile)
         phase = "release-archive"
-        tag = latest_release_tag(ROOT)
+        if base_tag is None and base_commit is None:
+            tag = latest_release_tag(ROOT)
+            base_commit = _git_bytes("rev-parse", f"refs/tags/{tag}^{{commit}}").decode().strip()
+        elif base_tag is not None and base_commit is not None:
+            tag = base_tag
+            _verify_pinned_base(tag, base_commit)
+        else:
+            raise MeasurementRefused("pinned-release-identity-incomplete")
+        if not tag or tag.startswith("-"):
+            raise MeasurementRefused("latest-release-tag-unavailable")
         report["tag"] = tag
         with tempfile.TemporaryDirectory(prefix="exomem-recall-latency-") as temporary:
             scratch = Path(temporary)
-            base = extract_release(ROOT, tag, scratch)
+            base = extract_release(ROOT, base_commit, scratch)
             phase = "paired-measurement"
             report = paired_run(base=base, tag=tag, scratch=scratch, profile=profile, cases=cases,
-                                series=series)
+                                series=series, shard=shard, shards=shards, base_commit=base_commit)
             report["source_digest"] = digest
     except (ValueError, OSError, subprocess.SubprocessError, ValidationError) as error:
         # Closed local error codes; never print arbitrary subprocess output.
         report["reason"] = error.code if isinstance(error, MeasurementRefused) else type(error).__name__
         report["phase"] = (error.phase or phase) if isinstance(error, MeasurementRefused) else phase
+    validate_document(report, "summary.schema.json",
+                      definition="paired_fragment" if shard is not None else None)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    print(json.dumps({"state": report["state"], "artifact": output.name}))
+    return int(report["state"] != ("collected" if shard is not None else "passed"))
+
+
+def aggregate_paired_cli(directory: Path, output: Path, *, series: str, tag: str, base_commit: str,
+                         producer_outcome: str | None = None) -> int:
+    import subprocess
+
+    from jsonschema.exceptions import ValidationError
+
+    report: dict = {"schema_version": 1, "mode": "paired", "state": "refused",
+                    "contract_revision": CONTRACT.revision, "series": [], "samples": []}
+    try:
+        # This filename is the raw Actions artifact protocol; elapsed records are separate files.
+        fragments = [json.loads(path.read_text()) for path in sorted(directory.rglob("recall-latency-fragment-*.json"))]
+        report = aggregate_paired(fragments, series=series, tag=tag, base_commit=base_commit,
+                                  producer_outcome=producer_outcome)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError, ValidationError) as error:
+        report["reason"] = error.code if isinstance(error, MeasurementRefused) else type(error).__name__
+        report["phase"] = "paired-aggregation"
     validate_document(report, "summary.schema.json")
     output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
     print(json.dumps({"state": report["state"], "artifact": output.name}))
@@ -1696,7 +1887,13 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--encoder-cache-key", action="store_true", help=argparse.SUPPRESS)
     source.add_argument("--validate-summary", type=Path, help="validate a content-free stored summary")
     source.add_argument("--paired", action="store_true", help="compare with the latest release")
+    source.add_argument("--aggregate-paired", type=Path, help="compare one complete series from raw shard artifacts")
+    parser.add_argument("--producer-outcome", help="current Actions sampler matrix result, required for aggregation")
     parser.add_argument("--series", help="limit --paired to one series of the case file")
+    parser.add_argument("--base-tag", help="release label resolved once before sampling")
+    parser.add_argument("--base-commit", help="peeled release commit resolved before sampling")
+    parser.add_argument("--shard", type=int, help="one contiguous case shard; emits raw samples only")
+    parser.add_argument("--shards", type=int, help="number of case shards")
     source.add_argument("--worker-source", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-cpus", help=argparse.SUPPRESS)
     parser.add_argument("--worker-vault", type=Path, help=argparse.SUPPRESS)
@@ -1741,7 +1938,16 @@ def main(argv: list[str] | None = None) -> int:
         print("digest=" + embedding_backend.served_artifact(embeddings.MODEL_NAME).digest)
         return 0
     if args.paired:
-        return paired_cli(args.output, series=args.series)
+        if args.shard is not None and not all((args.series, args.base_tag, args.base_commit, args.shards)):
+            parser.error("case shards require --series, --base-tag, --base-commit and --shards")
+        return paired_cli(args.output, series=args.series, base_tag=args.base_tag,
+                          base_commit=args.base_commit, shard=args.shard, shards=args.shards)
+    if args.aggregate_paired:
+        if not all((args.series, args.base_tag, args.base_commit)):
+            parser.error("aggregation requires --series, --base-tag and --base-commit")
+        return aggregate_paired_cli(args.aggregate_paired, args.output, series=args.series,
+                                    tag=args.base_tag, base_commit=args.base_commit,
+                                    producer_outcome=args.producer_outcome)
     if args.reference:
         return absolute_cli(args.output, quiescence_bound=args.quiescence_bound)
     if args.mcp_url:

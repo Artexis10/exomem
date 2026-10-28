@@ -17,6 +17,7 @@ import runpy
 import sqlite3
 import threading
 import time
+import uuid
 import zipfile
 from contextlib import closing
 from pathlib import Path
@@ -101,7 +102,8 @@ def _preserve(root, data):
 def _projections(conn, cid=DERIVED):
     """The names of a collection's query projection tables in one file."""
     return [name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? "
-                                             "ESCAPE '!'", (f"cq!_{cid.replace('-', '')}!_%",))]
+                                             "ESCAPE '!' AND name NOT LIKE '%!_undo' ESCAPE '!'",
+                                             (f"cq!_{cid.replace('-', '')}!_%",))]
 
 
 def _rows_file(found, cid=DERIVED):
@@ -433,15 +435,28 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
     assert route.run(writer, DERIVED, ROWS, facade_profile="records")["rows"] == before["rows"]
 
 
-def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_digests(derived):
-    """A rebuild drops the guard identity, rejects strings, or reconstructs a different scalar subtype."""
-    from exomem import structured_collections as collections
-    from exomem.collection_store.typed_storage import canonical_json
-
-    text = manifest_text(DERIVED, "Mixed", MIXED_FIELDS).replace(
+def _mixed_manifest(*, location_key):
+    """The mixed-types derived manifest; a location natural-key field is what makes a new derived collection hashed."""
+    fields = MIXED_FIELDS if not location_key else MIXED_FIELDS.replace(
+        "day: {type: date, required: true, sortable: true}",
+        "day: {type: date, required: true, sortable: true, classification: location}")
+    return manifest_text(DERIVED, "Mixed", fields).replace(
         "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n").removesuffix("---\n") + (
         "rollups:\n  daily:\n    bucket: day\n    timestamp: local_date\n"
         "    values:\n      numeric: [sum, max]\n---\n")
+
+
+@pytest.mark.parametrize("scheme", ["ordered-v1", "hashed-v1"])
+def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_digests(derived, scheme):
+    """A rebuild drops the guard identity, rejects strings, or reconstructs a different scalar subtype, or
+    its rows come back under other item keys than the import log recorded. A location natural-key field
+    makes the collection hashed; every other new derived collection is ordered."""
+    from dataclasses import replace
+
+    from exomem import structured_collections as collections
+    from exomem.collection_store.typed_storage import canonical_json
+
+    text = _mixed_manifest(location_key=scheme == "hashed-v1")
     writer, job = derived("mixed", {"samples/mixed.json": MIXED_DOCUMENT}, text=text, mapping=MIXED_MAPPING)
     done = finish(writer, job)
     assert {name: done["rows"][name] for name in ("inserted", "updated", "unchanged", "imported", "duplicates", "rejected")} == {
@@ -457,7 +472,9 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
                  "text" if type(value) is str else "numeric": value}
                 for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
     assert canonical_json(rows(writer.handle)) == canonical_json(expected)
-    parsed = collections.parse_manifest_bytes(writer.root, writer.root / PATH, text.encode())
+    parsed = replace(collections.parse_manifest_bytes(writer.root, writer.root / PATH, text.encode()),
+                     item_key_scheme=scheme)
+    assert writer.connection.execute("SELECT item_key_scheme FROM collections").fetchone() == (scheme,)
     expected_digest = hashlib.sha256(b"").hexdigest()
     for row in expected:
         values = {**row, "local_date": row["day"]}
@@ -496,6 +513,183 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
         assert buckets(handle) == expected_buckets
         assert _rows_file(derived_rows.path(path)) == before
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
+
+
+def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_touching_its_rows(derived):
+    """Defect: the upgrade to revision 14 re-keys or rebuilds a derived collection made before ordered keys,
+    or marks it ordered, so its stored UUID keys no longer match the keys its imports compute.
+
+    The revision-13 store is made by removing exactly what revision 14 adds from a hashed collection's store."""
+    from dataclasses import replace
+
+    from exomem import structured_collections as collections
+    from exomem.collection_store import schema
+
+    writer, job = derived("upgrade", {"samples/mixed.json": MIXED_DOCUMENT}, text=_mixed_manifest(location_key=True),
+                          mapping=MIXED_MAPPING)
+    assert finish(writer, job)["state"] == "complete"
+    path = writer.handle.path
+    file = derived_rows.path(path)
+    before = _rows_file(file)
+    writer.handle.close()
+    with closing(sqlite3.connect(path, isolation_level=None)) as raw:
+        for trigger in ("collections_item_key_scheme_fixed", "collections_ordered_keys_derived"):
+            raw.execute(f"DROP TRIGGER {trigger}")
+        raw.execute("ALTER TABLE collections DROP COLUMN item_key_scheme")
+        raw.execute("UPDATE store_meta SET value='13' WHERE key=?", (schema.META_SCHEMA_VERSION,))
+        raw.execute("UPDATE alembic_version SET version_num='13'")
+
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        assert schema.schema_version(handle.connection) == schema.SCHEMA_VERSION == 14
+        assert handle.connection.execute("SELECT collection_id,item_key_scheme FROM collections").fetchall() == [
+            (DERIVED, "hashed-v1")]
+        restarted = CollectionWriter(writer.root, handle)
+        manifest = restarted._collection_manifest(restarted._collection_row(DERIVED))[0]
+        assert manifest.item_key_scheme == "hashed-v1"
+        with preview_store(writer.root, handle):
+            assert derived_rows.step(writer.root, restarted) == "idle"  # nothing to rebuild
+        assert derived_rows.rebuild_status(handle.connection, path, DERIVED)["state"] == "ready"
+        assert _rows_file(file) == before
+        # The keys the rows hold are the keys an import computes today.
+        with closing(sqlite3.connect(file)) as derived_file:
+            [table] = _projections(derived_file)
+            held = {key for (key,) in derived_file.execute(f"SELECT item_key FROM {table}")}
+        parsed = replace(collections.parse_manifest_bytes(writer.root, writer.root / PATH,
+                         _mixed_manifest(location_key=True).encode()), item_key_scheme="hashed-v1")
+        values = {"day": "2026-11-01", "position": 0, "local_date": "2026-11-01", "numeric": 7}
+        assert uuid.UUID(collections.derived_item_key(parsed, values)).bytes in held
+
+
+@pytest.mark.parametrize(
+    ("change", "scheme"),
+    [
+        (lambda text: text, "ordered-v1"),
+        (lambda text: text.replace("sortable: true}", "sortable: true, classification: location}", 1), "hashed-v1"),
+        (lambda text: text.replace("day: {type: date,", "day: {type: enum, enum: [1, 2],", 1), "hashed-v1"),
+        (lambda text: text.replace("derived: true\n", ""), "hashed-v1"),
+    ],
+    ids=["new derived collection", "location key field", "key field without an ordered encoding", "not derived"],
+)
+def test_a_new_collection_takes_ordered_keys_only_when_derived_and_its_key_can_carry_them(tmp_path, change, scheme):
+    """Defect: a collection is created ordered although its key spells a location or has no ordered encoding,
+    or a collection whose rows live in the store is created ordered."""
+    root = tmp_path / "vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    with connection.open_writer(tmp_path / "collections.sqlite", lease_check=lambda: True) as handle, library_scope():
+        CollectionWriter(root, handle).create_collection(
+            PATH, change(_mixed_manifest(location_key=False)), why="scheme", scaffold=False)
+        assert handle.connection.execute("SELECT item_key_scheme FROM collections").fetchone() == (scheme,)
+
+
+def test_an_ordered_collection_refuses_a_location_natural_key_by_revise_and_by_import_mapping(derived):
+    """Defect: a key that spells a location reaches an item key, which every reader of the collection sees, by a
+    classification added after creation: in a revised manifest or in an import mapping's coverage."""
+    document = {"samples/mixed.json": MIXED_DOCUMENT}
+    writer, job = derived("location", document, text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
+    assert finish(writer, job)["state"] == "complete"
+    assert writer.connection.execute("SELECT item_key_scheme FROM collections").fetchone() == ("ordered-v1",)
+
+    text = _mixed_manifest(location_key=True)
+    guards = writer.inspect_collection(DERIVED)["lifecycle_guards"]
+    with pytest.raises(Exception) as refused:
+        writer.revise_collection(DERIVED, manifest_text=text, why="locate the day", **guards)
+    assert refused.value.code == derived_rows.COLLECTION_DERIVED
+    assert refused.value.details["location_key_fields"] == ["day"]
+
+    request = {"source_ref": _preserve(writer.root, _archive(document))["path"], "format": "json-document",
+               "members": "samples/*", "mapping": MIXED_MAPPING}
+    # Keys of a date (4 bytes) and an integer position (2 bytes for 0, 3 from 1 on): the preview reports them.
+    assert agent(writer, mode="preview", **request)["identity"]["item_keys"] == {
+        "scheme": "ordered-v1", "stored_key_bytes": {"min": 1, "max": 320},
+        "sampled_key_bytes": {"rows": 8, "min": 6, "max": 7}}
+
+    located = {**MIXED_MAPPING, "coverage": {"$.days[].day": {"classification": "location"}}}
+    request = {"source_ref": _preserve(writer.root, _archive(document))["path"], "format": "json-document",
+               "members": "samples/*", "mapping": located}
+    [finding] = agent(writer, mode="preview", **request)["mapping"]["findings"]
+    assert (finding["code"], finding["at"]) == ("IMPORT_MAPPING_INVALID", "mapping.coverage")
+    with pytest.raises(OpError) as refused:
+        agent(writer, mode="start", **request)
+    assert refused.value.code == "IMPORT_MAPPING_INVALID" and refused.value.details["at"] == "mapping.coverage"
+
+
+@pytest.mark.parametrize("scheme", ["ordered-v1", "hashed-v1"])
+def test_a_recipient_who_cannot_see_a_natural_key_field_cannot_read_it_back_through_the_item_key(
+        derived, monkeypatch, scheme):
+    """Defect: an ordered item key spells the natural key, so a principal whose field plan withholds a
+    natural-key field reads that value by selecting, filtering or sorting on `item_key`."""
+    from test_collection_field_admission import GUEST
+
+    from exomem import item_keys
+    from exomem.query_engine import route
+
+    if scheme == "hashed-v1":
+        monkeypatch.setattr(CollectionWriter, "_new_item_key_scheme", lambda self, manifest: item_keys.HASHED_V1)
+    writer, job = derived("recipient", DAYS, text=TEXT.replace("natural_key: [series, at]", "natural_key: [device, at]"))
+    assert finish(writer, job)["state"] == "complete"
+    assert writer.connection.execute("SELECT item_key_scheme FROM collections").fetchone() == (scheme,)
+
+    def ask(who, **raw):
+        with request_scope(who):
+            return route.run(writer, DERIVED, {"version": 1, "page": {"limit": 3}, **raw}, facade_profile="records")
+
+    with pytest.raises(Exception) as hidden:
+        ask(GUEST, select=["device"])
+    assert hidden.value.code == "QUERY_FIELD_UNAVAILABLE"
+    owner_keys = [row["item_key"] for row in ask(owner_principal(), select=["item_key"])["rows"]]
+    assert len(owner_keys) == 3
+    if scheme == "hashed-v1":
+        # The uuid spells nothing, so the recipient reads it as before.
+        assert [row["item_key"] for row in ask(GUEST, select=["item_key"])["rows"]] == owner_keys
+        return
+    reached = {"select": {"select": ["item_key"]},
+               "filter": {"where": {"field": "item_key", "op": "eq", "value": owner_keys[0]}},
+               "sort": {"order_by": [{"field": "item_key"}]},
+               "prefix": {"where": {"field": "item_key", "op": "startswith", "value": owner_keys[0][:4]}}}
+    for name, raw in reached.items():
+        with pytest.raises(Exception) as refused:
+            ask(GUEST, **raw)
+        assert (name, refused.value.code) == (name, "QUERY_FIELD_UNAVAILABLE")
+    # Rows of an ordinary page carry no key, and the owner still reads, filters and sorts by it.
+    assert all("item_key" not in row for row in ask(GUEST)["rows"])
+    assert ask(owner_principal(), **reached["filter"], select=["item_key"])["rows"] == [{"item_key": owner_keys[0]}]
+    assert [row["item_key"] for row in ask(owner_principal(), **reached["sort"], select=["item_key"])["rows"]] == owner_keys
+
+
+
+def test_a_recipient_pages_past_long_ordered_keys_with_cursors_of_one_length(derived):
+    """Defect: an ordered key over the cursor's old 128-character boundary refuses the next page, and a
+    cursor's length tells a recipient how long the hidden natural key is."""
+    from test_collection_field_admission import GUEST
+
+    from exomem.query_engine import route
+
+    devices = ["u", "unit-" + "y" * 20, "unit-" + "z" * 60, "unit-" + "w" * 100]
+    members = {}
+    for n, device in enumerate(devices):
+        day = f"2026-11-0{n + 1}"
+        members[f"samples/{day}.json"] = {**samples((day, at(day, ("08:00", 1), ("09:00", 2)))), "device": device}
+    writer, job = derived("long-keys", members, text=TEXT.replace("natural_key: [series, at]", "natural_key: [device, at]"))
+    assert finish(writer, job)["state"] == "complete"
+    rows, cursor, lengths = [], None, set()
+    while True:
+        with request_scope(GUEST):
+            page = route.run(writer, DERIVED, {"version": 1, "select": ["series"],
+                                               "page": {"limit": 1, **({"after": cursor} if cursor else {})}},
+                             facade_profile="records")
+        rows += page["rows"]
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+        lengths.add(len(cursor))
+    assert len(rows) == 8
+    assert len(lengths) == 1
+
+def test_the_derived_connection_caps_its_wal_at_the_journal_size_limit(derived):
+    """Defect: the derived file's connection loses the limit, so a large import leaves its whole WAL on disk,
+    hundreds of megabytes beside the rows."""
+    writer, _ = derived("journal")
+    assert derived_rows.open_store(writer).conn.execute("PRAGMA journal_size_limit").fetchone() == (64 << 20,)
 
 
 def test_a_rebuild_leaves_the_vault_commit_generation_where_it_was(derived):
@@ -717,3 +911,122 @@ def test_a_revise_cannot_convert_a_derived_collection_and_the_store_refuses_the_
     assert refused.value.code == "VIEW_MODE_CHANGE_UNSUPPORTED" and refused.value.details["derived"] is True
     with pytest.raises(sqlite3.IntegrityError, match="derived only at creation"):
         writer.connection.execute("UPDATE collections SET derived=0 WHERE collection_id=?", (DERIVED,))
+
+
+# A stopped import reverts only the member it had open (design D3).
+
+_FIRST = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", ("08:00", 100), ("09:00", 500),
+                                                                ("10:00", 200)))),
+          "samples/2026-11-02.json": samples(("2026-11-02", at("2026-11-02", ("08:00", 600))))}
+# The re-export's open member adds 07:00 and lowers the 09:00 peak, so its first batch inserts and updates.
+_AGAIN = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", ("07:00", 400), ("08:00", 90),
+                                                                ("09:00", 50), ("10:00", 200)))),
+          "samples/2026-11-02.json": _FIRST["samples/2026-11-02.json"]}
+
+
+def _mirror(writer):
+    """The derived file's rows, rollup mirrors and flagged counts, as a reader of that file sees them."""
+    with closing(sqlite3.connect(derived_rows.path(writer.handle.path))) as conn:
+        return (_rows_file(derived_rows.path(writer.handle.path)),
+                conn.execute("SELECT * FROM rollup_buckets ORDER BY rollup_id,bucket,groups").fetchall(),
+                conn.execute("SELECT * FROM rollup_members ORDER BY rollup_id,bucket,groups,row_id").fetchall(),
+                conn.execute("SELECT * FROM derived_flagged ORDER BY rollup_id").fetchall())
+
+
+def _cancelled_mid_member(derived, monkeypatch, name):
+    """A collection holding a first export, then a re-export cancelled after the open member's first batch."""
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
+    writer, job = derived(name, _FIRST)
+    assert finish(writer, job)["state"] == "complete"
+    before = _mirror(writer)
+    job = agent(writer, mode="start", source_ref=_preserve(writer.root, _archive(_AGAIN))["path"],
+                format="json-document", members="samples/*", mapping=SAMPLES)
+    run_jobs(writer, max_batches=1)
+    assert derived_rows.Store.progress(derived_rows.open_store(writer), DERIVED)["restored"] == 2
+    assert _mirror(writer) != before  # the open member moved rows, rollup buckets and members
+    agent(writer, mode="cancel", continuation=job["continuation"])
+    return writer, before
+
+
+def _revert_to_rest(writer):
+    with preview_store(writer.root, writer.handle):
+        for _ in range(16):
+            if derived_rows.step(writer.root, writer) == "idle":
+                return
+    raise AssertionError("the derived collection did not come to rest")
+
+
+def _no_rebuild(monkeypatch):
+    """Record each full rebuild's start: a revert never installs an empty rows table."""
+    installs = []
+    original = derived_rows.Store._install
+    monkeypatch.setattr(derived_rows.Store, "_install",
+                        lambda self, goal, *, state, **kwargs: (installs.append(state), original(self, goal, state=state, **kwargs))[1])
+    return installs
+
+
+def test_a_cancel_mid_member_restores_the_rows_buckets_and_members_without_a_rebuild(derived, monkeypatch):
+    """Defect: a stop dropped the whole collection and replayed its import log, so cancelling the one
+    open member of a re-export cost as much as importing every earlier member again."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "revert")
+    installs = _no_rebuild(monkeypatch)
+
+    _revert_to_rest(writer)
+
+    assert _mirror(writer) == before
+    assert installs == []
+    assert derived_rows.rebuild_status(writer.connection, writer.handle.path, DERIVED)["state"] == "ready"
+    assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(writer.handle.path))
+
+
+def test_a_revert_cut_short_resumes_after_a_restart_to_the_same_rows(derived, monkeypatch):
+    """Defect: a restart in the middle of a revert left the collection half reverted, with its earlier rows
+    back and the cancelled member's new rows still there, or sent it to a full rebuild."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "resume")
+    monkeypatch.setattr(derived_rows, "REBUILD_STEP_ROWS", 1)
+    with preview_store(writer.root, writer.handle):
+        assert derived_rows.step(writer.root, writer) == "advanced"
+    status = derived_rows.rebuild_status(writer.connection, writer.handle.path, DERIVED)
+    assert (status["state"], status["rows_remaining"] > 0) == ("reverting", True)
+    root, path = writer.root, writer.handle.path
+    writer.handle.close()
+    installs = _no_rebuild(monkeypatch)
+
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = CollectionWriter(root, handle)
+        with preview_store(root, handle):
+            outcomes = [derived_rows.step(root, restarted) for _ in range(64)]
+        assert outcomes[-1] == "idle" and "done" in outcomes
+        assert installs == []
+        assert _mirror(restarted) == before
+
+
+def test_a_member_opened_by_an_older_release_rebuilds_in_full(derived, monkeypatch):
+    """Defect: a record without ``row_floor`` was reverted from an undo table its member never filled,
+    which keeps the member's updates and drops nothing."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "older")
+    with closing(sqlite3.connect(derived_rows.path(writer.handle.path), isolation_level=None)) as raw:
+        record = json.loads(raw.execute("SELECT record_json FROM derived_progress").fetchone()[0])
+        del record["row_floor"]
+        raw.execute("UPDATE derived_progress SET record_json=?", (json.dumps(record),))
+    installs = _no_rebuild(monkeypatch)
+
+    _revert_to_rest(writer)
+
+    assert installs == ["rebuilding"]
+    assert _mirror(writer) == before
+
+
+def test_an_undo_table_that_disagrees_with_the_member_count_rebuilds_in_full(derived, monkeypatch):
+    """Defect: a revert trusted an undo table that lost a pre-image, and left that row at the cancelled
+    member's value."""
+    writer, before = _cancelled_mid_member(derived, monkeypatch, "short")
+    with closing(sqlite3.connect(derived_rows.path(writer.handle.path), isolation_level=None)) as raw:
+        raw.execute(f"DELETE FROM {derived_rows._undo_table(DERIVED)} WHERE row_id=(SELECT max(row_id) FROM "
+                    f"{derived_rows._undo_table(DERIVED)})")
+    installs = _no_rebuild(monkeypatch)
+
+    _revert_to_rest(writer)
+
+    assert installs == ["rebuilding"]
+    assert _mirror(writer) == before

@@ -56,6 +56,7 @@ from test_records_recall_graph import _manifest as _records_manifest
 from exomem import (
     deferred_index,
     epistemic_graph,
+    file_watcher,
     freshness,
     graph_drain,
     graph_sync,
@@ -1330,6 +1331,154 @@ def test_a_standalone_late_refresh_that_cannot_prove_its_no_op_still_converges(
 
     assert EpistemicGraphIndex(vault).available(), "a standalone caller was left with a queue"
     _assert_matches_a_fresh_rebuild(vault)
+
+
+# --- Background callers stop at queued ------------------------------------------
+
+
+def test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The watcher's echo of a governed write is background work, so it stops at queued.
+
+    A receipt-owned write does not register with the watcher, so its change
+    event arrives as an outside edit. The watcher's dispatch is not a caller
+    anyone waits on, yet it joined a whole-vault rebuild, and when the graph
+    stayed behind it raised an external mark that fenced the next write.
+    """
+    _publish_with_a_resident_resolver(
+        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    whole_vault_passes.clear()
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.2)
+
+    watcher._record(vault / CREATED, deleted=False)
+    watcher._flush()
+
+    assert whole_vault_passes == [], "the watcher's echo rebuilt the vault"
+    assert not freshness.external_pending(vault), "the watcher's echo fenced later writes"
+    assert deferred_index.list_graph_paths(vault), "the echo's repair is not queued"
+
+    index_sync.drain_graph_work(vault)
+
+    assert whole_vault_passes == []
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def _acknowledged_behind_withdrawn_reads(root: Path) -> None:
+    """A create the drain acknowledged, after which reads were withdrawn."""
+    _publish_with_a_resident_resolver(
+        root, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    _commit_before_its_fanout(root, {CREATED: _titled("Fresh Title", "A new page.")})
+    assert index_sync.publish_corpus_delta(root, changed=[root / CREATED])
+    index_sync.drain_graph_work(root)
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert checkpoint is not None
+    assert _acknowledged(root) == int(checkpoint.generation)
+    EpistemicGraphIndex(root).suspend_reads()
+
+
+def test_a_background_dispatch_behind_a_covering_acknowledgement_stops_at_queued(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """An acknowledgement at the checkpoint is no lineage gap, so it earns no rebuild.
+
+    The predecessor probe compared the acknowledgement with the checkpoint's
+    predecessor only, so an acknowledgement that already covered the
+    checkpoint read as a mismatch and registered a whole-vault rebuild.
+    """
+    _acknowledged_behind_withdrawn_reads(vault)
+    whole_vault_passes.clear()
+
+    with graph_sync.standalone_join_waived():
+        report = index_sync.upsert_after_write(
+            vault, [vault / CREATED], created_paths=[vault / CREATED]
+        )
+
+    graph = next(item for item in report.components if item.component == "epistemic_graph")
+    assert whole_vault_passes == [], "a covering acknowledgement rebuilt the vault"
+    assert (graph.outcome, graph.code) == ("deferred", "graph_repair_queued")
+
+    index_sync.drain_graph_work(vault)
+
+    assert whole_vault_passes == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_standalone_dispatch_behind_a_covering_acknowledgement_still_converges(
+    vault: Path,
+) -> None:
+    """A library caller's contract is a converged graph, whatever the probe says."""
+    _acknowledged_behind_withdrawn_reads(vault)
+
+    index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert EpistemicGraphIndex(vault).available(), "a standalone caller was left with a queue"
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def _refresh_fails_once(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    real = EpistemicGraphIndex.refresh_paths
+    raised: list[Exception] = []
+
+    def failing_once(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not raised:
+            raised.append(error)
+            raise error
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "refresh_paths", failing_once)
+
+
+def test_a_background_dispatch_that_meets_a_busy_boundary_stops_at_queued(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy boundary is a publication failure with a known scope, so it earns no rebuild.
+
+    The derived drain's fan-out met the graph drain holding the mutation
+    boundary, and the dispatch's failure branch registered a whole-vault
+    rebuild for a write whose own paths were the whole repair.
+    """
+    from exomem.cli_ops import OpError
+
+    _acknowledged_behind_withdrawn_reads(vault)
+    whole_vault_passes.clear()
+    _refresh_fails_once(monkeypatch, OpError("MUTATION_BUSY", "the graph drain holds the boundary"))
+
+    with graph_sync.standalone_join_waived():
+        report = index_sync.upsert_after_write(
+            vault, [vault / CREATED], created_paths=[vault / CREATED]
+        )
+
+    graph = next(item for item in report.components if item.component == "epistemic_graph")
+    assert whole_vault_passes == [], "a busy boundary rebuilt the vault"
+    assert (graph.outcome, graph.code) == ("deferred", "graph_repair_queued")
+    assert CREATED in deferred_index.list_graph_paths(vault)
+
+    index_sync.drain_graph_work(vault)
+
+    assert whole_vault_passes == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_background_dispatch_that_fails_unclassified_still_registers(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unclassifiable failure marks the whole vault, so the write's paths are not its scope."""
+    _acknowledged_behind_withdrawn_reads(vault)
+    whole_vault_passes.clear()
+    _refresh_fails_once(monkeypatch, ValueError("unclassified"))
+
+    with graph_sync.standalone_join_waived():
+        index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert whole_vault_passes, "an unclassified failure was left to the write's own paths"
 
 
 AFFECTED = "Knowledge Base/Notes/Insights/queue-affected.md"

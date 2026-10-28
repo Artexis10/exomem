@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate
-from test_context_catalogue import _built, _write
+from test_context_catalogue import INSIGHTS, _built, _seed, _write
 from test_context_views import OWNER, _cold, _second_vault
 from test_governance_egress import _external
 from test_working_set_index import _seed_structure
@@ -376,7 +376,7 @@ def test_a_slice_that_runs_out_of_budget_is_skipped_and_keeps_the_map(vault: Pat
 
 
 def test_a_slice_that_spends_the_request_budget_leaves_the_map_its_guard(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The slice ends one stage reserve before the request, so however long it runs, the map is still guarded and served."""
+    """A synchronous slice stage can overrun its deadline; the built map still reaches the final guard."""
     from types import SimpleNamespace
 
     from exomem import request_budget
@@ -388,9 +388,8 @@ def test_a_slice_that_spends_the_request_budget_leaves_the_map_its_guard(vault: 
     monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
 
     def slow(*args, **kwargs):
-        # Each stage that the budget admits takes half a second, until the budget refuses the next one.
-        while not working_set.budget_exhausted("working_set.semantic"):
-            clock[0] += 0.5
+        clock[0] += 5.5
+        working_set.budget_exhausted("working_set.semantic")
         raise working_set.BudgetExhausted("working_set.semantic")
 
     monkeypatch.setattr(working_set, "compile_packet", slow)
@@ -401,6 +400,63 @@ def test_a_slice_that_spends_the_request_budget_leaves_the_map_its_guard(vault: 
         request_budget.reset_current(token)
     assert not packet.get("abstained")
     assert packet["turn_slice"]["state"] == "skipped" and packet["map"] == expected["map"]
+
+
+@pytest.mark.parametrize(
+    ("caller", "hidden_target", "topics"),
+    [(OWNER, False, ["harbour"]), (_external(), False, ["harbour"]), (_external(), True, [])],
+)
+def test_slice_leads_keep_admitted_relation_topics(vault: Path, caller, hidden_target: bool, topics: list[str]) -> None:
+    """A lead inherits one admitted target's declarations; the target and further hops stay out of the slice."""
+    _seed(vault)
+    target = f"{INSIGHTS}/mooring-lines.md"
+    lead = f"{INSIGHTS}/dock-roster.md"
+    chain = f"{INSIGHTS}/chain-first.md"
+    if hidden_target:
+        _withhold(vault, target, ceiling=0)
+    _built(vault).close()
+
+    with principal.request_scope(caller), principal.invocation_scope():
+        # Prime the owner's map cache with the same slice reserve, so its leads still receive the full caller view.
+        context_views.activation_packet(
+            vault, 4000, generation={}, turn_leads=lambda _caller: context_views.TurnLeads("empty"),
+        )
+        packet = context_views.activation_packet(
+            vault, 4000, generation={},
+            turn_leads=lambda _caller: context_views.TurnLeads("ready", (
+                context_views.Lead(lead, "named", ()), context_views.Lead(chain, "named", ()),
+            )),
+        )
+        packet = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
+
+    items = {item["path"]: item for item in packet["turn_slice"]["items"]}
+    assert set(items) == {lead, chain}
+    assert items[lead]["topics"] == topics
+    assert items[chain]["topics"] == []
+
+
+def test_a_project_domain_edit_updates_a_warm_slice(vault: Path) -> None:
+    """A cached map must not keep a lead's old membership after the project registry changes."""
+    _seed(vault)
+    _built(vault).close()
+    lead = f"{INSIGHTS}/tide-work.md"
+
+    def slice_topics() -> list[str]:
+        with principal.request_scope(OWNER), principal.invocation_scope():
+            packet = context_views.activation_packet(
+                vault, 4000, generation={},
+                turn_leads=lambda _caller: context_views.TurnLeads("ready", (
+                    context_views.Lead(lead, "named", ()),
+                )),
+            )
+            packet = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
+        (item,) = packet["turn_slice"]["items"]
+        return item["topics"]
+
+    assert slice_topics() == slice_topics() == ["harbour"]
+    registry = vault / KB / "_Schema/project-keys.yaml"
+    registry.write_text(registry.read_text(encoding="utf-8").replace("domain: harbour", "domain: fleet"), encoding="utf-8")
+    assert slice_topics() == slice_topics() == ["fleet"]
 
 
 def test_a_budget_too_small_for_one_slice_line_holds_none_of_it_back(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

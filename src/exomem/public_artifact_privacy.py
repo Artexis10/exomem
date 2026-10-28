@@ -157,6 +157,7 @@ _TEXT_SUFFIXES = frozenset(
         ".gitattributes",
         ".gitignore",
         ".gitkeep",
+        ".go",
         ".hcl",
         ".html",
         ".htm",
@@ -215,6 +216,7 @@ _TEXT_BASENAMES = frozenset(
         "Procfile",
         "RECORD",
         "WHEEL",
+        "upstream-commit",
     }
 )
 _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".whl", ".zip", ".skill")
@@ -273,6 +275,18 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
             "sample.rtf",
             "sample.xlsx",
         )
+    ),
+    # These two reviewed public recordings have immutable source and derivative hashes.
+    *(
+        BinaryProvenance(
+            f"tests/fixtures/media-samples/{name}",
+            "public CC BY 4.0 speech fixture; source and derivative provenance in tests/MEDIA-SOURCES.md",
+        )
+        for name in ("sample.wav", "sample.mkv")
+    ),
+    BinaryProvenance(
+        "tests/fixtures/clip/photo.jpg",
+        "public CC0 photograph for the image-tower vector gate; provenance in tests/MEDIA-SOURCES.md",
     ),
 )
 

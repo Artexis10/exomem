@@ -264,9 +264,9 @@ def can_afford(reserve: float) -> bool:
 def leaving(reserve: float) -> Iterator[None]:
     """Run an optional part of the call on a deadline `reserve` seconds before the call's own.
 
-    The stages after it then still have `reserve` to start in, however much of the budget the
-    part spent. What the part skipped or truncated is recorded on the call's budget too, so its
-    response block names it. Without a bound budget nothing changes.
+    Stage checks cooperate with this deadline; a synchronous stage can overrun the reserve.
+    Skips and truncations are recorded on the parent budget too, so its response names them.
+    Without a bound budget nothing changes.
     """
     parent = current()
     if parent is None:

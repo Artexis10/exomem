@@ -34,7 +34,7 @@ import os
 import re
 import stat
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cache
 from importlib.resources import files
@@ -801,14 +801,14 @@ def _fields(entry: Entry) -> dict[str, Any]:
 
 
 def new_findings(
-    before: Snapshot | None, after_findings: tuple[Mapping[str, Any], ...]
+    before: Iterable[Mapping[str, Any]], after_findings: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Blocking findings the save introduces.
+    """Blocking findings the save introduces, given the current overlay's findings.
 
     A finding the current overlay already carries, such as a hand edit's, never
     refuses a save that does not touch it: the save still snapshots those bytes.
     """
-    known = {_finding_identity(item) for item in (before.findings if before else ())}
+    known = {_finding_identity(item) for item in before}
     return [
         dict(item)
         for item in after_findings

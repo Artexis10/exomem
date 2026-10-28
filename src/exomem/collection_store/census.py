@@ -234,8 +234,10 @@ class Census:
             "FROM main.collections c JOIN main.collection_manifests m ON m.collection_id=c.collection_id "
             "AND m.manifest_version=c.manifest_version WHERE c.collection_id>? ORDER BY c.collection_id LIMIT ?",
             (self.after, limit)).fetchall()
+        # One ownership proof for the step; each collection is still admitted or not on its own.
+        admitted = authority.admitted_collections(writer) if rows else frozenset()
         for cid, generation, path, text, mode, layout in rows:
-            if not authority.collection_admitted(writer, cid):
+            if cid not in admitted:
                 continue
             manifest = collections.parse_manifest_bytes(writer.root, path, text.encode())
             if not capability.summary_route_open(writer.root, manifest):
