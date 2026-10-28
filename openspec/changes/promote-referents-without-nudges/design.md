@@ -292,7 +292,7 @@ A first-mention prompt and an agent's declaration need no origin count: the deci
 | --- | --- |
 | add-context-activation-benchmark 1.6 | Overlaps. Task 3.2 here is a capture-to-activation replay for referents only; it reuses 1.6's harness when 1.6 lands first. 1.6 keeps fan-out and interrupted resume. |
 | add-context-activation-benchmark 4.3 | Overlaps. Group 4 here is a referent instance of 4.3's rich-turn journey and uses its observation format. 4.3 stays open for multiple topics. |
-| f27 agent-track driver (`benchmarks/epistemic/journeys/f27_replay.py`) | Reused for every arm of group 4. |
+| f27 agent-track driver (`benchmarks/epistemic/journeys/f27_replay.py`) | Historical isolation reference; group 4 reuses the maintained Compiler runner. |
 | close-memory-loop 3.4 | Related. The core line that 3.4 owns stays; a declaration line joins it only if decision 1B ships. |
 | close-memory-loop 4.3, 4.3a-c | Not a dependency. |
 | close-memory-loop 4.5 | Related. `entity_candidate` stays the 1→2 step and still switches to origins after 4.3. |
@@ -323,8 +323,11 @@ The evaluator files a new amendment under the next free family in `benchmarks/ep
 The owner acknowledges the amendment before the final run.
 A separate measurement lane runs the arms and checks their captured inputs, outputs and digests before scoring.
 
-**Reuse.** Use `benchmarks/epistemic/journeys/f33_referent_replay.py` for the two-session workflow, f27 client isolation, and existing tool-surface capture through a thin adapter.
-Do not reuse f33's cases.
+**Reuse.** Reuse the Compiler-owned session, state and transcript capture under `benchmarks/membench/utility/switch_eval/`.
+The current switch protocol exposes four read tools; it does not prove the write-capable Organisation workflow.
+Coordinate the isolated writer binding with its owner before generation, including product, schemas, engagement, authority, terminal receipts and readback.
+The f33 driver remains a historical reference with known transport gaps; its cases stay sealed.
+Add only an agreed adapter for this workflow, rather than a parallel actor harness.
 Each situation has a capture session and a fresh-recall session.
 Pin the model, client, product revision, prominence and captured configuration for both arms.
 
@@ -336,7 +339,7 @@ A product label in a manifest does not prove which code executed.
 
 Observe the shipped default maps workflow through the public tool names returned by discovery.
 Capture the complete fresh-session transcript, including map, profile and page pulls, plus the final answer and state.
-The existing replay reads legacy activation sections and assumes an older tool name; reuse its lifecycle through an adapter.
+The historical f33 replay reads legacy activation sections and assumes an older tool name; it is not the maintained actor transport.
 Do not score an empty legacy section as missing evidence or force the anchor fallback.
 
 Before writing cases, the independent author defines source-derived success and false precision for each category.
