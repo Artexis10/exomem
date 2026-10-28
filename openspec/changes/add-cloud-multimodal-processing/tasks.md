@@ -69,7 +69,14 @@ Cell-sized backlog acceptance and weight sharing across live cells remain tasks 
 The wider bake-off no longer blocks this delivery. Future model or routing changes require the frozen quality comparison and fresh confirmation in D6.
 
 - [ ] 4.4 Qualify later coverage or model upgrades on at least 100 languages and fresh confirmation, with the unchanged 2.0-point bound. This upgrade work does not gate the selected initial default.
-- [ ] 4.5 Transcribe long recordings under design D6: language once per file, the reference decoding fallback and resumable progress. Verify on 30-minute English and Japanese recordings at 2 CPU: WER and CER against the source texts, per-window wall time, peaks, and a stopped run that resumes to the same transcript.
+- [x] 4.5 Transcribe long recordings under design D6 with language detection once per file, reference decoding fallback, timestamp seeking and resumable progress. Verify 30-minute English and Japanese recordings, per-window timing, memory peaks and checkpoint replay under a 2-CPU quota. The paired retry ablation showed no change. The batch removes that retry and both thresholds. The final workflow uses shared weights explicitly; the earlier ablation used personal prepacking defaults.
+
+The 2026-10-28 workflow completed both 30-minute recordings with shared weights, prepacking disabled and one ONNX thread under the 2-CPU quota.
+The source-reference WER was 0.210902 for English; CER was 0.260376 for Japanese, and both had zero textual loops.
+English used 129 decoder attempts and Japanese used 170; wall times were 4183 and 5199 seconds, respectively.
+The English replay restored a checkpoint at 1717.5 seconds and reproduced all 225 timed segments and the full text with seven new decodes.
+The short normal and quiet checks returned nonempty speech with valid timestamps; quiet speech still had word errors.
+These exposed recordings establish regression coverage; the English prose reference and remaining word errors limit quality claims.
 
 ## 5. Integration and closure
 
