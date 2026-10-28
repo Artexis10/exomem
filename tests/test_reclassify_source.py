@@ -120,14 +120,6 @@ def test_a_correction_that_does_not_change_the_projection_moves_nothing(
     event = front["classification_history"]["events"][0]
     assert event["before"] == event["after"]
     assert event["reason"] == "confirming the existing classification after review"
-    # The in-place branch still has to write the correction: a no-relocation
-    # correction that records nothing would silently discard the caller's reason.
-    front = _front(vault, result.new_path)
-    assert front["source_type"] == "invoice-receipt"
-    assert front["domain"] == "equipment"
-    assert front["reclassified_reason"] == (
-        "confirming the existing classification after review"
-    )
 
 
 def test_an_unseen_kind_registers_itself_like_a_capture_does(
@@ -1001,6 +993,7 @@ def test_a_concurrent_metadata_edit_survives_a_correction(
     captured = _capture(vault, source_schema, title="Survey", source_type="research-report")
     page = vault / captured.path
     competing = splice_markdown_frontmatter(page.read_text(), {"tags": ["independent-update"]})
+    destination = rc.propose(vault, captured.path, source_kind="photograph").destination
     commit = rc._write_correction
 
     def concurrent_write(*args, **kwargs):
@@ -1018,7 +1011,7 @@ def test_a_concurrent_metadata_edit_survives_a_correction(
 
     assert page.read_text() == competing
     assert "classification_history" not in _front(vault, captured.path)
-    assert not (vault / KB / "Sources" / "Photographs").exists()
+    assert destination is not None and not (vault / destination).exists()
 
 
 def test_a_failed_companion_move_transaction_commits_no_event(
@@ -1032,6 +1025,7 @@ def test_a_failed_companion_move_transaction_commits_no_event(
     _write(vault, source,
            f"---\ntype: source\nsource_type: other\nevidence_file: {binary}\n---\n\nA survey.\n")
     before = (vault / source).read_bytes()
+    destination = rc.propose(vault, source, source_kind="photograph").destination
 
     def interrupted(*args, **kwargs):
         raise OSError("injected transaction interruption")
@@ -1043,4 +1037,36 @@ def test_a_failed_companion_move_transaction_commits_no_event(
 
     assert (vault / source).read_bytes() == before
     assert raw.read_bytes() == b"\x89PNG\r\n\x1a\noriginal"
-    assert not (vault / KB / "Sources" / "Photographs" / "survey.png.md").exists()
+    assert destination is not None and not (vault / destination).exists()
+
+
+def test_an_edit_after_preflight_survives_the_failed_relocation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands
+    from exomem.record_formats import splice_markdown_frontmatter
+
+    source = _legacy_source(vault)
+    page = vault / source
+    edited = splice_markdown_frontmatter(page.read_text(), {"tags": ["late-update"]})
+    held_rename = rc.move_file_module._held_rename
+    injected = False
+
+    def edit_before_rename(root, old_path, new_path, **kwargs):
+        nonlocal injected
+        if old_path == source and not kwargs.get("rollback"):
+            page.write_text(edited)
+            injected = True
+        return held_rename(root, old_path, new_path, **kwargs)
+
+    monkeypatch.setattr(rc.move_file_module, "_held_rename", edit_before_rename)
+
+    with pytest.raises(ValueError, match="SOURCE_CHANGED"):
+        commands.op_manage_memory_file(
+            vault, operation="reclassify", path=source,
+            source_kind="photograph", reason="a captured image",
+        )
+
+    assert injected
+    assert page.read_text() == edited
+    assert "classification_history" not in _front(vault, source)

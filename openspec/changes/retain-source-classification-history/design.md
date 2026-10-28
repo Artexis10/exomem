@@ -13,6 +13,7 @@ Compiled interpretation history excludes Sources; collection history owns a diff
 - Append events for unchanged classifications and reversals. Never truncate events or remove them during undo.
 - Patch the journal through the existing parsed frontmatter writer and transaction. Generate the timestamp once before the declared transform.
 - Retain the original read guard for in-place writes. Reject a relocation transform whose input differs from the planned source snapshot.
+- Bind the renamed source bytes to the destination write's expected hash. Existing rollback preserves an edit that arrives after preflight.
 - Read the journal through existing released frontmatter. Keep operation-log history and compiled revision history separate.
 
 ## Risks and controls
