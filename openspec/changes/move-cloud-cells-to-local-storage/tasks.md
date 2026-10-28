@@ -23,6 +23,9 @@
   - no published pool means zero;
   - only the configured domain publishes slots, and every non-deleted cell counts against them.
   - Evidence: unit tests on recorded observations, including a pass during a backup.
+  - Audit after #2145: `test_local_reservations.py` covers physical orphan charges, incarnation matching, larger commitments and missing frames.
+    Drill [40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645) records a guarded frame and recomputes five slots from it.
+    Still open: the unit test for unchanged slots during a backup uses unguarded observations; it does not qualify the D12 frame path.
 - [x] 2.3 Render the hourly online backup as a non-stopping hold:
   - snapshot, read-only clone, restic on the clone, cleanup whatever the outcome;
   - one hold per cell at a time;
@@ -63,6 +66,9 @@
   - only through the provider transaction that retains the prospective reserve; otherwise an alert and a retained target;
   - the grown size is recorded in a cellctl-owned row column (Substrate migration) and the claim renders at the larger of it and `storage_gib`.
   - Evidence: unit tests for growth, the cap, the pool refusal with its alert, and a rehearsal growth of a serving cell.
+  - D12 audit: drill [40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645), check 6, proves guarded growth and the cap.
+    `test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin` proves retained growth after provider refusal.
+    Still open: a provider-refusal test that also observes the growth alert; the existing alert test uses unguarded capacity.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). At 85% use a serving cell grew from 4 to 8 GiB online: same pod, 0 restarts, filesystem 4143677440 to 8369172480 bytes, quota applied at 16Gi with no refusal, row `grown_storage_gib` 8, next clone 8Gi, published slots matching D6. At the cap the verdict was `at-cap` and cellctl raised `storage-growth-blocked` (no receiver in the rehearsal).
 
 ## 3. Chart, admission, policy
