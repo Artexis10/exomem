@@ -7447,8 +7447,7 @@ def _op_activate_context_body(
             # only the anchors it may see: a withheld namesake must not turn a visible anchor into a question.
             reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
-            # The slice ends one stage reserve before the request does, so however long it runs, the map's guard can
-            # still start: a slice that spends the budget is skipped, and the map stays.
+            # Cooperative stage checks leave time for the map's mandatory guard; a synchronous stage can overrun.
             with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
                 compiled = _compile_guarded_activation(
                     vault_root,
@@ -7482,8 +7481,7 @@ def _op_activate_context_body(
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                 )
-                if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
-                    return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+                # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
                     guarded = egress_module.guard_working_set(
                         vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose

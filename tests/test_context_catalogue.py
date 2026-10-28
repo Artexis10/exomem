@@ -139,26 +139,6 @@ def test_a_page_joins_a_topic_only_by_the_declarations_the_spec_names(vault: Pat
     assert topics["fleet-notes"] == ("fleet",)
 
 
-def test_narrow_catalogue_reads_preserve_topic_declarations(vault: Path) -> None:
-    _seed(vault)
-    path = _page(
-        vault, "quay-work",
-        "exomem_id: 84741aa9-f188-45c5-912c-1b83b7b1f403\ntopics: [harbour]\n"
-        "project: harbour-ops\ntags: [quay/works]\n",
-    )
-    catalogue = _built(vault)
-    entry = next(entry for entry in catalogue.entries() if entry.path == path)
-
-    by_ref = catalogue.entries_for([entry.ref, "missing-ref"])
-    by_id = catalogue.entries_for([entry.entry_id, entry.ref])
-
-    assert by_ref == by_id == (entry,)
-    assert by_ref[0].topics == ("harbour",)
-    assert by_ref[0].projects == ("harbour-ops",)
-    assert by_ref[0].tags == ("quay/works",)
-    assert catalogue.memberships(among=by_ref).topics[path] == ("harbour",)
-
-
 def test_an_incremental_update_equals_a_fresh_build_after_every_kind_of_edit(vault: Path, tmp_path: Path) -> None:
     _seed(vault)
     _seed_planning(vault)

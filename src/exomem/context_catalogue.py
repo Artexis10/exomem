@@ -381,27 +381,6 @@ class ContextCatalogue:
         conn = self._connect()
         return () if conn is None else _load(conn, ids=list(ids))
 
-    def entries_for(self, names: Iterable[str]) -> tuple[Entry, ...]:
-        """The entries that `names` spell, by entry id or by ref, with their raw declarations.
-
-        A bounded read for a handful of names: it reads the declarations of the matched entries
-        only, never the table. A name matches by id or ref and never by `path`, which the items of
-        one collection share: a collection's path names the collection page and not its items.
-        """
-        wanted = sorted({name for name in names if name})
-        conn = self._connect()
-        if conn is None or not wanted:
-            return ()
-        found: set[str] = set()
-        # Each name binds twice; half the shared chunk stays below SQLite's variable limit.
-        chunk_size = SQL_VARIABLE_CHUNK // 2
-        for start in range(0, len(wanted), chunk_size):
-            chunk = wanted[start : start + chunk_size]
-            marks = ", ".join("?" for _ in chunk)
-            sql = f"SELECT entry_id FROM entries WHERE entry_id IN ({marks}) OR ref IN ({marks})"
-            found.update(entry_id for (entry_id,) in conn.execute(sql, (*chunk, *chunk)))
-        return _load(conn, ids=sorted(found))
-
     def membership_edges(self) -> dict[str, tuple[str, ...]]:
         """Entry id -> the page paths its authored membership relations name."""
         conn = self._connect()

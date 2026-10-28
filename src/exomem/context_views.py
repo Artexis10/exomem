@@ -950,11 +950,12 @@ class _ActivationMap:
     empty: bool
 
 
-def _activation_map(prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None) -> _ActivationMap:
+def _activation_map(
+    prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None, world: _World,
+) -> _ActivationMap:
     """Budget before reading state; only candidate rows pay the current-state resolver's cost."""
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None
-    world = _world(catalogue, caller)
     rows = tuple(_view_rows(prepared.target, prepared.key, world, prepared.registries))
     states: dict[str, dict[str, Any]] = {}
     view = View(
@@ -1039,6 +1040,7 @@ def _activation_packet(
         view = _usable(prepared)
         description = "Index of what exists."
         reserve = 0 if turn_leads is None else _slice_reserve(max_chars)
+        world = None
         map_chars = max_chars - reserve - len(description) - 1
         if view is None:
             assert catalogue is not None
@@ -1055,7 +1057,8 @@ def _activation_packet(
                     _OWNER_MAPS.move_to_end(key)
             with find_types.timing_span(timings, "working_set.map", source="cache" if compiled else "computed"):
                 if compiled is None:
-                    compiled = _activation_map(prepared, map_chars, timings)
+                    world = _world(catalogue, prepared.caller)
+                    compiled = _activation_map(prepared, map_chars, timings, world)
                     if key is not None and compiled.view.state_available and catalogue.token() == key[1]:
                         with _OWNER_MAPS_LOCK:
                             _OWNER_MAPS[key] = compiled
@@ -1086,7 +1089,7 @@ def _activation_packet(
         packet["budget"]["used_chars"] = map_packet_chars(block)
         if turn_leads is not None:
             slice_block = _turn_slice(
-                prepared, turn_leads, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
+                prepared, turn_leads, world=world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
             )
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
@@ -1226,7 +1229,7 @@ def _slice_reserve(max_chars: int) -> int:
 
 
 def _turn_slice(
-    prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, limit: int, reserve: int,
+    prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, world: _World | None, limit: int, reserve: int,
     timings: find_types.FindTimings | None,
 ) -> dict[str, Any]:
     """The turn slice for this caller, in the `reserve` that the map left. It never raises and never touches the map."""
@@ -1240,7 +1243,8 @@ def _turn_slice(
         state, evidence = leads.state, leads.evidence
         if state == READY:
             with find_types.timing_span(timings, "working_set.turn_slice"):
-                rows, extras = _slice_rows(prepared, leads)
+                # A lead has the same membership, project activity and thread head as in the caller's full map view.
+                rows, extras = _slice_rows(prepared, leads, world)
                 if rows:
                     chosen, overflow = _slice_within(prepared, rows, extras, states, reserve - 1 - len(SLICE_DESCRIPTION))
                 # No admitted lead is an empty turn; leads with no room for one whole line are a skipped slice.
@@ -1268,7 +1272,9 @@ def _turn_slice(
     return block
 
 
-def _slice_rows(prepared: _Prepared, leads: TurnLeads) -> tuple[tuple[Row, ...], dict[str, dict[str, Any]]]:
+def _slice_rows(
+    prepared: _Prepared, leads: TurnLeads, world: _World | None,
+) -> tuple[tuple[Row, ...], dict[str, dict[str, Any]]]:
     """The caller's rows for the leads, in lead order, with how each was reached.
 
     A lead names a catalogue entry by its id or its ref. A lead the caller may not see, or that names no
@@ -1276,8 +1282,7 @@ def _slice_rows(prepared: _Prepared, leads: TurnLeads) -> tuple[tuple[Row, ...],
     """
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None  # `_usable` returned None
-    entries = catalogue.entries_for(lead.ref for lead in leads.leads)
-    world = _world(catalogue, caller, among=entries)
+    world = world if world is not None else _world(catalogue, caller)
     by_name: dict[str, Row] = {}
     for row in world.rows:
         by_name.setdefault(row.entry_id, row)
