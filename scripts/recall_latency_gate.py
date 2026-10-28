@@ -17,7 +17,7 @@ import time
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Callable
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -876,6 +876,8 @@ def _sample_from_envelope(data: Any) -> Sample:
 
 BENCHMARK = ROOT / "benchmarks/recall-latency"
 REFERENCE = CONTRACT.references[HYBRID_BAR.reference]
+# The latency specification fixes these word ranges and case counts per series.
+QUERY_BANDS = ((1, 3, 10), (4, 9, 20), (15, 40, 10))
 PAIRING = REFERENCE["paired"]
 #: The principals whose paired series gate; the paired run samples only these.
 PAIRED_PRINCIPALS = tuple(PAIRING["principals"])
@@ -1169,6 +1171,14 @@ def absolute_cli(output: Path, *, quiescence_bound: float) -> int:
     return 0
 
 
+def reference_word_band(query: str) -> str:
+    words = len(query.split())
+    for lower, upper, _count in QUERY_BANDS:
+        if lower <= words <= upper:
+            return f"{lower}-{upper}"
+    raise MeasurementRefused("reference-query-bands-invalid")
+
+
 def reference_cases(profile: dict, directory: Path = BENCHMARK) -> tuple[list[dict], str]:
     from synth_vault import reference_source
 
@@ -1185,10 +1195,8 @@ def reference_cases(profile: dict, directory: Path = BENCHMARK) -> tuple[list[di
         selected = [case for case in cases if case["series"] == series]
         if len(selected) < REFERENCE["queries_min"]:
             raise MeasurementRefused("reference-case-count-below-profile")
-        lengths = [len(case["query"].split()) for case in selected]
-        # These word bands are the measurement contract's closed sampling bins.
-        if ([sum(1 <= n <= 3 for n in lengths), sum(4 <= n <= 9 for n in lengths),
-             sum(15 <= n <= 40 for n in lengths)] != [10, 20, 10]):
+        bands = Counter(reference_word_band(case["query"]) for case in selected)
+        if bands != {f"{lower}-{upper}": count for lower, upper, count in QUERY_BANDS}:
             raise MeasurementRefused("reference-query-bands-invalid")
     return cases, digest
 
@@ -1213,13 +1221,18 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
             digest = conn.execute("SELECT content_hash FROM pages WHERE path=?", (rel,)).fetchone()
             if digest is None or digest[0] != hashlib.sha256((vault_root / rel).read_bytes()).hexdigest():
                 raise MeasurementRefused("stored-page-source-mismatch")
-    with sqlite3.connect(index.path) as conn:
-        chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
-        vector_units = conn.execute("SELECT count(*) FROM semantic_unit_vectors").fetchone()[0]
-        for blob, in conn.execute("SELECT vector FROM chunks ORDER BY file_path, chunk_idx LIMIT 3"):
-            vector = np.frombuffer(blob, dtype=np.float32)
-            if not np.isfinite(vector).all() or not np.isclose(np.linalg.norm(vector), 1.0):
-                raise MeasurementRefused("stored-vector-invalid")
+        # These table names belong to the maintained lexical storage schema.
+        lexical_rows = ({table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                         for table in ("fts", "tri", "unit_fts")} if index is None else {})
+    chunks = vector_units = None
+    if index is not None:
+        with sqlite3.connect(index.path) as conn:
+            chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+            vector_units = conn.execute("SELECT count(*) FROM semantic_unit_vectors").fetchone()[0]
+            for blob, in conn.execute("SELECT vector FROM chunks ORDER BY file_path, chunk_idx LIMIT 3"):
+                vector = np.frombuffer(blob, dtype=np.float32)
+                if not np.isfinite(vector).all() or not np.isclose(np.linalg.norm(vector), 1.0):
+                    raise MeasurementRefused("stored-vector-invalid")
     source_words, _digest = reference_source(profile, BENCHMARK)
     source_terms = {word.strip(string.punctuation).casefold() for word in source_words}
     sizes, links, transcript_sizes = [], [], []
@@ -1239,9 +1252,10 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
             transcript_sizes.append(len(raw))
     vocabulary = len((terms & source_terms) - {""})
     median = statistics.median(sizes)
-    if (pages < REFERENCE["pages_min"] or chunks < REFERENCE["chunks_min"]
+    if (pages < REFERENCE["pages_min"]
+        or (index is not None and (chunks < REFERENCE["chunks_min"] or vector_units < units))
         or units < REFERENCE["units_min"] or unit_pages < pages * profile["unit_page_fraction"]
-        or vector_units < units or vocabulary < profile["vocabulary_min"]
+        or vocabulary < profile["vocabulary_min"]
         or min(links) < profile["links_min"] or max(links) > profile["links_max"]
         or len(transcript_sizes) < pages * profile["transcript_fraction"]
         or any(not profile["transcript_bytes"][0] <= size <= profile["transcript_bytes"][1]
@@ -1249,9 +1263,11 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
         or not profile["median_page_bytes"][0] <= median <= profile["median_page_bytes"][1]):
         raise MeasurementRefused("stored-corpus-below-reference-profile")
     return {"pages": pages, "chunks": chunks, "units": units, "unit_pages": unit_pages,
-            "vector_units": vector_units, "median_page_bytes": median, "spot_checks": 6,
+            "vector_units": vector_units, "median_page_bytes": median,
+            "spot_checks": 3 if index is None else 6,
             "vocabulary_terms": vocabulary, "wikilinks_min": min(links), "wikilinks_max": max(links),
-            "transcript_pages": len(transcript_sizes), "content_digest": corpus_digest.hexdigest()}
+            "transcript_pages": len(transcript_sizes), "content_digest": corpus_digest.hexdigest(),
+            **({"lexical_rows": lexical_rows} if index is None else {})}
 
 
 def _prepare_worker(vault_root: Path, startup: dict) -> dict:
@@ -1267,14 +1283,17 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
 
     profile = startup["profile"]
     words, _digest = reference_source(profile, BENCHMARK)
-    model = embeddings.get_model()
-    artifact = getattr(model, "profile", None)
-    if artifact is None or not artifact.artifact_digest:
-        raise MeasurementRefused("served-encoder-artifact-unknown")
-    probe = embeddings.embed_texts(["reference encoder warmup"], is_query=True)
-    identity = recall_space.current_identity(int(probe.shape[1]))
-    if identity.fingerprint != artifact.fingerprint():
-        raise MeasurementRefused("resident-encoder-identity-mismatch")
+    lexical_only = startup.get("calibration") == "sql"
+    artifact = identity = index = None
+    if not lexical_only:
+        model = embeddings.get_model()
+        artifact = getattr(model, "profile", None)
+        if artifact is None or not artifact.artifact_digest:
+            raise MeasurementRefused("served-encoder-artifact-unknown")
+        probe = embeddings.embed_texts(["reference encoder warmup"], is_query=True)
+        identity = recall_space.current_identity(int(probe.shape[1]))
+        if identity.fingerprint != artifact.fingerprint():
+            raise MeasurementRefused("resident-encoder-identity-mismatch")
     with principal.library_scope():
         manifest = vault_root / "reference-corpus.json"
         if manifest.exists():
@@ -1294,14 +1313,15 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
                 vectors.append(vector / np.linalg.norm(vector))
             return np.asarray(vectors, dtype=np.float32).reshape((-1, identity.dim))
 
-        try:
-            embeddings.embed_texts = seeded
-            index = embeddings.get_embedding_index(vault_root)
-            index.rebuild_all()
-        finally:
-            embeddings.embed_texts = original
-        if index.identity != identity:
-            raise MeasurementRefused("seeded-index-identity-mismatch")
+        if not lexical_only:
+            try:
+                embeddings.embed_texts = seeded
+                index = embeddings.get_embedding_index(vault_root)
+                index.rebuild_all()
+            finally:
+                embeddings.embed_texts = original
+            if index.identity != identity:
+                raise MeasurementRefused("seeded-index-identity-mismatch")
         from exomem import lexstore, memory_refs
 
         lexstore.ensure_fresh(vault_root)
@@ -1318,10 +1338,19 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
             ))
         enter_managed_recall(vault_root, full_startup=True)
         # Normal startup may leave this disposable matrix cold; preparation owns the wait.
-        index.all_vectors()
-    return {"corpus": corpus, "encoder_digest": artifact.artifact_digest,
-            "encoder_identity": artifact.fingerprint(), "sqlite_version": sqlite3.sqlite_version,
-            "python_version": sys.version.split()[0], "cpus": sorted(os.sched_getaffinity(0))}
+        if index is not None:
+            index.all_vectors()
+    environment = {"corpus": corpus, "encoder_digest": artifact.artifact_digest if artifact else None,
+                   "encoder_identity": artifact.fingerprint() if artifact else None,
+                   "sqlite_version": sqlite3.sqlite_version,
+                   "python_version": sys.version.split()[0], "cpus": sorted(os.sched_getaffinity(0))}
+    if lexical_only:
+        with sqlite3.connect(":memory:") as conn:
+            environment["sqlite_version"] = conn.execute("SELECT sqlite_version()").fetchone()[0]
+            environment["sqlite_compile_options_digest"] = _document_digest(
+                sorted(row[0] for row in conn.execute("PRAGMA compile_options"))
+            )
+    return environment
 
 
 def _failed_stage(result: Any, collectors=()) -> bool:
@@ -1332,7 +1361,7 @@ def _failed_stage(result: Any, collectors=()) -> bool:
     ) or any(stage.get("error") for collector in collectors for stage in collector.stages.values())
 
 
-def _worker_sample(ask_memory: Callable[..., Any], request: dict) -> dict:
+def _worker_sample(ask_memory: Callable[..., Any], request: dict, *, sql_observer=None) -> dict:
     from recall_latency_adapter import clear_results, instrument
 
     from exomem.governance import principal
@@ -1340,7 +1369,8 @@ def _worker_sample(ask_memory: Callable[..., Any], request: dict) -> dict:
     clear_results()
     caller = (principal.owner_principal(surface="library") if request["principal"] == "owner"
               else principal.RequestPrincipal(audience_id="benchmark-admitted", surface="mcp"))
-    with principal.request_scope(caller), principal.invocation_scope():
+    with (sql_observer.observe() if sql_observer is not None else nullcontext()), \
+            principal.request_scope(caller), principal.invocation_scope():
         with instrument() as (trace, collectors):
             started = time.perf_counter_ns()
             result = ask_memory(
@@ -1355,9 +1385,17 @@ def _worker_sample(ask_memory: Callable[..., Any], request: dict) -> dict:
              "warming" if isinstance(result, dict) and "warming" in result else
              "unknown" if not collectors or not trace.intervals else
              "empty" if not isinstance(hits, list) or not hits else "ok")
-    return {"elapsed_ms": elapsed_ms, "state": state, **{
+    sample = {"elapsed_ms": elapsed_ms, "state": state, **{
         key: value for key, value in accounting.items() if key != "total_ms"
     }}
+    if sql_observer is not None:
+        sample["sql"] = sql_observer.result(hits, trace, projection=request["arguments"]["mode"])
+        sample["sql_rows"] = {
+            row: accounting["stages"][row]["ms"] if any(
+                interval.name in names for interval in trace.intervals
+            ) else None for row, names in request["rows"].items()
+        }
+    return sample
 
 
 def worker_main(vault_root: Path) -> int:
@@ -1374,6 +1412,11 @@ def worker_main(vault_root: Path) -> int:
 
             command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
             ask_memory = command_surface.bind_vault(command.leaf, vault_root, command=command)
+            sql_observer = None
+            if startup.get("calibration") == "sql":
+                from recall_sql_calibration import SqlObserver
+
+                sql_observer = SqlObserver(_document_digest)
         print(json.dumps({"state": "ready", "runtime_prefix": sys.prefix,
                           "environment": {**environment, **runtime}}), flush=True)
         phase = "worker-request"
@@ -1382,7 +1425,7 @@ def worker_main(vault_root: Path) -> int:
             if request.get("stop"):
                 break
             with redirect_stdout(sys.stderr):
-                sample = _worker_sample(ask_memory, request)
+                sample = _worker_sample(ask_memory, request, sql_observer=sql_observer)
             print(json.dumps(sample, allow_nan=False), flush=True)
     except Exception as error:  # noqa: BLE001 - raw errors can contain corpus content.
         response = {"state": "worker-error", "error_class": type(error).__name__, "phase": phase}
@@ -1406,7 +1449,7 @@ class _Worker:
 
     def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict,
                  *, python: Path | str | None = None, runtime_prefix: Path | None = None,
-                 runtime_policy: str = "parent-benchmark"):
+                 runtime_policy: str = "parent-benchmark", calibration: str | None = None):
         import subprocess
 
         startup = {"profile": profile, "runtime_lock_digest": _runtime_lock_digest(source, phase="worker-startup"),
@@ -1421,6 +1464,9 @@ class _Worker:
                            EXOMEM_DISABLE_CLIP="1", EXOMEM_DISABLE_MEDIA_EXTRACTION="1")
         environment.pop("EXOMEM_DISABLE_EMBEDDINGS", None)
         environment.pop("KB_MCP_DISABLE_EMBEDDINGS", None)
+        if calibration == "sql":
+            startup["calibration"] = calibration
+            environment["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
         try:
             self.process = subprocess.Popen(
                 [str(python if python is not None else sys.executable), "-u", str(Path(__file__).resolve()), "--worker-source", str(source),
@@ -1440,7 +1486,8 @@ class _Worker:
         except BaseException:
             self.close()
             raise
-        self.pause()
+        if calibration != "sql":
+            self.pause()
 
     def exchange(self, request: dict, *, phase: str = "worker-request") -> dict:
         self.resume()
@@ -1884,6 +1931,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--reference", action="store_true", help="record the absolute reference series")
+    source.add_argument("--sql-calibration", action="store_true",
+                        help="record lexical rows on one reference SQLite runtime")
+    parser.add_argument("--sql-worker-python", type=Path,
+                        help="interpreter or launcher for the isolated lexical worker")
+    parser.add_argument("--sql-worker-prefix", type=Path,
+                        help="expected interpreter prefix for an external lexical worker")
     source.add_argument("--encoder-cache-key", action="store_true", help=argparse.SUPPRESS)
     source.add_argument("--validate-summary", type=Path, help="validate a content-free stored summary")
     source.add_argument("--paired", action="store_true", help="compare with the latest release")
@@ -1922,6 +1975,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if (args.sql_worker_python or args.sql_worker_prefix) and not args.sql_calibration:
+        parser.error("external SQL worker options require --sql-calibration")
+    if args.sql_calibration:
+        if bool(args.sql_worker_python) != bool(args.sql_worker_prefix):
+            parser.error("an external SQL worker requires its interpreter and expected prefix")
+        from recall_sql_calibration import run as run_sql_calibration
+
+        return run_sql_calibration(sys.modules[__name__], args.output,
+                                   quiescence_bound=args.quiescence_bound,
+                                   python=args.sql_worker_python, runtime_prefix=args.sql_worker_prefix)
     if args.worker_source:
         return worker_main(args.worker_vault)
     if args.corpus_counts:
