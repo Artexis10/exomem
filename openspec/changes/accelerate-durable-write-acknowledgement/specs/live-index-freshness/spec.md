@@ -9,13 +9,20 @@ restart and periodic reconciliation SHALL remain backstops. Completion SHALL
 clear only the exact receipt revision whose generation was published. A covered
 component deferral MUST NOT mint a redundant full-upsert receipt, while an
 uncovered or unreadable receipt MUST fail closed into explicit reconciliation
-demand.
+demand. An optional advisory component whose result has expired past its
+replay window SHALL settle as `not_required` and MUST NOT be retried.
 
 #### Scenario: Several components defer one batch
 
 - **WHEN** graph, embeddings, claims, and advisory work are deferred for one committed batch
 - **THEN** each unfinished component retains exact custody for the batch generation
 - **AND** the server drains the components without requiring an operator command or another foreground write
+
+#### Scenario: An advisory whose result expired settles
+
+- **WHEN** a claimed `write_advisory` component finds its result missing or past both its retention and replay deadlines
+- **THEN** the component settles as `not_required` in that pass and is never retried
+- **AND** its batch completes once its other components are done
 
 #### Scenario: A promoted component does not wait for the next tick
 

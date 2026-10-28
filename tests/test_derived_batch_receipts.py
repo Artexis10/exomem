@@ -1170,7 +1170,7 @@ def test_failed_component_rotates_behind_ready_work(vault: Path) -> None:
         observe_current_generation=lambda _root: "generation-1",
         limit=2,
         now=10.0,
-    ) == 1
+    ) == 2
     assert calls == ["rotate-0", "rotate-1"]
     failed = protocol.component_status(
         vault, receipts[0], protocol.DerivedComponent.LEXSTORE
@@ -1268,9 +1268,8 @@ def test_recovery_callback_exception_is_bounded_and_later_pass_progresses(
         protocol.DerivedComponent.LEXSTORE,
     )
     assert deferred.state == "prepared"
-    assert deferred.failure_code == "handler_unavailable"
-    assert deferred.attempt_count == 1
-    assert deferred.next_attempt_at > 3.0
+    assert deferred.failure_code is None
+    assert deferred.attempt_count == 0
 
     dispatched: list[str] = []
     assert drain.drain_once(
@@ -1279,7 +1278,7 @@ def test_recovery_callback_exception_is_bounded_and_later_pass_progresses(
         observe_current_generation=lambda _root: "generation-1",
         visibility_publisher=lambda _root, _receipt: True,
         limit=1,
-        now=deferred.next_attempt_at,
+        now=4.0,
     ) == 1
     assert dispatched == [receipt.batch_id]
     assert protocol.component_status(
@@ -3368,3 +3367,120 @@ def test_coverage_and_census_cost_stays_flat_as_receipts_grow(tmp_path: Path) ->
 
     for query, cost in small.items():
         assert large[query] <= cost + 64, (query, cost, large[query])
+
+
+def test_catalogue_success_keeps_a_commit_after_its_snapshot_owed(vault: Path) -> None:
+    protocol = _protocol()
+    catalogue = protocol.DerivedComponent.CONTEXT_CATALOGUE
+    current, target, _, after = _prepare_one(
+        vault, batch_id="catalogue-current", required={catalogue}, now=1.0
+    )
+    _commit_and_prove(vault, current, target, after)
+    late, late_target, _, late_after = _prepare_one(
+        vault, batch_id="catalogue-late", required={catalogue}, now=2.0
+    )
+
+    def refresh_then_commit(_root, status):
+        assert status.batch_id == current.batch_id
+        # The fold has read the vault before this prepared write commits.
+        _commit_and_prove(vault, late, late_target, late_after)
+        return True
+
+    _drain().drain_once(
+        vault, dispatch=refresh_then_commit,
+        observe_current_generation=lambda _root: "generation-1", limit=1, now=10.0,
+    )
+
+    assert protocol.component_status(vault, current, catalogue).state == "completed"
+    assert protocol.component_status(vault, late, catalogue).state == "ready"
+    assert protocol._load_receipt(vault, late.batch_id).state == "ready"
+
+
+def test_catalogue_success_keeps_unfinished_graph_inputs_owed(vault: Path) -> None:
+    protocol = _protocol()
+    catalogue = protocol.DerivedComponent.CONTEXT_CATALOGUE
+    current, target, _, after = _prepare_one(
+        vault, batch_id="catalogue-current", required={catalogue}, now=1.0
+    )
+    _commit_and_prove(vault, current, target, after)
+    pending, target, _, after = _prepare_one(
+        vault, batch_id="catalogue-graph", required={catalogue, protocol.DerivedComponent.GRAPH},
+        now=2.0,
+    )
+    _commit_and_prove(vault, pending, target, after)
+
+    def refresh(_root, status):
+        assert status.batch_id == current.batch_id
+        return True
+
+    _drain().drain_once(
+        vault, dispatch=refresh, observe_current_generation=lambda _root: "generation-1",
+        limit=1, now=10.0,
+    )
+
+    assert protocol.component_status(vault, current, catalogue).state == "completed"
+    assert protocol.component_status(vault, pending, protocol.DerivedComponent.GRAPH).state == "ready"
+    assert protocol.component_status(vault, pending, catalogue).state == "prepared"
+
+
+def test_recovery_exception_stamps_the_batch_and_leaves_sibling_components_alone(
+    vault: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    protocol = _protocol()
+    drain = _drain()
+    components = {
+        protocol.DerivedComponent.FRESHNESS,
+        protocol.DerivedComponent.LEXSTORE,
+    }
+    receipt, target, _before, after = _prepare_one(
+        vault, batch_id="sibling-recovery", required=components, now=1.0
+    )
+    _write(target, after)
+    before = {
+        component: protocol.component_status(vault, receipt, component)
+        for component in components
+    }
+
+    def broken_observer(_root: Path) -> str:
+        raise KeyError("observer unavailable")
+
+    with caplog.at_level("WARNING", logger="exomem.derived_receipts"):
+        drain.drain_once(
+            vault,
+            dispatch=lambda _root, _status: True,
+            observe_current_generation=broken_observer,
+            limit=4,
+            now=3.0,
+        )
+
+    for component, status in before.items():
+        assert protocol.component_status(vault, receipt, component) == status
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT failure_code FROM derived_batches WHERE batch_id = ?",
+            (receipt.batch_id,),
+        ).fetchone() == ("handler_unavailable",)
+    assert "KeyError" in caplog.text and "observer unavailable" in caplog.text
+
+
+def test_pass_that_dispatches_without_completing_still_counts_as_progress(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    drain = _drain()
+    receipt, target, _before, after = _prepare_one(vault, batch_id="no-completion", now=0.0)
+    _commit_and_prove(vault, receipt, target, after)
+
+    progress = drain.drain_once(
+        vault,
+        dispatch=lambda _root, _status: False,
+        observe_current_generation=lambda _root: "generation-1",
+        limit=1,
+        now=10.0,
+    )
+
+    assert protocol.component_status(
+        vault, receipt, protocol.DerivedComponent.LEXSTORE
+    ).state == "retryable"
+    # The scheduler backs off to its maximum only on zero progress.
+    assert progress == 1
