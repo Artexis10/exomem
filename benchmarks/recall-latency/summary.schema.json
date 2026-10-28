@@ -3,7 +3,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 1
+      "$ref": "#/$defs/schema_version"
     },
     "mode": {
       "enum": [
@@ -21,9 +21,7 @@
       ]
     },
     "contract_revision": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_.:-]*$",
-      "maxLength": 100
+      "$ref": "#/$defs/contract_revision"
     },
     "boundary": {
       "type": "string",
@@ -31,8 +29,7 @@
       "maxLength": 100
     },
     "tag": {
-      "type": "string",
-      "maxLength": 100
+      "$ref": "#/$defs/tag"
     },
     "accept_record": {
       "enum": [
@@ -42,25 +39,13 @@
       ]
     },
     "reason": {
-      "type": "string",
-      "maxLength": 200
+      "$ref": "#/$defs/reason"
     },
     "source_digest": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
+      "$ref": "#/$defs/sha256"
     },
     "environment": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "base": {
-          "$ref": "#/$defs/environment"
-        },
-        "head": {
-          "$ref": "#/$defs/environment"
-        }
-      },
-      "required": []
+      "$ref": "#/$defs/paired_environment"
     },
     "unmeasured": {
       "type": "array",
@@ -460,154 +445,7 @@
       }
     },
     "samples": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "case": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9_.:-]*$",
-            "maxLength": 100
-          },
-          "series": {
-            "type": "string",
-            "enum": [
-              "hybrid",
-              "keyword",
-              "filtered_hybrid",
-              "temporal",
-              "mixed",
-              "unit"
-            ]
-          },
-          "principal": {
-            "enum": [
-              "owner",
-              "admitted"
-            ]
-          },
-          "arm": {
-            "enum": [
-              "base",
-              "head"
-            ]
-          },
-          "repeat": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "load": {
-            "type": "number",
-            "minimum": 0
-          },
-          "elapsed_ms": {
-            "$ref": "#/$defs/measurement"
-          },
-          "state": {
-            "enum": [
-              "ok",
-              "warming",
-              "unknown",
-              "empty"
-            ]
-          },
-          "cpu_ms": {
-            "$ref": "#/$defs/measurement"
-          },
-          "cpu_source": {
-            "enum": [
-              "process_time_ns",
-              "unknown"
-            ]
-          },
-          "runqueue_ms": {
-            "$ref": "#/$defs/measurement"
-          },
-          "unattributed_ms": {
-            "$ref": "#/$defs/measurement"
-          },
-          "overlap_cpu_ms": {
-            "$ref": "#/$defs/measurement"
-          },
-          "unattributed_cpu_ms": {
-            "$ref": "#/$defs/measurement"
-          },
-          "unbudgeted": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^[a-z][a-z0-9_.:-]*$",
-              "maxLength": 100
-            }
-          },
-          "critical_path": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string",
-              "pattern": "^[a-z][a-z0-9_.:-]*$",
-              "maxLength": 100
-            }
-          },
-          "stages": {
-            "type": "object",
-            "propertyNames": {
-              "type": "string",
-              "pattern": "^[a-z][a-z0-9_.:-]*$",
-              "maxLength": 100
-            },
-            "additionalProperties": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "ms": {
-                  "type": "number",
-                  "minimum": 0
-                },
-                "cpu_ms": {
-                  "$ref": "#/$defs/measurement"
-                }
-              },
-              "required": [
-                "ms",
-                "cpu_ms"
-              ]
-            }
-          },
-          "read_error": {
-            "enum": [
-              "served-http-error",
-              "served-network-error",
-              "served-timeout",
-              "served-invalid-response",
-              "served-read-refused",
-              "served-call-aborted"
-            ]
-          }
-        },
-        "required": [
-          "case",
-          "series",
-          "principal",
-          "arm",
-          "repeat",
-          "load",
-          "elapsed_ms",
-          "state",
-          "cpu_ms",
-          "cpu_source",
-          "runqueue_ms",
-          "unattributed_ms",
-          "overlap_cpu_ms",
-          "unattributed_cpu_ms",
-          "unbudgeted",
-          "critical_path",
-          "stages"
-        ]
-      }
+      "$ref": "#/$defs/samples"
     },
     "load": {
       "type": "object",
@@ -639,15 +477,13 @@
       "$ref": "#/$defs/live_corpus"
     },
     "phase": {
-      "enum": [
-        "reference-preparation",
-        "release-archive",
-        "tag-runtime-preparation",
-        "worker-bootstrap",
-        "worker-startup",
-        "worker-request",
-        "paired-measurement"
-      ]
+      "$ref": "#/$defs/phase"
+    },
+    "raw_fragments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/paired_fragment"
+      }
     }
   },
   "required": [
@@ -750,6 +586,9 @@
             "transcript_pages": {
               "type": "integer",
               "minimum": 0
+            },
+            "content_digest": {
+              "$ref": "#/$defs/sha256"
             }
           },
           "required": [
@@ -763,7 +602,8 @@
             "vocabulary_terms",
             "wikilinks_min",
             "wikilinks_max",
-            "transcript_pages"
+            "transcript_pages",
+            "content_digest"
           ]
         },
         "encoder_digest": {
@@ -791,8 +631,7 @@
           }
         },
         "runtime_lock_digest": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "$ref": "#/$defs/sha256"
         },
         "runtime_policy": {
           "enum": [
@@ -818,6 +657,366 @@
         "null"
       ],
       "minimum": 0
+    },
+    "paired_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "paired_fragment"
+        },
+        "state": {
+          "enum": [
+            "collected",
+            "refused"
+          ]
+        },
+        "series": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "shard": {
+          "type": "integer"
+        },
+        "shards": {
+          "type": "integer"
+        },
+        "case_indices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "head_commit": {
+          "$ref": "#/$defs/git_commit"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/git_commit"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "cases_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "profile_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contract_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/actions_run_number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/actions_run_number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "$ref": "#/$defs/schema_version"
+        },
+        "contract_revision": {
+          "$ref": "#/$defs/contract_revision"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        },
+        "phase": {
+          "$ref": "#/$defs/phase"
+        },
+        "samples": {
+          "$ref": "#/$defs/samples"
+        },
+        "environment": {
+          "$ref": "#/$defs/paired_environment"
+        },
+        "source_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "schema_version",
+        "mode",
+        "state",
+        "contract_revision",
+        "series",
+        "shard",
+        "shards",
+        "samples",
+        "run_id",
+        "run_attempt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "collected"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "case_indices",
+              "head_commit",
+              "base_commit",
+              "tag",
+              "cases_digest",
+              "profile_digest",
+              "contract_digest",
+              "source_digest",
+              "run_id",
+              "run_attempt",
+              "environment"
+            ],
+            "properties": {
+              "environment": {
+                "required": [
+                  "base",
+                  "head"
+                ]
+              },
+              "run_id": {
+                "$ref": "#/$defs/actions_run_number"
+              },
+              "run_attempt": {
+                "$ref": "#/$defs/actions_run_number"
+              },
+              "shard": {
+                "$ref": "#/$defs/positive_integer"
+              },
+              "shards": {
+                "$ref": "#/$defs/positive_integer"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "git_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "actions_run_number": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.:-]*$",
+          "maxLength": 100
+        },
+        "series": {
+          "type": "string",
+          "enum": [
+            "hybrid",
+            "keyword",
+            "filtered_hybrid",
+            "temporal",
+            "mixed",
+            "unit"
+          ]
+        },
+        "principal": {
+          "enum": [
+            "owner",
+            "admitted"
+          ]
+        },
+        "arm": {
+          "enum": [
+            "base",
+            "head"
+          ]
+        },
+        "repeat": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "load": {
+          "type": "number",
+          "minimum": 0
+        },
+        "elapsed_ms": {
+          "$ref": "#/$defs/measurement"
+        },
+        "state": {
+          "enum": [
+            "ok",
+            "warming",
+            "unknown",
+            "empty"
+          ]
+        },
+        "cpu_ms": {
+          "$ref": "#/$defs/measurement"
+        },
+        "cpu_source": {
+          "enum": [
+            "process_time_ns",
+            "unknown"
+          ]
+        },
+        "runqueue_ms": {
+          "$ref": "#/$defs/measurement"
+        },
+        "unattributed_ms": {
+          "$ref": "#/$defs/measurement"
+        },
+        "overlap_cpu_ms": {
+          "$ref": "#/$defs/measurement"
+        },
+        "unattributed_cpu_ms": {
+          "$ref": "#/$defs/measurement"
+        },
+        "unbudgeted": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.:-]*$",
+            "maxLength": 100
+          }
+        },
+        "critical_path": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.:-]*$",
+            "maxLength": 100
+          }
+        },
+        "stages": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.:-]*$",
+            "maxLength": 100
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ms": {
+                "type": "number",
+                "minimum": 0
+              },
+              "cpu_ms": {
+                "$ref": "#/$defs/measurement"
+              }
+            },
+            "required": [
+              "ms",
+              "cpu_ms"
+            ]
+          }
+        },
+        "read_error": {
+          "enum": [
+            "served-http-error",
+            "served-network-error",
+            "served-timeout",
+            "served-invalid-response",
+            "served-read-refused",
+            "served-call-aborted"
+          ]
+        }
+      },
+      "required": [
+        "case",
+        "series",
+        "principal",
+        "arm",
+        "repeat",
+        "load",
+        "elapsed_ms",
+        "state",
+        "cpu_ms",
+        "cpu_source",
+        "runqueue_ms",
+        "unattributed_ms",
+        "overlap_cpu_ms",
+        "unattributed_cpu_ms",
+        "unbudgeted",
+        "critical_path",
+        "stages"
+      ]
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sample"
+      }
+    },
+    "paired_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/environment"
+        },
+        "head": {
+          "$ref": "#/$defs/environment"
+        }
+      },
+      "required": []
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "contract_revision": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.:-]*$",
+      "maxLength": 100
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "phase": {
+      "enum": [
+        "reference-preparation",
+        "release-archive",
+        "tag-runtime-preparation",
+        "worker-bootstrap",
+        "worker-startup",
+        "worker-request",
+        "paired-measurement",
+        "paired-aggregation"
+      ]
+    },
+    "tag": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "positive_integer": {
+      "type": "integer",
+      "minimum": 1
     }
   }
 }

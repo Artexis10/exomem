@@ -50,7 +50,7 @@ jobs:
           echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/ansible/bin/ansible-galaxy" collection install -r infra/ansible/collections/requirements.yml
       - name: Install the tools that stand in for the operator and the disks
-        timeout-minutes: 8
+        timeout-minutes: 9
         run: scripts/ci-apt-install.sh jose jq ufw e2fsprogs clevis
       - name: Create two blank data disks and one holding a filesystem
         run: |
