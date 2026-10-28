@@ -73,7 +73,7 @@ _QUIET_HOLD_MS = 250.0
 # The boundary's own high-frequency holder kinds, request-driven reads included: graph drains,
 # derived-receipt proofs, watcher freshness, media commits and collection ownership reads.
 # Their holds run beside ordinary traffic and would rotate the service log every fifteen minutes.
-_MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "collection-read"})
+_MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "collection-read"})  # nosemgrep: ep-word-set -- Closed holder labels implement the mutation-boundary protocol.
 # One INFO `mutation_lock_hold_summary` row per window stands in for every
 # demoted hold in it, so the log keeps hours of boundary evidence.
 _HOLD_SUMMARY_INTERVAL_SECONDS = 60.0
