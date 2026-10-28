@@ -34,6 +34,11 @@ Progress also marks the readiness checks, each case, measurement completion and 
 Case lines contain only their position and elapsed time. Failed samples report the arm, repeat and outcome,
 including warm-ups. These lines keep a timed-out run diagnosable without logging request or response content.
 
+Each attempt logs its start, completion and elapsed time, including warm-ups. Quiet waits report
+their worker CPU window and host CPU pressure. CI retains projected ledger timings after interruption;
+the projection excludes arguments, paths and identities. Each arm reports whether its ledger read was
+complete, partial or missing. These diagnostics cover completed calls and do not replace a full fragment.
+
 ## Modes
 
 | Command | Purpose |

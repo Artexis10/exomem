@@ -449,7 +449,8 @@ class Arm:
                 raise MeasurementRefused("startup-timeout", phase=phase)
             await asyncio.sleep(0.25)
 
-    async def quiesce(self, *, limit: float, window: float = 10.0, share: float = 0.2) -> float:
+    async def quiesce(self, *, limit: float, window: float = 10.0, share: float = 0.2,
+                      phase: str = "startup") -> float:
         """Wait until the worker used under `share` of one CPU for `window` seconds.
 
         A worker that re-embeds or rebuilds after startup stays busy and is refused here.
@@ -459,6 +460,7 @@ class Arm:
             return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
         started = time.perf_counter()
+        reported = started
         history = [(started, cpu_seconds())]
         while time.perf_counter() - started < limit:
             await asyncio.sleep(1)
@@ -466,7 +468,12 @@ class Arm:
             history.append((now, cpu_seconds()))
             history = [entry for entry in history if now - entry[0] <= window + 0.5]
             span = history[-1][0] - history[0][0]
-            if span >= window and (history[-1][1] - history[0][1]) / span < share:
+            used = history[-1][1] - history[0][1]
+            if now - reported >= window:
+                progress(f"quiesce-window arm={self.name} phase={phase} elapsed_s={now - started:.1f} "
+                         f"window_s={span:.1f} worker_cpu_s={used:.3f} cpu_psi_avg60={cpu_pressure()}")
+                reported = now
+            if span >= window and used / span < share:
                 return now - started
         raise MeasurementRefused("arm-not-quiescent", phase="quiescence")
 
@@ -565,11 +572,14 @@ async def time_cases(arms: dict[str, Arm], cases: list, *, repeats: int, timeout
         for repeat in range(repeats + 1):
             first = "base" if (index + repeat) % 2 == 0 else "head"
             for name in (first, "head" if first == "base" else "base"):
+                progress(f"sample-start case_index={index + 1} arm={name} repeat={repeat} warmup={repeat == 0}")
                 arms[name].resume()
                 try:
                     measurement = await measure_call(arms[name].client, case, timeout)
                 finally:
                     arms[name].pause()
+                progress(f"sample-complete case_index={index + 1} arm={name} repeat={repeat} "
+                         f"warmup={repeat == 0} elapsed_ms={measurement.elapsed_ms:.3f} outcome={measurement.outcome}")
                 if measurement.failure:
                     progress(f"sample-failed case_index={index + 1} arm={name} repeat={repeat} outcome={measurement.outcome}")
                 if repeat:
@@ -597,7 +607,7 @@ async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
     await arm.load_collections(fixture)
     loaded = time.monotonic()
     progress(f"fixture-loaded arm={arm.name} load_s={loaded - started:.0f}")
-    await arm.quiesce(limit=1800)
+    await arm.quiesce(limit=1800, phase="fixture")
     # Fixture preparation is not part of the summary; one stderr line keeps its cost visible to the operator.
     progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}")
 
