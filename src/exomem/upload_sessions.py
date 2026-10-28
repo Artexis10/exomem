@@ -65,7 +65,7 @@ SESSIONS_PATH = "/upload/sessions"
 TUS_VERSION = "1.0.0"
 #: The session secret travels only in this header, never in a URL.
 SECRET_HEADER = "Exomem-Upload-Secret"
-#: The one upload lane a session preserves into.
+#: The default lane of sessions created before lane selection was recorded.
 LANE = "evidence"
 #: `Upload-Metadata` keys that creation requires; `description`, `raw_protection` and
 #: `archive` are optional.
@@ -125,6 +125,14 @@ def _not_found() -> SessionError:
     return SessionError("UPLOAD_SESSION_NOT_FOUND", "no upload session answers this request", 404)
 
 
+def header_count(value: str) -> int | None:
+    """Parse the protocol's non-negative byte count without unbounded integer conversion."""
+    # A signed 64-bit byte count has at most 19 decimal digits.
+    if value.isascii() and value.isdigit() and len(value) <= 19:
+        return int(value)
+    return None
+
+
 def max_bytes_from_env() -> int:
     """The longest session; a malformed setting falls back to the default."""
     raw = os.environ.get(MAX_BYTES_ENV, "").strip()
@@ -136,7 +144,16 @@ def max_bytes_from_env() -> int:
     return DEFAULT_MAX_BYTES
 
 
-def handoff(base_url: str) -> dict[str, Any]:
+def required_metadata(lane: str) -> tuple[str, ...]:
+    """The fixed creation fields for each supported upload protocol lane."""
+    if lane == "source":
+        return ("filename", "sha256")
+    if lane == LANE:
+        return REQUIRED_METADATA
+    raise ValueError("unsupported upload session lane")
+
+
+def handoff(base_url: str, *, lane: str = LANE) -> dict[str, Any]:
     """What an upload handoff tells a client about sessions under `base_url`.
 
     Only what a client needs to open and fill a session; the recipe stays in
@@ -148,7 +165,7 @@ def handoff(base_url: str) -> dict[str, Any]:
         "resend_header": SECRET_HEADER,
         "max_part_bytes": MAX_PATCH_BYTES,
         "max_bytes": max_bytes_from_env(),
-        "metadata": list(REQUIRED_METADATA),
+        "metadata": list(required_metadata(lane)),
         "recipe": RECIPE_URL,
     }
 

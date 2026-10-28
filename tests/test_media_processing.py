@@ -1859,6 +1859,7 @@ def test_exact_media_status_finds_old_work_and_only_its_index_demand(vault: Path
     assert [job["path"] for job in row["jobs"]] == [relative]
     assert row["errors"] == []
     assert row["processing"] == {"state": "pending", "source": "job"}
+    assert row["activity"] == {"state": "queued", "source": "job", "freshness": "unknown"}
     assert row["index_refresh"] == {
         "source": "full_upserts", "coverage": "exact-path", "state": "available",
         "count": 1, "paths": [relative + ".md"], "freshness": "unknown",
@@ -1870,6 +1871,26 @@ def test_exact_media_status_finds_old_work_and_only_its_index_demand(vault: Path
     [cleared] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
     assert cleared["index_refresh"]["count"] == 0
     assert cleared["index_refresh"]["freshness"] == "unknown"
+
+
+def test_exact_media_status_does_not_mistake_a_recorded_claim_for_live_inference(vault: Path) -> None:
+    """A healthy reconciliation ledger and a registered PID cannot prove that a recording is being inferred."""
+    binary = _drop_media(vault, "claimed.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    _media_processing().reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    assert store.claim_next() is not None
+    store.set_worker(os.getpid())
+    [registered] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+    assert registered["processing"] == {"state": "running", "source": "job"}
+    assert registered["healthy"] is True
+    assert registered["health_scope"] == "reconciliation"
+    assert registered["activity"] == {"state": "unknown", "source": "job", "freshness": "unknown"}
+
+    store.clear_worker(os.getpid())
+    [abandoned] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+    assert abandoned["processing"]["state"] == "running"
+    assert abandoned["activity"] == registered["activity"]
 
 
 def test_exact_media_status_does_not_invent_completion_or_repair_custody(vault: Path) -> None:
@@ -1886,6 +1907,7 @@ def test_exact_media_status_does_not_invent_completion_or_repair_custody(vault: 
             deferred_index.store_path(vault).write_bytes(b"invalid sqlite")
         [row] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
         assert row["processing"] == {"state": "unknown", "source": "sidecar", "freshness": "unknown"}
+        assert row["activity"] == {"state": "unknown", "source": "unavailable", "freshness": "unknown"}
         assert row["counts"] is None
         assert row["job_inventory"]["state"] == "unavailable"
         assert row["index_refresh"]["count"] is None

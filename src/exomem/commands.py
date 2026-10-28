@@ -8893,6 +8893,20 @@ def op_transfer_artifact(
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
+        if lane == "source":
+            from . import vocabulary_authority, vocabulary_gate
+
+            try:
+                # The Source writer keeps every original opaque, including original Markdown.
+                format_limit = vocabulary_gate.artifact_admission(vault_root)
+                if format_limit is not None:
+                    handoff["resumable"]["max_bytes"] = min(handoff["resumable"]["max_bytes"], format_limit)
+            except (vocabulary_authority.VocabularyAuthorityDenied, vocabulary_authority.VocabularyAuthorityUnavailable):
+                handoff.pop("resumable", None)
+                handoff["resumable_unavailable"] = {
+                    "code": "SOURCE_UPLOAD_UNAVAILABLE",
+                    "reason": "Source uploads are unavailable for the active write format",
+                }
     return handoff
 
 

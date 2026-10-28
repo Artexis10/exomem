@@ -25,7 +25,7 @@ from .vocabulary import registry as vocabulary_registry
 
 _SCHEMA_PREFIX = f"{kb_dirname()}/_Schema/"
 _ALLOWED_ACTIONS = frozenset({"entity.create", "entity_type.add", "relation_type.add", "edge.add"})
-_MAX_IMAGE_BYTES = 1024 * 1024
+MAX_IMAGE_BYTES = 1024 * 1024
 
 
 def _sha256(content: bytes | None) -> str | None:
@@ -88,6 +88,16 @@ class ClassificationReason:
     code: str
     path: str
     detail: str = ""
+
+
+def image_format_refusals(*, is_markdown: bool, size: int | None, ordinary: bool = True) -> tuple[str, ...]:
+    """The closed structural-image format checks shared with transport admission."""
+    reasons = []
+    if size is not None and size > MAX_IMAGE_BYTES:
+        reasons.append("image_too_large")
+    if ordinary and not is_markdown:
+        reasons.append("unsupported_file_change")
+    return tuple(reasons)
 
     def as_dict(self) -> dict[str, str]:
         return {"code": self.code, "path": self.path, "detail": self.detail}
@@ -339,8 +349,10 @@ def classify_additive_effects(
     for image in active:
         if not isinstance(image, CanonicalWriteImage):
             raise ValueError("VOCABULARY_EFFECT_IMAGE_INVALID")
-        if max(len(image.before or b""), len(image.after or b"")) > _MAX_IMAGE_BYTES:
-            reasons.append(ClassificationReason("image_too_large", image.path))
+        reasons.extend(ClassificationReason(code, image.path) for code in image_format_refusals(
+            is_markdown=image.path.endswith(".md"), size=max(len(image.before or b""), len(image.after or b"")),
+            ordinary=False,
+        ))
         if image.path in indexed:
             reasons.append(ClassificationReason("duplicate_image_path", image.path))
         indexed[image.path] = image
@@ -389,7 +401,9 @@ def classify_additive_effects(
             continue
         if not image.path.endswith(".md"):
             if image.before != image.after:
-                reasons.append(ClassificationReason("unsupported_file_change", image.path))
+                reasons.extend(ClassificationReason(code, image.path) for code in image_format_refusals(
+                    is_markdown=False, size=None,
+                ))
             continue
         ordinary.append(image)
         if image.before is not None:

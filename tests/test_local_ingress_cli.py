@@ -387,7 +387,13 @@ def test_attach_resumes_an_interrupted_archive_upload_on_its_next_run(
             "--resumable", "--token-file", str(_token_file(tmp_path)), "--port", "8764"]
     records = state_store_root() / "attach-sessions"
 
-    interrupted = _ServiceTransport(app, cut=len(source.read_bytes()) // 2)
+    class DisconnectedTransport(_ServiceTransport):
+        def handle_request(self, request):
+            if request.method == "HEAD":
+                raise httpx.ReadError("connection remains unavailable", request=request)
+            return super().handle_request(request)
+
+    interrupted = DisconnectedTransport(app, cut=len(source.read_bytes()) // 2)
     assert _attach_main(argv, transport=interrupted) == 1
     assert "run the same command again" in capsys.readouterr().err
     [record] = records.glob("*.json")
@@ -405,6 +411,38 @@ def test_attach_resumes_an_interrupted_archive_upload_on_its_next_run(
         f"device_days/day-{day}.json" for day in range(1, 4)
     ]
     assert list(records.glob("*.json")) == []
+
+
+def test_attach_reconciles_a_timed_out_part_before_continuing(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A proxy timeout after accepted bytes must resume their offset without another upload session."""
+    import hashlib
+
+    from exomem import upload_sessions
+
+    monkeypatch.setattr(upload_sessions, "MAX_PATCH_BYTES", 1024)
+    app = _service_app(tmp_path, monkeypatch)
+    source = tmp_path / "recording.bin"
+    source.write_bytes(bytes(range(256)) * 5)
+
+    class TimeoutReplyTransport(_ServiceTransport):
+        def handle_request(self, request):
+            response = super().handle_request(request)
+            if request.method == "PATCH" and len(self.parts) == 1:
+                return httpx.Response(524, request=request)
+            return response
+
+    transport = TimeoutReplyTransport(app)
+    assert _attach_main(
+        [str(source), "--scope", "Device", "--category", "Uploads", "--resumable",
+         "--token-file", str(_token_file(tmp_path)), "--port", "8764"],
+        transport=transport,
+    ) == 0, capsys.readouterr().err
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["hash"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert (vault / receipt["path"]).read_bytes() == source.read_bytes()
+    assert sum(transport.parts) == source.stat().st_size
 
 
 def test_attach_sends_a_file_the_listener_refuses_as_too_large_through_a_session(

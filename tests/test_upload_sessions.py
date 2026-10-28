@@ -195,6 +195,139 @@ def test_bytes_that_do_not_match_their_hash_fail_and_are_deleted(vault, monkeypa
     assert state["state"] == "failed" and state["code"] == "UPLOAD_SHA256_MISMATCH"
     assert "receipt" not in state
     assert _parts(vault) == []
+
+
+def test_a_source_capability_resumes_into_sources_and_reports_unassessed_compilation(vault, monkeypatch) -> None:
+    """Raw material must retain its Source lane when its uploader needs resumable transport."""
+    from exomem import upload_tokens
+
+    client = _client(vault, monkeypatch)
+    data = b"Raw material kept for a later note."
+    handoff = upload_tokens.mint_for_endpoint("sekret", "https://example.invalid", lane="source")
+    metadata = {"filename": "material.bin", "sha256": hashlib.sha256(data).hexdigest(),
+                "source_kind": "session", "title": "Captured material", "scope": "Ignored", "category": "Ignored"}
+    created = client.request("POST", "/upload/sessions", headers={
+        **TUS, "Authorization": "Bearer " + handoff["token"], "Upload-Length": str(len(data)),
+        "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
+    })
+    assert created.status_code == 201, created.text
+    location, secret = created.headers["location"], created.headers["exomem-upload-secret"]
+    assert _patch(client, location, secret, 0, data[:10]).status_code == 204
+    held = client.request("HEAD", location, headers={**TUS, "Exomem-Upload-Secret": secret})
+    assert held.headers["upload-offset"] == "10"
+    assert _patch(client, location, secret, 10, data[10:]).status_code == 204
+    state = _settled(client, location, secret)
+    receipt = state["receipt"]
+    assert receipt["path"].startswith("Knowledge Base/Sources/")
+    assert receipt["artifact_path"].startswith("Knowledge Base/Sources/")
+    assert (vault / receipt["artifact_path"]).read_bytes() == data
+    assert receipt["hash"] == hashlib.sha256(data).hexdigest()
+    assert receipt["semantic_compilation"]["state"] == "unassessed"
+    assert not (vault / "Knowledge Base/Evidence/Ignored").exists()
+
+
+def test_a_source_session_replays_its_capture_after_the_upload_acknowledgement_is_lost(vault, monkeypatch) -> None:
+    """A stopped upload commit must reuse its Source rather than allocate another uniquely named pair."""
+    from exomem import server_transfer
+
+    client = _client(vault, monkeypatch)
+    data = b"One canonical Source despite an interrupted acknowledgement."
+    target = {"lane": "source", "filename": "original.bin", "title": "One capture",
+              "source_type": "session", "domain": None, "url": None, "content_type": None,
+              "raw_protection": False}
+    digest = hashlib.sha256(data).hexdigest()
+    target["destination"] = server_transfer._source_session_destination(vault, target, size=len(data), sha256=digest)
+    session, secret = upload_sessions.create(vault, binding="source-upload", length=len(data),
+                                             sha256=digest, target=target, max_bytes=upload_sessions.DEFAULT_MAX_BYTES)
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    patch.close()
+    first = server_transfer.commit_session(vault, session.part, session.record)
+    with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+        state = _settled(client, f"/upload/sessions/{session.id}", secret)
+    assert state["receipt"] == first
+    assert [path for path in (vault / target["destination"]).glob("*.bin")] == [vault / first["artifact_path"]]
+    assert (vault / first["artifact_path"]).read_bytes() == data
+
+
+def test_a_source_session_refuses_invalid_source_metadata_before_receiving_bytes(vault, monkeypatch) -> None:
+    from exomem import upload_tokens
+
+    client = _client(vault, monkeypatch)
+    token = upload_tokens.mint("sekret", scope=upload_tokens.upload_scope("source"))
+    metadata = {"filename": "article.bin", "sha256": "a" * 64, "source_kind": "article", "title": "An article without its URL"}
+    created = client.request("POST", "/upload/sessions", headers={
+        **TUS, "Authorization": "Bearer " + token, "Upload-Length": "100",
+        "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
+    })
+    assert created.status_code == 400, created.text
+    assert _parts(vault) == []
+
+
+def test_an_incomplete_source_rollback_retains_the_upload_without_another_capture(vault, monkeypatch) -> None:
+    """A rollback-incomplete failure must not clear the mutation identity and rerun the Source writer."""
+    from exomem import add, server_transfer
+    from exomem import vault as vault_module
+
+    _client(vault, monkeypatch)
+    data = b"Bytes retained after an uncertain Source publication."
+    digest = hashlib.sha256(data).hexdigest()
+    target = {"lane": "source", "filename": "original.bin", "title": "Uncertain capture",
+              "source_type": "session", "domain": None, "url": None, "content_type": None,
+              "raw_protection": False}
+    destination = server_transfer._source_session_destination(vault, target, size=len(data), sha256=digest)
+    target["destination"] = destination
+    session, _ = upload_sessions.create(vault, binding="source-upload", length=len(data),
+                                        sha256=digest, target=target, max_bytes=upload_sessions.DEFAULT_MAX_BYTES)
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    patch.close()
+    folder = vault / destination
+
+    def partial_publication(*args, **kwargs):
+        folder.mkdir(parents=True, exist_ok=True)
+        partial = folder / f"partial-{len(list(folder.glob('partial-*.md'))) + 1}.md"
+        partial.write_text("# Partially published Source\n")
+        raise vault_module.BatchWriteError(
+            "BATCH_ROLLBACK_INCOMPLETE",
+            vault_module.BatchTargetSummary(1, (partial.relative_to(vault).as_posix(),), 0), False,
+        )
+
+    monkeypatch.setattr(add, "add", partial_publication)
+    for _ in range(2):
+        with pytest.raises(upload_sessions.CommitFailed) as outcome:
+            server_transfer.commit_session(vault, session.part, session.record)
+        assert outcome.value.retryable
+        assert session.part.read_bytes() == data
+    assert [page.name for page in folder.glob("partial-*.md")] == ["partial-1.md"]
+
+
+@pytest.mark.parametrize("filename", ["recording.wav", "original.md"])
+def test_an_unsupported_write_format_is_visible_before_a_source_upload(vault, monkeypatch, filename) -> None:
+    """Transport must not advertise or receive bytes for an original that the active writer cannot accept."""
+    from types import SimpleNamespace
+
+    from exomem import commands, vocabulary_authority
+
+    client = _client(vault, monkeypatch)
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://example.invalid")
+    monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
+
+    class ActiveAuthority:
+        def runtime_status(self):
+            return SimpleNamespace(mode="v2")
+
+    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda root: ActiveAuthority())
+    handoff = commands.op_transfer_artifact(vault, operation="upload", lane="source")
+    assert "resumable" not in handoff
+    assert handoff["resumable_unavailable"]["code"] == "SOURCE_UPLOAD_UNAVAILABLE"
+    metadata = {"filename": filename, "sha256": "a" * 64, "source_kind": "session"}
+    created = client.request("POST", "/upload/sessions", headers={
+        **TUS, "Authorization": "Bearer " + handoff["token"], "Upload-Length": "100",
+        "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
+    })
+    assert created.status_code == 400, created.text
+    assert _parts(vault) == []
     assert not (vault / "Knowledge Base" / "Evidence" / "Device" / "Uploads").exists()
 
 

@@ -2494,6 +2494,7 @@ def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str
     """The `process_media status` view of `status`, without operator detail."""
     full = status(vault_root, path=path)
     result = {field: full[field] for field in TOOL_STATUS_FIELDS}
+    result["health_scope"] = "reconciliation"
     if vault_root is not None:
         from . import media_store, originals
 
@@ -2516,9 +2517,17 @@ def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str
             "state": recorded.get("processing_state", "unknown"),
             "source": "sidecar", "freshness": "unknown",
         }
+        result["activity"] = {
+            "state": "unknown", "source": "unavailable", "freshness": "unknown",
+        }
         for job in result["jobs"]:
             if job["media_type"] != OFFLOAD_MEDIA_TYPE:
                 result["processing"] = {"state": job["state"], "source": "job"}
+                # A durable claim can outlive its worker and does not prove current inference.
+                result["activity"] = {
+                    "state": "queued" if job["state"] == PENDING else "unknown",
+                    "source": "job", "freshness": "unknown",
+                }
                 break
         result["job_inventory"] = {
             "source": "jobs", "coverage": "exact-path",
