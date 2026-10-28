@@ -241,6 +241,7 @@ def _serve(monkeypatch: pytest.MonkeyPatch, packet: dict | None) -> list[dict]:
                 "continuity": continuity,
                 "key": api_key,
                 "attribution": attribution,
+                "max_chars": max_chars,
             }
         )
         return packet
@@ -2516,6 +2517,71 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     assert (generation_path.read_bytes(), overhead_path.read_bytes()) == before
 
 
+
+
+def test_the_hook_shows_the_turn_slice_on_a_turn_whose_map_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """The map is shown once, but the slice answers each turn: the second turn must still see its leads."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    lead = {
+        "kind": "anchor", "title": "Cargo Sled", "ref": "Knowledge Base/Products/Cargo Sled.md",
+        "profile": "exomem://profile/anchor/Cargo%20Sled", "description": "A towed sled.",
+        "match": "resolved", "evidence": ["exact_alias", "retrieval"],
+    }
+    packet = {
+        "map": {
+            "ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.",
+            "items": [{"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."}],
+        },
+        "turn_slice": {"state": "ready", "generation": "slice-1", "description": "What this turn reached.", "items": [lead]},
+        "continuity": "opaque-token", "abstained": False,
+    }
+    _serve(monkeypatch, packet)
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    packet["turn_slice"] = {"state": "empty", "generation": "slice-2", "items": []}
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    packet["turn_slice"] = {"state": "ready", "generation": "slice-3", "description": "What this turn reached.", "items": [{**lead, "match": "named", "evidence": ["retrieval"]}]}
+    third = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Depot Ledger" in first and "resolved (exact_alias, retrieval): Cargo Sled" in first
+    assert "map unchanged" in second and "Cargo Sled" not in second  # an empty slice adds no line
+    assert "map unchanged" in third and "Depot Ledger" not in third
+    assert "named (retrieval): Cargo Sled — A towed sled." in third and "[exomem://profile/anchor/Cargo%20Sled]" in third
+
+
+def test_the_next_maps_request_asks_for_the_same_cap_whatever_this_turns_slice_held(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """The cap is the map's budget: a turn whose slice listed three leads must not shrink the next turn's map."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    leads = [
+        {"kind": "anchor", "title": title, "ref": f"Knowledge Base/Products/{title}.md", "match": "resolved", "evidence": ["exact_alias"]}
+        for title in ("Cargo Sled", "Depot Ledger", "Winter Schedule")
+    ]
+    packet = {
+        "map": {
+            "ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.",
+            "items": [{"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."}],
+        },
+        "continuity": "opaque-token", "abstained": False,
+    }
+    seen = _serve(monkeypatch, packet)
+    for block in (
+        {"state": "ready", "generation": "slice-1", "description": "What this turn reached.", "items": leads},
+        {"state": "empty", "generation": "slice-2", "items": []},
+        {"state": "ready", "generation": "slice-3", "description": "What this turn reached.", "items": leads[:1]},
+    ):
+        packet["turn_slice"] = block
+        _run(monkeypatch, capsys, _event(), tmp_path)
+    caps = [request["max_chars"] for request in seen]
+    assert caps[0] is None  # the control: the first turn has no map framing to remember yet
+    assert caps[1] == caps[2] < hook._working_set_max_chars()
 
 
 def test_an_empty_map_says_nothing_visible_in_one_line() -> None:
