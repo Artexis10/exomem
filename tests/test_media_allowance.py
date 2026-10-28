@@ -30,6 +30,40 @@ def custody(tmp_path: Path, monkeypatch):
     return vault, page, header
 
 
+@pytest.mark.parametrize("allowance", [None, True, -1, 1.5])
+def test_admission_requires_an_explicit_whole_allowance(allowance):
+    usage = media_allowance.ReferenceUsage({}, "observed")
+    binary = originals.BinaryBinding("Knowledge Base/Evidence/sample.bin", "a" * 64, 23)
+    decision = media_allowance.admission(usage, binary, None, allowance)
+    assert decision.code == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert decision.allowance_bytes is None
+    assert decision.observed_at == "observed"
+
+
+@pytest.mark.parametrize(
+    ("allowance", "reuse", "projected", "code"),
+    [(23, True, 23, None), (46, False, 46, None), (45, False, 46, "MEDIA_ALLOWANCE_EXCEEDED")],
+)
+def test_admission_counts_a_version_once_and_accepts_the_exact_limit(allowance, reuse, projected, code):
+    reference = originals.StoredObject(1, "test-store", "1", "a" * 64, "version", 50, "b" * 64)
+    binary = originals.BinaryBinding("Knowledge Base/Evidence/sample.bin", "c" * 64, 23)
+    usage = media_allowance.ReferenceUsage({("test-store", "a" * 64, "version"): (binary, reference)}, "observed")
+    decision = media_allowance.admission(usage, binary, reference if reuse else None, allowance)
+    assert decision.used_bytes == 23
+    assert decision.projected_bytes == projected
+    assert decision.code == code
+
+
+def test_admission_does_not_publish_a_projection_from_unknown_or_conflicting_custody():
+    reference = originals.StoredObject(1, "test-store", "1", "a" * 64, "version", 50, "b" * 64)
+    binary = originals.BinaryBinding("Knowledge Base/Evidence/sample.bin", "c" * 64, 23)
+    unknown = media_allowance.admission(media_allowance.ReferenceUsage(None, "observed"), binary, None, 46)
+    assert unknown.code == "MEDIA_ALLOWANCE_UNKNOWN" and unknown.projected_bytes is None
+    usage = media_allowance.ReferenceUsage({("test-store", "a" * 64, "version"): (binary, reference)}, "observed")
+    conflict = media_allowance.admission(usage, originals.BinaryBinding(binary.path, binary.sha256, 24), reference, 46)
+    assert conflict.code == "MEDIA_ALLOWANCE_UNKNOWN" and conflict.projected_bytes is None
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -96,6 +130,7 @@ def test_allowance_counts_large_transcripts_once_with_bounded_body_prefetch(cust
     usage = media_allowance.reference_usage(vault)
     assert usage.used_bytes == 23
     assert len(usage.versions) == 1
+    assert usage.live_paths == {("test-store", "a" * 64, "version"): "Knowledge Base/Evidence/clip.bin"}
     assert read_sizes == [len(header), len(header)]
     assert all(len(header) <= size <= len(header) + io.DEFAULT_BUFFER_SIZE for size in descriptor_read_sizes)
     assert retained_keys and all(keys == {"original_path"} for keys in retained_keys)

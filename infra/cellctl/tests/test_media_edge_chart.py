@@ -6,10 +6,12 @@ import json
 from typing import Any
 
 import pytest
+import yaml
 
 from .test_platform_chart_headers import (
     ARTIFACT_BROKER_ARGS,
     HELM,
+    PLATFORM_CHART,
     _find,
     _helm_template,
     _helm_template_result,
@@ -147,7 +149,8 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
 
     assert env["CELLCTL_MEDIA_EDGE_URL"] == "http://10.43.0.30:8769"
     assert json.loads(env["CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS"]) == {CANARY: 2}
-    assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {"evict_after_days": 30}
+    default_policy = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())["mediaEdge"]["storePolicy"]
+    assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {**default_policy, "evict_after_days": 30}
     assert role["metadata"]["namespace"] == NAMESPACE
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["exomem-media-edge-active-set"],
@@ -168,6 +171,9 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
         ("--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem:latest"),
         ("--set-json", 'cells.jobEgressExcept=["10.0.0.0/8"]'),
         ("--set-json", 'mediaEdge.cellIds=["short"]'),
+        ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=true'),
+        ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=-1'),
+        ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=1.5'),
         ("--set-json", f'mediaEdge.credentialEpochs={{"{CANARY}":-1}}'),
     ],
 )

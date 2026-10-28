@@ -29,6 +29,7 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
               "name_key_path": str(name_key), "enabled": True, "eviction_enabled": True,
               "max_temporary_bytes": 10_000_000, "max_hydrations": 2,
               "minimum_idle_seconds": 0, "eviction_target": 0.7, "eviction_margin": 0.1}
+    values["allowance_bytes"] = 10_000_000
     config = tmp_path / "media.json"
     config.write_text(json.dumps({"vaults": {str(vault): values}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
@@ -1378,3 +1379,167 @@ def test_reference_usage_rejects_conflicting_sizes_and_ignores_a_foreign_store(v
     copy["stored_object"] = {**fields["stored_object"], "store": "foreign-store"}
     other.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
     assert media_allowance.reference_usage(vault).used_bytes == expected
+
+
+@pytest.mark.parametrize("recovery", ["free", "raise"])
+def test_allowance_worker_retains_demand_until_current_quota_admits_it(vault: Path, selected_store, monkeypatch, recovery):
+    """Quota must refuse before encryption, retain demand, and recover without changing the original's SHA."""
+    import os
+
+    from exomem import media_allowance, media_jobs, media_store, media_worker, preserve
+
+    values, config = selected_store
+    first = _preserved(vault, category="quota-first")
+    size = len(first.read_bytes())
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": size}}}))
+    _offload(vault, first)  # The exact allowance admits the first original.
+    trash = vault / "Knowledge Base/_trash/retained.txt.md"
+    trash.parent.mkdir()
+    trash.write_bytes(first.with_name(first.name + ".md").read_bytes())
+    trash.with_name("retained.txt.meta.json").write_text(json.dumps({"original_path": first.relative_to(vault).as_posix()}))
+    assert media_allowance.reference_usage(vault).used_bytes == size
+    captured = preserve.preserve(vault, scope="Test", category="quota-next", filename="next.bin", content="Another original.")
+    path = vault / captured.path
+    original = path.read_bytes()
+    digest = originals.original_state(vault, path).binary_sha256
+    ledger = media_jobs.MediaJobStore(vault)
+
+    with monkeypatch.context() as refused:
+        run = media_store.subprocess.run
+
+        def no_encrypt(command, *args, **kwargs):
+            if command[0] == "age":
+                pytest.fail("quota refusal reached encryption")
+            return run(command, *args, **kwargs)
+
+        def no_upload(*args, **kwargs):
+            pytest.fail("quota refusal reached the provider")
+
+        refused.setattr(media_store.subprocess, "run", no_encrypt)
+        refused.setattr(media_store.FilesystemStore, "upload", no_upload)
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+        assert media_store.enqueue_offloads(vault) == 0
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    pending = ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
+    assert pending.do_offload and "MEDIA_ALLOWANCE_EXCEEDED" in pending.last_error
+    assert path.read_bytes() == original
+    [row] = media_jobs.tool_status(vault)["offload_refusals"]
+    assert row["code"] == "MEDIA_ALLOWANCE_EXCEEDED" and row["ciphertext_size"] is None
+    assert set(row) == {"path", "original_state", "code", "ciphertext_size"}
+    if recovery == "free":
+        first.with_name(first.name + ".md").unlink()
+        trash.unlink()
+    else:
+        config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": size + len(original)}}}))
+    assert media_store.enqueue_offloads(vault) == 1
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    stored = originals.original_state(vault, path)
+    assert stored.state == "cached" and stored.binary_sha256 == digest
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    assert media_jobs.tool_status(vault)["offload_refusals"] == []
+
+
+def test_allowance_refusal_reports_the_current_unknown_or_exceeded_code(vault: Path, selected_store):
+    import os
+
+    from exomem import media_jobs, media_store, media_worker
+
+    values, config = selected_store
+    path = _preserved(vault)
+    without_allowance = {key: value for key, value in values.items() if key != "allowance_bytes"}
+    config.write_text(json.dumps({"vaults": {str(vault): without_allowance}}))
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    [row] = media_jobs.tool_status(vault)["offload_refusals"]
+    assert row["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    note = vault / "Knowledge Base/Notes/broken.md"
+    note.parent.mkdir(exist_ok=True)
+    note.write_text("---\nunterminated: custody\n")
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": 0}}}))
+    assert media_jobs.tool_status(vault)["offload_refusals"][0]["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    note.write_text("Ordinary prose.\n")
+    assert media_jobs.tool_status(vault)["offload_refusals"][0]["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert media_store.enqueue_offloads(vault) == 0
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    assert media_store.enqueue_offloads(vault) == 1
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):
+    from exomem import media_jobs, media_store
+
+    values, config = selected_store
+    path = _preserved(vault)
+    original = path.read_bytes()
+    upload = media_store.FilesystemStore.upload
+
+    def lower_after_upload(*args, **kwargs):
+        version = upload(*args, **kwargs)
+        config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": 0}}}))
+        return version
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", lower_after_upload)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert path.read_bytes() == original
+    assert originals.original_state(vault, path).reference is None
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+        assert connection.execute("SELECT ciphertext_size FROM media_offload_refusals").fetchone()[0] is None
+
+
+def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Path, selected_store, monkeypatch):
+    from dataclasses import replace
+
+    from exomem import media_allowance, media_jobs, media_store, move_file
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    values, config = selected_store
+    first = _preserved(vault, category="archive-reuse")
+    reference = _offload(vault, first)
+    backend = media_store.store_for(vault)
+    with backend.open(reference.object, reference.version) as stream:
+        retained = replace(reference, version=backend.upload(reference.object, stream, size=reference.ciphertext_size, sha256=reference.ciphertext_sha256))
+    sidecar = first.with_name(first.name + ".md")
+    archive_path = "Knowledge Base/_archive/retained.txt"
+    archive = vault / (archive_path + ".md")
+    archive.parent.mkdir()
+    archive.write_text(move_file._repoint_artifact(first.relative_to(vault).as_posix(), archive_path)(sidecar.read_text()))
+    trash = vault / "Knowledge Base/_trash/retained.txt.md"
+    trash.parent.mkdir()
+    trash.write_bytes(sidecar.read_bytes())
+    trash.with_name("retained.txt.meta.json").write_text(json.dumps({"original_path": first.relative_to(vault).as_posix()}))
+    sidecar.unlink()
+    usage = media_allowance.reference_usage(vault)
+    assert usage.used_bytes == len(first.read_bytes())
+    assert list(usage.live_paths.values()) == [archive_path]
+    path = _preserved(vault, category="archive-duplicate")
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": len(path.read_bytes())}}}))
+    ledger = media_jobs.MediaJobStore(vault)
+    head = media_store.FilesystemStore.head
+    changed = []
+
+    def change_during_protected_confirmation(*args, **kwargs):
+        result = head(*args, **kwargs)
+        with sqlite3.connect(ledger.path) as connection:
+            protected = connection.execute("SELECT 1 FROM media_protections WHERE binary_rel = ?", (path.relative_to(vault).as_posix(),)).fetchone()
+        if protected and not changed:
+            fields, body, _marker = parse_frontmatter(archive.read_text(), strict=True)
+            fields["stored_object"] = retained.fields()
+            archive.write_text(render_frontmatter_document(serialize_frontmatter(fields), body))
+            trash.unlink()
+            changed.append(True)
+        return result
+
+    monkeypatch.setattr(media_store.FilesystemStore, "head", change_during_protected_confirmation)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert changed and refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert path.exists() and originals.original_state(vault, path).reference is None
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -10,11 +10,16 @@ from . import held_fs, originals, reserved_paths, runtime_resources, trash_metad
 from .kbdir import kb_dirname
 from .vault import parse_frontmatter
 
+# These refusal codes belong to the closed media protocol, not a content vocabulary.
+MEDIA_ALLOWANCE_UNKNOWN = "MEDIA_ALLOWANCE_UNKNOWN"
+MEDIA_ALLOWANCE_EXCEEDED = "MEDIA_ALLOWANCE_EXCEEDED"
+
 
 @dataclass(frozen=True, slots=True)
 class ReferenceUsage:
     versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] | None
     observed_at: str
+    live_paths: dict[tuple[str, str, str], str] = field(default_factory=dict)
 
     @property
     def used_bytes(self) -> int | None:
@@ -48,6 +53,33 @@ def projected_bytes(
         _consistent(existing, (binary, reference))
         return used
     return used + binary.size
+
+
+@dataclass(frozen=True, slots=True)
+class AllowanceDecision:
+    used_bytes: int | None
+    projected_bytes: int | None
+    allowance_bytes: int | None
+    observed_at: str
+    code: str | None
+
+
+def admission(
+    usage: ReferenceUsage, binary: originals.BinaryBinding,
+    reference: originals.StoredObject | None, allowance_bytes: int | None,
+) -> AllowanceDecision:
+    """Admit one proposed plaintext version against the current reference union."""
+    allowance = allowance_bytes if type(allowance_bytes) is int and allowance_bytes >= 0 else None
+    try:
+        projected = projected_bytes(usage, binary, reference)
+    except ValueError:
+        projected = None
+    code = None
+    if allowance is None or projected is None:
+        code = MEDIA_ALLOWANCE_UNKNOWN
+    elif projected > allowance:
+        code = MEDIA_ALLOWANCE_EXCEEDED
+    return AllowanceDecision(usage.used_bytes, projected, allowance, usage.observed_at, code)
 
 
 def _binding(
@@ -101,6 +133,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
 
     vault = Path(vault_root).resolve()
     versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] = {}
+    live_paths: dict[tuple[str, str, str], str] = {}
     try:
         store = originals.binding_for(vault)
         if store is None:
@@ -140,10 +173,12 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                     if key in versions:
                         _consistent(versions[key], bound)
                     versions[key] = (binary, reference)
+                    if not trash_metadata.is_trash_path(path):
+                        live_paths.setdefault(key, binary.path)
     except (
         OSError, ValueError, MemoryError, RecursionError, held_fs.HeldFsError,
         reserved_paths.ReservedPathLeafError, runtime_resources.PreparationBudgetExceeded,
         runtime_resources.PreparationCapacityBusy,
     ):
         return ReferenceUsage(None, datetime.now(UTC).isoformat())
-    return ReferenceUsage(versions, datetime.now(UTC).isoformat())
+    return ReferenceUsage(versions, datetime.now(UTC).isoformat(), live_paths)
