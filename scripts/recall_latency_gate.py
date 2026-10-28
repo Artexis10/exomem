@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from release_arm import MeasurementRefused, extract_release, latest_release_tag
+from release_arm import prepare_tag_runtime as _prepare_tag_runtime
+from release_arm import runtime_lock_digest as _runtime_lock_digest
+from release_arm import runtime_provenance as _runtime_provenance
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 # Legacy diagnostics retain their source default. MCP evidence defaults to the
@@ -876,14 +881,6 @@ PAIRING = REFERENCE["paired"]
 PAIRED_PRINCIPALS = tuple(PAIRING["principals"])
 
 
-class MeasurementRefused(ValueError):
-    """A closed failure code; the summary schema owns phase and policy values."""
-
-    def __init__(self, code: str, *, phase: str | None = None):
-        super().__init__(code)
-        self.code, self.phase = code, phase
-
-
 def validate_document(document: dict, schema: str, *, directory: Path = BENCHMARK,
                       definition: str | None = None) -> None:
     """Validate stored evidence using the project's maintained JSON Schema engine."""
@@ -1399,60 +1396,6 @@ def worker_main(vault_root: Path) -> int:
     return 0
 
 
-def _runtime_lock_digest(source: Path, *, phase: str | None = None) -> str:
-    import hashlib
-
-    try:
-        return hashlib.sha256((source / "uv.lock").read_bytes()).hexdigest()
-    except OSError as error:
-        raise MeasurementRefused("runtime-lock-unavailable", phase=phase) from error
-
-
-def _runtime_provenance(source: Path, startup: dict, *, prefix: str | None = None) -> dict:
-    """Check the private interpreter prefix before accepting public provenance."""
-    if Path(sys.prefix if prefix is None else prefix).resolve() != Path(startup["runtime_prefix"]).resolve():
-        raise MeasurementRefused("runtime-prefix-mismatch", phase="worker-startup")
-    digest = _runtime_lock_digest(source, phase="worker-startup")
-    if digest != startup["runtime_lock_digest"]:
-        raise MeasurementRefused("runtime-lock-changed", phase="worker-startup")
-    return {"runtime_lock_digest": digest, "runtime_policy": startup["runtime_policy"]}
-
-
-def _prepare_tag_runtime(base: Path, scratch: Path) -> Path:
-    """Read the immutable tag lock into one owned environment, outside timers."""
-    import subprocess
-
-    phase = "tag-runtime-preparation"
-    try:
-        digest = _runtime_lock_digest(base)
-        runtime = (scratch / "tag-runtime").absolute()
-        # UV_ is uv's operation namespace; this fixed recipe retains only its cache location.
-        environment = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
-        if "UV_CACHE_DIR" in os.environ:
-            environment["UV_CACHE_DIR"] = os.environ["UV_CACHE_DIR"]
-        environment.pop("VIRTUAL_ENV", None)
-        environment["UV_PROJECT_ENVIRONMENT"] = str(runtime)
-        # Frozen reads use the lock's sources; historical writer settings do not apply.
-        result = subprocess.run(
-            ["uv", "--no-config", "sync", "--project", str(base.absolute()),
-             "--frozen", "--no-default-groups", "--extra", "embeddings-onnx",
-             "--no-python-downloads", "--python", sys.executable], cwd=base, env=environment,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if _runtime_lock_digest(base) != digest:
-            raise MeasurementRefused("tag-runtime-lock-changed", phase=phase)
-        if result.returncode:
-            raise MeasurementRefused("tag-runtime-install-failed", phase=phase)
-        python = runtime / "bin" / "python"
-        if not python.is_file():
-            raise MeasurementRefused("tag-runtime-python-unavailable", phase=phase)
-        return python
-    except MeasurementRefused as error:
-        raise MeasurementRefused(error.code, phase=phase) from error
-    except OSError as error:
-        raise MeasurementRefused("tag-runtime-install-failed", phase=phase) from error
-
-
 class _Worker:
     """One owned child; suspend its idle native pool outside the timed call."""
 
@@ -1722,22 +1665,11 @@ def paired_cli(output: Path, *, series: str | None = None) -> int:
         profile = json.loads((BENCHMARK / "profile.json").read_text())
         cases, digest = reference_cases(profile)
         phase = "release-archive"
-        tag = subprocess.check_output(
-            ["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"], text=True,
-            cwd=ROOT, stderr=subprocess.DEVNULL,
-        ).strip()
-        if not tag or tag.startswith("-"):
-            raise MeasurementRefused("latest-release-tag-unavailable")
+        tag = latest_release_tag(ROOT)
         report["tag"] = tag
         with tempfile.TemporaryDirectory(prefix="exomem-recall-latency-") as temporary:
             scratch = Path(temporary)
-            base = scratch / "base"
-            base.mkdir()
-            archive = scratch / "release.tar"
-            with archive.open("wb") as stream:
-                subprocess.run(["git", "archive", tag], cwd=ROOT, stdout=stream, check=True)
-            # Git owns this archive; the checkout contains no external tar input.
-            subprocess.run(["tar", "-xf", str(archive), "-C", str(base)], check=True)
+            base = extract_release(ROOT, tag, scratch)
             phase = "paired-measurement"
             report = paired_run(base=base, tag=tag, scratch=scratch, profile=profile, cases=cases,
                                 series=series)

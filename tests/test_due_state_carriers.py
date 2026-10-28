@@ -196,6 +196,7 @@ def _fresh_session() -> None:
         pass
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
 def test_activation_surfaces_the_relevant_sixth_due_item(vault: Path) -> None:
     """A global five-item list must not hide overdue work on the page being discussed."""
     from exomem import lexstore, working_set_index
@@ -242,6 +243,7 @@ def test_activation_surfaces_the_relevant_sixth_due_item(vault: Path) -> None:
     assert "relevant_due_refs" not in after
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
 def test_one_authored_prediction_update_clears_activation_advice(vault: Path) -> None:
     """Resolution writes authored state once; it must not require a second triage write."""
     from exomem import lexstore, working_set_index
@@ -301,6 +303,7 @@ def test_bounded_due_reads_do_not_contaminate_full_served_views(vault: Path) -> 
     assert _due_state().served_entries(vault) == before
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
 @pytest.mark.parametrize("evidence", ["recent", "partial"])
 def test_recent_or_partial_context_does_not_raise_due_advice(vault: Path, evidence: str) -> None:
     """A recent pointer or one partial name cannot associate an unrelated interruption."""

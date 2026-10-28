@@ -396,6 +396,8 @@
           "required": ["enabled", "backupConcurrencyPerNode", "maxCellGib"],
           "properties": {
             "enabled": {"type": "boolean"},
+            "reservations": {"type": "boolean"},
+            "reservationNamespace": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
             "backupConcurrencyPerNode": {"type": "integer", "minimum": 1},
             "maxCellGib": {"type": ["integer", "null"], "minimum": 4}
           }

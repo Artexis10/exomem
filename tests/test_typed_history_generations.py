@@ -19,6 +19,7 @@ from exomem.collection_store import (
     schema,
     tables,
     typed_storage,
+    writer,
 )
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
@@ -48,6 +49,12 @@ def previous_release(patch):
     patch.setattr(typed_storage, "_identity_trigger",
                   lambda layout, generation_bound=False: trigger(layout, generation_bound=False))
     # Schema 10 has six identity columns; this is its fixed historical INSERT.
+    # Schema 10 has no item key scheme column; its collections take the column default on upgrade.
+    patch.setattr(writer, "INSERT_COLLECTION", writer.INSERT_COLLECTION.replace(", item_key_scheme)", ")")
+                  .replace(", :item_key_scheme)", ")"))
+    current_manifest = writer.CollectionWriter._collection_manifest
+    patch.setattr(writer.CollectionWriter, "_collection_manifest",
+                  lambda self, row: current_manifest(self, {"item_key_scheme": "hashed-v1", **dict(row)}))
     patch.setattr(tables, "INSERT_IDENTITY", text(
         "INSERT INTO version_identity(row_id,row_version,encoding,payload_hash,txn_id,schema_version) "
         "VALUES(:row_id,:row_version,:encoding,:payload_hash,:txn_id,:schema_version)"))

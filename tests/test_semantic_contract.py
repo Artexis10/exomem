@@ -2686,9 +2686,9 @@ def test_remediation_leads_with_the_fix_and_says_the_fallback_re_triggers(
         f for f in result.findings if f.code == "RELATION_DISPOSITION_STALE"
     )
     # The causal fix reads first, and the fallback is labelled with its cost.
-    assert finding.remediation.startswith("Fix: add a qualifying typed relation.")
+    assert finding.remediation.startswith("Add a qualifying typed relation.")
     assert "Retriggers:" in finding.remediation
-    assert finding.remediation.index("Fix:") < finding.remediation.index("reviewed_none")
+    assert finding.remediation.index("Add a qualifying") < finding.remediation.index("reviewed_none")
 
 
 def test_identity_census_consumes_text_before_reading_next_page(tmp_path, monkeypatch):
@@ -2735,3 +2735,32 @@ def test_streaming_corpus_reads_outside_kb_once_and_skips_scan_exclusions(tmp_pa
     corpus = semantic_contract.build_corpus_context(tmp_path)
     assert sorted(reads) == sorted(paths)
     assert set(corpus.pages) == {path.relative_to(tmp_path).as_posix() for path in paths}
+
+
+def test_a_hidden_vault_root_path_link_resolves_as_if_the_page_were_absent(
+    tmp_path: Path,
+) -> None:
+    """A writer who cannot see `Reference/Hidden.md` learns nothing from `[[Reference/Hidden]]`.
+
+    Matching the Knowledge-Base-relative form would resolve the link to a phantom
+    `Knowledge Base/Reference/Hidden.md` while an absent page leaves it unresolved.
+    """
+    root = tmp_path / "vault"
+    (root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (root / "Knowledge Base" / "Notes" / "public.md").write_text("# Public\n", encoding="utf-8")
+    absent = semantic_contract.build_corpus_context(root)
+    (root / "Reference").mkdir()
+    (root / "Reference" / "Hidden.md").write_text("# Hidden\n", encoding="utf-8")
+    present = semantic_contract.build_corpus_context(root)
+
+    def visible(relative: str) -> bool:
+        return relative != "Reference/Hidden.md"
+
+    results = [
+        semantic_contract._resolve_reference_wikilink_from_context(
+            context, "[[Reference/Hidden]]", visible=visible
+        )
+        for context in (absent, present)
+    ]
+
+    assert [(result.status, result.path) for result in results] == [("unresolved", None)] * 2

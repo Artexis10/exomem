@@ -340,7 +340,7 @@ RUN usermod --home /data/host exomem \
 ARG EXOMEM_OCR_LANGS=eng+jpn+jpn_vert+est
 # The engines this image claims. The gate needs a passing sample of every media
 # kind they serve, so a claimed format cannot ship unproven.
-ARG EXOMEM_MEDIA_SHIPPED_ENGINES=documents,ocr
+ARG EXOMEM_MEDIA_SHIPPED_ENGINES=documents,ocr,speech
 RUN packs="$(echo "${EXOMEM_OCR_LANGS}" | tr '+_' ' -' | sed 's/[^ ][^ ]*/tesseract-ocr-&/g')" \
  && apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd 'tesseract-ocr-script-*' ${packs} \
@@ -355,7 +355,26 @@ RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
  && rm /tmp/media-cpu.txt
 ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
     EXOMEM_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \
-    OMP_THREAD_LIMIT=1
+    OMP_THREAD_LIMIT=1 \
+    EXOMEM_ASR_BACKEND=onnx \
+    EXOMEM_MEDIA_BUDGETS='{"speech":{"anon_mib":1024,"vmdata_mib":4096},"clip":{"anon_mib":256,"vmdata_mib":1792}}'
+# New media artifacts only fetch their pinned publication; a cell never builds them.
+RUN HF_HUB_OFFLINE=0 python -c "\
+from exomem.media_models import ensure_media_model; \
+ensure_media_model('image'); ensure_media_model('image-query'); ensure_media_model('speech')"
+RUN --network=none python -c "\
+from exomem.clip_query import OnnxClipQueryEncoder; \
+assert OnnxClipQueryEncoder().encode(['offline query gate']).shape == (1, 512)"
+# The image tower must keep the stored vector space: with networking off, it
+# reproduces the sentence-transformers vector of a committed photograph.
+RUN --network=none \
+    --mount=type=bind,source=tests/fixtures/clip,target=/clip-gate \
+    python -c "\
+import json, numpy as np; from pathlib import Path; from exomem import embeddings; \
+ref = np.asarray(json.loads(Path('/clip-gate/reference.json').read_text())['vector'], dtype=np.float32); \
+vec = embeddings.embed_image(Path('/clip-gate/photo.jpg')); \
+assert type(embeddings._CLIP_MODEL).__name__ == 'OnnxClipImageEncoder'; \
+assert float(vec @ (ref / np.linalg.norm(ref))) >= 0.9999"
 # The support proof: with networking off, extract a real sample of every format
 # the image serves and find its phrase. A format that fails is not shipped.
 RUN --network=none \
@@ -381,10 +400,9 @@ RUN --network=none \
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
 #
-# EXOMEM_DISABLE_CLIP: this image carries no CLIP stack (no torch, no CLIP model;
-# Pillow ships only for OCR).
-# Left enabled, every query reported image search as degraded and the media
-# worker tried, and warned, once per image.
+# EXOMEM_DISABLE_CLIP: the image carries the ONNX image tower and the multilingual
+# query tower. Image search stays off by default; a cell turns it on after the image
+# engine's own acceptance passes.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
     EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
     EXOMEM_RECALL_MODEL=BAAI/bge-m3 \

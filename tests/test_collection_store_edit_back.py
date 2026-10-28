@@ -589,6 +589,26 @@ def test_a_large_summary_census_reads_actual_files_without_generating_or_visitin
     assert store.connection.execute("SELECT count(*) FROM items WHERE view_path IS NOT NULL").fetchone() == (0,)
 
 
+def test_one_window_reads_an_open_collection_beside_a_fenced_one(store, monkeypatch):
+    """Defect: a closed route fence on one collection decides for every collection in its window."""
+    from test_collection_store_summary import summary_text
+
+    fenced = "88888888-8888-4888-8888-888888888888"
+    create(store)
+    daily = summary_text(manifest_text().replace(CID, fenced).replace("title: Work", "title: Daily"))
+    store.create_collection(manifest_path().replace("Work", "Daily"), daily, why="create", scaffold=False)
+    store.reconcile_views()
+    paths = {row[0] for row in store.connection.execute("SELECT path FROM projection_state WHERE kind='manifest'")}
+    assert len(paths) == 2
+
+    def read_collections():
+        return {found.projection["collection_id"] for found in edit_back.observe(store, force=paths)}
+
+    assert read_collections() == {CID, fenced}
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.RECORDS_SUMMARY_V1})
+    assert read_collections() == {CID}
+
+
 def test_an_invalid_save_is_held_once_and_stays_in_place(store):
     """Defect: one invalid save gives a second hold on the next reconcile pass, or loses its bytes."""
     _, path = appended(store, count=1)
@@ -1005,50 +1025,208 @@ def test_pending_view_publication_yields_to_a_waiting_query(served, monkeypatch)
     assert store_rows(root, "SELECT txn_id FROM txns ORDER BY txn_id") == before
 
 
-def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served, monkeypatch):
-    """Defect: a busy service always takes the next request and never applies a settled saved view."""
+def test_a_views_tick_publishes_under_the_policy_it_finds_at_the_write(served, monkeypatch):
+    """Defect: a tick publishes a view on the policy it read at its start, after the policy withheld
+    the collection, or keeps its start-of-tick policy for the next tick."""
+    from test_governance_egress import write_broken_policy
+
+    from exomem.collection_store import history, runtime
+    from exomem.collection_store.writer import CollectionWriter
+
+    root = served.root
+    published_view(root, "Settled", count=1)
+    release = threading.Event()
+    ticked = threading.Event()
+    tick = runtime.StoreServer._views_tick
+
+    def one_tick_per_release(current):
+        if not release.is_set():
+            return 0.05
+        release.clear()
+        try:
+            return tick(current)
+        finally:
+            ticked.set()
+
+    def run_one_tick():
+        ticked.clear()
+        release.set()
+        assert ticked.wait(10), "the views tick did not run"
+
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", one_tick_per_release)
+    run_one_tick()  # a tick under the allowing policy records its history release inputs
+    receipt = owner(root, "record_memory", action="append", collection=CID,
+                    item={"title": "Withheld", "count": 1}, why="capture")
+    relative = receipt["affected_paths"][0]
+    assert store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("pending",)]
+    inputs, invalidate = history.release_inputs, CollectionWriter.invalidate_history_pages
+    withheld, invalidations = threading.Event(), []
+
+    def withhold_after_the_tick_read_its_policy(vault_root):
+        found = inputs(vault_root)
+        if not withheld.is_set():
+            withheld.set()
+            write_broken_policy(vault_root)  # a blocked policy withholds every collection from the writer
+        return found
+
+    def counted_invalidation(writer):
+        invalidations.append(withheld.is_set())
+        return invalidate(writer)
+
+    monkeypatch.setattr(history, "release_inputs", withhold_after_the_tick_read_its_policy)
+    monkeypatch.setattr(CollectionWriter, "invalidate_history_pages", counted_invalidation)
+    run_one_tick()
+    assert withheld.is_set() and invalidations == []  # this tick still compares the policy it read first
+    assert store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("pending",)]
+    assert not (root / relative).exists()
+    run_one_tick()  # the next tick reads the new policy, so it queues the history pages
+    assert invalidations == [True]
+    assert not (root / relative).exists()
+
+
+def test_back_to_back_reads_never_wait_behind_due_maintenance(served, monkeypatch):
+    """Defect: a tick starts between the reads of a busy client, or after every request, or never
+    starts once the reads stop."""
+    from exomem import foreground_priority
+    from exomem.collection_store import runtime
+
+    server = runtime._server(served.root)
+    ticks, running = [], threading.Event()
+
+    def slow_tick(current):
+        running.set()
+        started = time.monotonic()
+        time.sleep(0.1)
+        ticks.append((started, time.monotonic()))
+        running.clear()
+        return 0.0
+
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", slow_tick)
+    monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 10.0)
+    until(lambda: ticks)  # the stand-in is due at once, so the first quiet gap runs it
+    with foreground_priority.foreground():  # a client between its calls: the gate stays shut
+        until(lambda: not running.is_set())
+        burst_start = time.monotonic()
+        for _ in range(30):
+            server.call(lambda: None, read_only=True, wake_maintenance=False)
+            time.sleep(0.005)
+        burst_end = time.monotonic()
+    assert [tick for tick in ticks if tick[0] < burst_end and burst_start < tick[1]] == []
+    until(lambda: ticks[-1][0] > burst_end)
+    assert ticks[-1][0] - burst_end < runtime.FOREGROUND_GRACE_SECONDS + 0.5
+
+
+@pytest.mark.parametrize("demand", ["queued_requests", "foreground_mark"])
+def test_continuous_demand_does_not_starve_a_notified_view_edit(served, monkeypatch, demand):
+    """Defect: a busy service never opens its maintenance gate and so never applies a settled saved view."""
+    from exomem import file_watcher, foreground_priority
+    from exomem.collection_store import runtime
+    from exomem.collection_store.writer import CollectionWriter
+
+    root = served.root
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 0.2)
+    server = runtime._server(root)
+    until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    apply_edit = CollectionWriter.apply_view_edit
+
+    def edit_after_completed_publication_passes(writer, *args, **kwargs):
+        # A settled edit can follow a completed wake while demand stays continuous.
+        server._views_after, server._views_passes = None, 2
+        return apply_edit(writer, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_after_completed_publication_passes)
+    _, path = published_view(root, "Busy", count=1)
+    demanding, released = threading.Event(), threading.Event()
+    demanding.set()
+    original_serve = server._serve
+    holder = None
+    marked = threading.Event()
+
+    def keep_requests_queued(request):
+        original_serve(request)
+        if demanding.is_set():
+            with server._condition:
+                server._requests.append(runtime._Call(lambda: None, wake_maintenance=False))
+                server._condition.notify_all()
+            time.sleep(0.005)
+
+    def hold_a_foreground_mark():
+        with foreground_priority.foreground():
+            marked.set()
+            released.wait(30)
+
+    if demand == "queued_requests":
+        monkeypatch.setattr(server, "_serve", keep_requests_queued)
+    else:
+        holder = threading.Thread(target=hold_a_foreground_mark)
+        holder.start()
+        assert marked.wait(10)
+    try:
+        server.call(lambda: None, wake_maintenance=False)
+        path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 2"))
+        file_watcher.FileWatcher(root)._record(path, deleted=False)
+        until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=8)
+        until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?",
+                                (path.relative_to(root).as_posix(),)) == [("current",)], seconds=8)
+        assert b"count: 2" in path.read_bytes()
+        assert demanding.is_set()
+        assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_edit'") == [("view_edit",)]
+    finally:
+        demanding.clear()
+        released.set()
+        if holder is not None:
+            holder.join(10)
+
+
+def test_a_view_edit_committed_beside_a_queued_request_re_renders_under_continuous_demand(served, monkeypatch):
+    """Defect: a views tick that yields to a request before publishing leaves the edit's re-render
+    unowed, so under continuous demand it waits for the next census."""
     from exomem import file_watcher
     from exomem.collection_store import runtime
     from exomem.collection_store.writer import CollectionWriter
 
     root = served.root
     monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 1.0)  # a tick that commits after a quiet gap is not starved
     server = runtime._server(root)
     until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
-    apply_edit = CollectionWriter.apply_view_edit
+    relative, path = published_view(root, "Busy", count=1)
+    demanding = threading.Event()
+    apply_edit, original_serve = CollectionWriter.apply_view_edit, server._serve
 
-    def edit_after_completed_publication_passes(writer, *args, **kwargs):
-        # A settled edit can follow a completed wake while the request queue remains busy.
-        server._views_after, server._views_passes = None, 2
-        return apply_edit(writer, *args, **kwargs)
+    def queue_a_request():
+        with server._condition:
+            server._requests.append(runtime._Call(lambda: None, wake_maintenance=False))
+            server._condition.notify_all()
 
-    monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_after_completed_publication_passes)
-    _, path = published_view(root, "Busy", count=1)
-    pumping = threading.Event()
-    pumping.set()
-    original_serve = server._serve
+    def edit_with_a_request_queued_at_the_commit(writer, *args, **kwargs):
+        result = apply_edit(writer, *args, **kwargs)
+        demanding.set()
+        queue_a_request()  # the tick that committed the edit now sees a waiting request
+        return result
 
     def keep_requests_queued(request):
         original_serve(request)
-        if pumping.is_set():
-            with server._condition:
-                server._requests.append(runtime._Call(lambda: None, wake_maintenance=False))
-                server._condition.notify_all()
+        if demanding.is_set():
+            queue_a_request()
             time.sleep(0.005)
 
+    monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_with_a_request_queued_at_the_commit)
     monkeypatch.setattr(server, "_serve", keep_requests_queued)
     try:
-        server.call(lambda: None, wake_maintenance=False)
         path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 2"))
         file_watcher.FileWatcher(root)._record(path, deleted=False)
-        until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=6)
-        until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?",
-                                (path.relative_to(root).as_posix(),)) == [("current",)], seconds=6)
+        until(demanding.is_set)
+        assert store_rows(root, "SELECT row_version FROM items") == [(2,)]
+        pending = store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state='pending'")[0][0]
+        # Each starved turn publishes one path, a second pass confirms the view, and the census stays 60 s away.
+        until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("current",)],
+              seconds=(pending + 1) * runtime.MAINTENANCE_DEFER_SECONDS + 4)
         assert b"count: 2" in path.read_bytes()
-        assert pumping.is_set()
-        assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_edit'") == [("view_edit",)]
+        assert demanding.is_set()
     finally:
-        pumping.clear()
+        demanding.clear()
 
 
 def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held(served):
@@ -1062,7 +1240,16 @@ def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is
     until(lambda: counted(root, "Served") == 7)
     edits = "SELECT operation,actor FROM txns WHERE operation='view_edit'"
     assert store_rows(root, edits) == [("view_edit", "owner:view-edit")]
-    until(lambda: owner(root, "read_memory", path=relative)["frontmatter"]["count"] == 7)
+    def page_count():
+        try:
+            return owner(root, "read_memory", path=relative)["frontmatter"]["count"]
+        except ValueError as error:
+            # From the save until the re-render installs, the view's bytes are not the published ones and a
+            # read answers NOT_FOUND. That window opens in the settle window, before the edit commits.
+            if "NOT_FOUND" not in str(error):
+                raise
+
+    until(lambda: page_count() == 7)
     rendered = path.read_bytes()
 
     def view_is_current():

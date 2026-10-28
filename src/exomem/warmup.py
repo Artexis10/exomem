@@ -692,9 +692,9 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             if not clip_applicable:
                 readiness.mark_ready("clip")
             else:
-                log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
-                if _preload("model_clip", embeddings.get_clip_model, lambda m: m.encode(["warm"])):
-                    log.info("CLIP model ready")
+                log.info("preloading the multilingual CLIP query encoder")
+                if _preload("model_clip", embeddings.get_clip_query_model, lambda m: m.encode(["warm"])):
+                    log.info("CLIP query encoder ready")
                     readiness.mark_ready("clip")
 
     if carried:

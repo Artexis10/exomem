@@ -187,6 +187,7 @@ class ClusterObservation:
     pvc_uid: str | None = None
     pvc_resource_version: str | None = None
     pvc_capacity_bytes: int | None = None
+    pvc_requested_bytes: int | None = None
     pvc_resize_pending: bool = False
     pv_claim_ref_uid: str | None = None
     pv_storage_class: str | None = None
@@ -222,6 +223,8 @@ class ClusterObservation:
     # D3: an hourly backup's recorded outcome (its snapshot id, or "failed").
     # While set, the hold only removes its clone and snapshot.
     statefulset_backup_outcome: str | None = None
+    statefulset_backup_family_request: str | None = None
+    backup_family_secret_referenced: bool | None = False
     # D4: a restore hold that relocates the cell off the volume with this id.
     statefulset_relocation_volume: str | None = None
     # D10: the size an hourly hold's backup planned to grow the cell to.
@@ -318,6 +321,7 @@ class Decision:
     create_clone: bool = False
     backup_prune: bool = False
     backup_outcome: str | None = None
+    backup_family_request: str | None = None
     delete_snapshot_backup: bool = False
 
     # D4 relocation: the old volume's id while the hold runs, the PV to set

@@ -212,6 +212,7 @@ def _activate(vault: Path, turn: str, **kwargs) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     ("turn", "path"),
     [
@@ -251,6 +252,7 @@ def test_the_words_a_japanese_run_holds_are_read_between_its_particles() -> None
     assert working_set_resolve.analyze_turn("Exomemのレイテンシ").words == ("exomem", "レイテンシ")
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("turn", ["続けて", "どこまでやった？", "続けてください", "前回の続きをお願い"])
 def test_a_japanese_pointing_back_turn_carries_recent_context_like_continue(
     ja_vault: Path, turn: str
@@ -283,6 +285,7 @@ def test_a_japanese_cue_turn_is_referential_only_with_nothing_else_said(
     assert working_set_resolve.analyze_turn(turn).referential is referential
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_japanese_pointing_back_turn_without_a_token_resumes_the_freshest_edit(
     ja_vault: Path,
 ) -> None:
@@ -293,6 +296,7 @@ def test_a_japanese_pointing_back_turn_without_a_token_resumes_the_freshest_edit
     assert _resolved(packet) == [FALCON], (packet.get("abstention"), packet["anchors"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_learned_japanese_alias_works_in_a_fresh_session(ja_vault: Path) -> None:
     turn = "隼号の車検はいつ？"
     assert FALCON not in _statuses(_activate(ja_vault, turn))
@@ -304,6 +308,7 @@ def test_a_learned_japanese_alias_works_in_a_fresh_session(ja_vault: Path) -> No
     assert _resolved(packet) == [FALCON], (packet.get("abstention"), packet["anchors"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_learned_japanese_cue_works_in_a_fresh_session(ja_vault: Path) -> None:
     token = _activate(ja_vault, "ハヤブサ号の油圧センサーは旅行前に交換すべき？")["continuity"]
     assert FALCON not in _resolved(_activate(ja_vault, "例の件をお願い", continuity=token))
@@ -323,6 +328,7 @@ def test_a_learned_japanese_cue_works_in_a_fresh_session(ja_vault: Path) -> None
     assert _resolved(packet) == [FALCON], (packet.get("abstention"), packet["anchors"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_mixed_script_turn_resolves_by_its_latin_name(ja_vault: Path) -> None:
     packet = _activate(ja_vault, "Exomemのレイテンシ")
     assert _resolved(packet) == [EXOMEM], (packet.get("abstention"), packet["anchors"])
@@ -398,6 +404,7 @@ def test_width_and_kana_variants_fold_sensibly() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_cross_lingual_today_abstains_then_one_learned_alias_reaches_the_page(
     ja_vault: Path,
 ) -> None:
@@ -415,6 +422,7 @@ def test_cross_lingual_today_abstains_then_one_learned_alias_reaches_the_page(
     assert _resolved(packet) == [WAGON], (packet.get("abstention"), packet["anchors"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_cross_lingual_one_correction_offers_the_japanese_name_and_teaches_it(
     ja_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,6 +460,7 @@ def test_cross_lingual_one_correction_offers_the_japanese_name_and_teaches_it(
     assert WAGON not in _resolved(other)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_cross_lingual_latin_name_in_a_japanese_sentence_is_a_lead_not_a_decision(
     ja_vault: Path,
 ) -> None:
@@ -483,6 +492,7 @@ def _create_entity(vault: Path, name: str, summary: str, **kwargs) -> str:
     return result["path"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_japanese_turn_reaches_an_english_entity_captured_with_a_japanese_alias(
     ja_vault: Path,
 ) -> None:
@@ -507,6 +517,7 @@ def test_a_japanese_turn_reaches_an_english_entity_captured_with_a_japanese_alia
     assert TESSARY not in _statuses(twin)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_japanese_alias_added_by_edit_reaches_the_english_entity(ja_vault: Path) -> None:
     """The same alias, added later through the owner's alias field."""
     _create_entity(ja_vault, "Tessary Works", "The tool shop by the station.")
@@ -562,6 +573,7 @@ def _refused(vault: Path, name: str, aliases: list[str]) -> str:
     return str(info.value)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_alias_a_note_already_answers_to_is_refused(ja_vault: Path) -> None:
     """ハヤブサ号 is a note, not an entity. As another page's alias it would
     make the note's own name resolve both pages."""
@@ -629,6 +641,7 @@ def test_one_create_walks_the_entities_once_however_many_aliases(
     assert len(walks) == one <= 2, (one, len(walks))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_edit_memory_refuses_an_alias_another_page_answers_to(ja_vault: Path) -> None:
     """The second route the guidance names runs the same guard."""
     _create_entity(ja_vault, "Tessary Works", "The tool shop by the station.")
@@ -678,6 +691,7 @@ def test_edit_memory_keeps_a_page_s_own_names_when_it_rewrites_its_aliases(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     ("turn", "path"),
     [
@@ -698,6 +712,7 @@ def test_a_name_followed_by_a_particle_glued_to_more_kana_resolves(
     assert "exact_alias" in packet["anchors"][0]["evidence"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     ("full", "head", "turn"),
     [
@@ -725,6 +740,7 @@ def test_a_name_with_hiragana_inside_beats_its_head_split_at_a_particle_characte
     assert "exact_alias" in packet["anchors"][0]["evidence"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_head_named_on_its_own_is_not_consumed_by_a_longer_name_in_the_turn(
     ja_vault: Path,
 ) -> None:
@@ -739,6 +755,7 @@ def test_a_head_named_on_its_own_is_not_consumed_by_a_longer_name_in_the_turn(
     assert set(_resolved(packet)) == {entity, note}, packet["anchors"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     ("with_longer", "winner"), [(True, "サクラもち"), (False, "サクラ")]
 )
@@ -786,6 +803,7 @@ def test_a_hiragana_name_after_a_particle_run_stays_one_name(turn: str) -> None:
     assert "銀行" not in words
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_name_that_starts_with_hiragana_is_not_handed_to_its_kanji_tail(
     ja_vault: Path,
 ) -> None:
@@ -813,6 +831,7 @@ def test_particles_and_short_kana_never_resolve(ja_vault: Path, turn: str) -> No
     assert working_set_resolve.analyze_turn(turn).referential is False
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_withheld_japanese_page_never_leaks(ja_vault: Path) -> None:
     owner = _activate(ja_vault, "月影プロジェクトの進み具合はどう？")
     assert _resolved(owner) == [SECRET]

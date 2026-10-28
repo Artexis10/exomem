@@ -229,7 +229,7 @@ def test_include_raw_is_identical_to_default_below_l6(
     assert "links" not in ordinary
     if ceiling == egress.LEVEL_EXCERPT:
         assert ordinary["body"] == "# Get payload probe body text here"
-        assert ordinary["body_truncated"] is True
+        assert ordinary["body_truncated"] is False
 
 
 @pytest.mark.parametrize(

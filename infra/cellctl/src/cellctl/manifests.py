@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .backup_source import VAULT_CHECK_COMMAND
+from .storage.topolvm import FamilyRequest
 from .storage_config import LEGACY_CLASS
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
@@ -84,6 +85,7 @@ BACKUP_OUTCOME_ANNOTATION = "exomem.io/backup-outcome"
 # D4: a restore hold that relocates the cell, naming the volume it leaves.
 RELOCATION_ANNOTATION = "exomem.io/relocation-volume"
 # D10: the size an hourly hold grows its cell to once its clone is gone.
+BACKUP_FAMILY_ANNOTATION = "exomem.io/backup-family-request"
 GROW_STORAGE_ANNOTATION = "exomem.io/grow-storage-gib"
 # D4: the render digest, compared against on every pass so a change that is
 # not a row change (bearer rotation, chart-level cell settings) still
@@ -204,6 +206,8 @@ class CellManifestSpec:
     backup_outcome: str | None = None
     relocation_volume: str | None = None
     grow_storage_gib: int | None = None
+    backup_family_request: str | None = None
+    backup_family_size_bytes: int | None = None
 
     # D6/D8: the backup-retry-after backoff. Unlike the hold annotations
     # above, these must survive a hold ending, so render_statefulset writes
@@ -793,12 +797,14 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
             annotations[BACKUP_OUTCOME_ANNOTATION] = spec.backup_outcome
         if spec.relocation_volume:
             annotations[RELOCATION_ANNOTATION] = spec.relocation_volume
-        if spec.grow_storage_gib is not None:
-            annotations[GROW_STORAGE_ANNOTATION] = str(spec.grow_storage_gib)
 
     # D6/D8: the backup-retry-after backoff must survive a hold ending, so
     # it is written unconditionally rather than only inside the `if
     # spec.hold_kind` block above.
+    if spec.grow_storage_gib is not None:
+        annotations[GROW_STORAGE_ANNOTATION] = str(spec.grow_storage_gib)
+    if spec.backup_family_request:
+        annotations[BACKUP_FAMILY_ANNOTATION] = spec.backup_family_request
     if spec.backup_retry_after:
         annotations[BACKUP_RETRY_AFTER_ANNOTATION] = spec.backup_retry_after
     if spec.backup_retry_minutes is not None:
@@ -997,12 +1003,26 @@ def hold_job_name(base: str, hold_started_at: str) -> str:
     return f"{base}-{digest}"
 
 
+def snapshot_backup_name(base: str, cell_id: str, hold_started_at: str | None,
+                         request: FamilyRequest | None = None) -> str:
+    """Snapshot/clone identity is global for guarded requests, and hold-based for legacy backups."""
+    if request is not None:
+        return f"{base}-{cell_id}-{request.request_id}"
+    if hold_started_at is None:
+        raise ValueError("a legacy snapshot backup needs its hold start")
+    return hold_job_name(base, hold_started_at)
+
+
 def _job_name_for_hold(spec: CellManifestSpec, base: str) -> str:
     # decide() only ever asks for a Job inside a hold, so a missing start
     # time is a caller bug; falling back to a bare name would bring back
     # stale-Job reuse.
     if not spec.hold_started_at:
         raise ValueError(f"{base} Job rendered outside a hold")
+    # Snapshot and clone bases are the closed backup resource naming protocol.
+    if base in (SNAPSHOT_NAME, CLONE_CLAIM_NAME):
+        request = FamilyRequest.parse(spec.backup_family_request) if spec.backup_family_request else None
+        return snapshot_backup_name(base, spec.cell_id, spec.hold_started_at, request)
     return hold_job_name(base, spec.hold_started_at)
 
 
@@ -1060,7 +1080,7 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
         "spec": {
             "accessModes": ["ReadWriteOnce"],
             "storageClassName": clone_class,
-            "resources": {"requests": {"storage": f"{spec.storage_gib}Gi"}},
+            "resources": {"requests": {"storage": str(spec.backup_family_size_bytes) if spec.backup_family_size_bytes is not None else f"{spec.storage_gib}Gi"}},
             "dataSourceRef": {
                 "apiGroup": "snapshot.storage.k8s.io",
                 "kind": "VolumeSnapshot",
@@ -1333,3 +1353,14 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
         "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,
                  "template": {"metadata": {"labels": labels}, "spec": pod}},
     }
+
+
+def render_backup_family_secret(spec: CellManifestSpec, *, namespace: str, token: str, physical_uuid: str) -> dict:
+    """The provider reads only immutable family capabilities in its dedicated namespace."""
+    # Secret data keys allow only [-._a-zA-Z0-9], so the provider's keys carry no domain prefix.
+    request = FamilyRequest.parse(spec.backup_family_request)
+    return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "immutable": True,
+            "metadata": {"name": _job_name_for_hold(spec, SNAPSHOT_NAME), "namespace": namespace,
+                         "labels": {"exomem.io/cell": spec.cell_id, BACKUP_FAMILY_ANNOTATION: request.request_id}},
+            "data": {"backup-family-token": _b64(token),
+                     "immediate-source-uuid": _b64(physical_uuid)}}

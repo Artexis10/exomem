@@ -12,8 +12,9 @@ Moving cells to node-local disk removes all three. It also removes the main dura
 
 - **Per-cell local volumes.** Cells store their data on a fixed-size logical volume on the node's local disk, provisioned through TopoLVM (a CSI driver):
   - One cell cannot read or fill another's volume, or the node's root disk.
-  - The thin pool is never overcommitted.
+  - Provider transactions charge full virtual sizes and preserve the online-backup reserve, including unclaimed physical volumes.
 - **Encryption.** Local cell storage is encrypted at rest at the node level: LUKS under the volume group on mirrored disks. Unlock is unattended against a key server on the control-plane node, and the recovery key is escrowed.
+- **Authoritative storage reservations.** TopoLVM serializes physical inventory, capacity checks and mutations across daemon death. Bounded backup families retain their charge until provider cleanup completes. Cached Kubernetes capacity does not authorize allocation.
 - **Online backups.** Cells are backed up hourly without being stopped:
   - The backup takes a crash-consistent volume snapshot, clones it read-only, and runs the existing per-cell restic backup against the clone, as a hold that does not stop the cell.
   - An alert fires when a cell's last good backup is over two hours old.
@@ -42,6 +43,7 @@ None.
 
 ## Impact
 
+- **Storage provider:** an upstream-capable TopoLVM enhancement for physical accounting, transaction fencing and bounded backup families. This adds provider protocol and image maintenance; no additional state service or filesystem migration is selected.
 - **cellctl:** storage classes from configuration, the hourly snapshot-backup hold, the storage capacity term, fenced relocation, per-driver deletion proof, post-etcd-restore reconciliation.
 - **Runtime:** the `cell-init` empty-vault guard, and fsync before rename in the JSON-state writers.
 - **Platform chart:** TopoLVM, snapshot controller, the new StorageClass, admission rules for the clone source and the relocation delete, RBAC.

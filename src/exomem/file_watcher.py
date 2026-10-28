@@ -31,6 +31,7 @@ registry is opportunistic: a missed registration merely costs the old harmless e
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -42,6 +43,7 @@ import weakref
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import freshness, index_sync, media_processing, mode, semantic_writes
 from .kbdir import kb_dirname, kb_prefix
@@ -951,9 +953,7 @@ def _graph_incompleteness_fields(vault_root: Path) -> str:
     return " ".join(f"{name}={value}" for name, value in fields.items())
 
 
-def _graph_incompleteness_scope(
-    vault_root: Path, rels: Iterable[str], *, self_authored: bool = False
-) -> list[Path] | None:
+def _graph_incompleteness_scope(vault_root: Path, rels: Iterable[str]) -> list[Path] | None:
     """The paths an unclassified fan-out incompleteness affects, or None for the vault.
 
     `_graph_incompleteness_fields` reports the same judgement as `scope=paths` or
@@ -967,34 +967,50 @@ def _graph_incompleteness_scope(
     the next write touches, which is the same self-sustaining loop in a narrower
     costume.
 
-    None means "whole vault", and it is also what every failure and every
-    whole-vault repair answers: a mark whose scope cannot be established has to
-    fence everything, because that is what this branch exists to be.
+    None means "whole vault": a drain that can name no path has not established
+    a scope, and a mark whose scope cannot be established has to fence
+    everything. A standing whole-vault marker is no longer a reason to widen:
+    `_graph_repair_owned` reads it as the owner of the repair, and the watcher
+    then marks nothing.
+    """
+    paths = [vault_root / rel for rel in rels]
+    return paths or None
 
-    `self_authored` is the exception to the whole-vault repair rule. Every path
-    in that batch was named by a governed writer before it wrote it, and reached
-    the watcher because that publication failed or expired. An outside edit to
-    one of those paths, seen while the watcher resolves the writer's held
-    intent, is labelled the same way; the edit's own change event then arrives
-    unattributed and widens the next drain. An outside edit that restores the
-    writer's exact before-image cannot be told apart from it, but it still
-    lands on one of those named paths. The scope is established, and a
-    whole-vault repair already on the queue is the graph's own debt, not
-    evidence of an unknown edit.
-    Widening that mark fenced every later write into another whole-vault
-    rebuild, which queued the next one.
+
+def _graph_repair_owned(vault_root: Path, *, batch_owned: bool) -> bool | None:
+    """Whether the graph already owes an incomplete fan-out its repair; None if unknown.
+
+    A standing whole-vault marker owes every path, and `batch_owned` says the
+    batch's own dispatch left registered or queued repair
+    (`index_sync.graph_repair_is_owned`). Marking an owned repair as an outside
+    edit fenced later writes to those paths, or, unscoped, every write. None
+    means the marker cannot be read, which is an unknown scope.
     """
     from . import deferred_index
 
-    paths = [vault_root / rel for rel in rels]
-    if self_authored and paths:
-        return paths
     try:
-        if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
-            return None
+        marker_stands = deferred_index.graph_full_rebuild_pending(vault_root) is not None
     except Exception:  # noqa: BLE001 - an unreadable marker is an unknown scope
         return None
-    return paths or None
+    return marker_stands or batch_owned
+
+
+def _background_graph_caller(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a watcher step as a background graph caller.
+
+    Nobody waits on the watcher for a converged graph: the durable queue owns
+    the repair its dispatch defers. Inside `graph_sync.standalone_join_waived`
+    its graph dispatch stops at queued instead of joining a whole-vault pass.
+    """
+
+    @functools.wraps(method)
+    def run(self: FileWatcher, *args: Any, **kwargs: Any) -> Any:
+        from . import graph_sync
+
+        with graph_sync.standalone_join_waived():
+            return method(self, *args, **kwargs)
+
+    return run
 
 
 class FileWatcher:
@@ -1015,9 +1031,6 @@ class FileWatcher:
         self._pending_media: set[Path] = set()
         self._managed_media_events: dict[Path, bool] = {}
         self._pending_publication_intents: dict[Path, _PublicationIntent] = {}
-        # Pending paths admitted on an event Exomem cannot attribute to itself.
-        # A drain with none came only from a writer's failed publication.
-        self._pending_unattributed: set[Path] = set()
         self._pending_external_epoch = 0
         self._pending_access_policy = False
         self._last_change = 0.0
@@ -1065,11 +1078,7 @@ class FileWatcher:
 
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
-    def _record_external_locked(
-        self, path: Path, *, deleted: bool, self_authored: bool = False
-    ) -> None:
-        if not self_authored:
-            self._pending_unattributed.add(path)
+    def _record_external_locked(self, path: Path, *, deleted: bool) -> None:
         if deleted:
             self._pending_upsert.discard(path)
             self._pending_delete.add(path)
@@ -1099,7 +1108,7 @@ class FileWatcher:
             else:
                 self._pending_publication_intents.pop(path, None)
             if disposition != "succeeded":
-                self._record_external_locked(path, deleted=False, self_authored=True)
+                self._record_external_locked(path, deleted=False)
         self._wake.set()
 
     def _replay_publication_remnant(self, path: Path) -> None:
@@ -1108,7 +1117,7 @@ class FileWatcher:
             self._pending_publication_intents.pop(path, None)
             if path in self._pending_upsert or path in self._pending_delete:
                 return
-            self._record_external_locked(path, deleted=False, self_authored=True)
+            self._record_external_locked(path, deleted=False)
         self._wake.set()
 
     def _hold_publication_intent(self, path: Path, intent: _PublicationIntent) -> None:
@@ -1266,25 +1275,22 @@ class FileWatcher:
             except ValueError:
                 return None
 
-    def _drain(self) -> tuple[list[Path], list[Path], list[str], int, bool, bool]:
+    def _drain(self) -> tuple[list[Path], list[Path], list[str], int, bool]:
         with self._lock:
             media = sorted(self._pending_media)
             ups = sorted(self._pending_upsert)
             dels = sorted(self._pending_delete)
             pending_epoch = self._pending_external_epoch
             access_policy = self._pending_access_policy
-            self_authored = (
-                bool(ups or dels) and not self._pending_unattributed and not access_policy
-            )
             self._pending_media.clear()
             self._pending_upsert.clear()
             self._pending_delete.clear()
-            self._pending_unattributed.clear()
             self._pending_external_epoch = 0
             self._pending_access_policy = False
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
-        return media, ups, del_rels, pending_epoch, access_policy, self_authored
+        return media, ups, del_rels, pending_epoch, access_policy
 
+    @_background_graph_caller
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
@@ -1294,7 +1300,7 @@ class FileWatcher:
             self._managed_media_events = {}
         for path, deleted in managed.items():
             self._record(path, deleted=deleted)
-        media, ups, del_rels, pending_epoch, access_policy, self_authored = self._drain()
+        media, ups, del_rels, pending_epoch, access_policy = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)
         if not (media or ups or del_rels):
@@ -1322,7 +1328,6 @@ class FileWatcher:
             del_rels,
             cap=False,
             pending_epoch=pending_epoch,
-            self_authored=self_authored,
         )
 
     def _reconcile_access_policy(self, pending_epoch: int) -> None:
@@ -1400,6 +1405,7 @@ class FileWatcher:
             except OSError:
                 continue
 
+    @_background_graph_caller
     def _reconcile_once(self, *, seed: bool) -> bool:
         """Re-derive the freshness maps from a fresh walk. `seed=True` on the
         first pass installs the maps and marks the scopes live; later passes
@@ -1965,7 +1971,6 @@ class FileWatcher:
         publish_corpus_change: bool = True,
         pending_epoch: int | None = None,
         policy: mode.WatcherPolicy | None = None,
-        self_authored: bool = False,
     ) -> int:
         """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
         inbound publish -> resolver publish -> KB-filtered index_sync
@@ -1978,10 +1983,6 @@ class FileWatcher:
         inbound publishes still get the FULL lists regardless of `cap`; only
         the embed dispatch is ever bounded, and the freshness/registry maps are
         always fully healed independent of this cap.
-
-        `self_authored`: every path came from a governed writer's failed or
-        expired publication, so a graph re-arm keeps exactly these paths
-        (`_graph_incompleteness_scope`).
         """
         if not (up_rels or del_rels):
             return 0
@@ -2142,6 +2143,7 @@ class FileWatcher:
             defer_semantic = True
             admitted_semantic = 0
         lexical_batch_complete = False
+        graph_batch_owned = False
         if ups or del_rels:
             try:
                 report = index_sync.upsert_after_write(
@@ -2169,6 +2171,15 @@ class FileWatcher:
                     component.component == "lexstore" and component.outcome == "completed"
                     for component in getattr(report, "components", ())
                 )
+                try:
+                    graph_batch_owned = any(
+                        index_sync.graph_repair_is_owned(
+                            self._vault_root, component, {*up_rels, *del_rels}
+                        )
+                        for component in getattr(report, "components", ())
+                    )
+                except Exception:  # noqa: BLE001 - unproven ownership keeps the mark
+                    log.exception("file watcher: graph repair ownership unreadable")
         downstream_del_rels = kb_del_rels
         if downstream_del_rels:
             try:
@@ -2233,20 +2244,30 @@ class FileWatcher:
                     # paths, which left the next fan-out incomplete: the loop
                     # `seamless-managed-worker-handoff` exists to break. A scope
                     # this helper cannot establish still fences the whole vault.
-                    scope = _graph_incompleteness_scope(
-                        self._vault_root,
-                        (*up_rels, *del_rels),
-                        self_authored=self_authored,
-                    )
-                    freshness.mark_external_pending(
-                        self._vault_root, paths=scope if scope is not None else ()
-                    )
-                    log.warning(
-                        "file watcher: graph fan-out incomplete; periodic recovery re-armed %s "
-                        "mark_scope=%s",
-                        _graph_incompleteness_fields(self._vault_root),
-                        "paths" if scope is not None else "full",
-                    )
+                    # A repair the graph already owes is not an unknown edit:
+                    # the drain converges it, and a mark only fences writes.
+                    owned = _graph_repair_owned(self._vault_root, batch_owned=graph_batch_owned)
+                    if owned:
+                        log.info(
+                            "file watcher: graph fan-out incomplete; its repair is already "
+                            "owned %s",
+                            _graph_incompleteness_fields(self._vault_root),
+                        )
+                    else:
+                        scope = (
+                            _graph_incompleteness_scope(self._vault_root, (*up_rels, *del_rels))
+                            if owned is False
+                            else None
+                        )
+                        freshness.mark_external_pending(
+                            self._vault_root, paths=scope if scope is not None else ()
+                        )
+                        log.warning(
+                            "file watcher: graph fan-out incomplete; periodic recovery "
+                            "re-armed %s mark_scope=%s",
+                            _graph_incompleteness_fields(self._vault_root),
+                            "paths" if scope is not None else "full",
+                        )
         return admitted_semantic
 
     def _run_reconcile(self) -> None:

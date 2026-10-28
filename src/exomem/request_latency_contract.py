@@ -46,6 +46,15 @@ class LatencyBar(BaseModel):
             raise ValueError("Only pending bars have a null threshold")
         return self
 
+    def covers(self, tool: str, deep: bool) -> bool:
+        """Whether this bar certifies a call to `tool` with this `deep` flag.
+
+        The one coverage rule: bar selection, the canary's pre-connection check and
+        the summarizer's match all ask it.
+        """
+        # '*' is the contract schema's fallback operation token, never a word classifier.
+        return self.deep == deep and (tool in self.operations or "*" in self.operations)
+
 
 class LatencyContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -65,23 +74,13 @@ class LatencyContract(BaseModel):
         return next(bar for bar in self.bars if bar.id == bar_id)
 
     def observation_bar(self, *, surface: str, tool: str, deep: bool) -> LatencyBar | None:
-        for bar in self.bars:
-            if (
-                bar.observe
-                and bar.surface == surface
-                and bar.deep == deep
-                and tool in bar.operations
-            ):
-                return bar
-        # '*' is the contract schema's fallback operation token, never a word classifier.
-        return next(
-            (
-                bar
-                for bar in self.bars
-                if bar.observe and bar.surface == surface and "*" in bar.operations
-            ),
-            None,
-        )
+        covering = [
+            bar
+            for bar in self.bars
+            if bar.observe and bar.surface == surface and bar.covers(tool, deep)
+        ]
+        # A bar that lists the tool beats one that covers it only as the fallback.
+        return min(covering, key=lambda bar: tool not in bar.operations, default=None)
 
 
 @lru_cache(maxsize=1)

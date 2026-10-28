@@ -117,7 +117,8 @@ def _txn(
     return head
 
 
-def _seed_collection(conn: sqlite3.Connection, collection_id: str = COLLECTION_ID) -> None:
+def _seed_collection(conn: sqlite3.Connection, collection_id: str = COLLECTION_ID, **later_columns: object) -> None:
+    """Seed one collection; ``later_columns`` are columns that only a newer schema has, such as ``derived``."""
     conn.execute(
         "INSERT OR IGNORE INTO collection_types(name, current_version, builtin) VALUES (?,?,?)",
         ("records", 1, 1),
@@ -133,23 +134,23 @@ def _seed_collection(conn: sqlite3.Connection, collection_id: str = COLLECTION_I
         " manifest_hash, schema_json, txn_id) VALUES (?,?,?,?,?,?)",
         (collection_id, 1, "---\ntitle: Invented\n---\n", H, "{}", 1),
     )
+    columns = {
+        "collection_id": collection_id,
+        "type_name": "records",
+        "type_version": 1,
+        "manifest_path": f"Knowledge Base/Records/{collection_id}/_collection.md",
+        "source_path": f"Knowledge Base/Records/{collection_id}/items",
+        "layout": "markdown-items",
+        "manifest_version": 1,
+        "generation": 1,
+        "audit_reader_version": 2,
+        "created_txn": 1,
+        "updated_txn": 1,
+        **later_columns,
+    }
     conn.execute(
-        "INSERT INTO collections(collection_id, type_name, type_version, manifest_path,"
-        " source_path, layout, manifest_version, generation, audit_reader_version,"
-        " created_txn, updated_txn) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            collection_id,
-            "records",
-            1,
-            f"Knowledge Base/Records/{collection_id}/_collection.md",
-            f"Knowledge Base/Records/{collection_id}/items",
-            "markdown-items",
-            1,
-            1,
-            2,
-            1,
-            1,
-        ),
+        f"INSERT INTO collections({','.join(columns)}) VALUES ({','.join('?' * len(columns))})",
+        tuple(columns.values()),
     )
 
 
@@ -381,7 +382,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 13
+    assert schema.SCHEMA_VERSION == 14
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -439,6 +440,33 @@ def test_schema_12_readers_refuse_projection_exposure_metadata(store, monkeypatc
         connection.open_writer(path, lease_check=_allow)
 
 
+def test_schema_13_readers_refuse_a_store_that_may_hold_ordered_item_keys(store, monkeypatch):
+    """An older release that opened a revision-14 store would read an ordered key as a UUID and drop its rows."""
+    path = store.path
+    store.close()
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 13)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        connection.open_reader(path)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        connection.open_writer(path, lease_check=_allow)
+
+
+def test_a_collection_keeps_its_item_key_scheme_and_only_a_derived_one_takes_ordered_keys(store):
+    """Defect: a scheme changes under the keys it spelled, or a collection whose rows live in the store takes
+    ordered keys, which the store's item key text rules and its readers do not expect."""
+    with store.transaction() as tx:
+        _seed_collection(tx, derived=1, item_key_scheme="ordered-v1")
+        _txn(tx, txn_id=1, commit_seq=1, event_hash="1" * 64, prev_head=None)
+    with pytest.raises(sqlite3.IntegrityError, match="keeps the item key scheme"), store.transaction() as tx:
+        tx.execute("UPDATE collections SET item_key_scheme='hashed-v1'")
+    with pytest.raises(sqlite3.IntegrityError, match="only a derived collection"), store.transaction() as tx:
+        _seed_collection(tx, OTHER_COLLECTION_ID, derived=0, item_key_scheme="ordered-v1")
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"), store.transaction() as tx:
+        _seed_collection(tx, OTHER_COLLECTION_ID, derived=1, item_key_scheme="ordered-v2")
+    assert store.connection.execute("SELECT collection_id,item_key_scheme FROM collections").fetchall() == [
+        (COLLECTION_ID, "ordered-v1")]
+
+
 @pytest.mark.parametrize("revision", [None, "unknown", "7"])
 def test_present_revision_metadata_cannot_masquerade_as_legacy(
     store: connection.WriterConnection, revision: str | None,
@@ -458,7 +486,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["13", "9"])
+@pytest.mark.parametrize("revision", ["14", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -473,12 +501,12 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 13
+        assert schema.schema_version(store.connection) == 14
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 13
+            assert schema.schema_version(reader) == 14
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("13",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("14",)]
 
 
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
@@ -492,7 +520,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("13",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("14",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 

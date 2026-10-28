@@ -33,6 +33,9 @@ from exomem import commands, lexstore, working_set_index, working_set_runtime
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 PEOPLE = "Knowledge Base/Entities/People"
 TALIA = f"{PEOPLE}/Talia Verenko.md"
 OREN = f"{PEOPLE}/Oren Haldane.md"

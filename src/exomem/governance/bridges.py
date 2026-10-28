@@ -162,6 +162,9 @@ def _reference_key(value: str) -> str:
         text = text[2:-2]
     text = text.split("|", 1)[0].split("#", 1)[0]
     text = text.replace("\\", "/").strip().strip("/").casefold()
+    # Unicode defines which characters are whitespace, so a run of them is one separator here and in
+    # every pack builder that collapses whitespace before the strip runs; this decides no meaning.
+    text = " ".join(text.split())
     prefix = "knowledge base/"
     if text.startswith(prefix):
         text = text[len(prefix) :]
@@ -199,7 +202,7 @@ def _embedded_identity_aliases(
         text = value.strip()
         if text:
             decoded, _spans = _decoded_shadow(text)
-            canonical = decoded.strip()
+            canonical = " ".join(decoded.split())
             if canonical:
                 terms.add(canonical)
 
@@ -232,8 +235,16 @@ def _embedded_identity_patterns(
     aliases: tuple[str, ...],
 ) -> tuple[re.Pattern[str], ...]:
     """Compile Unicode-aware decoded-token matchers once per strip operation."""
+    # An alias is an approved identity, not a word list. Its whitespace runs match any run of
+    # whitespace within a line (see `_reference_key`), so a builder that collapsed the text cannot hide
+    # the identity, and a multi-word alias does not match across a line break.
     return tuple(
-        re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.IGNORECASE)
+        re.compile(
+            r"(?<!\w)"
+            + r"[^\S\r\n]+".join(re.escape(part) for part in alias.split())
+            + r"(?!\w)",
+            re.IGNORECASE,
+        )
         for alias in aliases
     )
 
@@ -368,7 +379,7 @@ def _string_names_identity(
     reference_context: bool,
 ) -> bool:
     """Match exact identities and explicit link targets, never arbitrary prose."""
-    if _reference_key(value) in keys and (reference_context or " " not in value.strip()):
+    if _reference_key(value) in keys and (reference_context or len(value.split()) < 2):
         return True
     for target in (*_WIKILINK_RE.findall(value), *_MARKDOWN_LINK_RE.findall(value)):
         if _reference_key(target) in keys:
@@ -439,12 +450,17 @@ def strip_provenance(
     identities: tuple[StripIdentity, ...],
     *,
     direct_page: bool = False,
+    whole_excerpts: bool = False,
 ) -> Any:
     """Return a copy with every dependency identity removed recursively.
 
     A bridge approval authorizes the compiled claim, not its source trail.
     The stripping target comes from the approval snapshot itself, so this is
     independent of which dependencies happened to enter a retrieval pool.
+
+    `whole_excerpts` is the caller's statement that its builder withheld every excerpt it would have
+    cut, so an excerpt is stripped line by line like a body and survives; without it, every excerpt
+    is dropped.
     """
     keys = _identity_keys(identities)
     aliases = _embedded_identity_aliases(identities)
@@ -458,7 +474,7 @@ def strip_provenance(
         reference_context: bool = False,
     ) -> Any:
         if isinstance(node, str):
-            if field == "body":
+            if field == "body" or (whole_excerpts and field == "excerpt"):
                 return _strip_body_lines(
                     node, keys, patterns, reference_context=reference_context
                 )
@@ -487,6 +503,7 @@ def strip_provenance(
                         item, keys, patterns, reference_context=True
                     )
                 )
+            body_cut = node.get("body_truncated") is True
             out: dict[Any, Any] = {}
             for key, value in node.items():
                 name = str(key).casefold()
@@ -498,6 +515,12 @@ def strip_provenance(
                 if _string_names_identity(
                     str(key), keys, patterns, reference_context=True
                 ):
+                    continue
+                # Builders cut an excerpt or a bounded body by length before this strip, so a cut can
+                # start or end inside a link or path to a stripped source, and the whole-identity
+                # match never sees the fragment. Withhold every excerpt and every cut body rather than
+                # trust each builder to mark its cuts.
+                if (name == "excerpt" and not whole_excerpts) or (name == "body" and body_cut):
                     continue
                 if name in {"nodes", "seeds"} and isinstance(value, list):
                     value = [

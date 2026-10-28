@@ -45,6 +45,7 @@ def _create(root: Path, title: str, body: str, note_type: str = "insight") -> st
     return result["path"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("placement", ["same_page", "cross_page"])
 def test_activation_keeps_an_authored_exact_dependency_actionable(
     material_vault: Path, owner, placement: str,
@@ -119,6 +120,7 @@ def test_activation_keeps_an_authored_exact_dependency_actionable(
     assert followed["unit"]["content"].strip() == limitation
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_deleting_an_exact_dependency_page_leaves_its_claim_partial(material_vault: Path, owner) -> None:
     root = material_vault
     dependency = _create(root, "Neutral operating envelope", (
@@ -157,6 +159,7 @@ def test_deleting_an_exact_dependency_page_leaves_its_claim_partial(material_vau
     assert packet["generation"]["correction_context"] == "partial"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("reader", ["owner", "restricted"])
 def test_an_exact_dependency_through_a_shared_page_name_leaves_its_claim_partial(
     material_vault: Path, owner, reader: str,

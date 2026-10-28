@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import traceback
+import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -25,6 +26,7 @@ from kubernetes.client.rest import ApiException
 
 from . import alerts, db
 from .capacity import (
+    GIB,
     CapacityConfig,
     CapacityObservation,
     LocalCapacityObservation,
@@ -76,6 +78,7 @@ from .manifests import (
     dedicated_placement,
     hold_job_name,
     namespace_name,
+    render_backup_family_secret,
     render_backup_job,
     render_cell_manifests,
     render_clone_claim,
@@ -84,6 +87,7 @@ from .manifests import (
     render_import_job,
     render_restore_job,
     render_volume_snapshot,
+    snapshot_backup_name,
 )
 from .media_edge import (
     ActiveSet,
@@ -107,8 +111,11 @@ from .rollout import (
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
     BACKUP_FAILED,
+    BACKUP_OUTCOME_FAILED,
     CANARY_PARKED,
+    GROWTH_NO_ROOM,
     GROWTH_NOT_NEEDED,
+    GROWTH_PLANNED,
     MANIFEST_IMMUTABLE,
     MOVE,
     RELOCATION_REFUSED,
@@ -121,7 +128,14 @@ from .state import (
     row_hold_kind,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
-from .storage.topolvm import LocalVolumeState, cell_data_absent
+from .storage.topolvm import (
+    FamilyRequest,
+    LocalVolumeState,
+    cell_data_absent,
+    matching_family,
+    protocol_integer,
+    target_reserved,
+)
 from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
 
 logger = logging.getLogger("cellctl")
@@ -552,6 +566,7 @@ class ClusterGateway:
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
     def delete_cell_secrets(self, namespace: str, *, cell_id: str) -> bool: ...  # pragma: no cover
     def delete_secret(self, namespace: str, name: str, *, cell_id: str) -> bool: ...  # pragma: no cover
+    def delete_family_secret(self, local: LocalStorage, *, cell_id: str, request: FamilyRequest) -> bool: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
     def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False): ...  # pragma: no cover
@@ -561,6 +576,9 @@ class ClusterGateway:
     def run_job(self, manifest: dict) -> None: ...  # pragma: no cover
     def namespace_absent(self, name: str) -> bool: ...  # pragma: no cover
     def pv_absent_for_namespace(self, namespace: str) -> bool: ...  # pragma: no cover
+    def source_logical_volume(self, local: LocalStorage, volume_id: str, node: str | None) -> dict: ...  # pragma: no cover
+    def logical_volume(self, local: LocalStorage, name: str) -> dict: ...  # pragma: no cover
+    def patch_logical_volume(self, local: LocalStorage, name: str, spec: dict) -> None: ...  # pragma: no cover
     def local_volume_state(self, local: LocalStorage) -> LocalVolumeState: ...  # pragma: no cover
     def admission_policy_present(
         self, policy_name: str, binding_name: str, *, param_name: str | None = None, param_selects_all: bool = False
@@ -1391,6 +1409,12 @@ async def reconcile_once(
     await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
     await _cell_health_alerts(cluster, cluster_config, rows, observations, now, memory)
     await _host_alerts(cluster, cluster_config, now, memory)
+    local_capacity = None
+    if cluster_config.storage.local is not None and cluster_config.storage.local.reservations:
+        try:
+            local_capacity = cluster.local_capacity_inputs(cluster_config.storage.local)
+        except Exception as error:  # noqa: BLE001 - failed observations unpublish local limits, not service
+            logger.warning("cellctl: local import capacity is unknown: %s", _describe_error(error))
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
@@ -1499,6 +1523,7 @@ async def reconcile_once(
                 memory=memory,
                 storage_room=storage_room,
                 media_active=media_active,
+                local_capacity=local_capacity,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
@@ -1521,7 +1546,8 @@ async def reconcile_once(
         storage = cluster_config.storage
         local_slots = (
             compute_local_capacity(
-                cluster.local_capacity_inputs(storage.local), local=storage.local, cell_sizes=committed_sizes
+                local_capacity if local_capacity is not None else cluster.local_capacity_inputs(storage.local),
+                local=storage.local, cell_sizes=committed_sizes
             )
             if storage.domain_is_local
             else None
@@ -1564,12 +1590,12 @@ def _storage_room(
     observations: dict[str, ClusterObservation],
     committed_sizes: dict[str, int],
 ) -> StorageRoom | None:
-    """D10: the node pools, read only in a pass where an hourly backup has
+    """D10: unguarded node pools, read only in a pass where an hourly backup has
     just reported its use, which is when a growth is planned. A failed read
     plans no growth: that backup's cell grows, if it must, after its next one."""
 
     local = storage.local
-    if local is None or not any(
+    if local is None or local.reservations or not any(
         observation.statefulset_hold_kind == SNAPSHOT_BACKUP
         and observation.statefulset_backup_outcome is None
         and observation.backup_job_used_bytes is not None
@@ -1854,6 +1880,114 @@ async def _publish_parked_canary(
         )
 
 
+def _local_family(
+    cluster: ClusterGateway, row: CellRow, observation: ClusterObservation, decision: Decision,
+    local: LocalStorage,
+) -> dict | None:
+    """Persist Begin identity in the existing hold and retain it through physical closure."""
+    raw = observation.statefulset_backup_family_request
+    if raw is None:
+        if (decision.hold_kind != SNAPSHOT_BACKUP or decision.backup_outcome is not None
+                or observation.statefulset_backup_outcome is not None or decision.delete_snapshot_backup):
+            return None
+        volume = cluster.source_logical_volume(local, observation.pvc_volume_id, observation.pv_node)
+        status = volume.get("status") or {}
+        family = status.get("backupFamily") or {}
+        physical_uuid, epoch = status.get("physicalUUID"), family.get("closedEpoch")
+        if (isinstance(physical_uuid, str) and physical_uuid and family.get("state") == "closed"
+                and protocol_integer(epoch) and epoch < 2**63 - 1):
+            decision.backup_family_request = FamilyRequest(
+                volume["metadata"]["name"], physical_uuid, epoch, uuid.uuid4().hex).annotation()
+        # A provider call waits for the next pass to observe the durable hold identity.
+        decision.create_snapshot = decision.create_clone = decision.run_backup_job = False
+        return None
+
+    request = FamilyRequest.parse(raw)
+    decision.backup_family_request = raw
+    volume = cluster.logical_volume(local, request.volume_name)
+    family = matching_family(volume, request)
+    submitted = (volume.get("spec") or {}).get("backupFamilyRequest") or {}
+    ending = (decision.hold_kind != SNAPSHOT_BACKUP or decision.delete_snapshot_backup
+              or observation.statefulset_backup_outcome is not None
+              or row.desired_state not in ("running", "read_only")
+              or ((volume.get("status") or {}).get("volumeID") != observation.pvc_volume_id)
+              or submitted == request.spec("End"))
+    if ending:
+        cluster.patch_logical_volume(local, request.volume_name, {"backupFamilyRequest": request.spec("End")})
+        if (family is not None and family.get("state") == "closed" and family["closedEpoch"] == family["epoch"]
+                and not observation.snapshot_exists and not observation.clone_exists
+                and observation.backup_family_secret_referenced is False
+                and cluster.delete_family_secret(local, cell_id=row.cell_id, request=request)):
+            decision.backup_family_request = None
+            decision.create_snapshot = decision.create_clone = decision.run_backup_job = False
+            return None
+        # Pending End prevents early source deletion or hold completion. It can delay only this cell.
+        decision.delete_namespace = decision.delete_claim = False
+        decision.create_snapshot = decision.create_clone = decision.run_backup_job = False
+        decision.hold_kind = SNAPSHOT_BACKUP
+        decision.hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at
+        decision.row_updates.update(hold_kind="backup", hold_started_at=decision.hold_started_at)
+        decision.backup_outcome = decision.backup_outcome or observation.statefulset_backup_outcome or BACKUP_OUTCOME_FAILED
+        decision.delete_backup_job = decision.delete_snapshot_backup = True
+        decision.row_updates.pop("grown_storage_gib", None)
+        return None
+    if family is not None and family.get("state") == "closed":
+        # An End that overtook Begin consumes this request permanently.
+        decision.create_snapshot = decision.create_clone = decision.run_backup_job = False
+        decision.backup_outcome = BACKUP_OUTCOME_FAILED
+        decision.delete_snapshot_backup = True
+        return None
+    cluster.patch_logical_volume(local, request.volume_name, {"backupFamilyRequest": request.spec("Begin")})
+    if (family is None or family.get("state") != "active" or not isinstance(family.get("token"), str)
+            or not family["token"] or not protocol_integer(family.get("sourceSizeBytes"))
+            or family["sourceSizeBytes"] == 0):
+        decision.create_snapshot = decision.create_clone = decision.run_backup_job = False
+        return None
+    return family
+
+
+def _local_growth(
+    cluster: ClusterGateway, row: CellRow, observation: ClusterObservation, decision: Decision, local: LocalStorage,
+) -> bool:
+    requested_gib = -(-(observation.pvc_requested_bytes or 0) // GIB)
+    target = max(row.size_gib, requested_gib, observation.statefulset_grow_storage_gib or 0,
+                 decision.row_updates.get("grown_storage_gib") or 0, decision.grow_storage_gib or 0)
+    if not observation.pvc_exists and not observation.pvc_bound:
+        return True
+    if observation.pvc_capacity_bytes is not None and target * GIB <= observation.pvc_capacity_bytes:
+        if target > row.size_gib:
+            decision.row_updates["grown_storage_gib"] = target
+        return True
+    # Keep the desired increase through incomplete physical identity and controller restarts.
+    decision.grow_storage_gib = target
+    decision.row_updates.pop("grown_storage_gib", None)
+    if not decision.apply_manifests:
+        decision.apply_manifests = True
+        decision.image = observation.statefulset_image or row.observed_image
+        decision.replicas = observation.statefulset_replicas or 0
+        decision.read_only = row.desired_state == "read_only"
+    if not observation.pvc_bound:
+        return False
+    volume = cluster.source_logical_volume(local, observation.pvc_volume_id, observation.pv_node)
+    physical_uuid = (volume.get("status") or {}).get("physicalUUID")
+    if not isinstance(physical_uuid, str) or not physical_uuid or not protocol_integer(target * GIB):
+        return False
+    cluster.patch_logical_volume(local, volume["metadata"]["name"],
+        {"reservationTargetBytes": target * GIB, "reservationTargetPhysicalUUID": physical_uuid})
+    accepted, no_room = target_reserved(volume, physical_uuid, target * GIB)
+    # A rejected target stays desired across controller restarts without holding a family open.
+    decision.grow_storage_gib = None if accepted else target
+    if accepted:
+        decision.storage_growth = GROWTH_PLANNED
+        if target > row.size_gib:
+            decision.row_updates["grown_storage_gib"] = target
+    else:
+        decision.row_updates.pop("grown_storage_gib", None)
+        if no_room:
+            decision.storage_growth = GROWTH_NO_ROOM
+    return accepted
+
+
 async def _reconcile_row(
     connection: asyncpg.Connection,
     cluster: ClusterGateway,
@@ -1877,6 +2011,7 @@ async def _reconcile_row(
     start_relocation: bool = False,
     storage_room: StorageRoom | None = None,
     media_active: ActiveSet | None = None,
+    local_capacity: LocalCapacityObservation | None = None,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -1922,8 +2057,17 @@ async def _reconcile_row(
     if row.desired_state != "deleted":
         storage = cluster_config.storage
         storage_class = observation.pvc_storage_class or observation.pv_storage_class or storage.domain
-        # Local import growth awaits authoritative shared-pool accounting; clear earlier published caps.
-        limits = None if storage.is_local(storage_class) else asdict(ImportLimits.for_cell(row, storage, config))
+        publish = not storage.is_local(storage_class)
+        if storage.is_local(storage_class) and storage.local.reservations and local_capacity is not None:
+            identity = local_capacity.cell_allocations.get(row.cell_id)
+            budget = local_capacity.budgets.get(observation.pv_node)
+            publish = bool(identity and budget and observation.pvc_bound and observation.pvc_uid
+                and observation.pvc_uid == observation.pv_claim_ref_uid
+                and identity[2] == observation.pv_node
+                and local_capacity.cell_volume_ids.get(row.cell_id) == observation.pvc_volume_id
+                and any((name, physical_uuid) == identity[:2] for name, physical_uuid, _ in budget.allocations)
+                and not _identity_conflict(row, observation, storage))
+        limits = asdict(ImportLimits.for_cell(row, storage, config)) if publish else None
         if limits != row.import_limits:
             await db.write_observed(connection, row.cell_id, {"import_limits": limits})
             row = dataclass_replace(row, import_limits=limits)
@@ -1990,6 +2134,12 @@ async def _reconcile_row(
         and not backup_due
         and not start_upgrade
         and not is_render_digest_candidate
+        and observation.statefulset_grow_storage_gib is None
+        and observation.statefulset_backup_family_request is None
+        and not (cluster_config.storage.local is not None and cluster_config.storage.local.reservations
+                 and cluster_config.storage.is_local(observation.pvc_storage_class or observation.pv_storage_class
+                                                     or cluster_config.storage.domain)
+                 and (observation.pvc_requested_bytes or 0) > row.size_gib * GIB)
         # D4: a converged cell whose volume is lost still has its relocation
         # to start, and one the operator marked to move has its move.
         and relocation_volume(row, observation, cluster_config.storage) is None
@@ -2060,6 +2210,28 @@ async def _reconcile_row(
         start_relocation=start_relocation,
         storage_room=storage_room,
     )
+    local = cluster_config.storage.local
+    guarded = local is not None and local.reservations and (
+        cluster_config.storage.is_local(observation.pvc_storage_class or observation.pv_storage_class
+                                        or cluster_config.storage.domain)
+        or observation.statefulset_backup_family_request is not None)
+    guarded = guarded and not _identity_conflict(row, observation, cluster_config.storage)
+    family = None
+    growth_accepted = True
+    if guarded:
+        # RBAC cannot limit patch fields. Retry only this local cell while its request-only boundary is absent.
+        if not cluster.admission_policy_present("exomem-cellctl-reservations", "exomem-cellctl-reservations"):
+            return True
+        family = _local_family(cluster, row, observation, decision, local)
+        # End must be sent even when a prospective target cannot be reserved.
+        if row.desired_state != "deleted":
+            growth_accepted = _local_growth(cluster, row, observation, decision, local)
+        if item is not None and import_decision is None and decision.storage_growth == GROWTH_NO_ROOM:
+            blocked_import = decide_import(row, item, observation, jobs, now=now, config=config, storage_no_room=True)
+            if blocked_import is not None:
+                blocked_import.grow_storage_gib = decision.grow_storage_gib
+                blocked_import.storage_growth = decision.storage_growth
+                import_decision = decision = blocked_import
     import_storage = None
     if import_decision is not None:
         imported = jobs.get("import")
@@ -2151,12 +2323,15 @@ async def _reconcile_row(
             hold_job_name(BACKUP_JOB_NAME, observation.statefulset_hold_started_at.isoformat()),
         )
 
-    if decision.delete_snapshot_backup and observation.statefulset_hold_started_at is not None:
+    if decision.delete_snapshot_backup and (observation.statefulset_hold_started_at is not None
+                                            or observation.statefulset_backup_family_request is not None):
         # D3: whatever happens to the cell or its apply, the hold's clone and
         # snapshot go. Named from the hold-started string they were made with.
-        started = observation.statefulset_hold_started_at.isoformat()
+        started = observation.statefulset_hold_started_at.isoformat() if observation.statefulset_hold_started_at else None
+        request = FamilyRequest.parse(observation.statefulset_backup_family_request) if observation.statefulset_backup_family_request else None
         cluster.delete_snapshot_backup(
-            namespace_name(row.cell_id), hold_job_name(SNAPSHOT_NAME, started), hold_job_name(CLONE_CLAIM_NAME, started)
+            namespace_name(row.cell_id), snapshot_backup_name(SNAPSHOT_NAME, row.cell_id, started, request),
+            snapshot_backup_name(CLONE_CLAIM_NAME, row.cell_id, started, request)
         )
 
     # D4 relocation: the old PV is set to Retain one pass, and its claim is
@@ -2280,7 +2455,8 @@ async def _reconcile_row(
             replicas=decision.replicas,
             read_only=decision.read_only,
             # Local claims keep backup growth; attachable claims follow desired storage.
-            storage_gib=row.size_gib if local_volume else row.storage_gib,
+            storage_gib=(max(row.size_gib, decision.grow_storage_gib or 0) if guarded else row.size_gib)
+            if local_volume else row.storage_gib,
             resources=resources,
             model_env=cluster_config.model_env or {},
             placement=placement,
@@ -2298,6 +2474,8 @@ async def _reconcile_row(
             backup_outcome=decision.backup_outcome,
             relocation_volume=decision.relocation_volume,
             grow_storage_gib=decision.grow_storage_gib,
+            backup_family_request=decision.backup_family_request,
+            backup_family_size_bytes=family["sourceSizeBytes"] if family else None,
             backup_retry_after=retry_after.isoformat() if retry_after else None,
             backup_retry_minutes=retry_minutes,
             render_digest=render_digest,
@@ -2323,7 +2501,7 @@ async def _reconcile_row(
         )
         hold_active = observation.statefulset_exists and observation.statefulset_hold_kind is not None
         manifests = render_cell_manifests(spec)
-        if decision.delete_claim:
+        if decision.delete_claim or not growth_accepted:
             # D4: a claim deleted this pass is not applied again. This pass
             # renders the deleted claim's class, and an unused claim is gone
             # at once, so the apply would recreate it on the old class. The
@@ -2415,6 +2593,9 @@ async def _reconcile_row(
                     cluster.apply_all([render_export_verification_secret(spec, export_item, verify_url)])
                 _run_cell_job(cluster, row.cell_id, render_export_job(
                     spec, export_item, size, part_urls=part_urls, deadline_seconds=deadline), job_refused)
+            if family is not None:
+                cluster.apply_all([render_backup_family_secret(spec, namespace=local.reservation_namespace, token=family["token"],
+                    physical_uuid=family["physicalSourceUUID"])])
             if decision.create_snapshot and local is not None:
                 _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
                               job_refused)
@@ -2602,9 +2783,10 @@ def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservati
     sizes only, never content."""
 
     memory.growth_verdicts[row.cell_id] = decision.storage_growth
-    used, total = observation.backup_job_used_bytes, observation.backup_job_total_bytes
+    used = observation.backup_job_used_bytes if observation.backup_job_used_bytes is not None else "unknown"
+    total = observation.backup_job_total_bytes if observation.backup_job_total_bytes is not None else "unknown"
     level = logging.INFO if decision.storage_growth == GROWTH_NOT_NEEDED else logging.WARNING
-    logger.log(level, "cellctl: cell %s's volume is %d of %d bytes used at %d GiB: %s%s", row.cell_id, used, total,
+    logger.log(level, "cellctl: cell %s's volume is %s of %s bytes used at %d GiB: %s%s", row.cell_id, used, total,
                row.size_gib, decision.storage_growth,
                f" to {decision.grow_storage_gib} GiB" if decision.grow_storage_gib is not None else "")
 
@@ -2617,7 +2799,8 @@ def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
 
     if decision.hold_kind == SNAPSHOT_BACKUP:
         return {
-            "claim_name": hold_job_name(CLONE_CLAIM_NAME, spec.hold_started_at),
+            "claim_name": snapshot_backup_name(CLONE_CLAIM_NAME, spec.cell_id, spec.hold_started_at,
+                FamilyRequest.parse(spec.backup_family_request) if spec.backup_family_request else None),
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
     if decision.hold_kind == MOVE or (spec.local_volume and decision.hold_kind == "upgrade"):

@@ -28,6 +28,9 @@ from test_working_set_carry import seed_ordinary_notes
 from exomem import commands, lexstore, working_set_heat, working_set_index, working_set_runtime
 from exomem.governance.principal import request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 KB = "Knowledge Base"
 WORKSHOP = f"{KB}/Notes/Research/Workshop"
 CLEANING = f"{WORKSHOP}/smooth-chain-cleaning.md"

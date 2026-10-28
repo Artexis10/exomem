@@ -41,6 +41,9 @@ from exomem.governance import egress
 from exomem.governance.principal import request_scope
 from exomem.vault import content_hash
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 SLED = "Knowledge Base/Products/Cargo Sled.md"
 MARIT = "Knowledge Base/Entities/People/Marit Solheim.md"
 NAMELESS = "wie geht es dem Schlitten"

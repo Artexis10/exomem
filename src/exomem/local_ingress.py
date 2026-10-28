@@ -69,6 +69,9 @@ class LocalGrant:
     client_id: str
     session_id: str
     origin_session: OriginSessionBinding | None = None
+    #: The authority that verified this grant, so a later check in the same request rechecks
+    #: the bearer through it instead of building another one.
+    authority: Any = field(default=None, repr=False, compare=False)
 
 
 _GRANT: ContextVar[LocalGrant | None] = ContextVar("exomem_local_ingress_grant", default=None)
@@ -160,6 +163,7 @@ class LocalCredentialVerifier:
             origin_session=OriginSessionBinding(
                 session_id=record.session_id, generation=record.generation, audience=record.audience,
             ),
+            authority=authority,
         )
 
 

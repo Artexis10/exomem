@@ -585,6 +585,7 @@ def _fresh_session_index(vault: Path) -> None:
     working_set_index.WorkingSetIndex(vault).rebuild()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_named_synthesis_gets_its_own_home_on_the_first_pass(vault: Path, enabled) -> None:
     with request_scope(owner_principal(surface="mcp")):
         pages = _antecedents(vault)

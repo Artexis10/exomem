@@ -196,6 +196,11 @@ def test_live_ack_withdraws_graph_before_same_signature_fanout(
 
     assert handoff == [(False, False)]
     assert freshness.external_pending(vault) is False
+    # The watcher is a background caller: it stops at queued and the drain
+    # converges the page, while the withdrawn graph serves no stale link.
+    assert graph.available() is False
+    assert a_rel in {receipt.rel_path for receipt in deferred_index.snapshot_graph(vault)}
+    file_watcher.index_sync.drain_graph_work(vault)
     assert graph.available() is True
     assert not any(
         edge["relation_type"] == "links_to" for edge in graph.edges(source_path=a_rel)
@@ -1168,7 +1173,7 @@ def test_seed_replays_suppressed_self_write(
             rel = target.relative_to(vault).as_posix()
             file_watcher.register_self_delete(vault, [rel])
             watcher._record(target, deleted=True)
-        assert watcher._drain() == ([], [], [], 0, False, False)
+        assert watcher._drain() == ([], [], [], 0, False)
     finally:
         release_seed.set()
         seed_thread.join(timeout=2.0)

@@ -59,7 +59,10 @@ def _model_residency() -> dict[str, Any]:
         "module_loaded": True,
         "embeddings": getattr(embeddings, "_MODEL", None) is not None,
         "reranker": getattr(embeddings, "_RERANKER", None) is not None,
-        "clip": getattr(embeddings, "_CLIP_MODEL", None) is not None,
+        "clip": (
+            getattr(embeddings, "_CLIP_MODEL", None) is not None
+            or getattr(embeddings, "_CLIP_QUERY_MODEL", None) is not None
+        ),
         **policy,
     }
 
