@@ -44,10 +44,12 @@ from . import (
     context_catalogue,
     context_roles,
     find_types,
+    homes,
     lifecycle_statuses,
     project_keys,
     source_taxonomy,
     state_paths,
+    topic_carriers,
     vocabulary_resolution,
     working_set,
     working_set_index,
@@ -58,6 +60,7 @@ from .activation_result import AMBIGUOUS, INDEX_WARMING, UNRESOLVED, WITHHELD
 from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
+from .vocabulary import registry
 from .working_set_resolve import AnchorFacts, ResolvedAnchor, anchor_ref, anchor_visible
 from .working_set_runtime import CACHE_SIZE, READY, UNAVAILABLE
 
@@ -244,6 +247,10 @@ class CallerView:
     domains_admitted: bool
     #: Whether the caller may read the project registry. Without it no view reads that registry.
     projects_admitted: bool
+    #: Whether the caller may read the `topic-carriers` overlay. Without it no carrier files an entry.
+    carriers_admitted: bool = False
+    #: Whether the caller may read the `homes` overlay. Without it no home files an entry.
+    homes_admitted: bool = False
 
     @property
     def restricted(self) -> bool:
@@ -275,21 +282,26 @@ class CallerView:
         projects_admitted = visible is None or egress.release_level_for_path_only(
             root, project_keys.registry_relpath(), principal=principal, purpose=declared
         ) >= egress.LEVEL_FULL
-        return cls(visible, declared, binding, _domains_admitted(root, principal, purpose), projects_admitted)
+        return cls(
+            visible, declared, binding, _registry_admitted(root, principal, purpose, source_taxonomy.DOMAIN_SPEC),
+            projects_admitted, _registry_admitted(root, principal, purpose, topic_carriers.SPEC),
+            _registry_admitted(root, principal, purpose, homes.SPEC),
+        )
 
 
-def _domains_admitted(
-    vault_root: Path, principal: principal_module.RequestPrincipal | None, purpose: str | None
+def _registry_admitted(
+    vault_root: Path, principal: principal_module.RequestPrincipal | None, purpose: str | None,
+    spec: registry.RegistrySpec,
 ) -> bool:
-    """Whether the caller may read the domain registry: the admission that `schema_memory` asks for."""
+    """Whether the caller may read one registry: the admission that `schema_memory` asks for."""
     from .vocabulary.contract import selected_admission_refusal
 
     if principal is None and purpose is None:
-        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
+        return selected_admission_refusal(vault_root, spec) is None
     # The admission reads the bound principal, so it is bound with the purpose, as `read_view` binds it.
     who = principal if principal is not None else principal_module.effective_principal()
     with principal_module.request_scope(who.with_purpose(purpose)):
-        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
+        return selected_admission_refusal(vault_root, spec) is None
 
 
 def _digest(text: str) -> str:
@@ -316,7 +328,7 @@ class _Registries:
 
     @property
     def digest(self) -> str:
-        """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys.
+        """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys, the carriers and the homes.
 
         Only the owner's map cache keys on it, and only an owner's request reads it, because it reads the
         project registry whatever the caller may read. A generation never does: it covers the served rows alone.
@@ -325,7 +337,8 @@ class _Registries:
             domains = [self.taxonomy.domains[key].as_dict() for key in sorted(self.taxonomy.domains)]
             aliases = sorted(self.taxonomy.domain_aliases.items())
             projects = project_keys.load_project_registry(self.vault_root).content_hash
-            payload = json.dumps([domains, aliases, projects], sort_keys=True)
+            carriers = topic_carriers.load(self.vault_root).content_hash
+            payload = json.dumps([domains, aliases, projects, carriers, homes.load(self.vault_root).content_hash], sort_keys=True)
             self._digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return self._digest
 
@@ -523,7 +536,11 @@ def _world(
     # The join runs over the visible entries only: a relation to an entry the caller cannot see adds nothing.
     # It resolves through the domain registry, so a caller who may not read the registry joins no topic.
     joined = (
-        catalogue.memberships(entries, projects=caller.projects_admitted).topics if caller.domains_admitted else {}
+        catalogue.memberships(
+            entries, projects=caller.projects_admitted, carriers=caller.carriers_admitted, homes=caller.homes_admitted,
+        ).topics
+        if caller.domains_admitted
+        else {}
     )
     # An entry with no activity of its own (a project anchor) takes its project's newest visible page.
     project_activity: dict[str, str] = {}
@@ -742,7 +759,9 @@ def _profile_candidates(
     if prepared.target.kind == PROFILE_ANCHOR:
         chosen = [entry for entry in entries if _names_anchor(_row(entry, (), entry.activity), prepared.key)]
     else:
-        joined = catalogue.memberships(entries, projects=caller.projects_admitted).topics
+        joined = catalogue.memberships(
+            entries, projects=caller.projects_admitted, carriers=caller.carriers_admitted, homes=caller.homes_admitted,
+        ).topics
         chosen = [entry for entry in entries if prepared.key in joined.get(entry.entry_id, ())]
     ids = {entry.entry_id for entry in chosen}
     threads = {entry.thread_key for entry in chosen if entry.kind == KIND_THREAD}
@@ -1495,7 +1514,7 @@ def _served_key(
     # The admissions are part of the key: a guard that decides under other admissions finds no record.
     return (
         str(Path(vault_root)), ref, caller.binding, caller.domains_admitted, caller.projects_admitted,
-        generation, continuation,
+        caller.carriers_admitted, caller.homes_admitted, generation, continuation,
     )
 
 

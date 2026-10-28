@@ -840,6 +840,14 @@ class SemanticContractResult:
 
 ERROR_FINDING_LIMIT = 3
 
+# The validate form writers name in remediation text: the `validate_only`
+# parameter that edit and creation tools take by default.
+VALIDATE_FORM = "validate_only=true"
+
+# Tool parameter spellings fixed by the tool signatures, not registry vocabulary.
+# A writer operation absent here validates with VALIDATE_FORM.
+_OPERATION_VALIDATE_FORMS = MappingProxyType({"observe": "operation=validate"})
+
 
 def blocking_finding_text(finding: ContractFinding) -> str:
     text = finding.code
@@ -876,7 +884,8 @@ def blocking_reason(
     rendered = "; ".join(blocking_finding_text(item) for item in shown)
     omitted = len(findings) - len(shown)
     if omitted:
-        rendered += f"; +{omitted} more (validate_only returns the full set)"
+        validate_form = _OPERATION_VALIDATE_FORMS.get(result.operation, VALIDATE_FORM)
+        rendered += f"; +{omitted} more ({validate_form} returns the full set)"
     return f"{prefix}: {rendered}"
 
 
@@ -5238,9 +5247,11 @@ def _disposition_finding(
     disposition: RelationDisposition,
     *,
     existing: bool = True,
+    operation: str = "edit",
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
+    validate_form = _OPERATION_VALIDATE_FORMS.get(operation, VALIDATE_FORM)
     return ContractFinding(
         code=(
             "RELATION_DISPOSITION_STALE"
@@ -5262,11 +5273,11 @@ def _disposition_finding(
         # test_disposition_remediation_is_route_neutral is the ceiling to
         # respect when editing it.
         remediation=(
-            ("Fix: add a qualifying typed relation. " + RELATION_REVIEW_STABLE_ID_REMEDIATION)
+            ("Add a qualifying typed relation. " + RELATION_REVIEW_STABLE_ID_REMEDIATION)
             if existing and page.identity_kind == "path"
             else (
-                "Fix: add a qualifying typed relation. Retriggers: "
-                "validate_only=true; re-issue the same edit with "
+                "Add a qualifying typed relation. Retriggers: "
+                f"{validate_form}; re-issue the same edit with "
                 "transition_token=<returned>, "
                 "relation_disposition=\"reviewed_none\", "
                 "relation_review_hash=<returned>, "
@@ -5274,8 +5285,8 @@ def _disposition_finding(
             )
             if existing
             else (
-                "Fix: add a qualifying typed relation. Retriggers: "
-                "call validate_only=true, then "
+                "Add a qualifying typed relation. Retriggers: "
+                f"call {validate_form}, then "
                 "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
                 "draft_hash=<returned draft_hash>, draft_token=<returned "
                 "draft_token>, relation_disposition=\"reviewed_none\", "
@@ -5453,7 +5464,10 @@ def _raw_findings(
     findings.extend(_page_rule_findings(page, contracts, corpus))
     if disposition is not None:
         disposition_finding = _disposition_finding(
-            page, disposition, existing=before is not None or mode == "posthoc"
+            page,
+            disposition,
+            existing=before is not None or mode == "posthoc",
+            operation=operation,
         )
         if disposition_finding is not None:
             findings.append(disposition_finding)
