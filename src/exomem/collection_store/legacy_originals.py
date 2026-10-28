@@ -242,7 +242,7 @@ def backfill(writer, check):
 
 def needs_replica_copy(root, conn):
     """A same-head backfill must reach the replica before its only original file is stamped."""
-    from . import connection, replica
+    from . import connection, replica, schema
 
     def headers(reader):
         return tuple(reader.execute("SELECT key,json_extract(value,'$.sha256'),"
@@ -255,5 +255,8 @@ def needs_replica_copy(root, conn):
     path = replica.replica_path(root)
     if not path.exists():
         return True
-    with closing(connection.open_reader(path)) as reader:
-        return headers(reader) != expected
+    reader, found = connection._open_read_only(path, connection.BUSY_TIMEOUT_MS)
+    with closing(reader):
+        # A replica an earlier schema published is copied at this one; refusing it would stop
+        # the takeover that just migrated the live store on every retry.
+        return found < schema.SCHEMA_VERSION or headers(reader) != expected
