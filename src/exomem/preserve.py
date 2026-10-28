@@ -53,10 +53,12 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     document_newline,
+    folder_split_warnings,
     kb_root,
     parse_frontmatter,
     prepend_log_entry,
     read_guarded_text,
+    respell_new_path,
     with_newline,
     yaml_scalar,
 )
@@ -509,8 +511,17 @@ def admit_destination(
 
 
 def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
-    """The Evidence family folder for already-valid destination segments."""
-    return kb_root(vault_root) / "Evidence" / scope / category
+    """The Evidence family folder for already-valid destination segments.
+
+    Each folder on the way takes an existing sibling's spelling when it matches
+    by `vault_name_key`, so scope `food` lands in an existing `Food`.
+    """
+    root = kb_root(vault_root)
+    relative = respell_new_path(
+        vault_root, (root / "Evidence" / scope / category).relative_to(vault_root).as_posix()
+    )
+    evidence, scope_spelled, category_spelled = relative.split("/")[-3:]
+    return root / evidence / scope_spelled / category_spelled
 
 
 def evidence_artifact(
@@ -640,7 +651,9 @@ def preserve(
         artifact_bytes = None
         artifact_text = content
 
-    warnings: list[str] = []
+    warnings: list[str] = folder_split_warnings(
+        vault_root, evidence_folder(vault_root, scope_safe, category_safe)
+    )
     written_artifact = False
     sidecar_rel: str | None = None
     sidecar_ref: str | None = None
@@ -917,6 +930,9 @@ def preserve(
     finally:
         artifact_stage.close()
 
+    from .media_store import enqueue_offload
+
+    enqueue_offload(vault_root, artifact_path)
     return PreserveResult(
         path=artifact_path.relative_to(vault_root).as_posix(),
         sidecar_path=sidecar_rel,

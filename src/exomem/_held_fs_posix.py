@@ -25,6 +25,7 @@ from .held_fs import (
     HeldResult,
     SagaRecord,
     StableIdentity,
+    name_variants,
     write_parts,
 )
 
@@ -86,6 +87,23 @@ def _names(descriptor: int) -> Iterator[str]:
         _close(scan_descriptor)
 
 
+class _NameVariantError(OSError):
+    """A folder to create shares its `vault_name_key` with an existing sibling."""
+
+    def __init__(self, existing: str) -> None:
+        super().__init__(errno.EEXIST, "a sibling holds this name in another spelling")
+        self.existing = existing
+
+
+def _refuse_name_variant(descriptor: int, name: str) -> None:
+    # A local structural invariant, like a parser check: one folder holds no two
+    # names that a case-folding host would merge. It lists the parent once, and
+    # only when a folder is about to be created.
+    variants = name_variants(_names(descriptor), name)
+    if variants:
+        raise _NameVariantError(variants[0])
+
+
 class _OpenHow(Structure):
     _fields_ = [("flags", c_uint64), ("mode", c_uint64), ("resolve", c_uint64)]
 
@@ -131,6 +149,13 @@ def _same_object(left: StableIdentity, right: StableIdentity) -> bool:
 
 
 def _error(error: OSError) -> HeldFsError:
+    if isinstance(error, _NameVariantError):
+        return HeldFsError(
+            "PATH_VARIANT_EXISTS",
+            "a folder with this name in another spelling exists",
+            error,
+            existing_leaf=error.existing,
+        )
     if error.errno == errno.EXDEV:
         return HeldFsError("CROSS_DEVICE", "operation requires one filesystem", error)
     if error.errno in {errno.ELOOP, errno.ENOTDIR}:
@@ -333,6 +358,7 @@ class PosixHeldFilesystem(HeldFilesystem):
         create: bool = False,
         exclusive: bool = False,
         access: str = "read",
+        scratch: bool = False,
     ) -> HeldResult[HeldDirectory]:
         parts = _parts(relative)
         if parts is None or access not in {"read", "flush", "mutate"}:
@@ -343,10 +369,14 @@ class PosixHeldFilesystem(HeldFilesystem):
             return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
         descriptor = _dup(self.descriptor)
         parent_descriptor: int | None = None
+        # A folder this call just made is empty, so its child needs no listing.
+        check_variants = not scratch
         try:
             for index, part in enumerate(parts):
                 final = index == len(parts) - 1
                 if exclusive and final:
+                    if check_variants:
+                        _refuse_name_variant(descriptor, part)
                     _mkdir(part, 0o700, dir_fd=descriptor)
                     try:
                         child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
@@ -362,8 +392,11 @@ class PosixHeldFilesystem(HeldFilesystem):
                     except FileNotFoundError:
                         if not create or exclusive:
                             raise
+                        if check_variants:
+                            _refuse_name_variant(descriptor, part)
                         _mkdir(part, 0o700, dir_fd=descriptor)
                         child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
+                        check_variants = False
                 if index == len(parts) - 1:
                     parent_descriptor = descriptor
                 else:

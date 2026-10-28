@@ -28,6 +28,7 @@ from typing import Any, BinaryIO
 from . import __version__, reserved_paths, restore_journal, state_migration, state_paths
 from .governance import connector_boundary
 from .governance.principal import effective_principal
+from .held_fs import vault_name_key
 from .kbdir import kb_dirname
 
 MANIFEST_NAME = "exomem-manifest.json"
@@ -762,14 +763,14 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
     folded: set[str] = set()
     directory_spellings: dict[str, str] = {}
     for snapshot in snapshots:
-        collision_key = unicodedata.normalize("NFC", snapshot.path).casefold()
+        collision_key = vault_name_key(snapshot.path)
         if collision_key in folded:
             _fail("CASE_COLLISION", "vault paths collide on a case-insensitive filesystem")
         folded.add(collision_key)
         parts = PurePosixPath(snapshot.path).parts
         for index in range(1, len(parts)):
             spelling = "/".join(parts[:index])
-            directory_key = unicodedata.normalize("NFC", spelling).casefold()
+            directory_key = vault_name_key(spelling)
             prior = directory_spellings.setdefault(directory_key, spelling)
             if prior != spelling:
                 _fail("CASE_COLLISION", "vault directories collide by case")
@@ -919,8 +920,10 @@ def export_quiesced_vault(
             _fail("UNSAFE_ARTIFACT_ROOT", "artifact root must be a regular directory")
 
     _flush_collection_replica(source_root)
+    from .media_store import local_originals
+
     guard = mutation_guard if mutation_guard is not None else nullcontext()
-    with guard:
+    with guard, local_originals(source_root, (kb_dirname(),)):
         armed_requirement = connector_boundary.read_requirement(source_root)
         if connector_boundary.snapshot(source_root) is not None:
             state_migration.require_vault_state_ready(source_root)
@@ -991,17 +994,20 @@ def stream_quiesced_vault(
     if not connector_boundary.unrestricted(source_root, effective_principal()):
         _fail("EXPORT_UNAVAILABLE", "whole-vault export is unavailable")
     _flush_collection_replica(source_root)
-    armed_requirement = connector_boundary.read_requirement(source_root)
-    if connector_boundary.snapshot(source_root) is not None:
-        state_migration.require_vault_state_ready(source_root)
-    snapshots = _enumerate_source(source_root, effective_limits)
-    manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
-    _write_export_archive(sink, snapshots, manifest)
-    repeated = _enumerate_source(source_root, effective_limits)
-    if [(item.path, item.size, item.sha256) for item in snapshots] != [
-            (item.path, item.size, item.sha256) for item in repeated]:
-        _fail("SOURCE_CHANGED_DURING_EXPORT", "vault contents changed during export")
-    return manifest
+    from .media_store import local_originals
+
+    with local_originals(source_root, (kb_dirname(),)):
+        armed_requirement = connector_boundary.read_requirement(source_root)
+        if connector_boundary.snapshot(source_root) is not None:
+            state_migration.require_vault_state_ready(source_root)
+        snapshots = _enumerate_source(source_root, effective_limits)
+        manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
+        _write_export_archive(sink, snapshots, manifest)
+        repeated = _enumerate_source(source_root, effective_limits)
+        if [(item.path, item.size, item.sha256) for item in snapshots] != [
+                (item.path, item.size, item.sha256) for item in repeated]:
+            _fail("SOURCE_CHANGED_DURING_EXPORT", "vault contents changed during export")
+        return manifest
 
 
 def _json_no_duplicates(raw: bytes) -> Any:
@@ -1104,7 +1110,7 @@ def _preflight_entries(
             _fail("UNSAFE_ARCHIVE_PATH", "archive entries must use normalized paths")
         if normalized in by_path:
             _fail("DUPLICATE_ARCHIVE_PATH", "archive contains a duplicate path")
-        collision_key = unicodedata.normalize("NFC", normalized).casefold()
+        collision_key = vault_name_key(normalized)
         parent_parts = PurePosixPath(collision_key).parts
         parent_keys = {"/".join(parent_parts[:index]) for index in range(1, len(parent_parts))}
         if parent_keys & folded or any(
@@ -1116,7 +1122,7 @@ def _preflight_entries(
         parts = PurePosixPath(normalized).parts
         for index in range(1, len(parts)):
             spelling = "/".join(parts[:index])
-            directory_key = unicodedata.normalize("NFC", spelling).casefold()
+            directory_key = vault_name_key(spelling)
             prior = directory_spellings.setdefault(directory_key, spelling)
             if prior != spelling:
                 _fail("CASE_COLLISION", "archive directories collide by case")
@@ -1264,7 +1270,7 @@ def _validate_manifest_records(
             _fail("UNSAFE_ARCHIVE_PATH", "manifest contains an unsafe file path")
         if path in seen:
             _fail("DUPLICATE_ARCHIVE_PATH", "manifest contains a duplicate file path")
-        collision_key = unicodedata.normalize("NFC", path).casefold()
+        collision_key = vault_name_key(path)
         if collision_key in folded:
             _fail("CASE_COLLISION", "manifest paths collide on a case-insensitive filesystem")
         seen.add(path)

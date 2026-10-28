@@ -260,7 +260,8 @@ def test_handoff_needs_the_route_capsule_for_the_same_login(cell):
 
     unverified, download = _run(app, scenario)
     assert "no verified gateway origin" in json.dumps(unverified)
-    assert "only hold=true uploads" in json.dumps(download)
+    # A download of a path that is no readable original is refused without saying whether it exists.
+    assert "ORIGINAL_UNAVAILABLE" in json.dumps(download)
 
 
 @pytest.mark.parametrize("change", ["expired", "route_audience", "other_cell", "long_life", "extra_claim",

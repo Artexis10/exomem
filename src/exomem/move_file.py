@@ -20,12 +20,14 @@ import hashlib
 import logging
 import time
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import (
     call_spans,
+    originals,
     reserved_paths,
     semantic_index,
     semantic_writes,
@@ -36,6 +38,7 @@ from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
+    FrontmatterError,
     InboundLink,
     LogWritePlan,
     PathGuard,
@@ -45,11 +48,14 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     find_inbound_wikilinks,
+    folder_split_warnings,
     in_append_only_tree,
     in_curated_tree,
+    parse_frontmatter,
     plan_log_entry,
     read_guarded_text,
     resolve_under_vault,
+    respell_new_path,
     walk_vault_md,
     write_log_entry,
 )
@@ -170,6 +176,11 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool
             ) from None
         if error.code == "DESTINATION_EXISTS":
             raise MoveFileError("DEST_EXISTS", "destination already exists") from None
+        if error.code == "PATH_VARIANT_EXISTS":
+            raise MoveFileError(
+                "PATH_VARIANT_EXISTS",
+                "a destination folder already exists in another case or Unicode form",
+            ) from None
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
@@ -219,7 +230,8 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
             return None
-        return (rel, binary_rel) if (vault_root / binary_rel).is_file() else None
+        present = (vault_root / binary_rel).is_file() or originals.evicted(vault_root, binary_rel)
+        return (rel, binary_rel) if present else None
     page_rel = f"{rel}.md"
     return (page_rel, rel) if (vault_root / page_rel).is_file() else None
 
@@ -233,7 +245,6 @@ def _repoint_artifact(old_binary: str, new_binary: str):
 
     def transform(text: str) -> str:
         from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
-        from .vault import parse_frontmatter
 
         frontmatter, _body, block = parse_frontmatter(text, strict=True)
         if block is None:
@@ -243,6 +254,14 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         for field in ("evidence_file", "data_file"):
             if frontmatter.get(field) == old_binary:
                 changes[field] = new_binary
+        descriptor = frontmatter.get("governance_companion")
+        if isinstance(descriptor, dict) and descriptor.get("artifact_path") == old_binary:
+            moved_descriptor = {**descriptor, "artifact_path": new_binary}
+            if "original_filename" in descriptor:
+                moved_descriptor["original_filename"] = Path(new_binary).name
+            changes["governance_companion"] = moved_descriptor
+        if frontmatter.get("original_filename") == Path(old_binary).name:
+            changes["original_filename"] = Path(new_binary).name
         protection = frontmatter.get("raw_protection")
         if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
             changes["raw_protection"] = {**protection, "artifact_path": new_binary}
@@ -262,7 +281,7 @@ class InboundRewrite:
 
     path: str
     absolute: Path
-    #: The append-only tree that holds the page, or None for a mutable page.
+    #: The append-only tree that refuses the rewrite, or None when the move may write it.
     append_only: str | None
     #: Links whose bytes the move changes; zero leaves the page untouched.
     changes: int
@@ -300,8 +319,53 @@ def plan_inbound_rewrites(
         # the opposite of what the guard is for.
         if rel.rsplit("/", 1)[-1] == "index.md":
             append_tree = None
+        # Only Evidence takes this exception; a Sources page keeps the refusal.
+        elif append_tree == "Evidence" and n_changed:
+            repointed = _repoint_back_references(text, old_rel, new_rel, n_changed)
+            if repointed is not None:
+                new_text, append_tree = repointed, None
         plans.append(InboundRewrite(rel, abs_file, append_tree, n_changed, new_text, guard))
     return plans
+
+
+def _repoint_back_references(text: str, old_rel: str, new_rel: str, changes: int) -> str | None:
+    """`text` with the move applied to its `ingested_into` field alone, or None.
+
+    `ingested_into` is the back-reference that note writes maintain on captured
+    material; it is not captured content. When every one of the `changes` links
+    sits in that field, the field is patched where the YAML parser places it,
+    so the body and every other field keep their bytes. Any other link, or a
+    page the parser cannot read, leaves the page refused as append-only.
+    Sources pages keep the refusal: only Evidence sidecars carry this
+    system-kept field that a folder merge must repoint.
+    """
+    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+    try:
+        frontmatter, _body, block = parse_frontmatter(text, strict=True)
+    except FrontmatterError:
+        return None
+    entries = frontmatter.get("ingested_into") if block is not None else None
+    if not isinstance(entries, list):
+        return None
+    repointed: list[Any] = []
+    moved = 0
+    for entry in entries:
+        if isinstance(entry, str):
+            entry, count = _rewrite_wikilinks(entry, old_rel, new_rel)
+            moved += count
+        repointed.append(entry)
+    if moved != changes:
+        return None
+    try:
+        result = splice_markdown_frontmatter(text, {"ingested_into": repointed})
+    except FrontmatterSpliceError:
+        return None
+    # The counts can agree while a link elsewhere stays behind (an escaped entry, a merge key);
+    # the page then still points at the old path, so it stays refused.
+    if _rewrite_wikilinks(result, old_rel, new_rel)[1]:
+        return None
+    return result
 
 
 def move_file(
@@ -318,6 +382,49 @@ def move_file(
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> MoveFileResult | MoveFileValidation:
+    with ExitStack() as originals_context:
+        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context)
+
+
+def _evicted_source(vault_root: Path, old_path: str) -> tuple[Path, str, originals.OriginalSnapshot] | None:
+    """An evicted original the caller may see; any other absent path stays NOT_FOUND."""
+    if originals.binding_for(vault_root) is None:
+        return None
+    try:
+        abs_path, rel_path = resolve_under_vault(vault_root, old_path, must_be_file=True)
+        stored = originals.original_state(vault_root, abs_path)
+    except (VaultPathError, reserved_paths.ReservedPathLeafError):
+        return None
+    from .governance import egress
+
+    visible = egress.restricted_release_filter(vault_root)
+    if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
+        return None
+    return abs_path, rel_path, stored
+
+
+def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: str) -> None:
+    """Hydrate an evicted original only once the move is about to rename it."""
+    from .media_store import local_originals
+
+    originals_context.enter_context(local_originals(vault_root, (rel,)))
+
+
+def _move_file_local(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    update_wikilinks: bool = True,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    promotion_reason: str | None = None,
+    content_transform: Callable[[str], str] | None = None,
+    extra_writes: tuple[PlannedWrite, ...] = (),
+    validate_only: bool = False,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
+    originals_context: ExitStack,
+) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
     `content_transform` lets a caller that owns a *declared* content change —
@@ -329,6 +436,7 @@ def move_file(
     caller's own registry updates commit with the move or not at all.
     A caller's binding witness is checked before rename and batch publication.
     """
+    stored_original = None
     try:
         old_abs, old_rel = resolve_under_vault(
             vault_root, old_path, must_exist=True, must_be_file=True, refuse_withheld=True
@@ -341,39 +449,43 @@ def move_file(
         canonical_source, logical_rel = resolve_under_vault(vault_root, old_path)
         if canonical_source.exists():
             raise MoveFileError(code=e.code, reason=e.reason) from e
-        # The literal (NFKC) spelling may simply be absent because the
-        # on-disk name is a different Unicode normalization -- a macOS-origin
-        # NFD name on a byte-exact filesystem (Linux ext4). Substitute the
-        # confirmed physical spelling and re-resolve, so every downstream
-        # read AND rename (which just open literal path strings, no further
-        # normalization) target the real file. Refuse outright, rather than
-        # guess, if two physical spellings collide.
-        try:
-            physical_rel = reserved_paths.resolve_physical_relative(vault_root, old_path)
-        except reserved_paths.ReservedPathLeafError as fallback_error:
-            if fallback_error.code == "AMBIGUOUS_PATH":
-                from .get_page import path_withheld
+        evicted_source = _evicted_source(vault_root, old_path)
+        if evicted_source is not None:
+            old_abs, old_rel, stored_original = evicted_source
+        else:
+            # The literal (NFKC) spelling may simply be absent because the
+            # on-disk name is a different Unicode normalization -- a macOS-origin
+            # NFD name on a byte-exact filesystem (Linux ext4). Substitute the
+            # confirmed physical spelling and re-resolve, so every downstream
+            # read AND rename (which just open literal path strings, no further
+            # normalization) target the real file. Refuse outright, rather than
+            # guess, if two physical spellings collide.
+            try:
+                physical_rel = reserved_paths.resolve_physical_relative(vault_root, old_path)
+            except reserved_paths.ReservedPathLeafError as fallback_error:
+                if fallback_error.code == "AMBIGUOUS_PATH":
+                    from .get_page import path_withheld
 
-                if path_withheld(vault_root, logical_rel):
+                    if path_withheld(vault_root, logical_rel):
+                        raise MoveFileError(code=e.code, reason=e.reason) from None
+                    raise MoveFileError(
+                        code="AMBIGUOUS_PATH",
+                        reason=(
+                            f"{old_path} matches more than one on-disk spelling; "
+                            "refusing to guess which"
+                        ),
+                    ) from None
+                raise MoveFileError(code=e.code, reason=e.reason) from e
+            try:
+                old_abs, old_rel = resolve_under_vault(
+                    vault_root, physical_rel, must_exist=True, must_be_file=True,
+                    refuse_withheld=True,
+                )
+            except VaultPathError as e2:
+                if e2.code == "NOT_FOUND":
+                    # Keep the caller's logical spelling in the absent response.
                     raise MoveFileError(code=e.code, reason=e.reason) from None
-                raise MoveFileError(
-                    code="AMBIGUOUS_PATH",
-                    reason=(
-                        f"{old_path} matches more than one on-disk spelling; "
-                        "refusing to guess which"
-                    ),
-                ) from None
-            raise MoveFileError(code=e.code, reason=e.reason) from e
-        try:
-            old_abs, old_rel = resolve_under_vault(
-                vault_root, physical_rel, must_exist=True, must_be_file=True,
-                refuse_withheld=True,
-            )
-        except VaultPathError as e2:
-            if e2.code == "NOT_FOUND":
-                # Keep the caller's logical spelling in the absent response.
-                raise MoveFileError(code=e.code, reason=e.reason) from None
-            raise MoveFileError(code=e2.code, reason=e2.reason) from e2
+                raise MoveFileError(code=e2.code, reason=e2.reason) from e2
     else:
         # The NFKC spelling opened, but an NFD twin beside it would make the
         # read door refuse this same path; refuse the move too rather than
@@ -397,7 +509,8 @@ def move_file(
                     ),
                 ) from None
     try:
-        reserved_paths.inspect_generic_file(vault_root, old_rel, physical=True)
+        if stored_original is None:
+            reserved_paths.inspect_generic_file(vault_root, old_rel, physical=True)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
@@ -417,6 +530,19 @@ def move_file(
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
+    respelled = respell_new_path(vault_root, new_rel, replacing=old_rel)
+    if respelled == old_rel != new_rel:
+        # Re-spelling led back to the file's own folder: only moving that
+        # folder can change its spelling.
+        raise MoveFileError(
+            code="PATH_VARIANT_EXISTS",
+            reason=(
+                f"folder already exists as '{old_rel.rsplit('/', 1)[0]}'; "
+                "move that folder to change its spelling"
+            ),
+        )
+    if respelled != new_rel:
+        new_abs, new_rel = vault_root / respelled, respelled
     from .governance import raw_protection
 
     if raw_protection.marked(old_rel) and not raw_protection.marked(new_abs.name):
@@ -463,7 +589,7 @@ def move_file(
         collection_authority.refuse_view_paths(
             vault_root, (old_rel, new_rel, *paired_binary), MoveFileError
         )
-        if (vault_root / paired_binary[1]).exists():
+        if (vault_root / paired_binary[1]).exists() or originals.evicted(vault_root, paired_binary[1]):
             raise MoveFileError(
                 code="DEST_EXISTS",
                 reason=(
@@ -641,7 +767,7 @@ def move_file(
     if limited_mover:
         inbound = [hit for hit in inbound if visible(hit.path)]
 
-    warnings: list[str] = []
+    warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
     files_touched: list[str] = []
     wikilinks_updated = 0
     # For any other mover, every linking page is rewritten, including pages the
@@ -990,6 +1116,8 @@ def move_file(
                     ),
                 )
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
+            if not preflight.should_block:  # commit_move refuses a blocked move before any rename.
+                _materialize_originals(vault_root, originals_context, old_rel)
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )
@@ -1018,14 +1146,14 @@ def move_file(
         log_rel_no_ext, log_body, log_plan = plan_activity_log()
         if validate_only:
             try:
-                raw_source = reserved_paths.read_generic_bytes(
-                    vault_root, old_rel, physical=True
-                ).data
+                source_hash = (stored_original.binary_sha256 if stored_original is not None
+                               else hashlib.sha256(reserved_paths.read_generic_bytes(
+                                   vault_root, old_rel, physical=True
+                               ).data).hexdigest())
             except reserved_paths.ReservedPathLeafError as error:
                 raise MoveFileError(
                     "MOVE_FAILED", "move source changed during canonical validation"
                 ) from error
-            source_hash = hashlib.sha256(raw_source).hexdigest()
             return validation_result(
                 source_hash=source_hash,
                 destination_hash=source_hash,
@@ -1052,6 +1180,7 @@ def move_file(
             ) from error
         if _validate_prepared_bindings is not None:
             _validate_prepared_bindings()
+        _materialize_originals(vault_root, originals_context, old_rel)
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:

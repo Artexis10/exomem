@@ -87,6 +87,22 @@ def recover_from_trash(
     validate_only: bool = False,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RecoverResult:
+    from .media_store import local_originals
+
+    with local_originals(vault_root, (trash_path,)):
+        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews)
+
+
+def _recover_from_trash_local(
+    vault_root: Path,
+    *,
+    trash_path: str,
+    restore_path: str | None = None,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    validate_only: bool = False,
+    relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
+) -> RecoverResult:
     try:
         trash_abs, trash_rel = resolve_under_vault(
             vault_root, trash_path, must_exist=True

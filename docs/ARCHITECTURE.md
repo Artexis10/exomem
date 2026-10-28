@@ -70,8 +70,10 @@ retrieval evaluation or focused test intentionally changes behavior.
 ## Derived data
 
 Sidecars are classified explicitly rather than assumed equivalent. Embedding,
-CLIP, lexical, graph, freshness, generated-frame, job, and runtime SQLite state
-is rebuildable. User-visible media Markdown and `.review-state.json` are portable
+CLIP, lexical, graph, freshness, generated-frame, and runtime SQLite state
+is rebuildable. Media job rows and cache identities are rebuildable, but pending
+media-store protection records in the same database are authoritative. Keep that
+database until durable sidecar references replace those records. User-visible media Markdown and `.review-state.json` are portable
 because they preserve authored/extracted context or durable review decisions.
 The versioned portability registry is the authority for new sidecars.
 

@@ -20,13 +20,21 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from starlette.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
 
 from . import (
     artifact_recovery,
     auth_sessions,
     cf_access,
     local_ingress,
+    media_store,
+    originals,
     reserved_paths,
     upload_handoff,
     upload_sessions,
@@ -319,6 +327,22 @@ def load_transfer_config() -> TransferConfig:
     )
 
 
+def _download_target(vault_root: Path, path: str) -> tuple[Path, str]:
+    """Resolve a download path; an evicted original resolves by its binding (D1)."""
+    try:
+        return resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
+    except VaultPathError as missing:
+        if missing.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
+            raise
+        try:
+            abs_path, rel = resolve_under_vault(vault_root, path, must_be_file=True)
+            if originals.evicted(vault_root, rel):
+                return abs_path, rel
+        except (VaultPathError, reserved_paths.ReservedPathLeafError):
+            pass
+        raise missing
+
+
 def download_principal(
     request: Request, config: TransferConfig
 ) -> principal_module.RequestPrincipal:
@@ -528,6 +552,106 @@ def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bear
             except ValueError:
                 return _handoff_unavailable()
             return await _receive_ticket_upload(vault_root, request, claimed)
+
+
+class _CloudOriginalDownloadResponse(Response):
+    """Send one verified original to the login the gateway proved; this response owns the private copy.
+
+    The route returns before the body is sent, so this response binds the
+    request's origin again for the checks that run while it streams.
+    """
+
+    def __init__(self, vault_root: Path, path: str, request_origin):
+        super().__init__(headers=_RECOVERY_HEADERS)
+        self.vault_root = vault_root
+        self.path = path
+        self.request_origin = request_origin
+
+    async def __call__(self, scope, receive, send):
+        from starlette.datastructures import Headers
+
+        from . import cloud_origin
+
+        started = False
+        try:
+            with cloud_origin.bound(self.request_origin):
+                who = cloud_origin.with_origin(
+                    principal_module.cloud_owner_principal(self.request_origin.origin.cell_id, surface="mcp"))
+                if not await auth_sessions.origin_session_active(who):
+                    raise artifact_recovery.RecoveryUnavailable
+                async with artifact_recovery.staged(self.vault_root, self.path, who) as (copied, descriptor, proofs):
+                    # Every answer, including a refused range, names the whole file's identity.
+                    identity = {
+                        **_RECOVERY_HEADERS,
+                        "x-exomem-sha256": descriptor["sha256"],
+                        "x-exomem-size": str(descriptor["size"]),
+                        "content-disposition": "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe=""),
+                    }
+                    ranges = Headers(scope=scope).getlist("range")
+                    if len(ranges) > 1 or "," in "".join(ranges):
+                        # One slice is the contract; repeated Range headers or a multipart answer are not offered.
+                        response = PlainTextResponse(status_code=416, headers={"content-range": f"bytes */{descriptor['size']}"})
+                    else:
+                        response = FileResponse(copied.private_path, media_type=descriptor["mime_type"],
+                                                stat_result=copied.private_path.stat())
+
+                    async def checked_send(message):
+                        nonlocal started
+                        if message["type"] == "http.response.start":
+                            if not await auth_sessions.origin_session_active(who):
+                                raise artifact_recovery.RecoveryUnavailable
+                            revision = await run_in_threadpool(
+                                artifact_recovery.require_current, self.vault_root, copied, who, byte_proofs=proofs)
+                            artifact_recovery.require_revision(self.vault_root, who, copied, revision, byte_proofs=proofs)
+                            headers = dict(message.get("headers", []))
+                            headers.update({key.encode(): value.encode("latin-1") for key, value in identity.items()})
+                            message = {**message, "headers": list(headers.items())}
+                            started = True
+                        await send(message)
+
+                    # A pathsend extension may consume the file after ASGI returns; cleanup must await the actual stream.
+                    extensions = {key: value for key, value in scope.get("extensions", {}).items() if key != "http.response.pathsend"}
+                    await response({**scope, "extensions": extensions}, receive, checked_send)
+        except (artifact_recovery.RecoveryUnavailable, reserved_paths.ReservedPathLeafError) as error:
+            if started:
+                raise
+            # An evicted original whose store cannot supply it is retryable; anything else says nothing about the path.
+            if isinstance(error, artifact_recovery.RecoveryBusy):
+                refusal = JSONResponse({"code": "ORIGINAL_BUSY", "reason": "other downloads are in progress; retry shortly"},
+                    status_code=503, headers={**_RECOVERY_HEADERS, "retry-after": "5"})
+            elif isinstance(error.__cause__, media_store.MediaStoreError):
+                refusal = JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "the original is stored off this cell and the store is unreachable"},
+                    status_code=503, headers=_RECOVERY_HEADERS)
+            else:
+                refusal = JSONResponse({"code": "ORIGINAL_NOT_FOUND", "reason": "no preserved original is readable at that path"},
+                    status_code=404, headers=_RECOVERY_HEADERS)
+            await refusal(scope, receive, send)
+
+
+def register_cloud_download_route(mcp_app: FastMCP, *, vault_root: Path, cell_bearer: Any) -> None:
+    """Register a Cloud cell's exact-original download, which only the gateway can reach.
+
+    A custom route sits outside the MCP bearer check, so this route checks the
+    cell bearer itself. It then requires the gateway's proof for this exact
+    path, and only then resolves the path or reads a byte.
+    """
+    from . import cloud_origin
+
+    def unavailable() -> JSONResponse:
+        return JSONResponse({"code": "DOWNLOAD_UNAVAILABLE", "reason": "this download is not available"},
+                            status_code=401, headers=_RECOVERY_HEADERS)
+
+    @mcp_app.custom_route("/download", methods=["GET"])
+    async def _cloud_download(request: Request) -> Response:
+        header = request.headers.get("authorization", "")
+        presented = header[len("Bearer "):].strip() if header.startswith("Bearer ") else ""
+        paths = request.query_params.getlist("path")
+        if not presented or not cell_bearer.matches(presented) or len(paths) != 1 or not paths[0]:
+            return unavailable()
+        request_origin = cloud_origin.verify_request(request.headers, download_path=paths[0])
+        if request_origin is None:
+            return unavailable()
+        return _CloudOriginalDownloadResponse(vault_root, paths[0], request_origin)
 
 
 def register_transfer_routes(
@@ -1128,9 +1252,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         # Spelled exactly as the resolver spells a path it cannot find.
         requested = path.strip().replace("\\", "/").lstrip("/")
         try:
-            abs_path, rel = resolve_under_vault(
-                vault_root, path, must_exist=True, must_be_file=True
-            )
+            abs_path, rel = _download_target(vault_root, path)
             # Release gate on the download TARGET after path resolution but before
             # the response snapshot is opened or its bytes are read (design D1: the
             # transfer routes bypass `invoke_command`, so they carry the gate
@@ -1146,9 +1268,17 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             ):
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
             try:
-                snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                # The grant route's pin: hydrate only after the release gate, and
+                # keep eviction out until the bytes are read.
+                with media_store.local_originals(vault_root, (rel,)):
+                    snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            except media_store.MediaStoreError:
+                return JSONResponse(
+                    {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},
+                    status_code=503,
+                )
             if not await auth_sessions.origin_session_active(who):
                 return JSONResponse(
                     {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},

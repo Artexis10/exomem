@@ -25,10 +25,11 @@ import hashlib
 import json
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types, reserved_paths, semantic_contract
+from . import media_types, originals, reserved_paths, semantic_contract
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -102,6 +103,25 @@ def delete_file(
     validate_only: bool = False,
     expected_hash: str | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
+    with ExitStack() as originals_context:
+        return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context)
+
+
+def _delete_file_local(
+    vault_root: Path,
+    *,
+    path: str,
+    confirm: bool,
+    force_orphan: bool = False,
+    force_superseded: bool = False,
+    allow_curated: bool = False,
+    expected_dead_inbound: list[str] | None = None,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+    validate_only: bool = False,
+    expected_hash: str | None = None,
+    originals_context: ExitStack,
+) -> DeleteFileResult | DeleteFileValidation:
     if not confirm:
         raise DeleteFileError(
             code="UNCONFIRMED",
@@ -113,14 +133,27 @@ def delete_file(
             ),
         )
 
+    stored_original = None
     try:
         abs_path, rel_path = resolve_under_vault(
             vault_root, path, must_exist=True, must_be_file=True, refuse_withheld=True
         )
     except VaultPathError as e:
-        raise DeleteFileError(code=e.code, reason=e.reason) from e
+        if e.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
+            raise DeleteFileError(code=e.code, reason=e.reason) from e
+        try:
+            abs_path, rel_path = resolve_under_vault(vault_root, path, must_be_file=True)
+            stored_original = originals.original_state(vault_root, abs_path)
+        except (VaultPathError, reserved_paths.ReservedPathLeafError):
+            raise DeleteFileError(code=e.code, reason=e.reason) from None
+        from .governance import egress
+
+        visible = egress.restricted_release_filter(vault_root)
+        if stored_original.state != "evicted" or (visible is not None and not visible(rel_path)):
+            raise DeleteFileError(code=e.code, reason=e.reason) from e
     try:
-        reserved_paths.inspect_generic_file(vault_root, rel_path)
+        if stored_original is None:
+            reserved_paths.inspect_generic_file(vault_root, rel_path)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
@@ -354,17 +387,17 @@ def delete_file(
                 "trash metadata destination could not be acquired safely",
             ) from None
 
-    if validate_only:
+    if validate_only or expected_hash is not None:
         try:
-            source_hash = hashlib.sha256(
-                reserved_paths.read_generic_bytes(vault_root, rel_path).data
-            ).hexdigest()
+            source_hash = (stored_original.binary_sha256 if stored_original is not None
+                           else hashlib.sha256(reserved_paths.read_generic_bytes(vault_root, rel_path).data).hexdigest())
         except reserved_paths.ReservedPathLeafError as error:
             raise DeleteFileError(
                 "DELETE_FAILED", "delete source changed during canonical validation"
             ) from error
         if expected_hash is not None and source_hash != expected_hash:
             raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
+    if validate_only:
         return DeleteFileValidation(
             DeleteFileResult(
                 path=rel_path,
@@ -428,6 +461,9 @@ def delete_file(
             code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             reason=str(error),
         ) from error
+    from .media_store import local_originals
+
+    originals_context.enter_context(local_originals(vault_root, (rel_path,)))
     from . import graph_sync
 
     try:
@@ -524,6 +560,11 @@ def delete_file(
     from .writer_lease import mark_active_mutation_committed
 
     mark_active_mutation_committed()
+
+    from .media_store import forget_original
+
+    # Explicit deletion retires the binding; cache eviction never calls here.
+    forget_original(vault_root, rel_path)
 
     if prior_markdown is not None:
         from . import due_state

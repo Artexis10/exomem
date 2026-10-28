@@ -628,7 +628,12 @@ class WindowsHeldFilesystem(HeldFilesystem):
         create: bool = False,
         exclusive: bool = False,
         access: str = "read",
+        scratch: bool = False,
     ) -> HeldResult[HeldDirectory]:
+        # No variant listing here: NTFS folds case when it opens a name, so
+        # FILE_OPEN_IF reuses an existing folder instead of creating a case
+        # variant. It does not fold Unicode forms; that gap is known.
+        del scratch
         parts = _parts(relative)
         if parts is None or access not in {"read", "flush", "mutate"}:
             return HeldResult(error=_invalid())
