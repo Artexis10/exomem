@@ -67,9 +67,9 @@ the domains it names; the map uses a save at once and no page changes. Declare t
 from evidence, never from a list of your own.
 
 1. Read the owner's considerations from `review_memory(mode="vocabulary")`, following `continuation` until it is empty. Each names one carrier, and `review_item_context` returns its counts and a bounded sample of titles.
-2. Infer a topic from that evidence: reuse a domain key from `schema_memory(subject="domains", operation="inspect")` only when it names the subject the pages share; a neighbouring or broader domain is not a fit. When none fits, register one with `schema_memory(subject="domains", operation="save")` first; that is part of this workflow and needs no separate approval. Skip a carrier whose pages share no subject, such as a status tag or a folder that mixes topics.
+2. Infer a topic from that evidence: reuse a domain key from `schema_memory(subject="domains", operation="inspect")` only when it names the subject the pages share; a neighbouring or broader domain is not a fit. When none fits, register one with `schema_memory(subject="domains", operation="save")` first; that is part of this workflow and needs no separate approval. A refused or pending save stands: report it and do not declare the topic. Skip a carrier whose pages share no subject, such as a status tag or a folder that mixes topics.
 3. Save the carrier with `schema_memory(subject="topic-carriers", operation="save")`: `proposal.upsert` maps a key to `attributes` of `kind` (`project`, `folder` or `tag`), `match`, `topics` and `origin` (`inferred` for each topic). Add `expected_hash` and `why`.
-4. Show the person one review list. Each row names the carrier, its topic, the origin and a few entry titles. They can accept all, change a row, or skip.
+4. Show the person one review list. Each row names the carrier, its topic, the origin and a few entry titles, and the list names every domain you registered. They can accept all, change a row, or skip.
 
 Accepting saves the same carrier with origin `reviewed`. Changing a row saves new `topics`
 by replace and lists the turned-down key in `rejected`, so it is never offered again.
