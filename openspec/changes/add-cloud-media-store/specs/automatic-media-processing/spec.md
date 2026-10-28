@@ -17,6 +17,10 @@ It SHALL report unavailable job or index custody as unknown counts, and an empty
 A current extraction job SHALL supply processing state; an offload-only job SHALL NOT override the sidecar's recorded extraction state.
 A completed sidecar state SHALL require a valid transcript marker and an exact original binding.
 Sidecar status SHALL identify its source and SHALL NOT imply verification of the current original bytes.
+Status SHALL identify `healthy` as reconciliation health, independent of worker availability or inference.
+Exact-path status SHALL report a separate activity observation inside its governed result row.
+The closed activity states SHALL be `queued` for publicly pending extraction work and `unknown` without current execution evidence.
+A recorded running claim, registered process, worker lock or saved checkpoint SHALL NOT establish current inference or worker startup.
 This overview SHALL NOT claim exhaustive enumeration or pagination.
 
 An offload verification failure SHALL remain terminal for the same path and sidecar digest.
@@ -58,6 +62,18 @@ A refusal before ciphertext is measured SHALL report its ciphertext size as unkn
 - **WHEN** release policy or a content floor withholds the requested original
 - **THEN** terminal governance removes its entire result row, including scalar facts and index demand
 - **AND** the same rule applies when the original is evicted
+
+#### Scenario: A worker stops after claiming an original
+
+- **WHEN** a recording retains a running claim after its worker stops
+- **THEN** exact status reports the recorded running state with unknown activity
+- **AND** successful reconciliation health does not claim worker availability or current inference
+
+#### Scenario: Extraction is queued
+
+- **WHEN** the ledger presents an exact recording as pending extraction
+- **THEN** exact status reports queued activity with its job source and unknown freshness
+- **AND** the observation does not promise worker availability or completion time
 
 
 #### Scenario: A restricted caller reads a bounded overview

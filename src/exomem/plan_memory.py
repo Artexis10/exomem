@@ -8,7 +8,10 @@ from typing import Any, Literal, Never
 
 from . import operation_entries, planning
 from .cli_ops import OpError, action_argument_contract
+from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
+
+_QueryFilters = public_filter_annotation()
 
 #: The Planning spec caps every Planning refusal message at 512 UTF-8 bytes.
 _REFUSAL_MESSAGE_MAX_BYTES = 512
@@ -53,7 +56,7 @@ def plan_memory(
     why: str | None = None,
     scaffold: bool | None = None,
     view: str | None = None,
-    filters: list[dict[str, Any]] | None = None,
+    filters: _QueryFilters = None,
     columns: list[str] | None = None,
     sort_by: str | None = None,
     descending: bool | None = None,
@@ -86,7 +89,7 @@ def plan_memory(
     Help: bootstrap(section="records_planning").
 
     Args:
-        collection: Omit to list.
+        collection: Vault-relative manifest path, collection UUID or memory reference. Omit to list.
         plan_id: row plan_id.
         expected_container_hash: Returned snapshot.
         expected_item_version: row item_version.

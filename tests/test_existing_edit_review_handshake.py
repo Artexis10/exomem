@@ -384,7 +384,9 @@ def test_full_bootstrap_and_edit_description_teach_both_recovery_paths(
 ) -> None:
     bootstrap = commands.op_bootstrap(vault, profile="full")
     full = json.dumps(bootstrap)
-    description = commands.op_edit_memory.__doc__ or ""
+    from exomem.edit_operations import public_edit_operation_schema
+
+    description = (commands.op_edit_memory.__doc__ or "") + json.dumps(public_edit_operation_schema())
 
     for text in (full, description):
         assert "relation_review_hash" in text

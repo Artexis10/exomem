@@ -7,8 +7,8 @@ Unicode lower(), not SQLite affinity, LIKE or NOCASE.
 
 from __future__ import annotations
 
-import re
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +18,27 @@ OPS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains",
                  "startswith", "in", "nin", "exists", "missing"})
 #: The operator a filter without `op` applies.
 DEFAULT_OP = "eq"
+
+
+def filter_items_schema() -> dict[str, Any]:
+    """The published v1 predicate shape; runtime still accepts the existing dictionaries."""
+    return {"type": "array", "items": {
+        "type": "object", "properties": {
+            "column": {"type": "string", "description": "Column name or dotted property path."},
+            "op": {"type": "string", "enum": sorted(OPS), "default": DEFAULT_OP},
+            "value": {"description": "Comparison value; exists and missing need no value."},
+        }, "required": ["column"], "additionalProperties": True,
+    }}
+
+
+def public_filter_annotation():
+    """Attach discovery detail without changing legacy predicate validation or defaults."""
+    from typing import Annotated
+
+    from pydantic import WithJsonSchema
+
+    return Annotated[list[dict[str, Any]] | None,
+                     WithJsonSchema({"anyOf": [filter_items_schema(), {"type": "null"}]})]
 DATE_LIKE = re.compile(r"\d{1,4}[-/]\d")
 _NUM_PREFIX = re.compile(r"^[<>≤≥=~\s]+")
 _LEADING_NUM = re.compile(r"[+-]?\d+(?:[.,]\d+)?")

@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .capabilities import active_call_text
+
 #: section name -> (reference-payload keys it returns, when to fetch it).
 SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
     "authoring": (
@@ -301,8 +303,8 @@ def _due_summary(block: object) -> dict:
             summary["more_categories"] = len(names) - SUMMARY_CATEGORIES
         if visible:
             largest = max(visible, key=lambda name: visible[name])
-            summary["next"] = (
-                f"review_memory(mode='attention', categories=['{largest}'], limit={BATCH_LIMIT})"
+            summary["next"] = active_call_text(
+                "review_memory", {"mode": "attention", "categories": [largest], "limit": BATCH_LIMIT}
             )
     summary["list"] = "section=epistemics"
     return summary

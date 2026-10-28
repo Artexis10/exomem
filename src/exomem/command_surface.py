@@ -467,14 +467,15 @@ class UnresolvedInvocation(LookupError):
 
 
 def find_rendering(
-    public_name: str, commands: Iterable[Command], *, shape: str = DEFAULT_TOOL_SHAPE
+    public_name: str, commands: Iterable[Command], *, shape: str = DEFAULT_TOOL_SHAPE,
+    kind: object = None,
 ) -> tuple[Command, operation_entries.Rendering] | None:
     """The command and rendering that `public_name` spells, when this shape lists renderings."""
     if shape == "grouped":
         return None
     for command in commands:
         for rendering in command.renderings:
-            if rendering.name == public_name:
+            if rendering.name == public_name and (kind is None or kind in rendering.kinds):
                 return command, rendering
     return None
 
@@ -502,20 +503,78 @@ def resolve_invocation(
     `UnresolvedInvocation` for a name nothing resolves: a name that routes no call
     must fail closed rather than reach a default.
     """
+    commands = tuple(commands)
     command = resolve_command(public_name, commands)
-    if command is not None:
-        return command, dict(arguments)
+    nested = isinstance(arguments.get("operation"), Mapping)
     found = find_rendering(public_name, commands, shape=shape)
+    if command is not None and (found is None or not nested and "operation" not in arguments):
+        return command, dict(arguments)
+    # A grouped selector remains a scalar. Its explicit scalar spelling is compatibility.
+    if command is not None and found is not None and not nested and any(
+        rendering.selector == "operation" for rendering in command.renderings
+    ) and isinstance(arguments.get("operation"), str):
+        return command, dict(arguments)
     if found is None:
         raise UnresolvedInvocation(public_name)
-    command, rendering = found
+    from .cli_ops import OpError
+
+    operation = arguments.get("operation")
+    kind = operation.get("kind") if isinstance(operation, Mapping) else None
+    selected = find_rendering(public_name, commands, shape=shape, kind=kind) if isinstance(kind, str) else None
+    if selected is None and isinstance(kind, str):
+        # A known sibling operation keeps its target and its wrong-tool refusal.
+        siblings = [(command, rendering) for command in commands for rendering in command.renderings
+                    if rendering.name == public_name
+                    and any(kind in other.kinds for other in command.renderings)]
+        if len(siblings) == 1:
+            selected = siblings[0]
+    if selected is None:
+        contributors = [(command, rendering) for command in commands for rendering in command.renderings
+                        if rendering.name == public_name]
+        if len(contributors) == 1:
+            # One source owns the refusal format, but an invalid kind still owns no execution target.
+            contributors[0][0].argument_rules.refuse(f"{public_name} needs a valid operation.kind")
+        raise OpError("INVALID_OPERATION", f"{public_name} needs a valid operation.kind")
+    command, rendering = selected
     rules = command.argument_rules
     if rules is None:
         raise UnresolvedInvocation(public_name)
     carried, tool_arguments, parsed = _split_rendered_call(rendering, arguments, passthrough)
+    # Authorization needs the selected route even when its business fields are invalid.
+    flat = dict(carried)
+    if isinstance(operation, Mapping):
+        flat.update({key: value for key, value in operation.items()
+                     if key in {"scope", "session_action", "backfill_action"}})
+    if rendering.selector:
+        entry = next((variant for other in command.renderings for variant in other.variants
+                      if variant.kind == kind), None)
+        if entry is not None:
+            flat[rendering.selector] = entry.action
+            for constraint in entry.constraints:
+                if len(constraint.path) == 1 and constraint.path[0] in {
+                    "scope", "session_action", "backfill_action",
+                }:
+                    flat.setdefault(constraint.path[0], constraint.value)
+    try:
+        return _resolve_rendered(command, rendering, arguments, carried, tool_arguments,
+                                 parsed, strict=strict)
+    except OpError as error:
+        error.command = command
+        error.arguments = flat
+        error.rendering = rendering
+        raise
+
+
+def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, parsed, *, strict):
+    """Validate business fields after the public discriminator selects its command."""
+    rules = command.argument_rules
     if parsed is None:
         rules.refuse(f"{rendering.name} takes an operation object and nothing else")
     kind, fields = parsed
+    try:
+        fields = rendering.leaf_fields(fields)
+    except ValueError as error:
+        rules.refuse(str(error))
     label = operation_entries.OPERATION_KIND
     variant = rendering.variant_for(kind, fields)
     if variant is None:
@@ -529,18 +588,25 @@ def resolve_invocation(
         )
         if sibling is not None:
             rules.refuse(f"{kind} is not a {rendering.effect} operation: send it to {sibling}")
-        modes = rendering.modes_of(kind) if isinstance(kind, str) else ()
-        if modes:
-            axis = rendering.mode_axes[str(kind)]
-            rules.refuse(f"{kind} needs {axis.argument}.{axis.key} to be one of: {', '.join(modes)}")
+        if hint := rendering.constraint_hint(kind):
+            rules.refuse(hint)
         rules.refuse(f"{rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
+    fields = rendering.selected_arguments(variant, fields)
+    fields.pop(rendering.selector, None)
     rules.validate(variant.action, fields)
+    unexpected = {key for key in set(fields) - variant.fields if fields[key] is not None}
+    missing = {key for key in variant.required if fields.get(key) is None}
+    if unexpected:
+        rules.refuse(f"unexpected for {kind}: {', '.join(sorted(unexpected))}")
+    if missing:
+        rules.refuse(f"{kind} requires {', '.join(sorted(missing))}")
     wrong = _type_errors(command, {**fields, **tool_arguments}, skip=rendering.selector, strict=strict)
     if wrong:
         # FastMCP's own error for the grouped call would name a tool the host cannot call.
         rules.refuse(f"wrong type in {rendering.name} {kind}: {'; '.join(wrong)}")
     # The selector goes last: a field spelt like it must not replace the variant's action.
-    return command, {**fields, **tool_arguments, **carried, rendering.selector: variant.action}
+    return command, {**fields, **tool_arguments, **carried,
+                     **({rendering.selector: variant.action} if rendering.selector else {})}
 
 
 def _split_rendered_call(
@@ -572,7 +638,16 @@ def rendered_call_writes(
     from .governance.egress import SelectorCoverageError
 
     _, _, parsed = _split_rendered_call(rendering, arguments, passthrough)
-    flat = {} if parsed is None else {**parsed[1], rendering.selector: parsed[0]}
+    flat = {}
+    if parsed is not None:
+        try:
+            flat = rendering.leaf_fields(parsed[1])
+            variant = next((v for v in rendering.variants if v.kind == parsed[0]), None)
+            if rendering.selector:
+                flat[rendering.selector] = variant.action if variant is not None else parsed[0]
+        except ValueError:
+            # A conflicting alias never reaches dispatch; classify the refusal conservatively.
+            return True
     try:
         return not invocation_is_read_only(command, flat)
     except SelectorCoverageError:

@@ -919,6 +919,8 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
     import base64
     import hashlib
 
+    import httpx
+
     from . import upload_sessions
     from .state_paths import state_store_root
 
@@ -956,7 +958,10 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
         elif held.status_code != 200:
             return _attach_refused(held, None)
         else:
-            offset = int(held.headers["upload-offset"])
+            offset = upload_sessions.header_count(held.headers.get("upload-offset", ""))
+            if offset is None or not 0 <= offset <= size:
+                print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
+                return 1
     if session is None:
         metadata = {"filename": name, "sha256": sha256, **destination}
         created = client.post(
@@ -982,21 +987,48 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
         with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
             json.dump({"url": url, "secret": secret}, sink)
     headers = {**tus, "Exomem-Upload-Secret": secret}
+    stalls = 0
     with source.open("rb") as handle:
         while offset < size:
             handle.seek(offset)
-            sent = client.patch(
-                url,
-                headers={
-                    **headers,
-                    "Upload-Offset": str(offset),
-                    "Content-Type": "application/offset+octet-stream",
-                },
-                content=handle.read(part_bytes),
-            )
-            if sent.status_code != 204:
+            chunk = handle.read(part_bytes)
+            try:
+                sent = client.patch(
+                    url,
+                    headers={
+                        **headers,
+                        "Upload-Offset": str(offset),
+                        "Content-Type": "application/offset+octet-stream",
+                    },
+                    content=chunk,
+                )
+            except httpx.HTTPError:
+                sent = None
+            if sent is not None and sent.status_code == 204:
+                advanced = upload_sessions.header_count(sent.headers.get("upload-offset", ""))
+                if advanced is None or not offset < advanced <= offset + len(chunk):
+                    print("attach: the service returned an invalid upload offset; run the same command again to reconcile",
+                          file=sys.stderr)
+                    return 1
+                offset, stalls = advanced, 0
+                continue
+            # HTTP timeout/conflict/size refusals and server errors can follow accepted bytes.
+            if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
                 return _attach_refused(sent, None)
-            offset = int(sent.headers["upload-offset"])
+            held = client.head(url, headers=headers)
+            if held.status_code != 200:
+                return _attach_refused(held, None)
+            advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))
+            if advanced is None or not offset <= advanced <= offset + len(chunk):
+                print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
+                return 1
+            stalls = stalls + 1 if advanced == offset else 0
+            if stalls >= 3:
+                print("attach: the upload made no progress; run the same command again to resume", file=sys.stderr)
+                return 1
+            offset = advanced
+            # Smaller requests reduce repeated timeout exposure without discarding accepted bytes.
+            part_bytes = max(1, part_bytes // 2)
     while True:
         state = client.get(url, headers=headers)
         try:

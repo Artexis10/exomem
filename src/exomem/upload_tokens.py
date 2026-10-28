@@ -291,8 +291,7 @@ def mint_for_endpoint(
         from . import upload_sessions
 
         # A session preserves into one lane, so a capability for another advertises none.
-        if out["lane"] == upload_sessions.LANE:
-            out["resumable"] = upload_sessions.handoff(base_url)
+        out["resumable"] = upload_sessions.handoff(base_url, lane=out["lane"])
     if scope == "download":
         from .governance.raw_protection import is_owner
 

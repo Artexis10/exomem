@@ -1604,6 +1604,12 @@ def _build_corpus_in_process(root: Path) -> ConversationCorpusManifest:
 
     root = Path(root)
     init_vault(root)
+    # The v1 corpus pins product-written fixture input; live scaffold instructions can evolve.
+    # Source: 93e9722882ca8c75f1c60745bd8f7a32d35d437c:src/exomem/_scaffold/_Governance/README.md
+    # SHA-256: 6a3e49996135d42f481f616449bc41d9da1d5b4e94276704235e432a5b3215fd
+    (root / "Knowledge Base" / "_Governance" / "README.md").write_bytes(
+        Path(__file__).with_name("context_activation_conversation_v1_governance_readme.md").read_bytes()
+    )
     key_to_path: dict[str, str] = {}
     for key, _domain, name, slug, summary, tags in ENTITIES:
         key_to_path[key] = _entity(root, name=name, slug=slug, summary=summary, tags=tags)

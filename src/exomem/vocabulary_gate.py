@@ -161,13 +161,32 @@ class _BatchAuthority:
             self.closed = True
 
 
+def artifact_admission(vault_root: Path, *, size: int | None = None, is_markdown: bool = False) -> int | None:
+    """Check format compatibility and return its byte bound, without granting authority."""
+    status = vocabulary_authority.VocabularyAuthority(vault_root).runtime_status()
+    if status.mode == "v1":
+        return
+    if status.mode != "v2":
+        raise vocabulary_authority.VocabularyAuthorityUnavailable("artifact write-format compatibility is unavailable")
+    if vocabulary_effects.image_format_refusals(is_markdown=is_markdown, size=size):
+        raise vocabulary_authority.VocabularyAuthorityDenied("artifact input has an unsupported structural format")
+    return vocabulary_effects.MAX_IMAGE_BYTES
+
+
 def _stage_bytes(artifact) -> bytes:
+    # These images already fail classification; refuse before allocating their complete contents.
+    limit = vocabulary_effects.MAX_IMAGE_BYTES
+    if os.fstat(artifact.descriptor).st_size > limit:
+        raise vocabulary_authority.VocabularyAuthorityDenied("structural image exceeds the supported byte bound")
     artifact.recheck()
     previous = os.lseek(artifact.descriptor, 0, os.SEEK_CUR)
     try:
         os.lseek(artifact.descriptor, 0, os.SEEK_SET)
-        chunks = []
-        while chunk := os.read(artifact.descriptor, 64 * 1024):
+        chunks, size = [], 0
+        while chunk := os.read(artifact.descriptor, min(64 * 1024, limit - size + 1)):
+            size += len(chunk)
+            if size > limit:
+                raise vocabulary_authority.VocabularyAuthorityDenied("structural image exceeds the supported byte bound")
             chunks.append(chunk)
         content = b"".join(chunks)
     finally:
