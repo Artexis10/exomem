@@ -184,6 +184,11 @@ Rerun the measurement after integration changes the wire objects.
 The paired development rounds in decision 8 decide whether this conditional mechanism is needed.
 Its trigger remains an owner-anchored recall miss while the entity and edge exist; the final comparison evaluates the complete candidate once.
 
+The evidence below describes the anchor workflow. The shipping default now returns maps.
+Diagnose a miss across the complete default workflow before attributing it to anchor traversal.
+An empty legacy `pointers[]` field in a map is not an activation miss.
+This conditional design does not authorize switching the comparison to anchors or changing the mechanism without reconciling the observed cause.
+
 **Evidence.**
 - The built-in profiles are a dict in code (`traversal_profiles.py:143-180`), which is C4 debt.
 - Activation applies `GRAPH_TRAVERSAL_PROFILE = "epistemic"` to every resolved anchor (`working_set.py:79`), and `_graph_neighbours` passes no `keep` (`working_set.py:1199-1207`).
@@ -323,6 +328,23 @@ Do not reuse f33's cases.
 Each situation has a capture session and a fresh-recall session.
 Pin the model, client, product revision, prominence and captured configuration for both arms.
 
+**Authoring readiness.** Define one common main baseline that includes PR A, the released source-quality repair and the common tool catalogue.
+Bind its exact revision before generation; pending catalogue delivery does not prevent semantic case authoring.
+The baseline runs that product; the candidate adds only PR B to the same base.
+Record the actual interpreter, installed product and loaded source for each arm before generation.
+A product label in a manifest does not prove which code executed.
+
+Observe the shipped default maps workflow through the public tool names returned by discovery.
+Capture the complete fresh-session transcript, including map, profile and page pulls, plus the final answer and state.
+The existing replay reads legacy activation sections and assumes an older tool name; reuse its lifecycle through an adapter.
+Do not score an empty legacy section as missing evidence or force the anchor fallback.
+
+Before writing cases, the independent author defines source-derived success and false precision for each category.
+Keys accept equivalent grounded outcomes, without prescribing tool sequences, note counts or private implementation details.
+Keep development cases separate and keep the held-out sources and keys outside implementation custody.
+The amendment defines omissions, abandoned writes, duplicate reasons, call and byte accounting, and transport-failure handling before generation.
+It preserves the approved repeat, spend and decision limits rather than inheriting the old driver's defaults.
+
 **Development.** Each round asks one question on at most four paired situations, with one repeat per arm.
 Change at most one thing between rounds and use fresh situations after checking a repair on the cases that exposed it.
 At most five rounds use eighty actor sessions in total.
@@ -338,7 +360,9 @@ These rounds diagnose failures; they do not establish a gain.
 
 The baseline is pinned main with PR A; the candidate adds the complete PR B batch.
 Twenty situations use the hooked client and twenty use the hookless client, balanced across categories.
+Assign each situation to one client shape before generation: each shape receives eight relation, six referent, three placement and three freshness situations.
 Label the hookless arm as a proxy, not a result for another client.
+Report each client shape separately; differences in hooks and prominence are not a hooks-only causal comparison.
 The forty paired situations take 160 actor sessions.
 Use deterministic source-derived scoring wherever possible.
 Only residual uses-the-fact cases go to a blind judge from another model family, with the same reference view for both arms.
@@ -353,7 +377,8 @@ Do not expand the batch after seeing that result.
 
 **Route and holds.** Actors use the approved Claude subscription through `claude -p`; judges use the Codex subscription.
 No API or credit spend is authorized.
-Development and final runs use the manager's serial laptop evaluation slot after the tool-surface evaluation.
+Development and final runs use the manager's serial evaluation allocation after the tool-surface evaluation.
+Run on the host admitted for the workload; the earlier laptop-slot description does not require a constrained host to run heavy work.
 The final run also waits for PR A's release, the common tool-surface delivery, amendment acknowledgement and allocated actor room.
 A transfer of implementation custody changes none of these holds.
 
