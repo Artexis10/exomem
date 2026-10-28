@@ -485,12 +485,12 @@ def gen_collection_cases(fixture: dict, profile: dict) -> list[dict]:
     return cases
 
 
-def gen_note_cases(root: Path, rels: list[str], profile: dict) -> list[dict]:
+def gen_note_cases(root: Path, rels: list[str], profile: dict, fixture: dict) -> list[dict]:
     """Read, search and recall cases for pages drawn from the generated vault.
 
     The shared synthetic prose repeats across pages, so no query names one page.
     The read case pins the exact page; the search case requires a non-empty ranked answer, and the
-    recall case requires the abstention that a title-only turn produces. Both arms must give the same.
+    recall case requires source-bound collection material from the default map.
     """
     from exomem import vault
 
@@ -511,13 +511,24 @@ def gen_note_cases(root: Path, rels: list[str], profile: dict) -> list[dict]:
     for number, (_rel, _title, passage) in enumerate(pages[size:2 * size]):
         cases.append({"id": f"search-{number:02d}", "group": "search", "tool": "search_memory",
                       "arguments": {"query": passage}, "expected": {"response_schema": search_schema}})
-    # A turn that is only a page title carries no task, so recall_context abstains with an `unresolved` reason
-    # on every page. A turn with prose resolves on some pages and not on others, which no answer key can predict.
-    recall_schema = {"type": "object", "required": ["anchors", "abstention"],
-                     "properties": {"anchors": {"type": "array"},
-                                    "abstention": {"type": "object", "required": ["reason"]}}}
+    # Maps are turn-independent; bind each collection's identity and lede from the authored fixture at any rank.
+    collections = [*fixture["records"], *fixture["planning"]]
+    material = [{"type": "object", "required": ["path", "title", "description"],
+                 "properties": {"path": {"const": collection["manifest_path"]},
+                                "title": {"const": collection["title"]},
+                                "description": {"const": collection["title"] + "."}}}
+                for collection in collections]
+    recall_schema = {
+        "type": "object", "required": ["abstained", "map"],
+        "properties": {
+            "abstained": {"const": False},
+            "map": {"type": "object", "required": ["ref", "state", "items"],
+                    "properties": {"ref": {"const": "exomem://map"}, "state": {"const": "ready"},
+                                   "items": {"type": "array", "contains": {"anyOf": material}}}},
+        },
+    }
     for number, (_rel, title, _passage) in enumerate(pages[2 * size:]):
         cases.append({"id": f"recall-{number:02d}", "group": "recall", "tool": "recall_context",
                       "arguments": {"turn": title},
-                      "expected": {"outcome": "abstained", "response_schema": recall_schema}})
+                      "expected": {"outcome": "ok", "response_schema": recall_schema}})
     return cases

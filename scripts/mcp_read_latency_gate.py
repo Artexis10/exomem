@@ -626,7 +626,6 @@ async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, re
         return {"samples": samples, "timings": timings,
                 "environment": {"cpu_pressure_start": pressure_start, "cpu_pressure_end": cpu_pressure()}}
     finally:
-        progress("cleanup-start")
         await stop_arms(arms)
         progress("cleanup-complete")
 
@@ -802,7 +801,7 @@ def run_paired(args: argparse.Namespace) -> dict:
         rels = prepare_notes(arms, base_src, base_python, notes_pages=args.notes_pages)
         progress(f"notes-prepared elapsed_s={time.monotonic() - began:.0f}")
         fixture = gen_collection_fixture(profile)
-        everything = gen_collection_cases(fixture, profile) + gen_note_cases(arms["head"].vault, rels, profile)
+        everything = gen_collection_cases(fixture, profile) + gen_note_cases(arms["head"].vault, rels, profile, fixture)
         cases, total = select_cases(everything, per_group=args.max_cases, shard=args.shard, shards=profile["shards"])
         loaded = load_cases(json.dumps(cases).encode())
         for arm in arms.values():

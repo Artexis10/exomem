@@ -112,9 +112,9 @@ Registry-constrained values come from the shipped vocabulary packs at run time. 
 the kind hierarchy that the registry's `parents` rules require, sized by `planning.fanout`; the
 loader adds parents first and builds each child's `parent` reference from the add response. The cases come from
 the same profile, so the generator's input is the source of truth for each expected value.
-The `recall` cases send a page title as the whole turn. That turn carries no task, so `recall_context`
-abstains on every page, and each case expects that abstention. A turn with prose resolves on some pages and
-not on others, so no answer key can fix it. The `recall` group therefore times the abstaining path; use
-private mode with real turns to time the resolving path.
+The `recall` cases send a page title as the whole turn and expect the default map packet.
+Each packet must contain a generated collection's path, title and description within the same item, at any rank.
+The expected material comes from the fixture's authored manifest. The map does not depend on the turn;
+these cases measure the map path, not turn-specific anchor resolution.
 Every fragment pins `profile_sha256` and `cases_sha256`; the contract pins the profile as
 `fixture_profile_sha256`. A changed profile needs a new digest in the contract.
