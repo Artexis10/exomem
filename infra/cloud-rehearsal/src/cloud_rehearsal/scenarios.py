@@ -472,6 +472,19 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
         raise StepFailure(f"provisioning took {provision:.1f}s, target < 180s")
 
 
+# Read the running image's registry and configured discovery shape; command names can share a public rendering.
+CLOUD_DISCOVERY_POLICY_COMMAND = (
+    "import json,os;from exomem.commands import product_commands_for;"
+    "from exomem.command_surface import listed_names;from exomem.server import _tool_shape_from_environment;"
+    "from exomem import cloud_origin;shape=_tool_shape_from_environment();tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
+    "personal=product_commands_for('mcp',expose_tier2=tier2);"
+    "cloud=product_commands_for('mcp',expose_tier2=tier2,cloud=True,upload_bridge=cloud_origin.enabled());"
+    "names=lambda commands:{name for command in commands for name in listed_names(command,shape)};"
+    "print(json.dumps({'excluded':sorted(names(personal)-names(cloud)),"
+    "'adoption':sorted(names(command for command in cloud if command.name=='adopt_vault'))}))"
+)
+
+
 async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     _require(ctx.a.session and ctx.a.cell_id)
     # The stock MCP Python SDK client: its PKCE verifiers use the whole RFC
@@ -486,12 +499,14 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     policy = wait_for(
         lambda: ctx.exec_in(
             namespace_name(ctx.a.cell_id), "statefulset/cell", "python3", "-c",
-            "import json;from exomem.commands import CLOUD_SURFACE_EXCLUSIONS;"
-            "print(json.dumps(list(CLOUD_SURFACE_EXCLUSIONS)))",
+            CLOUD_DISCOVERY_POLICY_COMMAND,
         ).stdout,
         timeout=120, description="tenant A's runtime policy to be readable",
     )
-    exclusions = json.loads(policy)
+    discovery = json.loads(policy)
+    exclusions = discovery["excluded"]
+    adoption = discovery["adoption"]
+    adoption_present = bool(adoption) and set(adoption) <= set(tools)
     exposed = set(exclusions) & set(tools)
     record.evidence.update(
         {
@@ -506,13 +521,14 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             "tools": tools,
             "expected_cloud_exclusions": exclusions,
             "cloud_exclusions_absent": not exposed,
-            "staged_adoption_present": "adopt_vault" in tools,
+            "staged_adoption_tools": adoption,
+            "staged_adoption_present": adoption_present,
         }
     )
     if exposed:
         raise StepFailure(f"cloud-excluded tools are served: {sorted(exposed)}")
     # Staged encrypted imports require the standard adoption command.
-    if "adopt_vault" not in tools:
+    if not adoption_present:
         raise StepFailure("staged adoption is absent from the Cloud tool surface")
     # 5.3: warm initialize and tools/list, each on a fresh MCP session over
     # the connector's existing token and its one HTTP client, so a sample

@@ -15,6 +15,42 @@ from cloud_rehearsal.mcp_client import _HiddenInputs
 from cloud_rehearsal.shell import wait_for
 
 
+@pytest.mark.parametrize("surface", ["valid", "excluded", "missing-adoption"])
+def test_cloud_discovery_checks_public_renderings_and_keeps_its_denials(monkeypatch, surface):
+    """An admitted status rendering must pass without admitting an excluded operation or losing imports."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import scenarios
+
+    discovery = {"excluded": ["transfer_artifact"], "adoption": ["read_import", "import_memory"]}
+    policy = json.dumps(discovery)
+    tools = ["read_media", "read_import", "import_memory"]
+    if surface == "excluded":
+        tools.append(discovery["excluded"][0])
+    elif surface == "missing-adoption":
+        tools.remove(discovery["adoption"][0])
+    client = SimpleNamespace(authorizations=1, access_token="synthetic-token", verifier_seen="synthetic-verifier",
+                             redirect_uri="http://127.0.0.1/callback")
+
+    async def first_session(*args):
+        return tools
+
+    monkeypatch.setattr(scenarios, "TenantClient", lambda *args: client)
+    monkeypatch.setattr(scenarios, "first_session", first_session)
+    monkeypatch.setattr(scenarios, "WARM_ITERATIONS", 0)
+    ctx = SimpleNamespace(a=SimpleNamespace(session=object(), cell_id="a" * 26), resolver=None, browser=None,
+                          substrate=SimpleNamespace(redirect_uri=client.redirect_uri),
+                          exec_in=lambda *args: SimpleNamespace(stdout=policy))
+    record = report.StepRecord(number=3, name="oauth_mcp_tools_list")
+    if surface == "valid":
+        asyncio.run(scenarios.step_3_oauth_mcp(ctx, record))
+        assert record.evidence["cloud_exclusions_absent"] and record.evidence["staged_adoption_present"]
+    else:
+        with pytest.raises(report.StepFailure):
+            asyncio.run(scenarios.step_3_oauth_mcp(ctx, record))
+
+
 def test_wait_for_propagates_error_when_retries_are_disabled() -> None:
     calls = 0
 
