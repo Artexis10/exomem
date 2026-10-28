@@ -8821,11 +8821,10 @@ def op_transfer_artifact(
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False,
 ) -> dict:
-    """Prepare an original upload or download; a handoff does not prove custody.
+    """Prepare an upload or download; a handoff does not prove custody.
 
-    Upload: hold=true with expected_sha256, then exomem attach --handoff-file or
-    POST to upload_url. Capture the returned handle.
-    Download: supply artifact; use MCP or HTTPS delivery.
+    Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
+    Capture its handle. Download: supply artifact; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
