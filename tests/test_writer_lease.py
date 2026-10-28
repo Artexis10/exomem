@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import multiprocessing
 import os
 import pickle
@@ -4795,6 +4796,52 @@ def test_probe_acquire_does_not_refresh_idle_activity(tmp_path: Path) -> None:
     assert manager._last_activity_monotonic == backdated
 
 
+def test_routine_lease_grant_does_not_log_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A re-grant under the held token would flood the INFO log and rotate real evidence out."""
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    manager.ensure_writer()
+    held_token = manager._fencing_token
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="exomem.writer_lease"):
+        manager._acquire_writer()
+
+    assert manager._fencing_token == held_token
+    grants = [r for r in caplog.records if getattr(r, "event", None) == "lease_acquired"]
+    assert [r.levelno for r in grants] == [logging.DEBUG]
+
+
+def test_lease_grant_that_changes_the_token_logs_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A first grant is a role transition, so it keeps its INFO row."""
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    with caplog.at_level(logging.DEBUG, logger="exomem.writer_lease"):
+        manager.ensure_writer()
+
+    grants = [r for r in caplog.records if getattr(r, "event", None) == "lease_acquired"]
+    assert [r.levelno for r in grants] == [logging.INFO]
+
+
 def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
     tmp_path: Path,
 ) -> None:
@@ -4986,15 +5033,15 @@ def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
     assert target.read_text(encoding="utf-8") == "# Ack\n"
 
 
-def test_derived_acknowledgement_budget_bounds_the_waiting_only(
+def test_derived_acknowledgement_budget_bounds_observation_not_custody(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A spent request budget stops the *waiting*, not the acknowledgement.
+    """A spent request budget stops observation, not durable custody handoff.
 
     Proof, publication and signalling are cheap and are what make derived work
     recoverable; skipping them because a slow leaf ate the request budget would
-    report `pending` for work that was never even attempted. Only the component
-    wait is bounded by what is left of the request.
+    report `pending` for work that was never even attempted. Component reads
+    and waits use only the remaining observation budget.
     """
     from exomem import derived_receipts
 
@@ -5002,22 +5049,20 @@ def test_derived_acknowledgement_budget_bounds_the_waiting_only(
         tmp_path, monkeypatch, claimed_component="embeddings"
     )
     proofs: list[str] = []
-    expired: list[bool] = []
+    observations: list[str] = []
     real_prove = derived_receipts.prove_committed
-    real_wait = writer_lease_module._wait_for_derived_component
 
     def observed_prove(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         proofs.append("prove")
         return real_prove(*args, **kwargs)
 
-    def observed_wait(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        expired.append(
-            kwargs["deadline_monotonic"] <= writer_lease_module._fast_ack_monotonic()
-        )
-        return real_wait(*args, **kwargs)
+    def unexpected_observation(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        observations.append("observation")
+        raise AssertionError("the observation budget is already exhausted")
 
     monkeypatch.setattr(derived_receipts, "prove_committed", observed_prove)
-    monkeypatch.setattr(writer_lease_module, "_wait_for_derived_component", observed_wait)
+    monkeypatch.setattr(derived_receipts, "component_status", unexpected_observation)
+    monkeypatch.setattr(writer_lease_module, "_wait_for_derived_component", unexpected_observation)
     # Budget equal to the delivery reserve leaves the waiting nothing.
     monkeypatch.setattr(
         writer_lease_module,
@@ -5037,9 +5082,9 @@ def test_derived_acknowledgement_budget_bounds_the_waiting_only(
     assert terminal["status"] == "committed"
     assert terminal["derived_sync"] == "pending"
     assert "embeddings" in terminal["derived_sync_components"]
-    # The cheap half ran; only the wait was clamped, to a deadline already past.
+    # Custody still commits, but no expired status read or wait starts.
     assert proofs == ["prove"]
-    assert expired and all(expired)
+    assert observations == []
     assert calls == [1]
     assert target.read_text(encoding="utf-8") == "# Ack\n"
 

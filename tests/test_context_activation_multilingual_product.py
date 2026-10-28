@@ -56,7 +56,8 @@ from exomem import (
     working_set_runtime,
 )
 
-pytestmark = pytest.mark.timeout(1800)
+# These tests exercise the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.usefixtures("anchors_packet")]
 
 DIM = 1024
 FINGERPRINT = "planted-multilingual|cls|l2|0000"

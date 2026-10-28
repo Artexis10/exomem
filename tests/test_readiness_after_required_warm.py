@@ -132,7 +132,7 @@ def test_cloud_service_warms_core_independent_of_stored_quiet(
         return embeddings._MODEL
 
     monkeypatch.setattr(embeddings, "get_model", load_core)
-    for loader in ("get_reranker", "get_clip_model", "get_activation_model"):
+    for loader in ("get_reranker", "get_clip_query_model", "get_activation_model"):
         monkeypatch.setattr(embeddings, loader, lambda: pytest.fail("optional model preloaded"))
     readiness.begin_warm()
     warmup.warm_all(tmp_path)

@@ -592,6 +592,7 @@ def test_the_worded_kinds_are_the_four_the_contract_names() -> None:
         assert surfaced_by_recall not in hook._WORDED_CONTACT_KINDS
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_real_rare_term_candidate_from_the_leaf_is_rendered(tmp_path: Path) -> None:
     """Integration, not a hand-authored fixture. `rare_term` is the resolver's
     weak worded kind (`working_set_resolve.WORDED_CONTACT_KINDS`) and this

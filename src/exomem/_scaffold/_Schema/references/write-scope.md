@@ -70,13 +70,13 @@ per-operation rules:
 | Path | Operations | Notes |
 |---|---|---|
 | `Knowledge Base/Sources/**` | add | Append-only; never edit existing files. `_attachments/` subfolders may hold binary originals (append-only). |
-| `Knowledge Base/Notes/**` | note, replace | Propose-then-confirm by default. `_attachments/` subfolders may hold binary outputs (append-only). |
-| `Knowledge Base/Entities/**` | link, replace | Propose-then-confirm by default |
+| `Knowledge Base/Notes/**` | note, replace | Follow the live engagement policy, operation envelope, and standing authority. `_attachments/` subfolders may hold binary outputs (append-only). |
+| `Knowledge Base/Entities/**` | link, replace | Follow the live engagement policy, operation envelope, and standing authority. |
 | `Knowledge Base/Evidence/**` | preserve | Append-only proof-bearing and adopted-final artifacts; never edit existing files; no frontmatter required on binaries |
-| `Knowledge Base/index.md` | any write | Catalog of what exists; auto-updated as part of every confirmed write |
-| `Knowledge Base/log.md` | any write | Chronological activity log; appended (never edited) on every confirmed write |
+| `Knowledge Base/index.md` | any write | Catalog of what exists; auto-updated as part of every governed write |
+| `Knowledge Base/log.md` | any write | Chronological activity log; appended (never edited) on every governed write |
 | `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |
-| `Knowledge Base/_Schema/**` | manual only | Schema is human-edited; the skill does not modify itself |
+| `Knowledge Base/_Schema/**` | governed schema and registry writers | Follow the operation envelope and any active holds. Instruction changes require an explicit user request; never rewrite the skill autonomously. |
 
 ## A legacy page `observe_memory` refuses
 

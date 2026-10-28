@@ -66,6 +66,7 @@ def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, 
     return code, captured.out
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_configured_role_content_stays_out_of_private_activation_diagnostics(
     activation_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -119,6 +120,7 @@ def test_configured_role_content_stays_out_of_private_activation_diagnostics(
     assert role_id not in repr(list(watch._ring))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_unavailable_graph_diagnostics_cannot_delay_activation_past_its_deadline(
     activation_vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,6 +232,7 @@ def _comparable(packet: dict) -> dict:
     return {key: packet.get(key) for key in PARITY_BLOCKS}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_three_doors_return_the_same_packet(
     activation_vault: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -264,6 +267,7 @@ def test_three_doors_return_the_same_packet(
     ]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
 def test_mcp_and_rest_return_the_same_relevant_due_identity(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -305,6 +309,7 @@ def test_mcp_and_rest_return_the_same_relevant_due_identity(
     assert "due_state" not in packet and "due_state" not in rest.json()["data"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
 @pytest.mark.parametrize("headroom", [0.05, 1.3])
 def test_mcp_due_omission_reaches_the_response_and_final_observation(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headroom: float,
@@ -441,6 +446,7 @@ def _root_stages(timings: dict) -> dict[str, dict]:
     }
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_working_set_spans_are_registered_and_sum_within_the_total(
     activation_vault: Path,
 ) -> None:
@@ -472,6 +478,7 @@ def test_timings_are_absent_unless_requested(activation_vault: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_empty_turn_abstains_without_touching_the_index(activation_vault: Path) -> None:
     packet = commands.op_activate_context(activation_vault, turn="   ")
 
@@ -563,6 +570,7 @@ def _without_token(packet: dict) -> dict:
     return {key: value for key, value in packet.items() if key != "continuity"}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_attribution_is_accepted_and_never_changes_the_packet(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

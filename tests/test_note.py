@@ -104,12 +104,10 @@ def test_note_returns_structural_write_feedback(vault: Path) -> None:
     assert feedback["links"]["body_wikilinks"] == 1
     assert feedback["links"]["generic_wikilinks"] == 0
     assert feedback["links"]["unresolved_count"] == 0
-    assert feedback["relations"] == {
-        "typed_note": 1,
-        "typed_block": 0,
-        "errors": [],
-        "relation_debt": False,
-    }
+    assert feedback["relations"]["typed_note"] == 1
+    assert feedback["relations"]["typed_block"] == 0
+    assert feedback["relations"]["errors"] == []
+    assert feedback["relations"]["relation_debt"] is False
     assert "unregistered" not in feedback["relations"]
     assert "write_feedback" in result.as_dict()
 

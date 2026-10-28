@@ -500,6 +500,7 @@ def test_an_anchor_only_the_recency_prior_supplied_does_not_serve(tmp_path) -> N
     assert {(row["item_id"], row["serves"]) for row in rows} == {(_entity_id(), False), (owner, True)}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("hot", ["ordinary_note", "entity_page"], ids=["recency_carry", "fifth_clause"])
 def test_the_products_real_recency_packets_serve_nothing(tmp_path, monkeypatch, hot: str) -> None:
     """Fails when the product renames its recency carry or recency evidence, or when a

@@ -1528,7 +1528,7 @@ def test_warm_up_readies_a_served_recall_model_off_the_request_path(
         embeddings, "get_model", lambda: calls.append("recall") or types.SimpleNamespace(encode=lambda _t: None)
     )
     monkeypatch.setattr(embeddings, "get_reranker", lambda: pytest.fail("the reranker stays lazy"))
-    monkeypatch.setattr(embeddings, "get_clip_model", lambda: pytest.fail("CLIP stays lazy"))
+    monkeypatch.setattr(embeddings, "get_clip_query_model", lambda: pytest.fail("CLIP stays lazy"))
     monkeypatch.setattr(embedding_backend, "ensure_served_artifact", lambda name: ensured_calls.append(name))
 
     try:

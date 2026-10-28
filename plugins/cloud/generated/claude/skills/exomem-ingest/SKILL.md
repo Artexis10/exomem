@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 71e00a8d42a05a76bb189604d9e30d47a1245948bfaf92e4fc2ab5f65dc0693e
+  skill_contract: b041d8b2e43fdac1d8fde32bbfc8fb9461c57310df8b9fd016b734bf52c2ba1c
   version: "0.1.0"
 ---
 
@@ -40,7 +40,9 @@ identity after an uncertain commit.
 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
-2. Preserve the raw source first with `capture_source` — `content` for text, `files` for an attached transcript, article, or screenshot. Reach for `preserve_evidence`, `preserve_artifacts`, or the `transfer_artifact` fallback only when the artifact is proof-bearing rather than raw material.
+2. Preserve raw material with `capture_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
+   Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
+   Use `preserve_evidence` or `preserve_artifacts` for proof-bearing material.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
@@ -58,18 +60,19 @@ identity after an uncertain commit.
    `schema_memory(subject="note-types", operation="inspect")` lists as compiled, and
    `project` or `domain` where that type needs one. Each Markdown file in the folder keeps
    its Source and also gets a draft note that cites it and keeps its original body. Other
-   files stay Sources. A draft is not live and does not compile its Source: promote it after
-   review with the usual writers, and expect its Source to stay in the backlog until then.
-3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `search_memory`.
-4. If distilling, reuse the returned proposal, or call `prepare_note` when none exists, to obtain a draft.
-
-   Request `compile_guidance=true` during capture to get the proposal in that call.
-   Include the captured path in `sources:` to link provenance and mark the Source processed.
-
-5. Reuse known connections; use `connect_memory(operation="suggest-links")` only for missing candidates, then review them.
-6. Write with `create_note`, carrying sources and accepted links in the first write.
-7. After a bulk import, the Sources that no live note cites are the backlog. Work it in
-   batches as `exomem-review` describes; a dismissal is not completion.
+   files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
+   after review with the usual writers; a live citation still does not prove semantic coverage.
+3. Inspect available original media or extracted content; record the scope actually read.
+   Media processing is automatic. Use `process_media` for reconciliation, status or retry,
+   and `read_media` or the exposed source-read route for inspection. Pending extraction
+   does not prevent using an available original. Extraction completion says nothing
+   about semantic compilation. Respect source-version guards on dependent writes.
+4. When preparing compiled knowledge, request `compile_guidance=true` or use `prepare_note`; the optional scaffold is available.
+   A proposal prepares one note, not a source-wide semantic plan. Its opening excerpt
+   covers only the opening; use the returned read route for the full available source.
+   Adjacent pages and `suggested_connections` are unreviewed candidates, never accepted edges.
+5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
+   Raw capture may end after custody when compilation is outside the request and live policy.
 
 ## Vocabulary
 
@@ -88,7 +91,9 @@ meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
+Report preserved originals, compiled outputs and the scope actually inspected.
+Distinguish custody, extraction, citation linkage and the agent's semantic coverage judgment.
+Name unread, unavailable or uncompiled material without claiming that counts prove completion.
 
 ## Save rules
 Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typed compiled notes with source links.

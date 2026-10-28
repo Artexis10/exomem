@@ -19,6 +19,7 @@ from exomem.ranking_config import DEFAULT_RANKING
 from exomem.vault import kb_dirname
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("principal", ["owner", "admitted"])
 def test_public_recall_work_does_not_scale_with_unrelated_pages(
     tmp_path: Path, monkeypatch, principal: str, record_property,

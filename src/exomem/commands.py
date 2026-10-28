@@ -135,6 +135,7 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
@@ -1181,13 +1182,10 @@ def op_bootstrap(
         # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
         inspect_route="schema_memory(operation=inspect, subject=<registry>)",
     )
+    workflow_families = ("entity-instance/v1", "entity-type/v1", "relation-type/v1", "topic-carrier/v1")
     vocabulary_workflow_projection = {
         "version": "v1",
-        "families": [
-            "entity-instance/v1",
-            "entity-type/v1",
-            "relation-type/v1",
-        ],
+        "families": list(workflow_families),
         # The live wording is shorter to fund the `vocabulary` block.
         "consideration": (
             "Choose reuse/enrich/propose-new or generic/no-edge/defer from source evidence; no quota."
@@ -1198,10 +1196,9 @@ def op_bootstrap(
             )
         ),
         "cadence": (
-            "At capture, review pending vocabulary items with context. "
+            "At capture, review pending items in context. "
             "Anchor a question on a source page/entity; "
-            "relation_question uses both current endpoints. Record a typed decision before "
-            "structural writes."
+            "relation_question uses both current endpoints. Log a decision before structural writes."
             if profile == "compact" else
             (
                 "At a capture boundary, review items with context; anchor a missing identity "
@@ -1245,13 +1242,12 @@ def op_bootstrap(
                 "rationale",
                 "choice",
             ],
+            # Compact omits a defer-only contract: it needs no choice, and review_item_context returns it.
             "choice_contracts": {
                 family: vocabulary_workflow_module.choice_contract(family)
-                for family in (
-                    "entity-instance/v1",
-                    "entity-type/v1",
-                    "relation-type/v1",
-                )
+                for family in workflow_families
+                if profile != "compact"
+                or vocabulary_workflow_module.family_descriptor(family).allowed_decisions != {"defer"}
             },
         },
         "application": {
@@ -1286,6 +1282,17 @@ def op_bootstrap(
                 "schema_memory", {"operation": "save-relations", "subject": "relations"}
             ),
         },
+        # Compact discovery is the family listing and the vocabulary-workflow advert.
+        **({
+            "topic_carrier": {
+                "inspect": vocabulary_operation(
+                    "schema_memory", {"operation": "inspect", "subject": "topic-carriers"}
+                ),
+                "apply": vocabulary_operation(
+                    "schema_memory", {"operation": "save", "subject": "topic-carriers"}
+                ),
+            },
+        } if profile != "compact" else {}),
         "authority": {
             "contract_version": "v1",
             "scoped_delegation": False,
@@ -1811,7 +1818,7 @@ def op_bootstrap(
                 "raw_material": "capture_source",
                 "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
                 "new_durable_conclusion": "create_note",
-                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance and marks each source processed",
+                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance; one live citing derivative clears the citation backlog, not semantic compilation",
                 "small_correction": "edit_note",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "supersede_note",
@@ -2681,10 +2688,11 @@ def op_find(
         detail: Result verbosity. "full" (default) keeps the current hit
             shape including `excerpt` and `signals`. "compact" returns the
             SAME ranked hits as token-cheap routing stubs — path, title,
-            type, scope, updated, plus lifecycle/media/outside_kb markers
-            when present — omitting `excerpt` and `signals`. Use compact
-            for cheap proactive recall, then `get` a chosen page (or rerun
-            with detail="full") when you need the why.
+            type, scope, updated, a short `excerpt` when the hit has one,
+            plus lifecycle/media/outside_kb markers when present —
+            omitting `signals`. Use compact for cheap proactive recall,
+            then `get` a chosen page (or rerun with detail="full") when you
+            need the why.
         include_timings: When true (off by default), the return becomes an
             envelope {"hits": [...], "timings": {...}} (with pack=true the
             envelope also carries "pack"). `timings` reports total_ms,
@@ -2727,7 +2735,7 @@ def op_find(
         groups bounded citable units under one parent context; `semantic_blocks`
         is a bounded compatibility projection from those same rich units.
         With detail="compact": each hit is the routing stub described under
-        `detail` (no excerpt/signals) — same paths, same order.
+        `detail` (a short `excerpt`, no signals) — same paths, same order.
         With include_timings on: {"hits": [...], ["pack": {...},]
         "timings": {total_ms, unattributed_ms, cache, stages}}.
         Right after a server start, while models are still warming in the
@@ -2995,6 +3003,8 @@ def op_find(
             ):
                 active_budget.note_skipped("graph_enrich")
                 graph_enrich = False
+            # One resolver for the assembler and the release gate, so a page is decided once.
+            strip_for = egress_module.release_strip_resolver(vault_root, purpose=purpose)
             with find_module._span(timings, "pack"):
                 pack_obj = context_pack_module.assemble_pack(
                     vault_root,
@@ -3004,6 +3014,7 @@ def op_find(
                     graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
                     timings=timings,
                     purpose=purpose,
+                    strip_for=strip_for,
                 )
                 if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
                     pack_obj.get("truncation") or []
@@ -3014,7 +3025,9 @@ def op_find(
                 ):
                     active_budget.note_skipped("graph_enrich")
                 if release.active:
-                    pack_obj = egress_module.annotate_pack(pack_obj, release)
+                    pack_obj = egress_module.annotate_pack(
+                        pack_obj, release, strip_for=strip_for
+                    )
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone
@@ -3857,7 +3870,7 @@ def op_audit(
       Bare names resolve against filename stems AND frontmatter `title:`
       (so date-prefixed sources with a title match are not flagged).
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
-    - `unprocessed_source`: source that no live note compiles yet (no page
+    - `unprocessed_source`: source without a live citing derivative (no page
       in its `ingested_into:` is live and cites it in its own `sources:`)
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
@@ -3939,8 +3952,8 @@ def op_attention(
       close enough to restate, refine, or contradict (do they conflict?).
     - `stale_review`: active conclusions that are old AND rarely surfaced in
       `find` AND low inbound-degree (possibly stale — still true?).
-    - `unprocessed_source`: sources captured but never compiled (nothing
-      distilled from them yet).
+    - `unprocessed_source`: sources without a live citing derivative.
+      Citation linkage does not assess semantic compilation.
     - `relation_debt`: active compiled pages with no outbound Markdown
       connections (semantic neighbours are not yet durable graph edges).
 
@@ -4245,15 +4258,14 @@ def op_propose_compilation(
     sources: list[str],
     suggested_title: str | None = None,
 ) -> dict:
-    """Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only.
+    """Offer one optional compiled-note scaffold from captured sources. Read-only.
 
     The backlog-drain companion to `audit`'s `unprocessed_source` findings:
-    point it at one or more raw sources and it hands back a ready-to-fill
-    note skeleton — inferred note_type, a Question/Findings/Relations (or
-    Claim/…) outline, the `sources[]` to cite, and adjacent compiled pages to
-    link (computed via the same hybrid retrieval as `suggest_links`). It
-    does NOT write anything: you fill the prose and call `note()` with the
-    returned `suggested_sources` + `suggested_connections`.
+    It returns an optional outline for one note, citation candidates and
+    adjacent pages for review. It is not a source-wide compilation plan.
+    Read the full material before choosing useful destinations and grounded
+    relations. `suggested_connections` are unreviewed candidates, not accepted
+    edges. Write chosen outputs through the normal governed authoring routes.
 
     Group sources yourself before calling — pass a set that genuinely belongs
     in one note (the audit list is aged oldest-first to help you triage).
@@ -4268,9 +4280,8 @@ def op_propose_compilation(
     Returns:
         {suggested_note_type, suggested_title, suggested_sources,
          suggested_connections, outline_markdown, source_excerpts, warnings}.
-        `source_excerpts` holds one bounded excerpt per source, with its
-        recorded import metadata, so the note can be written without a read
-        per source.
+        `source_excerpts` holds opening-only excerpts and admitted full-source
+        read routes. An excerpt or citation does not establish semantic coverage.
 
     Errors:
         INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).
@@ -6870,6 +6881,15 @@ def _withhold_vault_generation(vault_root: Path, packet: Any) -> None:
         }
 
 
+def _attach_episode_advice(vault_root: Path, packet: dict[str, Any]) -> None:
+    # After the guard and never cached: advice to this caller about recording
+    # its conversation, not material about the vault, and it names no page.
+    # Both packet modes carry it, so a mode switch never silences the nudge.
+    episode_due = episode_nudge_module.on_activation(vault_root)
+    if episode_due is not None:
+        packet["episode_due"] = episode_due
+
+
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -7168,6 +7188,7 @@ def _op_activate_context_body(
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
             )
+        _attach_episode_advice(vault_root, packet)
         if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()
         return packet
@@ -7477,11 +7498,7 @@ def _op_activate_context_body(
                 seen_ns=time.time_ns(),
             ),
         )
-    # After the guard and never cached: advice to this caller about recording
-    # its conversation, not material about the vault, and it names no page.
-    episode_due = episode_nudge_module.on_activation(vault_root)
-    if episode_due is not None:
-        packet["episode_due"] = episode_due
+    _attach_episode_advice(vault_root, packet)
     if include_timings and timings is not None:
         packet["timings"] = timings.as_dict()
     # Deliberately NOT `_with_due_state`. That helper consults the emission
@@ -8205,7 +8222,7 @@ def op_capture_source(
         source_type: source_kind alias.
         url: Source URL.
         tags: Labels.
-        compile_guidance: Reusable compilation proposal.
+        compile_guidance: Optional scaffold or source read routes.
         suggested_title: Proposal title.
         source_kind: What it is; open slug.
         domain: Subject slug.
@@ -8236,6 +8253,7 @@ def op_capture_source(
         source_capture.require_authority(vault_root)
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    out: dict
     if files or adoption is not None:
         from . import client_artifacts
 
@@ -8257,41 +8275,53 @@ def op_capture_source(
             correction=correction,
         )
         _note_committed_artifact_targets(captured)
-        return captured
-    source = _add_source(
-        vault_root,
-        source_schema,
-        kind=kind,
-        content=content,
-        title=title,
-        slug=slug,
-        url=url,
-        tags=tags,
-        why_captured=why_captured,
-        domain=domain,
-        projects=projects,
-        raw_protection=raw_protection,
-        source_identity=source_identity,
-        expected_sha256=expected_sha256,
-        correction=correction,
-    )
-    out: dict = {"source": source}
-    if source_identity is not None:
-        out["capture_outcome"] = source["capture_outcome"]
-        out["mutated"] = source["capture_outcome"] == "created"
-    # The terminal reads these from the leaf's top level.
-    for key in ("vocabulary_resolution", "vocabulary_receipt"):
-        if key in source:
-            out[key] = source[key]
+        out = captured
+        # Stored/replayed are the successful outcomes fixed by the artifact receipt protocol.
+        source_paths = [
+            row["page"] for row in captured.get("files", [])
+            if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
+        ]
+    else:
+        source = _add_source(
+            vault_root,
+            source_schema,
+            kind=kind,
+            content=content,
+            title=title,
+            slug=slug,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+            raw_protection=raw_protection,
+            source_identity=source_identity,
+            expected_sha256=expected_sha256,
+            correction=correction,
+        )
+        out = {"source": source}
+        if source_identity is not None:
+            out["capture_outcome"] = source["capture_outcome"]
+            out["mutated"] = source["capture_outcome"] == "created"
+        # The terminal reads these from the leaf's top level.
+        for key in ("vocabulary_resolution", "vocabulary_receipt"):
+            if key in source:
+                out[key] = source[key]
+        source_paths = [source["path"]]
+    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
     if compile_guidance:
-        try:
-            out["compile_guidance"] = op_propose_compilation(
-                vault_root,
-                sources=[source["path"]],
-                suggested_title=suggested_title,
-            )
-        except ValueError as exc:
-            out["compile_guidance"] = {"available": False, "error": str(exc)}
+        if files or adoption is not None:
+            # Originals remain usable while extraction is pending; preparation is optional.
+            out["compile_guidance"] = {"semantic_compilation": out["semantic_compilation"]}
+        else:
+            try:
+                out["compile_guidance"] = op_propose_compilation(
+                    vault_root,
+                    sources=source_paths,
+                    suggested_title=suggested_title,
+                )
+            except ValueError as exc:
+                out["compile_guidance"] = {"available": False, "error": str(exc)}
     return out
 
 
@@ -8648,6 +8678,11 @@ def op_transfer_artifact(
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled() and not hold:
+        # A Cloud cell has only the gateway's held-upload receiver: no download or credential upload route.
+        raise ValueError("INVALID_MODE: an Exomem Cloud cell supports only hold=true uploads")
     if hold:
         if operation != "upload" or artifact is not None or expected_sha256 is None:
             raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
@@ -10359,29 +10394,30 @@ def op_adoption_studio(
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
 ) -> dict:
-    """Review and import an existing collection of notes, documents, images, audio and video in a resumable run.
+    """Review and import a collection in a resumable run.
 
     Never rewrite, move or delete originals. Status/work-item read; other actions
-    save run state or material. Apply commits the previewed plan or refuses.
+    write. Apply commits the previewed plan or refuses.
 
-    start scans; select chooses files; plan previews; apply copies each file
-    into Sources, and drafts a note under an own-note rule; cancel closes
-    pre-apply; finish proves recall and reports coverage. Repeat plan or apply
-    with a returned `continuation`. Then
-    work-item reads context, propose submits proposals, apply-proposal
-    approves one. Details: references/operations.md.
+    start scans; select chooses; plan previews; apply copies into Sources and
+    drafts notes under own-note rules; cancel closes pre-apply; finish reports
+    recall and coverage. Resume plan/apply with `continuation`.
+    work-item reads context; propose submits; apply-proposal approves.
+    Details: references/operations.md.
 
     Args:
         action: Lifecycle step.
-        run_id: From `start`; required except for `start` and run-listing `status`.
-        path: For `start`, subtree to scan (default: vault root).
+        run_id: From `start`; omit only to start or list runs.
+        path: For `start`, scan subtree (default: vault root). For run-listing
+            `status`, count distinct successfully filed originals across historical
+            runs in this subtree; null with `complete=false` if incomplete.
+            Omit for legacy listing.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
-        include: For `select`, paths whose files are selected, or {path,
-            source_kind?, domain?} to file a folder under registered keys, or
-            {path, adopt_as: note, note_type, project?, domain?} for a draft
-            note of each Markdown file.
+        include: For `select`, paths or folder rules {path, source_kind?,
+            domain?} using registered keys; {path, adopt_as: note, note_type,
+            project?, domain?} drafts a note for each Markdown file.
         exclude: For `select`, paths to deselect.
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
@@ -10409,7 +10445,7 @@ def op_adoption_studio(
                 initialize_kb=initialize_kb, collection=collection,
             )
         if action == "status":
-            return adoption_run_module.status(vault_root, run_id=run_id)
+            return adoption_run_module.status(vault_root, run_id=run_id, path=path)
         if action == "select":
             return adoption_run_module.select(
                 vault_root,
@@ -10989,7 +11025,8 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
-            source-kinds, domains, statuses, planning-values, note-types or homes);
+            source-kinds, domains, statuses, planning-values, note-types, homes,
+            topic-carriers);
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
@@ -11519,7 +11556,7 @@ def op_schema_memory(
                 current = relation_registry_module.load_registry(vault_root)
                 relation_registry_module.require_current_hash(current.extension_hash, expected_hash)
                 relation_registry_module.merge_extension_delta(
-                    memory_schema_module.relation_registry_proposal(current), proposal
+                    memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
                 )
                 return vocabulary_contract.queue_for_owner(
                     vault_root,
@@ -11538,7 +11575,7 @@ def op_schema_memory(
                 current.extension_hash, expected_hash
             )
             relation_registry_module.merge_extension_delta(
-                memory_schema_module.relation_registry_proposal(current), proposal
+                memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
             )
             from .writer_lease import active_manager, active_mutation_request_id
 
@@ -11553,7 +11590,7 @@ def op_schema_memory(
                     current.extension_hash, expected_hash
                 )
                 merged = relation_registry_module.merge_extension_delta(
-                    memory_schema_module.relation_registry_proposal(current), proposal
+                    memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
                 )
                 before = load_vocabulary(relation_registry_module.SPEC, vault_root)
                 saved = relation_registry_module.save_registry(
@@ -13887,6 +13924,8 @@ class SurfaceExclusion:
     command: str
     reason: str
     lifted_when: str
+    #: A cell configured for gateway upload handoffs serves the command.
+    lifted_by_upload_bridge: bool = False
 
 
 CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
@@ -13896,14 +13935,14 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="transfer_artifact",
                 reason=(
-                    "An Exomem Cloud cell has no browser transfer or "
-                    "gateway-mediated upload flow to bridge this leaf into; "
-                    "direct browser transfers are out of scope for Exomem Cloud "
-                    "(design Non-Goals)."
+                    "This Exomem Cloud cell is not configured for the gateway's "
+                    "upload handoff, and direct browser transfers are out of "
+                    "scope for Exomem Cloud (design Non-Goals)."
                 ),
                 lifted_when=(
-                    "a live artifact-upload bridge is added for running Cloud cells"
+                    "the cell is configured for gateway upload handoffs"
                 ),
+                lifted_by_upload_bridge=True,
             ),
             SurfaceExclusion(
                 command="read_media",
@@ -13923,22 +13962,35 @@ def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, .
     return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
 
 
+def cloud_surface_exclusions(*, upload_bridge: bool = False) -> tuple[SurfaceExclusion, ...]:
+    """The exclusions in force on a cell, with or without gateway upload handoffs."""
+    return tuple(
+        exclusion
+        for exclusion in CLOUD_SURFACE_EXCLUSIONS.values()
+        if not (upload_bridge and exclusion.lifted_by_upload_bridge)
+    )
+
+
 def product_commands_for(
-    surface: str, *, expose_tier2: bool = True, cloud: bool = False
+    surface: str, *, expose_tier2: bool = True, cloud: bool = False, upload_bridge: bool = False
 ) -> tuple[Command, ...]:
     """Product commands exposed on a public surface, honoring tier-2 opt-out.
 
     `cloud=True` is the one definition of the Cloud cell surface: the product
-    surface minus `CLOUD_SURFACE_EXCLUSIONS`, plus the Cloud-only commands that
+    surface minus the exclusions in force, plus the Cloud-only commands that
     the gateway serves from the control plane. Every other surface omits those.
     """
+    excluded = (
+        {exclusion.command for exclusion in cloud_surface_exclusions(upload_bridge=upload_bridge)}
+        if cloud else set()
+    )
     return tuple(
         c
         for c in PRODUCT_COMMANDS
         if surface in c.surfaces
         and (expose_tier2 or c.tier == 1)
         and (cloud or not c.cloud_only)
-        and not (cloud and c.name in CLOUD_SURFACE_EXCLUSIONS)
+        and c.name not in excluded
     )
 
 

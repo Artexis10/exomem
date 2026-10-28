@@ -43,7 +43,10 @@ def decision(current, outcome="generic", **overrides):
 
 
 def test_product_families_are_distinct_and_immutable():
-    assert set(workflow.FAMILIES) == {"entity-instance/v1", "entity-type/v1", "relation-type/v1"}
+    assert set(workflow.FAMILIES) == {
+        "entity-instance/v1", "entity-type/v1", "relation-type/v1", "topic-carrier/v1",
+    }
+    assert workflow.family_descriptor("topic-carrier/v1").allowed_decisions == {"defer"}
     relation = workflow.family_descriptor("relation-type/v1")
     assert {"generic", "no-edge", "defer"} <= relation.allowed_decisions
     assert "enrich" not in relation.allowed_decisions

@@ -63,6 +63,7 @@ from test_graph_post_handoff_writes import (  # noqa: E402
     _run_child,
 )
 
+import exomem.server  # noqa: F401 - a serving worker has loaded its MCP surface before its first write
 from exomem import graph_sync, lexstore, service_standby  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 
@@ -442,6 +443,7 @@ from test_graph_post_handoff_writes import (  # noqa: E402
 
 import threading  # noqa: E402
 
+import exomem.server  # noqa: F401 - a serving worker has loaded its MCP surface before its first write
 from exomem import epistemic_graph, graph_sync, readiness, service_standby, warmup  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 

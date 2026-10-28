@@ -65,12 +65,17 @@ def _finding(vault: Path):
     return next((item for item in report.findings if item.path == SOURCE), None)
 
 
-def test_a_live_derivative_that_cites_the_source_completes_it(vault: Path) -> None:
+def test_a_live_citing_derivative_clears_only_the_citation_backlog(vault: Path) -> None:
     _source(vault, SOURCE)
     _derivative_page(vault, "compiled-claim", status="active", cites=CITED)
     _name_derivatives(vault, SOURCE, "compiled-claim")
 
     assert _finding(vault) is None
+    from exomem import find, source_coverage
+
+    source = find._CACHE.get(vault / SOURCE, vault)
+    assert source is not None
+    assert source_coverage.describe(vault, source)["semantic_compilation"]["state"] == "unassessed"
 
 
 def test_each_failing_derivative_reports_its_own_reason(vault: Path) -> None:

@@ -1,8 +1,8 @@
-"""Source coverage: which captured Sources a live compiled page compiles.
+"""Source citation linkage for the existing unprocessed-source backlog.
 
 A Source's `ingested_into` records every page that cites it, whatever that page's
-status. It is a citation edge, never a completion claim. A Source counts as
-compiled when at least one page it names
+status. It is a citation edge, never a completion claim. A Source clears the
+citation backlog when at least one page it names
 
 1. exists,
 2. has a status whose registry lifecycle class is `live`, and
@@ -13,15 +13,15 @@ rejects it. Every other Source stays in the `unprocessed_source` family, and eac
 derivative that fails reports one reason: `missing`, `pending`, `retired` or
 `claim_unresolved`.
 
-The audit family and the due-state projection both evaluate through this module, so
-the two never hold two definitions of "compiled". The rule branches only on the
-registry's closed lifecycle `class` and note-type `role`, never on an entry key.
+The audit family and due-state projection share this criterion. The compatibility
+property `compiled` means citation linkage only; semantic compilation remains
+unassessed. The rule branches only on registry lifecycle `class` and note-type `role`.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -29,7 +29,7 @@ from typing import Any
 from . import lifecycle_statuses, note_types, source_closure, vault
 from .find_types import ParsedPage
 
-#: The closed reasons a derivative fails to compile its Source.
+#: The closed reasons a derivative fails the citation-backlog criterion.
 MISSING = "missing"
 PENDING = "pending"
 RETIRED = "retired"
@@ -47,6 +47,9 @@ SCAFFOLD_EXCERPT_CHARS = 6000
 MIN_EXCERPT_CHARS = 60
 #: Raw characters read before whitespace collapses, so one excerpt never walks a whole body.
 _SCAN_CHARS = 8 * EXCERPT_CHARS
+#: Shared response bounds for admitted compilation routes, not a source coverage quota.
+COMPILATION_SOURCES_LISTED = 5
+COMPILATION_PATH_CHARS = 2048
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +76,7 @@ class Coverage:
 
     @property
     def compiled(self) -> bool:
+        """Compatibility name for one live citing derivative, not semantic completion."""
         return any(item.reason is None for item in self.derivatives)
 
     @property
@@ -219,6 +223,43 @@ def excerpt(root: Path, page: ParsedPage, limit: int = EXCERPT_CHARS) -> str:
     return _clip(" ".join(prose.split()), limit)
 
 
+def compilation_guidance(root: Path, paths: Sequence[str]) -> dict[str, Any]:
+    """Informational assessment state and bounded routes over released Source paths."""
+    from .governance import egress
+
+    keep = egress.restricted_release_filter(root)
+    # Citation closure owns parent-reference syntax; preparation reads the whole source.
+    source_paths = (
+        source_closure._target(path).removesuffix(".md") + ".md" for path in paths
+    )
+    released = list(dict.fromkeys(
+        path for path in source_paths if keep is None or keep(path)
+    ))
+    selected = [path for path in released if len(path) <= COMPILATION_PATH_CHARS][
+        :COMPILATION_SOURCES_LISTED
+    ]
+    out = compilation_routes(selected)
+    if len(selected) < len(released):
+        out["truncated"] = True
+    return out
+
+
+def compilation_routes(paths: Sequence[str]) -> dict[str, Any]:
+    """Render already admitted, bounded paths; callers own admission and bounds."""
+    # `unassessed` is a declared protocol state, never inferred from citations or extraction.
+    out: dict[str, Any] = {"state": "unassessed"}
+    if paths:
+        # Inherit the caller's purpose; replacing it can invalidate an admitted session grant.
+        out["full_source_reads"] = [
+            {"tool": "read_memory", "args": {
+                "path": path, "include_raw": True,
+            }}
+            for path in paths
+        ]
+        out["preparation_route"] = {"tool": "prepare_note", "args": {"sources": list(paths)}}
+    return out
+
+
 def describe(
     root: Path, page: ParsedPage, *, excerpt_chars: int | None = EXCERPT_CHARS
 ) -> dict[str, Any]:
@@ -229,10 +270,14 @@ def describe(
     which Sources belong in one note.
     """
     frontmatter: Mapping[str, Any] = page.frontmatter
-    out: dict[str, Any] = {"title": _clip(page.title, TITLE_CHARS)}
+    out: dict[str, Any] = {
+        "title": _clip(page.title, TITLE_CHARS),
+        "semantic_compilation": compilation_guidance(root, [page.rel_path]),
+    }
     opening = excerpt(root, page, excerpt_chars) if excerpt_chars else ""
     if opening:
         out["excerpt"] = opening
+        out["excerpt_scope"] = "opening_only"
     collection_path = _text(frontmatter.get("collection_path"))
     folder = PurePosixPath(collection_path).parent.as_posix() if collection_path else "."
     for key, value in (
@@ -248,7 +293,7 @@ def describe(
 
 
 def context(root: Path, page: ParsedPage, coverage: Coverage) -> dict[str, Any]:
-    """`describe` plus the derivatives that fail to compile the Source, for a finding."""
+    """`describe` plus derivatives that fail the citation-backlog criterion, for a finding."""
     out = describe(root, page)
     failing = coverage.failing
     if failing:

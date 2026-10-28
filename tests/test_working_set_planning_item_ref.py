@@ -25,6 +25,9 @@ from exomem import (
     working_set_runtime,
 )
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 MANIFEST = "Knowledge Base/Planning/Harbour Works/_collection.md"
 ITEMS = {
     str(UUID(int=41)): "Resurface the harbour slipway",

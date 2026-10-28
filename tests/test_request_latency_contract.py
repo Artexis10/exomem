@@ -119,7 +119,7 @@ def test_the_packaged_contract_keeps_owners_and_strict_comparisons() -> None:
     contract = load_contract()
     raw = json.loads(files("exomem").joinpath("request_latency_contract.json").read_text())
     assert contract.revision == raw["revision"]
-    assert contract.revision == "request-latency-v4"
+    assert contract.revision == "request-latency-v5"
     assert contract.bar("activation-live-warm").comparison == "<"
     assert contract.bar("governed-hybrid").threshold_ms == 200
     assert contract.bar("governed-keyword").threshold_ms == 100
@@ -129,6 +129,50 @@ def test_the_packaged_contract_keeps_owners_and_strict_comparisons() -> None:
                    "governed-keyword-p95-target", "governed-p50-target"):
         assert contract.bar(bar_id).boundary.id == "recall-bound-command-v1"
     assert all(bar.requirement and bar.provenance for bar in contract.bars)
+
+
+def test_the_paired_mcp_read_bar_is_pending_and_never_labels_live_traffic() -> None:
+    from exomem.request_latency_contract import load_contract
+
+    contract = load_contract()
+    bar = contract.bar("mcp-read-paired-pending")
+    reference = contract.references[bar.reference]
+    assert (bar.establishment, bar.threshold_ms, bar.boundary.id) == (
+        "pending",
+        None,
+        "mcp-worker-socket-v1",
+    )
+    # An observing bar would relabel live mcp-dispatch-v1 rows with the worker-socket boundary.
+    assert bar.observe is False
+    live = contract.observation_bar(surface="mcp", tool="search_memory", deep=False)
+    assert live is not None and live.id == "mcp-observed"
+    # The six collection-store groups carry the private-sandbox target; only gating groups
+    # carry an allowance, and the multiplicity family size comes from this list.
+    groups = {**reference["gating_groups"], **reference["non_gating_groups"]}
+    assert sorted(name for name, group in groups.items() if group.get("p95_target_ms") == 100) == [
+        "planning-list",
+        "planning-query",
+        "planning-read",
+        "records-list",
+        "records-query",
+        "records-read",
+    ]
+    assert all("allowance_ms" in group for group in reference["gating_groups"].values())
+    assert not any("allowance_ms" in group for group in reference["non_gating_groups"].values())
+
+
+def test_a_selected_observation_bar_always_covers_the_sample_it_labels() -> None:
+    from exomem.request_latency_contract import load_contract
+
+    contract = load_contract()
+    for surface in ("mcp", "rest", "activation"):
+        for tool in ("ask_memory", "find", "read_memory", "activate_context"):
+            for deep in (False, True):
+                bar = contract.observation_bar(surface=surface, tool=tool, deep=deep)
+                assert bar is None or bar.covers(tool, deep)
+    # A deep call to a tool with no deep bar has no bar, not a fallback it cannot match.
+    assert contract.observation_bar(surface="mcp", tool="read_memory", deep=True) is None
+    assert contract.observation_bar(surface="mcp", tool="ask_memory", deep=True).id == "watch-deep"
 
 
 def test_unknown_operation_names_do_not_become_evidence_content() -> None:

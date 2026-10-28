@@ -639,7 +639,23 @@ def test_the_release_lever_stops_the_service_building_derived_state(service, mon
     rollup = "rollups:\n  daily:\n    bucket: day\n    timestamp: day\n    values:\n      count: [sum]\n"
     call(root, "record_memory", action="revise", collection=activity, manifest_text=text.removesuffix("---\n")
          + rollup + "---\n", why="daily rollup", **guards)
+    # The revise wakes the backfill tick, which may have begun a batch before the lever clears. The store
+    # thread runs its ticks one at a time, so a tick that begins after the clear shows that batch has ended.
+    cleared, settled = [], threading.Event()
+    backfill_tick = runtime.StoreServer._backfill_tick
+
+    def observed(self):
+        after_clear = bool(cleared)
+        try:
+            return backfill_tick(self)
+        finally:
+            if after_clear:
+                settled.set()
+
+    monkeypatch.setattr(runtime.StoreServer, "_backfill_tick", observed)
     monkeypatch.setattr(capability, "RELEASED", frozenset())
+    cleared.append(True)
+    assert settled.wait(10), "the store thread never ran a tick after the lever cleared"
 
     def progress():
         with closing(connection.open_reader(connection.store_path(root))) as reader:

@@ -207,7 +207,11 @@ def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCovera
 #: so an external edit could be missing from any bounded set we could enqueue.
 #: Deferring there would quietly leave the rest of the graph stale, which is a
 #: worse failure than the cost being removed. These stay whole-vault, and the
-#: value of writing them down is that they stay few.
+#: value of writing them down is that they stay few. A caller that may stop at
+#: queued never runs that pass on its own thread: without a checkpoint it
+#: advances the full marker (`_leave_rebuild_to_the_drain`), and with one it
+#: registers the pass, unless a standing full marker already owes it
+#: (`_standing_marker_owns_the_pass`).
 _FALLBACK_DISPOSITIONS = {
     "path_outside_vault": "defer",
     "path_unreadable": "defer",
@@ -1131,12 +1135,13 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
     try:
         from . import graph_drain
 
-        graph_drain.note_graph_progress()
+        graph_drain.note_graph_progress(vault_root)
     except Exception:  # noqa: BLE001 - a missed wake costs one poll, never the repair
         pass
 
 
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
+RECOVERY_DECLINE_QUEUE_OWNS_REPAIR = "queue_owns_repair"
 RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
 RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
 RECOVERY_DECLINE_NO_SIDECAR = "no_sidecar"
@@ -1161,9 +1166,24 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     published analyses of this incident named the wrong mechanism before one
     measured it" -- so the reason is now a value a caller can log and a test can
     assert, rather than something to be inferred from an absence.
+
+    Queued per-path receipts with no whole-vault marker come first, while the
+    drain can repair them per path: the queue owns that repair, and the drain
+    that empties it publishes and clears the barrier. Recovery behind it ran a
+    whole-vault pass for work already queued, and an external mark on the
+    queued paths turned it into whole-vault debt. A queue whose latest drain
+    could not repair per path at all -- an epoch that refused it, or a vault
+    not ready for it, as a restarted worker leaves it -- owns nothing, and
+    recovery goes on to the reasons below. Declining there left the graph
+    unavailable until the stall escalation, longer than a reader waits. Nor
+    does a queue whose oldest receipt has waited the drain's stall threshold:
+    one receipt that never drains, behind writes that do, held the barrier for
+    good, because their progress restarts the stall escalation's clock.
     """
     from . import freshness
 
+    if _graph_receipts_own_repair(vault_root):
+        return RECOVERY_DECLINE_QUEUE_OWNS_REPAIR
     if freshness.external_pending(vault_root):
         return RECOVERY_DECLINE_EXTERNAL_PENDING
     if not graph_enabled():
@@ -1179,6 +1199,32 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
         # costs nothing but the delay.
         return RECOVERY_DECLINE_PUBLICATION_REFUSED
     return None
+
+
+def _graph_receipts_own_repair(vault_root: Path) -> bool:
+    """Whether queued per-path receipts, with no marker, are repair the drain can run.
+
+    The drain's own record answers "can run": its latest per-path attempt was
+    not refused by the epoch or by an unready vault. The oldest receipt's age
+    bounds it: a requeue keeps a receipt's first enqueue time, so a receipt
+    that never drains ages past the threshold however much drains around it.
+    An unreadable queue reads as empty, which leaves recovery to the reasons
+    after this one.
+    """
+    from . import graph_drain
+
+    if graph_drain.per_path_repair_blocked(vault_root):
+        return False
+    try:
+        count, oldest_age = deferred_index.graph_queue_age(vault_root)
+        return (
+            count > 0
+            and oldest_age is not None
+            and oldest_age < graph_drain.stall_seconds()
+            and deferred_index.graph_full_rebuild_pending(vault_root) is None
+        )
+    except Exception:  # noqa: BLE001 - an unreadable queue owns no repair
+        return False
 
 
 def _note_recovery_decline(vault_root: Path, reason: str | None) -> None:
@@ -5607,6 +5653,12 @@ class EpistemicGraphIndex:
           nothing is converging it. Routed to the incremental path, which
           defers and queues without publishing over the gap -- the
           acknowledgement is never advanced on a promise.
+        * `graph_sync_acknowledgement_covers` -- the sidecar already
+          acknowledges this exact checkpoint, and only its availability marker
+          is withdrawn. The watcher's echo of a write that a drain already
+          repaired arrives here. Nothing is wrong with the lineage, so a caller
+          that may stop at queued takes the incremental path; a standalone
+          caller still rebuilds, because it has to see a converged graph.
         """
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
@@ -5620,6 +5672,13 @@ class EpistemicGraphIndex:
             )
         finally:
             snapshot.close()
+        acknowledged = _graph_sync_acknowledgement(values)
+        # Exact identity, not `GraphBuildOutcome.covers`: an acknowledgement at
+        # a later generation proves no lineage for this checkpoint.
+        if acknowledged is not None and graph_sync.GraphBuildOutcome.covering(
+            acknowledged
+        ) == graph_sync.GraphBuildOutcome.covering(checkpoint):
+            return "graph_sync_acknowledgement_covers"
         predecessor = checkpoint.generation - 1
         if predecessor == 0:
             if (
@@ -5628,7 +5687,6 @@ class EpistemicGraphIndex:
             ):
                 return "available"
             return "graph_sync_predecessor_present_at_genesis"
-        acknowledged = _graph_sync_acknowledgement(values)
         if acknowledged is None:
             return "graph_sync_acknowledgement_absent"
         if acknowledged.generation != predecessor:
@@ -5997,7 +6055,8 @@ class EpistemicGraphIndex:
                 # The generation this repair is owed for, so a later predecessor
                 # probe can prove the gap this deferral opens is covered by
                 # durable work. A caller with no checkpoint leaves it unknown,
-                # which is honest: it rebuilds after release and claims nothing.
+                # which is honest: it claims the path is owed, never for which
+                # generation.
                 generation=(
                     int(graph_checkpoint.generation) if graph_checkpoint is not None else None
                 ),
@@ -6178,14 +6237,11 @@ class EpistemicGraphIndex:
             report["_durable_before_rebuild"] = 1
         if report.pop("_rebuild_after_release", False):
             durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
-            if _parent_receipted_graph_handoff_active(
-                self.vault_root, self._mutation_coordinator.state_root
+            if _caller_can_carry_pending(
+                self.vault_root, self._mutation_coordinator
+            ) and self._leave_rebuild_to_the_drain(
+                graph_checkpoint, durable_before_rebuild=durable_before_rebuild
             ):
-                required = graph_checkpoint or graph_sync.read_checkpoint(self.vault_root)
-                if required is not None and not durable_before_rebuild:
-                    deferred_index.advance_graph_full_rebuild(
-                        self.vault_root, after_generation=required.generation
-                    )
                 return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
             try:
                 with _logged_whole_vault_rebuild(
@@ -6227,8 +6283,10 @@ class EpistemicGraphIndex:
                 }
         # Standalone callers have already left the graph mutation hold. Command
         # callers and receipted parent handoffs retain their exact registration
-        # for the response boundary to start without blocking publication.
-        if not _caller_can_carry_pending(self.vault_root, self._mutation_coordinator):
+        # for the response boundary to start without blocking publication. A
+        # background caller has no boundary, so it starts the registration here
+        # and its waiver spends no time joining it.
+        if not _caller_has_pending_boundary(self.vault_root, self._mutation_coordinator):
             graph_sync.start_registered(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
             )
@@ -6248,6 +6306,42 @@ class EpistemicGraphIndex:
                     else None,
                 )
         return report
+
+    def _leave_rebuild_to_the_drain(
+        self,
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None,
+        *,
+        durable_before_rebuild: bool,
+    ) -> bool:
+        """Hand a deferring caller's whole-vault pass to the drain. False to run it here.
+
+        A caller that may stop at queued never runs that pass on its own thread.
+        A defer disposition has already queued its paths. A rebuild disposition
+        knows only that the scope is wider, so it advances the full marker the
+        drain converges. A receipted parent handoff without a checkpoint keeps
+        its own durable full receipt as that debt. A marker that cannot be
+        written leaves the pass to the caller, so the graph is never left
+        stale without a record of the debt.
+        """
+        if durable_before_rebuild:
+            return True
+        required = graph_checkpoint or graph_sync.read_checkpoint(self.vault_root)
+        if required is None and _parent_receipted_graph_handoff_active(
+            self.vault_root, self._mutation_coordinator.state_root
+        ):
+            return True
+        try:
+            deferred_index.advance_graph_full_rebuild(
+                self.vault_root,
+                after_generation=required.generation if required is not None else 0,
+            )
+        except Exception:  # noqa: BLE001 - an unrecorded debt is paid inline instead
+            log.warning(
+                "graph whole-vault debt could not be recorded; rebuilding inline",
+                exc_info=True,
+            )
+            return False
+        return True
 
     def _refresh_paths_locked(
         self,
@@ -6330,6 +6424,17 @@ class EpistemicGraphIndex:
             if _FALLBACK_DISPOSITIONS[reason] == "defer":
                 deferred = defer(reason)
                 if deferred is not None:
+                    return deferred
+            elif graph_checkpoint is not None and _standing_marker_owns_the_pass(
+                self.vault_root, self._mutation_coordinator
+            ):
+                # The pass this reason asks for is already owed. Queue this
+                # write's paths at its generation and advance the marker over
+                # it; a failed enqueue or marker write still registers below.
+                deferred = defer(reason)
+                if deferred is not None and self._leave_rebuild_to_the_drain(
+                    graph_checkpoint, durable_before_rebuild=False
+                ):
                     return deferred
             if graph_checkpoint is None:
                 return {
@@ -10114,23 +10219,91 @@ def _caller_can_carry_pending(
     vault_root: Path,
     mutation_coordinator: mutation_lock.VaultMutationCoordinator,
 ) -> bool:
-    """Whether this caller has a response envelope that can report `pending`.
+    """Whether this caller's contract allows it to stop at `queued`.
 
-    Deferring repair to the queue is only honest for a caller that can *say* the
-    graph has not converged. A mutation request can: its terminal carries the
-    `graph_sync` field. A receipted parent media handoff can retain its exact
-    durable full receipt for recovery. A direct library caller cannot -- it
-    returns a leaf result with nowhere to put the outcome, and its contract has
-    always been a converged graph, which is why `_join_registered_standalone`
-    joins the rebuild to completion for exactly this case.
+    Deferring repair to the queue is only honest for a caller whose contract is
+    not a converged graph. A caller under a response boundary
+    (`_caller_has_pending_boundary`) can say the graph has not converged. A
+    background caller inside `graph_sync.standalone_join_waived` has nobody
+    waiting on it: the receipt-owned fan-out and the operator's receipt repair
+    hold a durable receipt, and the file watcher's dispatch and reconcile hold
+    the queue. A direct library caller has neither -- it returns a leaf result
+    with nowhere to put the outcome, and its contract has always been a
+    converged graph, which is why `_join_registered_standalone` joins the
+    rebuild to completion for exactly this case.
 
     Deferring for a standalone caller does not merely under-report; it changes
     what the next call in the same process observes. Ten governance and
     deletion-lineage tests failed on that, because the operation after a delete
     read a graph that used to be current by the time it ran.
+    """
+    return graph_sync.standalone_join_is_waived() or _caller_has_pending_boundary(
+        vault_root, mutation_coordinator
+    )
 
-    Same predicate as `_join_registered_standalone`, deliberately: the caller
-    that joins is precisely the caller that must not defer.
+
+def _standing_marker_owns_the_pass(
+    vault_root: Path,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether a standing full marker already owes the pass this caller would register.
+
+    A standing full marker records whole-vault debt that the graph drain pays
+    once, and its publication retires the marker and acknowledges the
+    checkpoint it sampled. A caller that may stop at queued therefore queues
+    its own paths, advances the marker over its generation and registers no
+    second pass. A standalone caller still registers and joins, and an
+    unreadable marker is not a standing one.
+    """
+    return deferred_index.graph_full_rebuild_pending(
+        vault_root
+    ) is not None and _caller_can_carry_pending(vault_root, mutation_coordinator)
+
+
+def _failure_left_to_the_queue(
+    vault_root: Path,
+    error: BaseException,
+    required: graph_sync.GraphSyncCheckpoint,
+    paths: Iterable[Path],
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether a failed dispatch's repair is this write's own paths, queued here.
+
+    A failure that may not mark the registry -- a busy boundary, a refused
+    publication, a moved projection, a rebuild already running -- says the
+    registry saw this write and only this projection did not land, so the
+    write's paths are the whole repair. A caller that may stop at queued queues
+    them for the drain instead of registering a whole-vault pass. An
+    unclassifiable failure has marked the whole vault, and a failed enqueue
+    loses nothing only if the pass still runs, so both register as before.
+    """
+    if may_mark_external_pending(error) or not _caller_can_carry_pending(
+        vault_root, mutation_coordinator
+    ):
+        return False
+    scope = {rel for path in paths if (rel := _vault_rel(vault_root, Path(path))) is not None}
+    try:
+        index = EpistemicGraphIndex(vault_root, mutation_coordinator=mutation_coordinator)
+        return index._queue_graph_repair(
+            scope, reason="graph_dispatch_failed", graph_checkpoint=required
+        )
+    except Exception:  # noqa: BLE001 - an unqueued repair registers the pass instead
+        log.warning("failed graph dispatch could not queue its repair", exc_info=True)
+        return False
+
+
+def _caller_has_pending_boundary(
+    vault_root: Path,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether a response boundary will start this caller's registered work.
+
+    A mutation request's terminal carries the `graph_sync` field, a direct
+    mutation guard reports to its own boundary, and a receipted parent media
+    handoff retains its exact durable full receipt for recovery. Each of those
+    starts the registered rebuild itself, so the refresh and the dispatch leave
+    it registered. A background caller has no such boundary: it may stop at
+    queued, but registered work it leaves behind still has to start here.
     """
     from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
 
@@ -10187,7 +10360,7 @@ def _join_registered_standalone(
         # request-local waiter; releasing it here turns a healthy graph handoff
         # into GRAPH_SYNC_HANDOFF_MISSING before the parent can finalize.
         return result
-    if _caller_can_carry_pending(vault_root, mutation_coordinator):
+    if _caller_has_pending_boundary(vault_root, mutation_coordinator):
         return result
     assert result.checkpoint is not None
     try:
@@ -10420,8 +10593,8 @@ def upsert_after_write(
         return GraphDispatchResult.not_required()
     required = graph_sync.read_checkpoint(vault_root)
     mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None
+    created = list(created_paths)
     try:
-        created = list(created_paths)
         replay: dict[str, bool] = {"replayed": True} if replayed else {}
         from .writer_lease import active_manager
 
@@ -10449,6 +10622,21 @@ def upsert_after_write(
             predecessor_state = index._graph_sync_predecessor_state(required)
             unreadable = predecessor_state == "graph_sync_predecessor_unreadable"
             covered_gap = predecessor_state == "graph_sync_gap_covered_by_receipts"
+            # A sidecar that already acknowledges this checkpoint owes no
+            # whole-vault pass. A caller that may stop at queued takes the
+            # incremental path, which queues the paths behind the withdrawn
+            # marker; a standalone caller still has to see a converged graph.
+            acknowledged_here = (
+                predecessor_state == "graph_sync_acknowledgement_covers"
+                and _caller_can_carry_pending(vault_root, mutation_coordinator)
+            )
+            if acknowledged_here:
+                log.info(
+                    "graph dispatch routed a covering acknowledgement to incremental "
+                    "repair external_pending=%s generation=%s",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
             if covered_gap:
                 # Task 1.13. The gap is real and the rebuild is not the repair:
                 # the queue already holds every generation it skipped, and the
@@ -10475,7 +10663,37 @@ def upsert_after_write(
                     freshness.external_pending(vault_root),
                     required.generation,
                 )
-            if predecessor_state != "available" and not unreadable and not covered_gap:
+            if (
+                predecessor_state != "available"
+                and not unreadable
+                and not covered_gap
+                and not acknowledged_here
+            ):
+                if (
+                    _standing_marker_owns_the_pass(vault_root, mutation_coordinator)
+                    and index._queue_graph_repair(
+                        {
+                            rel
+                            for path in (*written_paths, *created)
+                            if (rel := _vault_rel(vault_root, Path(path))) is not None
+                        },
+                        reason=predecessor_state,
+                        graph_checkpoint=required,
+                    )
+                    and index._leave_rebuild_to_the_drain(
+                        required, durable_before_rebuild=False
+                    )
+                ):
+                    # Availability is already withdrawn on this branch. A
+                    # failed enqueue or marker write registers below.
+                    log.info(
+                        "graph dispatch left an unproven predecessor to the standing "
+                        "full marker reason=%s external_pending=%s generation=%s",
+                        predecessor_state,
+                        freshness.external_pending(vault_root),
+                        required.generation,
+                    )
+                    return GraphDispatchResult("deferred", "graph_repair_queued", required)
                 # #576 F3, applied to the gate the incremental table does not
                 # cover. `fallback()` logs which of the nine bail-out reasons
                 # fired; this door precedes `refresh_paths` entirely, so
@@ -10649,6 +10867,10 @@ def upsert_after_write(
         )
         if required is not None:
             assert mutation_coordinator is not None
+            if _failure_left_to_the_queue(
+                vault_root, error, required, (*written_paths, *created), mutation_coordinator
+            ):
+                return GraphDispatchResult("deferred", "graph_repair_queued", required)
             return _join_registered_standalone(
                 vault_root,
                 _registered_or_failure(vault_root, required, None, mutation_coordinator),
@@ -10662,6 +10884,10 @@ def upsert_after_write(
         log.warning("graph post-commit dispatch failed", exc_info=True)
         if required is not None:
             assert mutation_coordinator is not None
+            if _failure_left_to_the_queue(
+                vault_root, error, required, (*written_paths, *created), mutation_coordinator
+            ):
+                return GraphDispatchResult("deferred", "graph_repair_queued", required)
             return _join_registered_standalone(
                 vault_root,
                 _registered_or_failure(vault_root, required, None, mutation_coordinator),

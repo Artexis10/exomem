@@ -1324,6 +1324,72 @@ def test_an_s1_migration_whose_files_changed_after_publication_restores_its_stor
         service.stop()
 
 
+def test_an_s1_restore_that_the_same_apply_continues_replaces_its_store_while_background_threads_run(
+        s1, capsys, monkeypatch, tmp_path):
+    """A restore that leaves its store admitted while the same apply goes on to replace it. The lease
+    renewal and the replica publisher of an admitted store read it in the background, and a reader
+    open at the replacement makes it refuse COLLECTION_STORE_BUSY, so the apply fails at random."""
+    root = s1
+    crash_apply(tmp_path, "before-publication", released=S1_RELEASED)
+    edit_by_hand(root)
+    capsys.readouterr()
+    live = connection.store_path(root).resolve()
+    apply_thread = threading.get_ident()
+    restored, replacing, background_reader_open, replacement_checked = (threading.Event() for _ in range(4))
+
+    restore = migration._restore
+
+    def restore_then_note(*args, **kwargs):
+        result = restore(*args, **kwargs)
+        restored.set()
+        return result
+
+    replace_live = takeover.replace_live
+
+    def replace_once_a_background_reader_opens(session, leaf, check, **kwargs):
+        if not restored.is_set() or replacement_checked.is_set():
+            return replace_live(session, leaf, check, **kwargs)
+        replacing.set()
+        # An admitted store's renewal reads it every second at this TTL; nothing else should.
+        background_reader_open.wait(2.5)
+        try:
+            return replace_live(session, leaf, check, **kwargs)
+        finally:
+            replacement_checked.set()
+
+    class OpenUntilTheReplacementChecked:
+        def __init__(self, reader):
+            self.reader = reader
+
+        def __getattr__(self, name):
+            return getattr(self.reader, name)
+
+        def close(self):
+            replacement_checked.wait(10)
+            self.reader.close()
+
+    def held_when_opened_in_the_background(open_store):
+        def opened(path, *args, **kwargs):
+            reader = open_store(path, *args, **kwargs)
+            if (replacing.is_set() and not replacement_checked.is_set() and threading.get_ident() != apply_thread
+                    and Path(path).resolve() == live):
+                background_reader_open.set()
+                return OpenUntilTheReplacementChecked(reader)
+            return reader
+        return opened
+
+    monkeypatch.setattr(migration, "_restore", restore_then_note)
+    monkeypatch.setattr(takeover, "replace_live", replace_once_a_background_reader_opens)
+    monkeypatch.setattr(connection, "open_reader", held_when_opened_in_the_background(connection.open_reader))
+    monkeypatch.setattr(connection, "open_head_reader", held_when_opened_in_the_background(connection.open_head_reader))
+
+    assert migrate(root, "apply") == 0
+
+    applied = printed(capsys)
+    assert (applied["status"], applied["restored"]["forked"]) == ("marker_admitted", False)
+    assert stored_body(root, KEY) == "Edited by hand\n"
+
+
 def test_an_s1_restore_cut_before_its_fork_finishes_on_the_next_apply(s1, capsys, tmp_path):
     """A restore killed after it put the superseded store back but before it continued it as a new
     tenure, after which every apply refuses behind the coordinator's head on the abandoned import."""

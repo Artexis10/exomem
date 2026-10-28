@@ -48,7 +48,7 @@ Invited friends write in Japanese and other languages, so these gaps are part of
     - an fp32 ONNX build of today's CLIP image model, with a multilingual text encoder aligned to its image space, which answers queries in any supported language and keeps the stored image vectors;
     - a multilingual image–text model, which re-encodes stored image vectors once.
   - HEIC is decoded, subject to a licence check.
-- **Speech.** Audio and video get transcripts from the engine and model that the bake-off in design.md selects. The first required language set is Japanese, English and Estonian, and it is deployment configuration.
+- **Speech.** Ingested audio and video receive transcripts automatically through the existing worker, without an agent or a per-file request. Selection targets the broadest language coverage that meets quality and resource bounds. Japanese, English and Estonian are the verification set, not the coverage limit. Language sets remain deployment data.
 - **Off until proven.** Each engine has a switch, off by default on Cloud. It turns on first in the owner's cell, which is the canary, for that engine's acceptance, and then in the other cells one at a time. Under the current cellctl render, each switch change restarts that cell briefly, so changes happen outside the backup window.
   - Acceptance compares a labelled known-content subset with a personal install's extraction, and reads memory as anonymous plus non-reclaimable memory.
   - An engine that is off or not shipped is reported as disabled on runtime status and doctor.

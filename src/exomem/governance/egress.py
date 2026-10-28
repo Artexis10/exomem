@@ -173,6 +173,9 @@ def _packet_publications(packet: Any) -> set[str] | None:
     # Pointers do not carry their producer's authored-page/canonical-item basis.
     if packet.get("pointers"):
         return None
+    # A map block lists catalogue entries without a per-page basis: the count stays unknown, never zero.
+    if "map" in packet:
+        return None
     paths: set[str] = set()
     # These are packet schema blocks, not customer-defined roles or meanings.
     for block in ("anchors", "related", "recent_context", "current_state", "units"):
@@ -752,6 +755,11 @@ assert LEVEL_NONE == DISCLOSURE_MIN and LEVEL_FULL == DISCLOSURE_MAX
 # ---------------------------------------------------------------------------
 # Per-level field allow-lists (D3)
 # ---------------------------------------------------------------------------
+
+#: Characters of page text a compact hit excerpt keeps; a cut adds the " …" marker after them.
+#: The page builders already cut near 220 characters (`find_results`), so this clips only an
+#: outlier and bounds the compact payload at a few hundred bytes per hit.
+COMPACT_HIT_EXCERPT_MAX = 240
 
 # A find hit is inherently an excerpt shape, so L5 and L6 share a field set;
 # the ladder distinction between them bites on `get`/`read_memory`, where L5 is
@@ -1506,6 +1514,14 @@ def project(
     out = _strip_withheld_provenance(out, withheld_paths)
     if decision is not None and decision.release_strip:
         out = bridges.strip_provenance(out, decision.release_strip)
+    if compact and resolved_kind == "hit" and "excerpt" in out:
+        # Cut AFTER every strip above, so a compact excerpt is a prefix of the one full mode releases.
+        # Cutting first could end inside an identity the strip removes whole, and leave half of it.
+        excerpt = _excerpt_of(str(out["excerpt"]), COMPACT_HIT_EXCERPT_MAX)
+        if excerpt:
+            out["excerpt"] = excerpt
+        else:
+            del out["excerpt"]
     return out
 
 
@@ -1537,16 +1553,65 @@ def project_hits(
     return out
 
 
-def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[str, Any] | None:
+def _strip_bridge_pack_page(
+    pack: dict[str, Any], path: str, identities: tuple[bridges.StripIdentity, ...]
+) -> None:
+    """Remove the source trail of one released bridge page from the pack sections that hold it.
+
+    A released bridge page carries its claim, never its source trail. The terminal backstop only
+    recognises a pack's `parent` blocks (they carry a path and ref), so the claim text, unit text,
+    unit relations and block metadata of such a page are stripped here, where the page's own decision
+    is known. Each unit and block is stripped on its own: as a list entry, one that names a stripped
+    source anywhere would be dropped with its claim. The assembler withheld every value it would have
+    cut, so an excerpt is stripped line by line instead of dropped.
+    """
+
+    def strip(value: Any) -> Any:
+        return bridges.strip_provenance(value, identities, whole_excerpts=True)
+
+    claims = pack.get("claims")
+    if isinstance(claims, dict) and path in claims:
+        claims[path] = strip(claims[path])
+    units = pack.get("semantic_units")
+    if isinstance(units, dict) and isinstance(units.get(path), dict):
+        units[path] = {
+            **units[path],
+            "parent": strip(units[path].get("parent")),
+            "units": [strip(unit) for unit in units[path].get("units") or []],
+        }
+    blocks = pack.get("semantic_blocks")
+    if isinstance(blocks, dict) and isinstance(blocks.get(path), list):
+        blocks[path] = [strip(block) for block in blocks[path]]
+
+
+def annotate_pack(
+    pack: dict[str, Any] | None,
+    release: AnnotatedHits,
+    *,
+    strip_for: Callable[[str], tuple[bridges.StripIdentity, ...]],
+) -> dict[str, Any] | None:
     """Carry governance context in the pack header, never sub-notice content.
 
     `assemble_pack` already runs over released hits only, so `packed_paths`
     is clean by construction. What still needs scrubbing is everything the
     pack derives from the graph — neighbours, contradictions, claims — since
     those walk edges out of permitted pages and can land on a withheld one.
+    A page released under a bridge approval also loses its source trail here,
+    decided from that page's own release decision (`strip_for`, the request's
+    `release_strip_resolver`, shared with `assemble_pack`), whether a hit, a
+    correction counterpart or a neighbour brought it into the pack.
     """
     if pack is None:
         return None
+    keyed_by_path = (pack.get("claims"), pack.get("semantic_units"), pack.get("semantic_blocks"))
+    for path in sorted({key for section in keyed_by_path if isinstance(section, dict) for key in section}):
+        if identities := strip_for(path):
+            _strip_bridge_pack_page(pack, path, identities)
+    neighborhood = pack.get("neighborhood")
+    if isinstance(neighborhood, list):
+        for index, entry in enumerate(neighborhood):
+            if isinstance(entry, dict) and (identities := strip_for(str(entry.get("path") or ""))):
+                neighborhood[index] = bridges.strip_provenance(entry, identities)
     withheld = release.withheld_paths
     if withheld:
         for section in (
@@ -5484,10 +5549,12 @@ def _annotate_page(
             principal=who,
             purpose=declared_purpose,
         )
+        shown = _excerpt_of(body)
         excerpt = {
             "path": rel_path,
-            "body": _excerpt_of(body),
-            "body_truncated": True,
+            "body": shown,
+            # `_excerpt_of` collapses whitespace and, only when it cuts, adds a marker.
+            "body_truncated": shown != " ".join(body.split()),
             "release_level": level,
         }
         if decision.release_strip:
@@ -6723,6 +6790,52 @@ def release_level_for(
         size=artifact_copy.size if artifact_copy is not None else None,
     )
     return level
+
+
+def release_strip_resolver(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str], tuple[bridges.StripIdentity, ...]]:
+    """A caller's view of which source identities each page's own release decision strips.
+
+    The returned function answers, for one vault path, the identities of the sources that a bridge
+    approval holds back from this caller, or `()` when the page is released whole. It reads the same
+    decision as every other release gate, so a builder that cuts text and the gate that strips it
+    agree on which pages are bridges without sharing a list of paths.
+
+    It answers `()` for a page that cannot be decided and for every page of a blocked policy or an
+    unresolved caller, because none of those is released, and for every page of an open vault, which
+    has nothing to strip. Policy and caller are read once; each path is decided once.
+    One request builds one resolver and hands it to every pack stage, so they cannot disagree.
+    """
+    vault_root = Path(vault_root)
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    # An open vault has no release plane to strip under, and a pack asks this for every page it holds.
+    if policy.blocked or not who.resolved or _file_policy_empty(vault_root, policy):
+        return lambda _rel_path: ()
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    grants_hash = _grants_hash(policy)
+    decided: dict[str, tuple[bridges.StripIdentity, ...]] = {}
+
+    def strip_for(rel_path: str) -> tuple[bridges.StripIdentity, ...]:
+        if rel_path not in decided:
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                principal=who, audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+            decided[rel_path] = () if decision is None else decision.release_strip
+        return decided[rel_path]
+
+    return strip_for
 
 
 def unit_seed_parent_filter(
@@ -8166,8 +8279,9 @@ def filter_withheld_entries(
             if (inspection_evidence.root != vault_root.resolve()
                     or inspection_evidence.principal != (principal if principal is not None else effective_principal())):
                 canonical_governance.OperationAuthorization.refuse()
-            if inspection_evidence.history is not None:
-                def recheck_history():
+            query_state = inspection_evidence.query_sources or inspection_evidence.history
+            if query_state is not None:
+                def recheck_query():
                     return filter_withheld_entries(
                         vault_root, payload, principal=principal, purpose=purpose,
                         _artifact_scan_demand=_artifact_scan_demand,
@@ -8175,12 +8289,12 @@ def filter_withheld_entries(
                         _current_parent_binding=_current_parent_binding)
 
                 if writer is not None:
-                    with writer.read_collection(inspection_evidence.history.collection_id):
-                        return recheck_history()
-                server = store_runtime.projection_route(vault_root, inspection_evidence.history.manifest_path)
+                    with writer.read_collection(query_state.collection_id):
+                        return recheck_query()
+                server = store_runtime.projection_route(vault_root, query_state.manifest_path)
                 if server is None:
                     canonical_governance.OperationAuthorization.refuse()
-                return server.call(recheck_history, read_only=True, wake_maintenance=False)
+                return server.call(recheck_query, read_only=True, wake_maintenance=False)
             if not store_runtime.served(vault_root):
                 canonical_governance.OperationAuthorization.refuse()
             # Only a store writer in this process seals an inspection, and the serving store
@@ -8251,8 +8365,10 @@ def filter_withheld_entries(
         return allowed
 
     resolved_items: dict[str, str | None] = {}
-    # One listing per directory per call: (exact names, first name per casefold).
-    listings: dict[Path, tuple[frozenset[str], dict[str, str]] | None] = {}
+    # One listing per directory per call: each entry by exact name, in scandir order. The
+    # casefold map of a directory is built only when an exact name misses in it.
+    listings: dict[Path, dict[str, os.DirEntry[str]] | None] = {}
+    folded_listings: dict[Path, dict[str, str]] = {}
     def _markup_targets(text: str) -> list[str]:
         targets = []
         for raw in _WIKILINK_ANYWHERE.findall(text):
@@ -8330,29 +8446,34 @@ def filter_withheld_entries(
         """
         current = vault_root
         real: list[str] = []
+        entry: os.DirEntry[str] | None = None
         for part in parts:
             if current not in listings:
                 try:
-                    with os.scandir(current) as entries:
-                        names = [entry.name for entry in entries]
+                    with os.scandir(current) as scanned:
+                        listings[current] = {item.name: item for item in scanned}
                 except OSError:
                     listings[current] = None
-                else:
-                    first: dict[str, str] = {}
-                    for name in names:
-                        first.setdefault(name.casefold(), name)
-                    listings[current] = (frozenset(names), first)
             listing = listings[current]
             if listing is None:
                 return None
-            exact_names, by_casefold = listing
-            match = part if part in exact_names else by_casefold.get(part.casefold())
-            if match is None:
-                return None
-            real.append(match)
-            current = current / match
+            entry = listing.get(part)
+            if entry is None:
+                folded = folded_listings.get(current)
+                if folded is None:
+                    folded = folded_listings[current] = {}
+                    for name in listing:
+                        folded.setdefault(name.casefold(), name)
+                match = folded.get(part.casefold())
+                if match is None:
+                    return None
+                entry = listing[match]
+            real.append(entry.name)
+            current = current / entry.name
         try:
-            return "/".join(real) if current.is_file() else None
+            # The entry's own file type proves a regular file without a stat; a symlink
+            # leaf is followed exactly as `Path.is_file` followed it.
+            return "/".join(real) if entry is not None and entry.is_file() else None
         except OSError:
             return None
 
@@ -8469,7 +8590,6 @@ def filter_withheld_entries(
         ):
             return None
         if (location == ("source_versions",) and inspection_evidence is not None
-                and inspection_evidence.history is None
                 and _is_admitted_source_versions(node)):
             # Exact admitted metadata has no ordinary references or nested text.
             # The always-on credential scrubber still visits every string later.

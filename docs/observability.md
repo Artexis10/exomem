@@ -81,7 +81,7 @@ the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRES
 when a whole-vault pass is running. Both are healthy. Neither requires rereading
 the written note or running maintenance.
 
-Behind that terminal the dispatch chose one of five repairs, and the log says
+Behind that terminal the dispatch chose one of six repairs, and the log says
 which:
 
 - `graph dispatch routed an unreadable predecessor to incremental repair` — the
@@ -114,10 +114,23 @@ which:
   the incremental path and queues its own paths; the dispatch outcome is
   `graph_repair_covered_gap`, and the acknowledgement is never advanced on a
   promise. No whole-vault pass runs.
+- `graph dispatch routed a covering acknowledgement to incremental repair` — the
+  sidecar already acknowledges this exact checkpoint, and only its availability
+  marker is withdrawn. The watcher's echo of a write that a drain already
+  repaired is the usual source. A background caller, such as the watcher, queues
+  the paths and reports `graph_repair_queued`. No whole-vault pass runs.
+- `graph dispatch left an unproven predecessor to the standing full marker reason=…`
+  — the sidecar's acknowledgement is not this checkpoint's predecessor, but a full
+  marker already owes the whole-vault pass. A request or a background caller queues
+  its paths, advances the marker over its generation and reports
+  `graph_repair_queued`. The drain pays the marker once. The first writes after a
+  worker replacement usually take this route.
 - `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
   `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
   is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`
-  (no sidecar, a schema or relation-registry drift, a corrupt checkpoint).
+  (no sidecar, a schema or relation-registry drift, a corrupt checkpoint). The
+  reason `graph_sync_acknowledgement_covers` is a standalone caller in the state
+  above: it must see a converged graph, so it still rebuilds.
 
 A run of whole-vault rebuilds with an *unreadable* reason is the defect
 `seamless-managed-worker-handoff` removed; a run of them with a mismatch or
@@ -465,6 +478,20 @@ write's. Two knobs, neither changed by default:
 - Setting the `exomem.mutation_lock` logger to `WARNING` drops the routine
   acquisitions while keeping the long-holder warnings, which is the right trade
   when the boundary is not what you are investigating.
+
+`lease_acquired` logs at INFO when the grant changes the fencing token (a first
+grant, a takeover or a re-grant after idle release) and at DEBUG when it
+repeats the held token, because a governed write batch grants the writer lease
+thousands of times an hour. `lease_reclaimed`, `lease_renew_rejected`,
+`lease_idle_released` and `lease_released` stay at INFO. A mutation-lock hold
+from a command or lifecycle boundary keeps its INFO audit pair. A reserved-state
+or machine-frequency hold (`background`, `graph`, `derived-worker`,
+`collection-read`) logs at DEBUG
+when its acquire waited less than one poll interval (25 ms by default) and its
+hold took less than 250 ms; `mutation_lock_hold_summary` counts these. A hold
+that waited, took 250 ms or more, ran overdue or was refused logs at INFO or
+higher. A boundary with no declared holder kind, such as `unknown`, also keeps
+its INFO pair.
 
 Two log lines close loops the spans cannot: `lexical deferred upsert retry
 completed paths=… outcome=…` says what became of a lexical upsert the

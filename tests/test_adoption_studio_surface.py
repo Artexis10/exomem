@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -53,7 +54,8 @@ def _post(client: TestClient, command: str, body: dict) -> dict:
     payload = response.json()
     assert payload["success"] is True, response.text
     data = payload["data"]
-    return data.get("diagnostics", data)
+    diagnostics = data.get("diagnostics", data)
+    return diagnostics.get("leaf_result", diagnostics)
 
 
 def _post_error(client: TestClient, command: str, body: dict) -> tuple[int, dict]:
@@ -102,6 +104,14 @@ def test_read_only_action_classification() -> None:
     assert commands.invocation_is_read_only(cmd, {}) is False
 
 
+def test_scoped_count_survives_the_default_mcp_reply(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    mcp = server.build_server(require_auth=False)
+    result = asyncio.run(mcp.call_tool("adoption_studio", {"action": "status", "path": "."}))
+    assert result.structured_content["adopted_files"] == 0
+    assert result.structured_content["complete"] is True
+
+
 # --- 27 ---
 def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_legacy(vault)
@@ -141,6 +151,11 @@ def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) ->
     # Read-only status round-trips without a run_id (list) and with one (full doc).
     listed = _post(client, "adoption_studio", {"action": "status"})
     assert any(row["run_id"] == run_id for row in listed["runs"])
+    assert listed["runs"][0]["source_root"] == "Old Notes"
+    assert "adopted_files" not in listed
+    scoped = _post(client, "adoption_studio", {"action": "status", "path": "Old Notes"})
+    assert scoped["adopted_files"] == 2
+    assert scoped["complete"] is True
 
     # --- propose -> review -> apply-proposal (Lane B agent contract) ---
     imported_path = [

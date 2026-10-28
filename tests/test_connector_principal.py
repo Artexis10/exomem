@@ -10,7 +10,7 @@ from fastmcp.server import dependencies
 from fastmcp.server.auth.auth import AccessToken
 from starlette.testclient import TestClient
 
-from exomem import local_ingress, server, server_auth, upload_tokens
+from exomem import auth_sessions, local_ingress, server, server_auth, upload_tokens
 from exomem.auth_sessions import SessionAuthority, SessionIdentity
 from exomem.governance import principal
 from exomem.session_oauth import ExomemSessionOAuthProxy
@@ -92,6 +92,31 @@ def test_local_grant_retains_client_and_login_on_mcp_and_rest(tmp_path, monkeypa
             assert who.client_binding.issuer == local_ingress.LOCAL_ISSUER
             assert who.origin_session.session_id == record.session_id
             assert who.origin_session.generation == record.generation
+    finally:
+        local_ingress._GRANT.reset(binding)
+
+
+def test_a_local_session_revoked_after_admission_fails_the_origin_check(tmp_path, monkeypatch):
+    local = SessionAuthority.local(
+        directory=tmp_path / "sessions", signing_root=SIGNING_ROOT,
+        issuer=local_ingress.LOCAL_ISSUER, audience=local_ingress.LOCAL_AUDIENCE,
+    )
+
+    async def issue():
+        bearer, record = await local.issue(
+            client_id="local-client", scopes=list(local_ingress.LOCAL_SCOPES), identity=IDENTITY,
+        )
+        grant = await local_ingress.LocalCredentialVerifier(local).verify(bearer)
+        return grant, record
+
+    grant, record = asyncio.run(issue())
+    binding = local_ingress._GRANT.set(grant)
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: grant.access_token)
+    try:
+        who = principal.resolve_mcp_principal()
+        assert asyncio.run(auth_sessions.origin_session_active(who))
+        asyncio.run(local.tombstone(record.session_id, reason="operator"))
+        assert not asyncio.run(auth_sessions.origin_session_active(who))
     finally:
         local_ingress._GRANT.reset(binding)
 

@@ -277,7 +277,9 @@ def test_coverage_counts_descriptions_by_origin_and_serves_the_owner_only(vault:
 
     assert coverage["available"] is True
     assert coverage["descriptions"][cc.KIND_NOTE][cc.ORIGIN_AUTHORED] == 1  # mooring-lines carries a summary
-    assert coverage["unresolved_declarations"] == {"topics": 1, "project_domains": 1}
+    assert coverage["unresolved_declarations"] == {
+        "topics": 1, "project_domains": 1, "carrier_topics": 0, "home_topics": 0,
+    }
     guest = principal.RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
     with principal.request_scope(guest):
         assert catalogue.owner_coverage() == {"available": False, "reason": "audience_restricted"}

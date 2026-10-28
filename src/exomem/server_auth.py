@@ -69,7 +69,7 @@ class CloudCellTokenVerifier(TokenVerifier):
             else None
         )
 
-    def _matches(self, presented: str) -> bool:
+    def matches(self, presented: str) -> bool:
         candidate = hashlib.sha256(presented.encode("utf-8")).digest()
         matched_current = hmac.compare_digest(self._expected, candidate)
         matched_previous = self._previous is not None and hmac.compare_digest(
@@ -78,7 +78,7 @@ class CloudCellTokenVerifier(TokenVerifier):
         return matched_current or matched_previous
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if not token or not self._matches(token):
+        if not token or not self.matches(token):
             return None
         return CloudCellAccessToken(
             token="exomem-cloud-cell",
