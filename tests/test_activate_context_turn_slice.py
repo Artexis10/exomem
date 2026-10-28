@@ -402,6 +402,30 @@ def test_slice_leads_keep_admitted_relation_topics(vault: Path, caller, hidden_t
     assert items[chain]["topics"] == []
 
 
+def test_a_project_domain_edit_updates_a_warm_slice(vault: Path) -> None:
+    """A cached map must not keep a lead's old membership after the project registry changes."""
+    _seed(vault)
+    _built(vault).close()
+    lead = f"{INSIGHTS}/tide-work.md"
+
+    def slice_topics() -> list[str]:
+        with principal.request_scope(OWNER), principal.invocation_scope():
+            packet = context_views.activation_packet(
+                vault, 4000, generation={},
+                turn_leads=lambda _caller: context_views.TurnLeads("ready", (
+                    context_views.Lead(lead, "named", ()),
+                )),
+            )
+            packet = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
+        (item,) = packet["turn_slice"]["items"]
+        return item["topics"]
+
+    assert slice_topics() == slice_topics() == ["harbour"]
+    registry = vault / KB / "_Schema/project-keys.yaml"
+    registry.write_text(registry.read_text(encoding="utf-8").replace("domain: harbour", "domain: fleet"), encoding="utf-8")
+    assert slice_topics() == slice_topics() == ["fleet"]
+
+
 def test_a_budget_too_small_for_one_slice_line_holds_none_of_it_back(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Where the slice's share cannot hold one line, the map compiles into the whole budget, as with the slice off."""
     _structured(vault)

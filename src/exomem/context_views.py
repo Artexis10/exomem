@@ -945,6 +945,7 @@ def map_within(
 @dataclass(frozen=True, slots=True)
 class _ActivationMap:
     view: View
+    world: _World
     selected: tuple[int, ...]
     overflow: str
     empty: bool
@@ -989,10 +990,11 @@ def _activation_map(
     # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
     items = [_map_item(view, rows[index]) for index in selected]
     generation = _digest(json.dumps([items, available, overflow, not world.rows, view.stale, view.graph], sort_keys=True))
-    return _ActivationMap(replace(view, generation=generation, state_available=available), selected, overflow, not world.rows)
+    return _ActivationMap(replace(view, generation=generation, state_available=available), world, selected, overflow, not world.rows)
 
 
-# The activation cache shares the existing packet cache's resource bound. Restricted builds never enter it.
+# The bounded owner cache retains the admitted world so warm slices reuse the map's membership joins.
+# Restricted builds never enter it.
 _OWNER_MAPS: OrderedDict[tuple[Any, ...], _ActivationMap] = OrderedDict()
 _OWNER_MAPS_LOCK = threading.Lock()
 
@@ -1040,7 +1042,6 @@ def _activation_packet(
         view = _usable(prepared)
         description = "Index of what exists."
         reserve = 0 if turn_leads is None else _slice_reserve(max_chars)
-        world = None
         map_chars = max_chars - reserve - len(description) - 1
         if view is None:
             assert catalogue is not None
@@ -1089,7 +1090,7 @@ def _activation_packet(
         packet["budget"]["used_chars"] = map_packet_chars(block)
         if turn_leads is not None:
             slice_block = _turn_slice(
-                prepared, turn_leads, world=world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
+                prepared, turn_leads, world=compiled.world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
             )
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
