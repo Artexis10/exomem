@@ -234,6 +234,31 @@ The owner allowance SHALL count original plaintext bytes, including versions ref
 Multiple live or trash references to one version SHALL count once.
 The operator's physical meter SHALL count provider ciphertext bytes separately.
 
+The owner meter SHALL require complete canonical reference custody, including Trash, and SHALL report unknown when that custody is incomplete.
+It SHALL exclude registry-owned private state without reusing recall exclusions.
+A malformed potential companion or conflicting binding SHALL NOT prove that no referenced version exists.
+Offload SHALL check the allowance before encryption or provider upload, and SHALL recheck its proposed reference union before publication.
+A quota failure or unknown meter SHALL leave the original local with retryable demand.
+
+#### Scenario: A complete meter meets incomplete custody
+
+- **WHEN** a canonical companion is malformed, an ordinary alias is unresolved, or a subtree cannot be read
+- **THEN** owner usage is unknown and offload sends no bytes
+- **AND** local originals and core operations remain available
+
+#### Scenario: Trash retains the current version
+
+- **WHEN** the owner trashes a stored binary
+- **THEN** its canonical Trash companion and placement metadata are durable before its live reference retires
+- **AND** the same provider version remains charged once until its last current reference disappears
+
+#### Scenario: Recovery retires a Trash reference
+
+- **WHEN** recovery restores a stored original as local bytes
+- **THEN** it retires the Trash companion before removing its placement metadata
+- **AND** a failed cleanup retains the placement evidence needed by the surviving reference
+
+
 #### Scenario: An owner keeps media in trash
 
 - **WHEN** live originals reference 60 GB and trash references another 20 GB of distinct original bytes

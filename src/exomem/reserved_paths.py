@@ -2129,6 +2129,8 @@ def _list_candidate_records(
     source_relative: str,
     *,
     identities: IdentityCatalogue | None,
+    require_complete: bool = False,
+    recursive: bool = True,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases."""
 
@@ -2136,11 +2138,26 @@ def _list_candidate_records(
 
     def walk(directory: held_fs.HeldDirectory, prefix: str) -> None:
         _require_current_generic_directory(filesystem, directory)
-        children = filesystem.children(directory)
+        def admit_name(name: str) -> bool:
+            relative = f"{prefix}/{name}" if prefix else name
+            child = relative if source_relative == "." else f"{source_relative.rstrip('/')}/{relative}"
+            classification = classify_logical(child)
+            if classification.disposition is PathDisposition.INVALID:
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            # Only registry-owned private paths are deliberate omissions from a complete census.
+            return classification.disposition is not PathDisposition.RESERVED
+
+        names = None
+        if require_complete:
+            names = {name for name in filesystem.iter_names(directory) if admit_name(name)}
+        children = filesystem.children(directory, name_filter=admit_name) if require_complete else filesystem.children(directory)
         if not children.ok:
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
-        for record in children.require():
+        observed = children.require()
+        if names is not None and names != {record.relative_path for record in observed}:
+            raise ReservedPathLeafError("UNSAFE_PATH")
+        for record in observed:
             relative = (
                 f"{prefix}/{record.relative_path}"
                 if prefix
@@ -2154,12 +2171,17 @@ def _list_candidate_records(
             )
             classification = classify_logical(child)
             descriptor_id = identities.descriptor_for(record.identity) if identities else None
+            if require_complete and (
+                classification.disposition is PathDisposition.INVALID
+                or (descriptor_id is None and record.identity.kind == "file" and record.identity.link_count != 1)
+            ):
+                raise ReservedPathLeafError("UNSAFE_PATH")
             blocked = (
                 classification.blocked
                 or descriptor_id is not None
                 or (record.identity.kind == "file" and record.identity.link_count != 1)
             )
-            if record.identity.kind != "directory" or blocked:
+            if not recursive or record.identity.kind != "directory" or blocked:
                 continue
             retained = filesystem.parent(child)
             if not retained.ok:
@@ -2170,6 +2192,8 @@ def _list_candidate_records(
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 _require_current_generic_directory(filesystem, child_directory)
                 walk(child_directory, relative)
+        if names is not None and names != {name for name in filesystem.iter_names(directory) if admit_name(name)}:
+            raise ReservedPathLeafError("IDENTITY_CHANGED")
         _require_current_generic_directory(filesystem, directory)
 
     walk(source_directory, "")
@@ -2183,11 +2207,13 @@ def list_generic_tree(
     recursive: bool = True,
     identities: IdentityCatalogue | None = None,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
+    require_complete: bool = False,
 ) -> tuple[GenericTreeEntry, ...]:
     """Enumerate an ordinary tree while structurally removing private state.
 
     `select` receives every releasable `(relative_path, kind)` in walk order and
     returns the relative paths to open, stat and read; None opens them all.
+    `require_complete` refuses ordinary omissions rather than reporting a partial census.
     """
 
     with _generic_identity_catalogue_scope(
@@ -2199,6 +2225,7 @@ def list_generic_tree(
             recursive=recursive,
             identities=current,
             select=select,
+            require_complete=require_complete,
         )
 
 
@@ -2226,6 +2253,7 @@ def _list_generic_tree_held(
     recursive: bool,
     identities: IdentityCatalogue,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
+    require_complete: bool = False,
 ) -> tuple[GenericTreeEntry, ...]:
 
     if value == ".":
@@ -2251,12 +2279,14 @@ def _list_generic_tree_held(
         with source_result.require() as source_directory:
             _refuse_private_identity(source_directory.identity, identities)
             _require_current_generic_directory(filesystem, source_directory)
-            if recursive:
+            if recursive or require_complete:
                 records = _list_candidate_records(
                     filesystem,
                     source_directory,
                     relative,
                     identities=identities,
+                    require_complete=require_complete,
+                    recursive=recursive,
                 )
             else:
                 enumerated = filesystem.children(source_directory)

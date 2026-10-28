@@ -46,6 +46,45 @@ from exomem.replace import ReplaceError
 from exomem.replace import replace as replace_page
 
 
+def test_complete_census_includes_retained_content_and_excludes_private_state(tmp_path: Path) -> None:
+    """Accounting must include retained references wherever recall intentionally omits them."""
+    kb = tmp_path / "Knowledge Base"
+    expected = {"_trash/original.bin.md", "_archive/original.bin.md", "_attachments/original.bin.md",
+                "Notes/item.sync-conflict-copy.md"}
+    for relative in expected | {"_Governance/rules/private.md"}:
+        target = kb / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("An ordinary document.\n")
+    entries = reserved_paths.list_generic_tree(
+        tmp_path, "Knowledge Base", require_complete=True,
+        select=lambda candidates: (path for path, kind in candidates if path.endswith(".md")),
+    )
+    assert {entry.relative_path for entry in entries} == expected
+    assert all(entry.markdown == b"An ordinary document.\n" for entry in entries)
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_complete_census_refuses_an_ordinary_alias_instead_of_omitting_it(tmp_path: Path, alias_kind: str) -> None:
+    """An omitted ordinary alias cannot become an apparently complete zero-reference total."""
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir()
+    source = kb / "source.md"
+    source.write_text("A possible companion.\n")
+    alias = kb / "alias.md"
+    try:
+        if alias_kind == "symlink":
+            alias.symlink_to(source)
+        else:
+            os.link(source, alias)
+    except OSError:
+        pytest.skip("this filesystem cannot create the alias")
+    public = reserved_paths.list_generic_names(tmp_path, "Knowledge Base")
+    assert all(path != "alias.md" for path, _kind in public)
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as error:
+        reserved_paths.list_generic_tree(tmp_path, "Knowledge Base", require_complete=True)
+    assert error.value.code == "UNSAFE_PATH"
+
+
 @pytest.mark.parametrize(
     ("raw", "descriptor_id"),
     [

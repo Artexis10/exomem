@@ -76,6 +76,27 @@ def test_strict_frontmatter_rejects_duplicate_keys_without_weakening_legacy_pars
     assert "second" not in exc.value.reason
 
 
+@pytest.mark.parametrize("root", ["false", "null"])
+def test_strict_frontmatter_does_not_treat_scalar_roots_as_empty(root: str) -> None:
+    """A scalar cannot prove the absence of governed descriptor fields."""
+    source = f"---\n{root}\n---\nBody.\n"
+    assert vault.parse_frontmatter(source)[0] == {}
+    with pytest.raises(vault.FrontmatterError) as error:
+        vault.parse_frontmatter(source, strict=True)
+    assert error.value.code == "INVALID_FRONTMATTER"
+
+
+def test_strict_frontmatter_distinguishes_incomplete_headers_from_plain_notes() -> None:
+    """An incomplete header must not let an inventory silently skip a possible binding."""
+    source = "\ufeff---\r\nevidence_file: incomplete\r\n"
+    assert vault.parse_frontmatter(source) == ({}, source, None)
+    with pytest.raises(vault.FrontmatterError) as error:
+        vault.parse_frontmatter(source, strict=True)
+    assert error.value.code == "INVALID_FRONTMATTER"
+    assert vault.parse_frontmatter("A plain note.\n", strict=True) == ({}, "A plain note.\n", None)
+    assert vault.parse_frontmatter("---\n# An empty header.\n---\nBody.\n", strict=True)[0] == {}
+
+
 def test_create_only_write_refuses_existing_leaf_and_preserves_legacy_overwrite(
     tmp_path: Path,
 ) -> None:

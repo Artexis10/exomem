@@ -14,11 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import reserved_paths
+from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import kb_root
 
 log = logging.getLogger(__name__)
 
-TRASH_SUBPATH = "_trash"
 
 
 @dataclass
@@ -129,7 +129,7 @@ def list_trash(
             child.relative_path
             for child in children
             if child.identity.kind == "file"
-            and child.relative_path.endswith(".meta.json")
+            and child.relative_path.endswith(METADATA_SUFFIX)
         }
         non_sidecars = [
             child for child in children if child.relative_path not in sidecar_names
@@ -137,7 +137,7 @@ def list_trash(
 
         for sidecar_name in sorted(sidecar_names):
             # Sidecar name: <trash_name>.meta.json
-            target_name = sidecar_name[: -len(".meta.json")]
+            target_name = sidecar_name[: -len(METADATA_SUFFIX)]
             sidecar_rel = f"{date_rel}/{sidecar_name}"
             try:
                 sidecar = reserved_paths.read_generic_bytes(vault_root, sidecar_rel)
@@ -193,7 +193,7 @@ def list_trash(
             ))
 
         for nonsc in non_sidecars:
-            if f"{nonsc.relative_path}.meta.json" not in sidecar_names:
+            if f"{nonsc.relative_path}{METADATA_SUFFIX}" not in sidecar_names:
                 orphan_files.append(f"{date_rel}/{nonsc.relative_path}")
 
     # Sort entries most-recent-first by trashed_at when available, else by trash_path.

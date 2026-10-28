@@ -1268,3 +1268,89 @@ def test_captured_source_original_reconciles_and_recovers_without_metadata_rewri
     assert media_processing.reconcile_all_media(vault) == 0
     assert page.read_bytes() == published
     assert not media_jobs.MediaJobStore(vault).has_pending_ocr(path)
+
+
+def test_reference_usage_counts_live_and_trash_versions_once(vault: Path, selected_store):
+    """Archived and Trash companions count once, while a retained unreferenced object does not count."""
+    from exomem import media_allowance, move_file, preserve
+    from exomem.vault import parse_frontmatter
+
+    path = _preserved(vault)
+    expected = len(path.read_bytes())
+    reference = _offload(vault, path)
+    sidecar = path.with_name(path.name + ".md")
+    fields, body, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    archive_binary = "Knowledge Base/_archive/retained.txt"
+    archive = vault / (archive_binary + ".md")
+    archive.parent.mkdir(parents=True)
+    archive.write_text(move_file._repoint_artifact(path.relative_to(vault).as_posix(), archive_binary)(sidecar.read_text()))
+    trash_root = "Knowledge Base/_trash/2026-10-28/bundle"
+    trash_sidecar = vault / trash_root / sidecar.name
+    trash_sidecar.parent.mkdir(parents=True)
+    trash_sidecar.write_bytes(sidecar.read_bytes())
+    metadata = vault / (trash_root + ".meta.json")
+    metadata.write_text(json.dumps({"original_path": path.parent.relative_to(vault).as_posix()}))
+
+    captured = preserve.preserve(vault, scope="Test", category="retained", filename="other.txt",
+                                content="A distinct original retained only in provider history.")
+    other = vault / captured.path
+    preserve.update_sidecar_extraction(vault, vault / captured.sidecar_path, text="Retained history.", engine="text")
+    from exomem import media_jobs
+
+    media_jobs.MediaJobStore(vault).retire_ocr(other, "text")
+    unreferenced = _offload(vault, other)
+    (vault / captured.sidecar_path).unlink()
+    assert (Path(selected_store[0]["root"]) / unreferenced.object / unreferenced.version).exists()
+    usage = media_allowance.reference_usage(vault)
+    assert usage.used_bytes == expected
+    assert len(usage.versions) == 1
+    assert media_allowance.projected_bytes(usage, originals.BinaryBinding("another.txt", fields["binary_sha256"], expected), reference) == expected
+
+    # Once only historical Trash placement remains, unreadable metadata makes its custody unknown.
+    sidecar.unlink()
+    archive.unlink()
+    metadata.write_text("not JSON")
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    metadata.write_text(json.dumps({"original_path": path.parent.relative_to(vault).as_posix()}))
+    assert media_allowance.reference_usage(vault).used_bytes == expected
+    trash_sidecar.unlink()
+    assert media_allowance.reference_usage(vault).used_bytes == 0
+
+
+def test_reference_usage_does_not_hide_a_malformed_potential_companion(vault: Path, selected_store):
+    """An unfinished header cannot become a false zero; ordinary body examples do not affect custody."""
+    from exomem import media_allowance
+
+    path = _preserved(vault)
+    expected = len(path.read_bytes())
+    _offload(vault, path)
+    note = vault / "Knowledge Base/Notes/incomplete.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\nevidence_file: unresolved\n")
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    note.write_text("An ordinary example in the body:\n\n```yaml\nstored_object: invalid example\n```\n")
+    assert media_allowance.reference_usage(vault).used_bytes == expected
+
+
+def test_reference_usage_rejects_conflicting_sizes_and_ignores_a_foreign_store(vault: Path, selected_store):
+    """One version has one original size; a foreign store never spends this cell's allowance."""
+    from exomem import media_allowance, move_file
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    path = _preserved(vault)
+    expected = len(path.read_bytes())
+    _offload(vault, path)
+    sidecar = path.with_name(path.name + ".md")
+    fields, body, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    other_rel = "Knowledge Base/Evidence/other.txt"
+    other = vault / (other_rel + ".md")
+    other.parent.mkdir(parents=True, exist_ok=True)
+    moved, body, _ = parse_frontmatter(
+        move_file._repoint_artifact(path.relative_to(vault).as_posix(), other_rel)(sidecar.read_text()), strict=True,
+    )
+    copy = {**moved, "binary_size": expected + 1}
+    other.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    copy["stored_object"] = {**fields["stored_object"], "store": "foreign-store"}
+    other.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
+    assert media_allowance.reference_usage(vault).used_bytes == expected

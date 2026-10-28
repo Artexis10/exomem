@@ -21,13 +21,18 @@ from pathlib import Path
 
 from . import (
     graph_sync,
+    held_fs,
+    originals,
     relation_review,
     reserved_paths,
     semantic_index,
     semantic_writes,
+    trash_metadata,
 )
 from .governance import catalog_publication, lifecycle
 from .kbdir import kb_dirname, kb_prefix
+from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
+from .trash_metadata import original_path as trash_original_path
 from .vault import (
     DirectoryCensusGuard,
     PathGuard,
@@ -37,6 +42,7 @@ from .vault import (
     content_hash,
     in_append_only_tree,
     in_curated_tree,
+    parse_frontmatter,
     plan_log_entry,
     read_guarded_text,
     resolve_under_vault,
@@ -45,7 +51,6 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 
-TRASH_SUBPATH = "_trash"
 
 
 @dataclass
@@ -145,8 +150,17 @@ def _recover_from_trash_local(
             reason="trash source could not be acquired through the generic boundary",
         ) from None
 
+    if trash_kind == "file" and trash_rel.lower().endswith(".md"):
+        try:
+            fields, body, _marker = parse_frontmatter(trash_file_snapshot.data.decode("utf-8"), strict=True)
+        except (UnicodeError, ValueError):
+            pass  # Ordinary page recovery retains its existing validation boundary.
+        else:
+            if originals.is_reference_only_companion(fields, body):
+                raise RecoverError("TRASH_REFERENCE_METADATA", "Select the original Trash entry to recover its bytes and retention metadata")
+
     # Determine restore_path: explicit > sidecar's original_path.
-    sidecar = trash_abs.parent / f"{trash_abs.name}.meta.json"
+    sidecar = trash_abs.parent / f"{trash_abs.name}{METADATA_SUFFIX}"
     meta: dict = {}
     sidecar_guard: PathGuard
     sidecar_proof_guard: PathGuard | None = None
@@ -348,6 +362,13 @@ def _recover_from_trash_local(
 
     semantic: dict | None = None
     lifecycle_operation: lifecycle.LifecycleOperation | None = None
+    retained_companion: tuple[str, reserved_paths.GenericFileSnapshot] | None = None
+    retention_unresolved = False
+    if trash_kind == "file" and not trash_rel.lower().endswith(".md"):
+        try:
+            retained_companion = trash_metadata.reference_companion(vault_root, trash_rel)
+        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            retention_unresolved = True
     graph_transition: graph_sync.GraphLifecycleTransition | None = None
     semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     recovery_entries: list[semantic_writes.RecoveryEntry] = []
@@ -364,7 +385,7 @@ def _recover_from_trash_local(
             recovery_entries.append(
                 semantic_writes.RecoveryEntry(
                     trash_rel,
-                    str(meta.get("original_path") or restore_rel),
+                    trash_original_path(meta, trash_root=trash_rel, current_path=trash_rel, fallback_root=restore_rel),
                     restore_rel,
                     source,
                     source_guard,
@@ -373,7 +394,7 @@ def _recover_from_trash_local(
                     sidecar_source,
                 )
             )
-        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+        except (OSError, UnicodeDecodeError, ValueError, PathGuardError) as error:
             code = getattr(error, "code", "RECOVER_FAILED")
             raise RecoverError(code=code, reason=str(error)) from error
     elif trash_kind == "directory":
@@ -399,13 +420,12 @@ def _recover_from_trash_local(
                     )
                     for path in sorted(directories, key=lambda item: item.as_posix())
                 )
-                original_root = str(meta.get("original_path") or restore_rel).rstrip(
-                    "/"
-                )
                 for markdown_path in markdown:
                     suffix = markdown_path.relative_to(trash_abs).as_posix()
                     source_path = f"{trash_rel}/{suffix}"
-                    original_path = f"{original_root}/{suffix}"
+                    original_path = trash_original_path(
+                        meta, trash_root=trash_rel, current_path=source_path, fallback_root=restore_rel,
+                    )
                     destination_path = f"{restore_rel.rstrip('/')}/{suffix}"
                     source, source_guard = read_guarded_text(
                         vault_root, markdown_path
@@ -426,7 +446,7 @@ def _recover_from_trash_local(
                             sidecar_source,
                         )
                     )
-        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+        except (OSError, UnicodeDecodeError, ValueError, PathGuardError) as error:
             code = getattr(error, "code", "RECOVER_FAILED")
             raise RecoverError(code=code, reason=str(error)) from error
 
@@ -665,7 +685,18 @@ def _recover_from_trash_local(
             catalog_published = True
 
     warnings: list[str] = []
-    if sidecar_guard.leaf_policy == "content":
+    keep_metadata = retention_unresolved
+    if retained_companion is not None:
+        companion_path, companion_snapshot = retained_companion
+        try:
+            trash_metadata.remove_unchanged(
+                vault_root, companion_path, companion_snapshot.identity, companion_snapshot.data,
+            )
+        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            keep_metadata = True
+    if keep_metadata:
+        warnings.append("recovered bytes; retained the changed or unreadable Trash companion and its placement metadata")
+    elif sidecar_guard.leaf_policy == "content":
         try:
             sidecar_guard.recheck(vault_root)
             reserved_paths.unlink_generic_file(

@@ -6597,6 +6597,9 @@ def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any
     """
     m = _FM_PATTERN.match(text)
     if not m:
+        # These delimiters are the fixed frontmatter format, not a rule about prose meaning.
+        if strict and text.removeprefix("\ufeff").startswith(("---\n", "---\r\n")):
+            raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter block is not terminated")
         return {}, text, None
     fm_text = m.group(1)
     body = m.group(2)
@@ -6613,7 +6616,11 @@ def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any
             )
         else:
             fm = yaml_safe_load(fm_text)
-        fm = fm or {}
+        if fm is None:
+            # Empty YAML and comments are allowed; an explicit null is still a scalar root.
+            if strict and yaml.compose(fm_text, Loader=_UniqueKeySafeLoader) is not None:
+                raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")
+            fm = {}
         if not isinstance(fm, dict):
             if strict:
                 raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")

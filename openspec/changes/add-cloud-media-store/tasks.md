@@ -45,6 +45,10 @@
   - a restart retains uncertain write intent, and missing HEAD does not produce a drained-generation acknowledgement;
   - a lost successful upload reply recovers its exact version, while unrelated cells continue to work.
 - [ ] 4.5 Meter media storage in the cell from referenced versions, meter physical bytes in cellctl, and refuse uploads above the allowance with `MEDIA_ALLOWANCE_EXCEEDED`. Verify: tests show refusal before any byte, status for an original left local, and no charge for versions kept only for backups.
+- [ ] 4.5.1 Add a complete owner reference census inside the maintained filesystem boundary and correct strict frontmatter parsing. Verify: private state stays excluded; ordinary aliases, read failures and malformed potential companions produce unknown usage; valid plain notes do not.
+- [ ] 4.5.2 Preserve canonical references and durable placement metadata through Trash deletion and recovery. Verify: binary, companion and directory paths retain charges until their last reference is removed; interrupted handoff and rollback keep recoverable bytes and known custody.
+- [ ] 4.5.3 Configure the allowance once and enforce it before offload encryption or provider upload. Verify: plaintext version deduplication, backup-only exclusion, refusal with local bytes retained, recovery after freed space or changed limits, and publication-time reference changes.
+  - These cell-side steps are partial implementation of 4.5. Physical metering and complete ingress admission remain required; 4.5 and 4.9 stay unchecked until their full contracts are proved.
 - [ ] 4.6 Write a reference manifest from each backup's clone. Add cellctl's version destruction in the backup hold after prune, under the three conditions. Verify these with tests using the fake provider:
   - a version stays while a months-old retained snapshot names it;
   - a sidecar deleted between clone and backup keeps its version;
