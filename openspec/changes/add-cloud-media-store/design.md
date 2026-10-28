@@ -326,9 +326,17 @@ Older Trash bytes without a canonical reference remain local; no cache or provid
 The existing Cloud worker lock serializes offloads; no second queue or reservation database is added.
 The cell checks complete usage before encryption or provider upload, then recomputes the proposed reference union under the publication guard.
 A referenced version adds no bytes; a newly referenced version adds its original plaintext size.
-A quota or unknown-meter failure retains demand and can recover on a later scan.
+Reuse requires a current canonical companion outside Trash; historical placement alone does not prove that the live binding remains.
+If provider confirmation or the protection check invalidates reuse, admission assesses a new version before encryption.
+A publication refusal retains the plaintext and the durable protection record.
+
+The chart's media edge store policy supplies `allowance_bytes` through the existing cell configuration path.
+The runtime has no business default; a missing or invalid allowance makes admission unknown.
+A quota or unknown-meter refusal retains retryable worker demand and reassesses current custody and policy on a later scan.
 It does not enter the exact-input terminal refusal rule.
+Restricted status rows show the current refusal code without global usage figures.
 The first implementation scans directly; a cache requires measured cost and an explicit invalidation contract.
+
 Complete ingress admission and the operator's physical meter remain part of task 4.5.
 
 The 20 GiB volume cap is unchanged. It now bounds notes, sidecars, indexes, datasets and the cache, not media.

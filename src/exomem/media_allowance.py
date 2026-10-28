@@ -13,6 +13,7 @@ from .vault import parse_frontmatter
 # These refusal codes belong to the closed media protocol, not a content vocabulary.
 MEDIA_ALLOWANCE_UNKNOWN = "MEDIA_ALLOWANCE_UNKNOWN"
 MEDIA_ALLOWANCE_EXCEEDED = "MEDIA_ALLOWANCE_EXCEEDED"
+ALLOWANCE_REFUSAL_CODES = (MEDIA_ALLOWANCE_UNKNOWN, MEDIA_ALLOWANCE_EXCEEDED)
 
 
 @dataclass(frozen=True, slots=True)

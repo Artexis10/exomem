@@ -432,7 +432,7 @@ def _guard(vault: Path, operation: str):
 
 def _offload_admission(
     vault: Path, snapshot: OriginalSnapshot, *, reference: StoredObject | None = None,
-    select_reuse: bool = True,
+    select_reuse: bool = True, usage: media_allowance.ReferenceUsage | None = None,
 ) -> tuple[media_allowance.AllowanceDecision, OriginalSnapshot | None]:
     """Select current live reuse and its quota projection under one read boundary."""
     from .writer_lease import get_manager
@@ -442,7 +442,9 @@ def _offload_admission(
                                      snapshot.binary_sha256, snapshot.binary_size)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
         config = originals.configuration(vault) or {}
-        usage = media_allowance.reference_usage(vault)
+        # A caller can share one census only while its enclosing consistency guard holds.
+        if usage is None:
+            usage = media_allowance.reference_usage(vault)
         reuse = None
         if select_reuse and usage.versions is not None:
             for key, path in usage.live_paths.items():
@@ -560,17 +562,20 @@ def _refused(store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str,
     return _refusal_code(store.vault_root, row, snapshot, config) if row is not None else None
 
 
-def _refusal_code(vault: Path, row, snapshot: OriginalSnapshot, config: dict[str, object]) -> str | None:
+def _refusal_code(
+    vault: Path, row, snapshot: OriginalSnapshot, config: dict[str, object], *,
+    usage: media_allowance.ReferenceUsage | None = None,
+) -> str | None:
     if row["sha256"] != snapshot.binary_sha256:
         return None
     # These refusal codes are fixed by the media protocol, not inferred from error prose.
     if row["code"] == "MEDIA_OBJECT_TOO_LARGE":
         bound = config.get("max_object_bytes")
         return row["code"] if bound is not None and row["ciphertext_size"] is not None and row["ciphertext_size"] > int(bound) else None
-    if row["code"] in (media_allowance.MEDIA_ALLOWANCE_UNKNOWN, media_allowance.MEDIA_ALLOWANCE_EXCEEDED):
+    if row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES:
         if snapshot.reference is not None:
             return None
-        decision, _reuse = _offload_admission(vault, snapshot)
+        decision, _reuse = _offload_admission(vault, snapshot, usage=usage)
         return decision.code
     return row["code"]
 
@@ -610,6 +615,8 @@ def _offload_input(vault: Path, path: Path, ledger: MediaJobStore):
 
 def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Originals that stay local because the store refused their exact bytes."""
+    from .writer_lease import get_manager
+
     query = "SELECT binary_rel, sha256, code, ciphertext_size FROM media_offload_refusals"
     parameters: tuple[object, ...] = ()
     if path is not None:
@@ -620,17 +627,20 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
         coverage = {**coverage, "coverage": "exact-path"}
     config = originals.configuration(vault) or {}
     result = []
-    for row in rows:
-        try:
-            snapshot = original_state(vault, row["binary_rel"])
-        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-            result.append(_unavailable_original(row["binary_rel"]))
-            continue
-        code = _refusal_code(vault, row, snapshot, config)
-        if code is None:
-            continue
-        result.append({"path": row["binary_rel"], "original_state": snapshot.state,
-                       "code": code, "ciphertext_size": row["ciphertext_size"]})
+    with get_manager().consistency_guard(vault, operation="media_refusal_status", holder_kind="background"):
+        usage = (media_allowance.reference_usage(vault)
+                 if any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows) else None)
+        for row in rows:
+            try:
+                snapshot = original_state(vault, row["binary_rel"])
+            except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                result.append(_unavailable_original(row["binary_rel"]))
+                continue
+            code = _refusal_code(vault, row, snapshot, config, usage=usage)
+            if code is None:
+                continue
+            result.append({"path": row["binary_rel"], "original_state": snapshot.state,
+                           "code": code, "ciphertext_size": row["ciphertext_size"]})
     return result, coverage
 
 
@@ -665,7 +675,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
         refusal = _refused(ledger, snapshot, config)
-        if refusal in (media_allowance.MEDIA_ALLOWANCE_UNKNOWN, media_allowance.MEDIA_ALLOWANCE_EXCEEDED):
+        if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
             _require_allowance(ledger, snapshot, refusal)
         if refusal is not None:
             return None
