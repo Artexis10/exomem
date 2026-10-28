@@ -1132,8 +1132,18 @@ def test_offload_demand_does_not_hide_pending_extraction(vault: Path, selected_s
     assert ledger.has_pending_ocr(path)
 
 
-def test_explicit_trash_removes_the_stored_binding(vault: Path, selected_store):
-    from exomem import delete_file, media_jobs, media_processing, media_store, preserve
+def test_trash_keeps_a_stored_version_accounted_until_its_original_recovers(vault: Path, selected_store):
+    from exomem import (
+        delete_file,
+        list_trash,
+        media_allowance,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        recover_from_trash,
+        trash_metadata,
+    )
 
     path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
     path.parent.mkdir(parents=True)
@@ -1141,11 +1151,25 @@ def test_explicit_trash_removes_the_stored_binding(vault: Path, selected_store):
     media_processing.reconcile_media(vault, path)
     preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
     media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
-    _offload(vault, path)
+    reference = _offload(vault, path)
     assert media_store.evict(vault, path)
+    assert media_allowance.reference_usage(vault).used_bytes == len(b"original bytes")
     trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
     assert originals.original_state(vault, path).state == "missing"
     assert (vault / trashed.trash_path).read_bytes() == b"original bytes"
+    assert media_allowance.reference_usage(vault).used_bytes == len(b"original bytes")
+    listing = list_trash.list_trash(vault)
+    assert [entry.trash_path for entry in listing.entries] == [trashed.trash_path]
+    assert not listing.orphan_files and not listing.orphan_sidecars
+
+    recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path)
+
+    assert path.read_bytes() == b"original bytes"
+    assert originals.original_state(vault, path).state == "local"
+    assert media_allowance.reference_usage(vault).used_bytes == 0
+    assert not originals.sidecar_path(vault / trashed.trash_path).exists()
+    assert not (vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).exists()
+    assert (Path(selected_store[0]["root"]) / reference.object / reference.version).exists()
 
 
 def test_original_states_use_only_the_bound_store(tmp_path: Path, monkeypatch):

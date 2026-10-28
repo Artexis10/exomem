@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import reserved_paths
+from . import held_fs, reserved_paths, trash_metadata
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import kb_root
 
@@ -134,6 +134,7 @@ def list_trash(
         non_sidecars = [
             child for child in children if child.relative_path not in sidecar_names
         ]
+        retained_companions: set[str] = set()
 
         for sidecar_name in sorted(sidecar_names):
             # Sidecar name: <trash_name>.meta.json
@@ -191,9 +192,19 @@ def list_trash(
                 force_superseded_used=bool(meta.get("force_superseded_used", False)),
                 allow_curated_used=bool(meta.get("allow_curated_used", False)),
             ))
+            if target_kind == "file":
+                # Only the canonical empty companion belongs to this entry; independent pages remain visible.
+                try:
+                    trash_metadata.original_path(meta, trash_root=target_rel, current_path=target_rel)
+                    retained = trash_metadata.reference_companion(vault_root, target_rel)
+                except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                    retained = None
+                if retained is not None:
+                    retained_companions.add(Path(retained[0]).name)
 
         for nonsc in non_sidecars:
-            if f"{nonsc.relative_path}{METADATA_SUFFIX}" not in sidecar_names:
+            if (nonsc.relative_path not in retained_companions
+                    and f"{nonsc.relative_path}{METADATA_SUFFIX}" not in sidecar_names):
                 orphan_files.append(f"{date_rel}/{nonsc.relative_path}")
 
     # Sort entries most-recent-first by trashed_at when available, else by trash_path.
