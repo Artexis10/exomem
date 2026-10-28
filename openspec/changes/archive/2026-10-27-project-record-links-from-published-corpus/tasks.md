@@ -15,6 +15,6 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Review the exact change independently, with disclosure, freshness and egress as the main risks; resolve findings.
-- [ ] 3.2 Measure link-bearing record queries at the MCP boundary on the sandbox vault before and after.
-- [ ] 3.3 Merge, then synchronize this delta into the canonical specs and archive this change with `openspec archive`.
+- [x] 3.1 Review the exact change independently, with disclosure, freshness and egress as the main risks; resolve findings. (Three rounds on PR #2159; approved with no blocking findings at 5f36b9bef.)
+- [x] 3.2 Measure link-bearing record queries at the MCP boundary on the sandbox vault before and after. (Watcher-on crossover: the link-bearing Records query case ran 146 to 251 ms faster per orientation; every link index span borrowed; other groups showed no change.)
+- [x] 3.3 Merge, then synchronize this delta into the canonical specs and archive this change with `openspec archive`. (Merged as ececce3df.)

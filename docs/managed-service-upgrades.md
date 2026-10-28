@@ -70,9 +70,8 @@ The script discovers the managed unit, asks its private control socket to
 switch to the staged version, verifies the reported active release, then uses
 the existing CLI sync and managed-install manifest helpers. `--cli-sync auto`
 updates an existing uv-managed CLI, `always` installs it if needed, and `never`
-leaves it alone. Failed staging leaves the old worker serving and retains the
-candidate directory for inspection; no release environment is automatically
-deleted.
+leaves it alone. Failed staging leaves the old worker serving and removes the
+release directory it created, also when wheel verification fails.
 
 Once the target is confirmed active, the operator also re-runs `install-hook`,
 from the newly promoted release, for every local Claude Code profile that
@@ -180,6 +179,53 @@ accepting the maintenance. Changing OAuth issuer or signing keys requires
 clients to authorize again. If startup fails, leave the unit stopped and
 inspect the journal and retained state before another change; do not silently
 start an older release over migrated state.
+
+## Release retention
+
+After the target is confirmed active, the operator removes the release
+directories that the service no longer needs. It keeps the serving release, the
+release that the promotion replaced, and every release that `active.json` or
+`transition.json` in the runtime directory records. The launcher venv lives
+outside `releases/` and is never removed. The operator removes only directories
+that the service user owns, that are not symlinks, and whose names are 32
+lowercase hexadecimal characters. It keeps every other entry. An unreadable or
+malformed manager record stops retention before it removes anything. A removal
+failure or an interrupt never fails the operator's result. An interrupted
+`scripts/upgrade.sh` stops itself, but the promoted release keeps serving: check
+`--status`, then run `scripts/upgrade.sh` again to finish the CLI sync.
+
+The manager's records are the only proof of use. A process outside those
+records is not protected, and a later upgrade can remove the release it runs.
+Never run a canary, a hand-pinned unit or a script from a release interpreter.
+Give each such process its own independent interpreter.
+
+`scripts/upgrade.sh` prints one summary line from the `release_retention`
+report in the upgrade result:
+
+```text
+Release retention: removed 3 freed_bytes 2147483648 failures 0 skipped no
+```
+
+`removed` counts the deleted directories, and `freed_bytes` is the allocated
+space they released. `at_least` before that number means that a failed or
+interrupted removal freed space it could not count. `failures` counts the
+directories it could not remove; the next upgrade tries them again. `skipped`
+names why retention stopped early, for example `interrupted` or an unreadable
+record.
+
+`scripts/upgrade.sh` runs the `exomem.service_upgrade` module installed in the
+launcher venv. Retention therefore reaches a host only after an offline
+launcher upgrade, described above. Until then, the summary line reads
+`Release retention: this operator predates release retention`. To remove unused
+releases before the launcher upgrade, run the operator from a newer interpreter.
+It stages and promotes a worker release like `scripts/upgrade.sh`, but it skips
+the CLI sync and the managed-install manifest helpers:
+
+1. Install this release in an interpreter outside the service, such as a tested checkout's venv.
+2. Read the runtime directory from the rendered unit's `--runtime-dir` argument.
+3. Read the profile from `service_profile` in `~/.config/exomem/managed-install.json`.
+4. From the checkout root, run `<operator-python> -m exomem.service_upgrade --runtime-dir <runtime-dir> --profile <profile>`.
+5. Read the printed JSON result: it contains a `release_retention` report.
 
 ## The standby sequence
 
