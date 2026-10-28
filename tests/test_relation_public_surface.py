@@ -424,22 +424,30 @@ def test_mcp_and_openapi_contracts_share_relation_parameter_schemas(
     }
     openapi = TestClient(mcp.http_app()).get("/api/openapi.json").json()
     selected = {
-        "connect_memory": {"requested_relation", "continuation", "limit"},
-        "schema_memory": {"date_from", "date_to", "continuation", "limit"},
-        "triage_memory": {"source_path"},
+        "connect_memory": ("read_connections", "resolve-relation", {"requested_relation", "continuation", "limit"}),
+        "schema_memory": ("read_schema", "propose-relation", {"date_from", "date_to", "continuation", "limit"}),
+        "triage_memory": ("triage_memory", "decision", {"source_path"}),
     }
 
-    for name, parameter_names in selected.items():
-        mcp_properties = live_tools[name]["inputSchema"]["properties"]
+    for name, (public_name, kind, parameter_names) in selected.items():
+        operation = live_tools[public_name]["inputSchema"]["properties"]["operation"]
+        branch = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == kind)
+        mcp_properties = {**branch["properties"], **operation.get("properties", {})}
         rest_properties = openapi["paths"][f"/api/{name}"]["post"][
             "requestBody"
         ]["content"]["application/json"]["schema"]["properties"]
         for parameter_name in parameter_names:
-            assert rest_properties[parameter_name] == mcp_properties[parameter_name]
-    for name in ("connect_memory", "schema_memory"):
-        relation_limit = live_tools[name]["inputSchema"]["properties"]["limit"]
-        assert relation_limit["minimum"] == 1
-        assert relation_limit["maximum"] == 64
+            # Discovery compacts prose; both surfaces retain the same validation constraints.
+            assert {
+                key: value for key, value in rest_properties[parameter_name].items()
+                if key != "description"
+            } == {
+                key: value for key, value in mcp_properties[parameter_name].items()
+                if key != "description"
+            }
+        if "limit" in parameter_names:
+            assert mcp_properties["limit"]["minimum"] == 1
+            assert mcp_properties["limit"]["maximum"] == 64
 
 
 def test_only_relation_delta_save_uses_the_invocation_specific_narrow_boundary(

@@ -108,7 +108,7 @@ breadcrumbs as Evidence.
 On MCP these expected refusals arrive as normal tool content with top-level
 `success: false`; inspect the structured `error` rather than treating it as a
 transport failure. A `receipt_id` is diagnostic and is not a transferable
-cross-session replay key. `coordination_status` probes this vault's local OS
+cross-session replay key. `bootstrap` probes this vault's local OS
 mutation boundary: `verified: true` binds the safe holder fields to the current
 lock generation, while `verified: false` means the external holder is real but
 cannot be safely attributed. Never infer vault content or identity from status.

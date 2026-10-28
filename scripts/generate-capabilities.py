@@ -75,6 +75,12 @@ def build_capabilities_markdown() -> str:
     rest_commands = list(commands.product_commands_for("rest", expose_tier2=True))
     cli_commands = list(commands.product_commands_for("cli", expose_tier2=True))
     hand_registered = sorted(commands.HAND_REGISTERED_EXCEPTIONS)
+    mcp_tools = {}
+    from exomem.command_surface import listed_names
+
+    for command in mcp_generated:
+        for name in listed_names(command, "nested"):
+            mcp_tools.setdefault(name, []).append(command)
 
     lines = [
         "<!-- authority:non-specification -->",
@@ -90,7 +96,7 @@ def build_capabilities_markdown() -> str:
         f"- Product commands: {len(registry)}",
         f"- Tier 1 commands: {tier_1}",
         f"- Tier 2 commands: {tier_2}",
-        f"- Registry-generated MCP commands: {len(mcp_generated)}",
+        f"- Public MCP tools: {len(mcp_tools)}",
         f"- REST commands: {len(rest_commands)}",
         f"- CLI commands: {len(cli_commands)}",
         f"- Hand-registered MCP tools: {', '.join(hand_registered) or 'none'}",
@@ -112,7 +118,25 @@ def build_capabilities_markdown() -> str:
         "See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the",
         "[Substrate control-plane contract](substrate-control-plane-contract.md).",
         "",
-        "## Product Command Registry",
+        "## Public MCP Tools",
+        "",
+        "MCP discovery publishes the typed jobs below. Each operation keeps its original execution command.",
+        "REST and CLI calls keep the grouped commands in the following registry.",
+        "",
+        "| MCP tool | Operations | Execution commands |",
+        "| --- | --- | --- |",
+        *(
+            "| " + " | ".join((
+                _cell(name),
+                _cell(", ".join(dict.fromkeys(kind for command in contributors
+                                            for rendering in command.renderings if rendering.name == name
+                                            for kind in rendering.kinds))) or "Direct inputs",
+                _cell(", ".join(command.name for command in contributors)),
+            )) + " |"
+            for name, contributors in sorted(mcp_tools.items())
+        ),
+        "",
+        "## Execution Command Registry",
         "",
         "| Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |",
         "| --- | ---: | --- | --- | --- | --- | --- | --- | --- |",

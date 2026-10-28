@@ -15,11 +15,11 @@ commands.
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `read_plans` or `change_plans` for a configured Planning collection |
 | `record` | Capture, correct, inspect, or query a durable observed event or current state | `read_records` or `change_records` for a configured Record collection |
-| `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
-| `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
-| `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `review` | Review stale, contradictory, or unprocessed knowledge | `read_review/triage_memory` |
+| `connect` | Suggest links or return graph, evidence, provenance, and history context | `read_connections/change_connections`; use `operation="context"` for the unified read-only view |
+| `adopt` | Assess or import an existing vault safely | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | Check or repair vault health | Remote tools may audit or dry-run. Actual repair is host-operator work via `exomem maintain --fix` / `--reconcile` |
-| `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `schema_memory`; inference is proposal-only and saving is explicit |
+| `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `read_schema/change_schema`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
@@ -57,13 +57,18 @@ The plan UUID is durable identity. A manifest may render a human filename from
 stable descriptive fields and a readable managed body from canonical
 frontmatter. Keep status, priority, horizon, and other mutable state out of the
 filename. Existing UUID-named collections move only through
-`maintain_memory(mode="structured-files", collection=...)`: inspect the
+`check_memory(operation={'kind': 'structured-files', 'collection': ...})`: inspect the
 read-only preview, resolve every collision or immutable/withheld inbound-link
 blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
 
 ## Governed curation
 
-Use `maintain_memory(mode="curation")` when one reviewed structural improvement
+MCP and REST expose only curation `work-item`, `preview`, and `status` reads.
+Use the CLI `maintain_memory` command with `mode="curation"` for every curation
+write, including proposals and compensation proposals. Retain the grouped
+`curation_action` selector and the returned identifiers on that CLI route.
+
+Use `check_memory(operation={'kind': 'curation-work-item'})` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,
 edit, supersession, move, delete, or recovery. The active agent remains the
 semantic author: `curation_action="work-item"` assembles only explicit refs and
@@ -96,7 +101,7 @@ bounded current view; `create` explicitly creates a reviewed collection contract
 guards and a concise reason; `revise` changes a validated manifest under its
 current guards; and `rebaseline` explicitly records a valid direct-edit audit
 gap. Remote callers may preview generic derived-index repair with
-`maintain_memory(mode="reconcile", dry_run=true)`; actual repair remains the
+`check_memory(operation={'kind': 'reconcile', 'dry_run': true})`; actual repair remains the
 host-operator command `exomem maintain --reconcile`.
 
 Route durable observed events or current state here without waiting for a magic
@@ -189,7 +194,7 @@ being inspected or debugged. Do not embed the canonical ref as a Markdown link
 target when a client could expose its UUID; use a plain title-first citation.
 
 Do not manually create, copy, or modify IDs. Legacy pages remain untouched until
-`maintain_memory(mode="backfill-ids")` is requested. That mode is a dry run by
+`check_memory(operation={'kind': 'backfill-ids'})` is requested. That mode is a dry run by
 default and writes only with `dry_run=false`. Duplicate and malformed IDs are
 reported by audit and make canonical resolution fail rather than selecting an
 arbitrary page.
@@ -441,7 +446,7 @@ an explicit reviewed operation because paths are graph addresses.
 
 At balanced or maximal prominence, spend one ordinary recurrence read once per session,
 on the first turn after bootstrap, after primary work and before the final response:
-`review_memory(mode="attention", categories=["entity_recurrence"], limit=3)`.
+`read_review(operation={'kind': 'attention', 'categories': ['entity_recurrence'], 'limit': 3})`.
 Do not repeat it on later ordinary prompts. The response is deterministic
 evidence for the active agent, not an Entity decision. It returns at most three
 candidates and eight contexts each; absence from default attention or due-state
@@ -450,11 +455,10 @@ does not mean the explicit category is clean.
 For a candidate, resolve exact and alias matches, stop on ambiguity, hydrate a
 single match before considering a duplicate, and promote only a stable reusable
 no-match. Open the exact review ref with
-`maintain_memory(mode="curation", curation_action="work-item",
-review_ref=...)`; the returned signal, context batch, target, grammar, and
+`check_memory(operation={'kind': 'curation-work-item', 'curation_action': 'work-item', 'review_ref': ...})`; the returned signal, context batch, target, grammar, and
 registry bindings must round-trip unchanged into the agent-authored plan.
 Register an unknown durable kind separately through guarded
-`schema_memory(operation="save-entity-types")`, then refresh; curation never
+`change_schema(operation={'kind': 'save-entity-types'})`, then refresh; curation never
 edits `_Schema`.
 
 After one separately confirmed hydration batch reaches a terminal receipt, one
@@ -485,10 +489,10 @@ model, embedding, or due-state claim.
 
 ### Procedure
 1. Read the active entity registry and selected knowledge-pack priorities.
-2. Call `connect_memory(operation="resolve-entity", name=...)`. If one active entity matches, use a guarded
+2. Call `read_connections(operation={'kind': 'resolve-entity', 'name': ...})`. If one active entity matches, use a guarded
    `edit_note` correction or the canonical relation workflow instead of create.
 3. If no entity matches and the identity is stable, and central or recurring,
-   and useful beyond this source, call `connect_memory(operation="create-entity")`.
+   and useful beyond this source, call `change_connections(operation={'kind': 'create-entity'})`.
 4. Draft the page using `page-types.md` and write under the served promotion class and current write scope.
 5. For an existing entity, show a guarded diff and update through `edit_note`.
 6. Refresh the entity index and top-level counts through the governed writer.
@@ -723,7 +727,7 @@ None.
 **Goal:** Return one bounded, read-only context envelope containing stored page
 bodies and semantic blocks, typed graph edges, provenance, evidence,
 supersession history, unresolved targets, warnings, and explicit truncation.
-Call `connect_memory(operation="context")`; `graph-context` remains a
+Call `read_connections(operation={'kind': 'context'})`; `graph-context` remains a
 compatibility alias with the same response.
 
 ### Triggers
@@ -750,7 +754,7 @@ Markdown.
 
 ---
 
-## schema_memory
+## read_schema/change_schema
 
 **Goal:** Govern optional corpus contracts, relation extensions, and traversal
 profiles through one proposal-first surface.
@@ -768,11 +772,11 @@ profiles through one proposal-first surface.
 5. Use `operation="diff"` to compare a saved contract with current corpus
    reality or another named contract.
 6. Before authoring a typed edge, call
-   `connect_memory(operation="resolve-relation")`; reuse a specific truthful
+   `read_connections(operation={'kind': 'resolve-relation'})`; reuse a specific truthful
    registered meaning. Use `relates_to` only for a real generic connection, and
    prefer no edge to an invented label.
 7. For a durable recurring distinction, call
-   `schema_memory(subject="relations", operation="propose-relation")` with a
+   `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})` with a
    reviewed parent, description, and direction. Review its full duplicate
    evidence and delta, then call `operation="save-relations"` with that delta,
    its `expected_hash`, and `why`. The hash is mandatory. Add aliases rather
@@ -797,7 +801,7 @@ vault or assign truth.
 migration.
 
 ### Procedure
-1. Call `maintain_memory(mode="backfill-ids")`; the default `dry_run=true`
+1. Call `check_memory(operation={'kind': 'backfill-ids'})`; the default `dry_run=true`
    reports affected pages and identity problems without writing.
 2. Review the complete proposal and resolve duplicate or malformed IDs first.
 3. After explicit confirmation, repeat with `dry_run=false`. The batch is atomic
@@ -896,7 +900,7 @@ See `supersession.md`. Summary:
 
 Structured query over a CSV/JSON **data file** under the vault — the retrieval
 half of the data-search pattern. `search_memory` surfaces a dataset's markdown card;
-`query_dataset` reads the raw file the card's `data_file:` points at and returns
+`read_memory` reads the raw file the card's `data_file:` points at and returns
 exact rows or an aggregate. Read-only. Raw CSV/JSON are not `find`-searchable;
 this is how you query their values.
 
@@ -923,7 +927,7 @@ this is how you query their values.
 ### Writes performed
 - None (read-only).
 
-## episode_memory
+## record_episode/read_episode
 
 Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
 
@@ -941,9 +945,9 @@ Use only when explicitly requested or the live `proactive_capture` disposition f
 - resume adds `{status, executed, replayed, stale, diverged, reconciled, blocked, deferred, publication}`; coverage adds `{input: {input_revision, ref, recovery}, receipts: [{candidate_key, leaf_id, operation_id, receipt_digest, path, readback}]}`.
 - Newlines, credential-shaped text and anything over a cap are refused with nothing written. `about` refs you cannot see are dropped and counted in `about_skipped`; recording marks the rest as the conversation's latest work.
 
-## adoption_studio
+## Collection adoption
 
-A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `status` is the read-only default; `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `read_import` carries `status` and `work-item`. `import_memory` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
 
 Every selected file is imported or refused with a per-path code; none is dropped silently. A UTF-8 text file becomes a Source that holds the exact text in a verbatim fence, with its links, embeds, tags and aliases kept outside the fence as graph structure. Any other file, and a text file that is not valid UTF-8, becomes a Source that keeps the original bytes as its artifact; media extraction then runs through the media job path.
 
@@ -961,6 +965,6 @@ Every selected file is imported or refused with a per-path code; none is dropped
 - `propose` submits structured `proposals`.
 - `apply-proposal` approves one through an existing governed leaf: `ref` (`exomem://review/adoption/<id>`), `why` required, `expected_fingerprint` must still match, and `expected_hash` guards relation and reconciliation-relate targets.
 
-## adopt_vault
+## One-shot adoption
 
-One-shot adoption of an existing vault without replacing originals. `mode` is `scan-only` (default), `save-manifest`, `copy-as-sources` or `compile-selected`; only the last three write, under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.
+One-shot adoption preserves originals. Use `read_import` with `operation.kind="scan-only"` to inspect first. Use `import_memory` with `operation.kind` set to `save-manifest`, `copy-as-sources` or `compile-selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

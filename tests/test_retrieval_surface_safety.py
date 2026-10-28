@@ -74,19 +74,10 @@ def test_product_mcp_retrieval_schemas_are_safe(
     assert "find" not in tools
     assert "get" not in tools
 
-    ask_schema = tools["search_memory"]["outputSchema"]
     assert "explain" in tools["search_memory"]["inputSchema"]["properties"]
-    # The published schema names only the two shapes (hits or one envelope);
-    # the fields inside them are asserted on the runtime payload below and the
-    # typed model stays in the return annotation.
-    assert ask_schema["properties"]["result"] == {
-        "anyOf": [{"type": "array"}, {"type": "object"}]
-    }
-
-    read_schema = tools["read_memory"]["outputSchema"]
-    assert read_schema["type"] == "object"
-    assert read_schema["additionalProperties"] is True
-    read_inputs = tools["read_memory"]["inputSchema"]["properties"]
+    operation = tools["read_memory"]["inputSchema"]["properties"]["operation"]
+    page = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "page")
+    read_inputs = {**page["properties"], **operation.get("properties", {})}
     assert {"path", "unit_ref"} <= set(read_inputs)
 
     with principal_module.request_scope(
@@ -94,14 +85,14 @@ def test_product_mcp_retrieval_schemas_are_safe(
     ):
         result = asyncio.run(
             _build_server(monkeypatch, vault).call_tool(
-                "ask_memory",
+                "search_memory",
                 {
                     "query": "metabolism",
                     "mode": "keyword",
                     "scope": "kb-only",
                     "explain": True,
                 },
-                run_middleware=False,
+                run_middleware=True,
             )
         ).structured_content["result"]
     assert result["retrieval_profile"]["effective_mode"] == "keyword"
@@ -143,7 +134,8 @@ def test_legacy_mcp_leaf_names_are_opt_in(
     compat_tools = _mcp_tools(_build_server(monkeypatch, vault))
 
     assert "create_note" in compat_tools
-    assert "manage_memory_file" in compat_tools
+    assert "change_files" in compat_tools
+    assert "manage_memory_file" not in compat_tools
     assert "note" in compat_tools
     assert "create_file" in compat_tools
     assert compat_tools["note"]["description"].startswith(
