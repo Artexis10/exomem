@@ -50,14 +50,17 @@ def compile_rows(query, projection, *, as_of, after):
     def tuple_sql(values):
         return "(" + ",".join(values) + ")" if len(values) > 1 else values[0]
 
-    def key(value, field):
+    def key(value, field, *, exact):
         value = typed_sql._relative(value, field.kind, instant)
         if field.tag is None:
             try:
                 return None, (native_identity.encode(value, identity),)
             except (ValueError, UnicodeError) as error:
-                if identity == native_identity.UUID16:
-                    return None, None
+                if identity == native_identity.UUID16 or (identity == native_identity.ORDERED and exact):
+                    return None, None  # no stored key spells this literal, so an equality matches nothing
+                if identity == native_identity.ORDERED:
+                    raise QueryError("QUERY_VALUE_INVALID",
+                                     "a key range bound must be the exact spelling of an ordered item key") from error
                 raise ScalarValueError("identity literal must be valid UTF-8") from error
         tag, band, payload = native_operands.scalar_operand(value, field.kind)
         if tag < 2:
@@ -74,7 +77,7 @@ def compile_rows(query, projection, *, as_of, after):
     def comparison(value, field, operator):
         if field.tag is None and identity == native_identity.UUID16 and operator != "=":
             return identity_range(value, operator)
-        tag, values = key(value, field)
+        tag, values = key(value, field, exact=operator == "=")
         if values is None:
             return "0"
         prefix = "" if field.tag is None else field.tag + "=" + bind(tag) + " AND "
@@ -157,7 +160,7 @@ def compile_rows(query, projection, *, as_of, after):
                 values = (cut.to_bytes(16, "big"),)
                 inclusive = lower
             else:
-                tag, values = key(value, field)
+                tag, values = key(value, field, exact=False)
                 if field.tag is not None:
                     fix(field.rank, 0)
                     fix(field.tag, tag)
@@ -172,7 +175,7 @@ def compile_rows(query, projection, *, as_of, after):
         for leaf in typed_sql._leaves(query.where) or ():
             field = columns(leaf.field)
             if leaf.op == "eq":
-                tag, values = key(leaf.value, field)
+                tag, values = key(leaf.value, field, exact=True)
                 if values is None:
                     empty = True
                     continue

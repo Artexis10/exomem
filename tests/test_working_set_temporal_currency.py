@@ -541,6 +541,7 @@ def _governed_entity_vault(tmp_path: Path, *, declared: bool) -> Path:
     return vault
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("declared", [True, False])
 @pytest.mark.parametrize(
     "turn", ["what is the current state of Harbourline Trust", "what's up with harbourline trust"]
@@ -565,6 +566,7 @@ def test_a_restricted_current_state_page_never_reaches_an_external_packet(
     assert "harbourline-operating-state" not in json.dumps(packet).casefold()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_declared_page_is_served_to_its_owner(tmp_path):
     from exomem import commands
 

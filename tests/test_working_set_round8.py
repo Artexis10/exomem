@@ -148,6 +148,7 @@ def test_container_code_keeps_its_whole_body_opaque(turn: str) -> None:
     assert not working_set_conversation.may_carry(analysis, subject_title=turn)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("turn", ASSIGNED_TURNS[:5] + ASSIGNED_TURNS[-26:] + CONTAINER_CODE[:7])
 @pytest.mark.parametrize("leaf", (False, True), ids=("compiler", "command"))
 def test_structural_local_material_abstains_at_both_public_paths(
@@ -442,6 +443,7 @@ def test_state_and_overflow_pointer_occurrences_are_charged() -> None:
     _assert_ledger(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("material", (True, False))
 def test_real_indexed_long_titles_are_bounded_including_no_material_fallback(
     cvault: Path, monkeypatch, material: bool
@@ -466,6 +468,7 @@ def test_real_indexed_long_titles_are_bounded_including_no_material_fallback(
     assert "conversation_inferred" not in json.dumps(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_real_indexed_ambiguity_keeps_every_identity_with_budgeted_titles(cvault: Path) -> None:
     write_scope(cvault)
     write_rule(cvault, ceiling=0)
@@ -521,6 +524,7 @@ def test_egress_recounts_retained_subject_prose_without_refill(vault: Path) -> N
     _assert_ledger(guarded)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("material", (True, False))
 def test_command_leaf_preserves_inferred_marker_through_egress(
     cvault: Path, monkeypatch, material: bool
@@ -707,6 +711,7 @@ def test_ordinary_packet_accounting_keeps_its_shipped_fields(carry_kind: str | N
     assert packet["budget"]["used_chars"] == len(item.text)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("focus", (False, True))
 def test_current_turn_and_focus_resolution_precede_the_local_veto(
     cvault: Path, focus: bool

@@ -38,6 +38,8 @@ are this chart's own: templates/cell-array-exporter.yaml renders them.
     "snapshot_class" "exomem-cloud-local-snapshot"
     "driver" "topolvm.io"
     "device_class" $deviceClass
+    "reservations" $local.reservations
+    "reservation_namespace" $local.reservationNamespace
     "topology_key" "topology.topolvm.io/node"
     "backup_concurrency_per_node" $local.backupConcurrencyPerNode
     "metrics_namespace" .Release.Namespace
@@ -61,4 +63,22 @@ are this chart's own: templates/cell-array-exporter.yaml renders them.
 {{- $_ := set $storage "max_cell_gib" $local.maxCellGib -}}
 {{- end -}}
 {{- $storage | toJson -}}
+{{- end -}}
+
+{{/* One fixed capability shape for the dedicated namespace and cellctl's scope exception. */}}
+{{- define "exomem.familySecretShape" -}}
+variables.target.type == 'Opaque' && variables.target.?immutable.orValue(false) &&
+variables.target.metadata.?labels.orValue({}).size() == 2 &&
+variables.target.metadata.labels['exomem.io/cell'].matches('^[a-z2-7]{16}$') &&
+variables.target.metadata.labels['exomem.io/backup-family-request'].matches('^[0-9a-f]{32}$') &&
+variables.target.metadata.name == 'cell-snapshot-' + variables.target.metadata.labels['exomem.io/cell'] + '-' +
+  variables.target.metadata.labels['exomem.io/backup-family-request'] &&
+variables.target.metadata.?ownerReferences.orValue([]).size() == 0 &&
+variables.target.data.size() == 2 &&
+variables.target.data['backup-family-token'].size() > 0 &&
+variables.target.data['immediate-source-uuid'].size() > 0
+{{- end -}}
+{{- define "exomem.familySecretScope" -}}
+(request.resource.resource == 'secrets' && request.namespace == '{{ .Values.cellStorage.local.reservationNamespace }}' &&
+  ({{ include "exomem.familySecretShape" . }}))
 {{- end -}}

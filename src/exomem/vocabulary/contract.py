@@ -447,6 +447,9 @@ def inspect(
         out["count_source"] = usage.source
     else:
         out["reason"] = usage.reason
+    extra = getattr(spec.adapter, "inspect_extra", None)
+    if extra is not None:
+        out.update(extra(vault_root))
     return out
 
 
@@ -561,13 +564,20 @@ def _candidate(
     candidate = spec.adapter.parse_document(document)
     after_entries = spec.adapter.entries(candidate)
     registry.validate_replacements(spec, after_entries)
-    blocking = registry.new_findings(snapshot, tuple(spec.adapter.findings(candidate)))
+    blocking = registry.new_findings(snapshot.findings, spec.adapter.findings(candidate))
     removal = _removal_report(after_entries, delta, usage) if removing else {}
     continuity = getattr(spec.adapter, "continuity", None)
     if continuity is not None:
         # A key the delta removed after counting it unused is no continuity break.
         gone = {key for key, outcome in removal.items() if outcome["action"] == "removed"}
         blocking.extend(dict(item) for item in continuity(snapshot.typed, candidate, gone))
+    admission = getattr(spec.adapter, "admission", None)
+    if admission is not None:
+        # Checks that read the vault run for the entries this delta touched, so state that moved
+        # since an earlier save never blocks an unrelated one.
+        blocking.extend(
+            dict(item) for item in admission(vault_root, candidate, {k: v for k, v in touched.items() if k not in removal})
+        )
     vault_entries = sum(1 for entry in after_entries.values() if entry.origin == "vault")
     if vault_entries > spec.cap:
         blocking.append(
@@ -956,7 +966,7 @@ def restore(
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     restored = spec.adapter.parse(text, registry.content_hash(text))
     # Restore preserves legacy reader meaning, but never republishes invalid bytes.
-    blocking = registry.new_findings(None, tuple(spec.adapter.findings(restored)))
+    blocking = registry.new_findings((), spec.adapter.findings(restored))
     if blocking:
         return {"subject": spec.name, "valid": False, "findings": blocking, "saved": None}
     after_entries = spec.adapter.entries(restored)

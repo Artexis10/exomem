@@ -18,6 +18,9 @@ from exomem import request_budget
 from exomem.governance import egress
 from exomem.governance.principal import library_scope, request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 # Reuse the maintained fixture factories without copying their setup.
 cvault = conversation_fixtures.cvault
 competing_projects = conversation_fixtures.competing_projects

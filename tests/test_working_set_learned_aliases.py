@@ -30,6 +30,9 @@ from exomem import (
 from exomem.governance.principal import request_scope
 from exomem.vault import content_hash, parse_frontmatter, render_frontmatter_document
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 SLED = "Knowledge Base/Products/Cargo Sled.md"
 LEDGER = "Knowledge Base/Systems/Depot Ledger.md"
 

@@ -23,6 +23,7 @@ from sqlalchemy import bindparam, select
 
 from .. import (
     held_fs,
+    item_keys,
     memory_refs,
     mutation_terminal,
     planning,
@@ -109,6 +110,15 @@ def _refuse_view_stamp(manifest, values):
         raise collections.CollectionError(
             "RESERVED_RECORD_FIELD", "item uses a reserved system field"
         )
+
+
+# One statement, so a test that emulates an earlier schema can swap in that schema's column list.
+INSERT_COLLECTION = (
+    "INSERT INTO collections (collection_id, type_name, type_version, manifest_path, source_path, layout, "
+    "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode, "
+    "derived, item_key_scheme) VALUES (:collection_id, :type_name, :type_version, :manifest_path, :source_path, "
+    ":layout, 1, 1, :audit_head, 1, :txn_id, :txn_id, :view_mode, :derived, :item_key_scheme)"
+)
 
 
 class CollectionWriter:
@@ -316,7 +326,7 @@ class CollectionWriter:
         key = (str(self.root), row["collection_id"], row["manifest_version"], epoch)
         if key in cache.contracts:
             manifest, declared = cache.contracts[key]
-            return replace(manifest, audit_head=row["audit_head"]), declared
+            return replace(manifest, audit_head=row["audit_head"], item_key_scheme=row["item_key_scheme"]), declared
         text = self.connection.execute(
             "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
             (row["collection_id"], row["manifest_version"]),
@@ -334,7 +344,7 @@ class CollectionWriter:
                 "COLLECTION_TYPE_VERSION_MISMATCH", "collection type differs from release"
             )
         cache._remember(cache.contracts, key, (manifest, declared), 64)
-        return replace(manifest, audit_head=row["audit_head"]), declared
+        return replace(manifest, audit_head=row["audit_head"], item_key_scheme=row["item_key_scheme"]), declared
 
     def _item(self, cid: str, key: str) -> dict[str, Any] | None:
         row = _row(
@@ -376,22 +386,25 @@ class CollectionWriter:
             manifest = self._collection(selector, facade_profile=facade_profile)[1]
             yield self._operation.field_plan(manifest).manifest
 
-    def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
+    def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512,
+                             semantic_profile=None):
+        """The releasable manifests of the admitted collections, of one profile when one is named.
+
+        A collection of another profile costs nothing here; ``released_identities`` answers for the
+        one case where the sweep still needs to know it exists.
+        """
         from . import ownership
         from .preview import production_bound
 
         with self.read_snapshot():
             proof = ownership.current(self.root, conn=self.connection, private=not production_bound(self.root))
             entries = [(entry["collection_id"], entry["manifest_path"]) for entry in proof.entries
-                       if entry["collection_id"] in proof.admitted]
+                       if entry["collection_id"] in proof.admitted
+                       # A marker entry without a recorded profile may still be of the asked one.
+                       and (semantic_profile is None or entry.get("semantic_profile") in (None, semantic_profile))]
             manifests = []
             for cid, path in sorted(entries, key=lambda entry: entry[1]):
-                if authorize_path is not None and not authorize_path(path):
-                    continue
-                head = self._operation.summary_manifest(cid)
-                if head is None:
-                    head = (None, self._operation.decision(self._operation.catalog(cid)[0]))
-                if head[1].level < 6:
+                if not self._shown(cid, path, authorize_path):
                     continue
                 if len(manifests) >= min(max_candidates, max_raw_candidates):
                     raise collections.CollectionError(
@@ -400,6 +413,27 @@ class CollectionWriter:
                 manifest = self._collection(cid)[1]
                 manifests.append(self._operation.field_plan(manifest).manifest)
             return tuple(manifests), ()
+
+    def released_identities(self, identities, *, authorize_path=None):
+        """Which of these collection identities name an admitted collection whose manifest is releasable.
+
+        A sweep that skips a profile still refuses a physical manifest that reuses a releasable identity.
+        """
+        from . import ownership
+        from .preview import production_bound
+
+        with self.read_snapshot():
+            proof = ownership.current(self.root, conn=self.connection, private=not production_bound(self.root))
+            paths = {entry["collection_id"]: entry["manifest_path"] for entry in proof.entries
+                     if entry["collection_id"] in proof.admitted}
+            return tuple(cid for cid in identities
+                         if cid in paths and self._shown(cid, paths[cid], authorize_path))
+
+    def _shown(self, cid, path, authorize_path):
+        """Whether the caller may see this collection's manifest: its path is authorized and its subject releases."""
+        if authorize_path is not None and not authorize_path(path):
+            return False
+        return self._operation.decision(self._operation.manifest_subject(cid)).level >= 6
 
     def _projection_manifest(self, selector):
         """Canonical contract for server-internal write deltas; never egress."""
@@ -649,6 +683,7 @@ class CollectionWriter:
             payload["capacity"] = summary.capacity()
         if manifest.derived:
             payload["contract"]["derived"] = True
+            payload["contract"]["item_keys"] = collections.item_key_contract(manifest)
             payload["derived_rows"] = derived_rows.rebuild_status(self.connection, self.handle.path,
                                                                   manifest.collection_id)
         if release is None and (manifest.item_presentation or manifest.record_presentation or manifest.item_filename):
@@ -2092,22 +2127,20 @@ class CollectionWriter:
                 admission.record(manifest, txn)
             types.register_builtins(self.connection, txn_id=txn["txn_id"])
             self._execute(
-                "INSERT INTO collections (collection_id, type_name, type_version, manifest_path, source_path, layout, "
-                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode, "
-                "derived) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?, ?)",
-                (
-                    manifest.collection_id,
-                    declared.name,
-                    declared.version,
-                    manifest.path,
-                    manifest.storage.source,
-                    manifest.storage.strategy,
-                    txn["event_hash"],
-                    txn["txn_id"],
-                    txn["txn_id"],
-                    manifest.view_mode,
-                    int(manifest.derived),
-                ),
+                INSERT_COLLECTION,
+                {
+                    "collection_id": manifest.collection_id,
+                    "type_name": declared.name,
+                    "type_version": declared.version,
+                    "manifest_path": manifest.path,
+                    "source_path": manifest.storage.source,
+                    "layout": manifest.storage.strategy,
+                    "audit_head": txn["event_hash"],
+                    "txn_id": txn["txn_id"],
+                    "view_mode": manifest.view_mode,
+                    "derived": int(manifest.derived),
+                    "item_key_scheme": self._new_item_key_scheme(manifest),
+                },
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
             if manifest.view_mode == summary.SUMMARY:
@@ -2147,6 +2180,18 @@ class CollectionWriter:
         writer_lease.mark_active_mutation_committed()
         records._refresh_manifest_due_state(self.root, manifest)
         return receipt
+
+    def _new_item_key_scheme(self, manifest) -> str:
+        """The item key scheme a collection takes at creation; the store fixes it for the collection's life.
+
+        Only a derived collection can have ordered keys, and only when its natural key has an ordered encoding
+        and no natural-key field is a location, whose value an item key must not spell.
+        """
+        from .field_admission import location_key_fields
+
+        ordered = (manifest.derived and collections.ordered_keys_encode(manifest)
+                   and not location_key_fields(self.connection, manifest))
+        return item_keys.ORDERED_V1 if ordered else item_keys.HASHED_V1
 
     def _validate(
         self, manifest, declared, key, values, *, before=None, operation="append",
@@ -3242,6 +3287,13 @@ class CollectionWriter:
             raise derived_rows.conversion_refused(current.derived)
         if current.derived and summary.populated(self.connection, current.collection_id):
             refused = derived_rows.field_change_refused(current, proposed)
+            if refused is not None:
+                raise refused
+        if current.derived and current.item_key_scheme == item_keys.ORDERED_V1:
+            from .field_admission import location_key_fields
+
+            refused = derived_rows.ordered_key_refused(
+                location_key_fields(self.connection, proposed), collections.ordered_keys_encode(proposed))
             if refused is not None:
                 raise refused
         mode_change = proposed.view_mode != current.view_mode

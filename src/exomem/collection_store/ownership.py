@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import sqlite3
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -84,16 +85,27 @@ class Proof:
 def declarations(root, conn, *, generation=1):
     """Validate the complete immutable declaration namespace, also at verified ingestion boundaries."""
     sid = conn.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_STORE_ID,)).fetchone()[0]
-    entries, declarations = [], []
-    # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
-    planning_values = PlanningValues(root, server_side=True)
-    for cid, path, source, layout, text, digest in conn.execute(
+    rows = conn.execute(
         "SELECT c.collection_id,c.manifest_path,c.source_path,c.layout,m.manifest_text,m.manifest_hash "
         "FROM collections c LEFT JOIN collection_manifests m ON m.collection_id=c.collection_id "
         "AND m.manifest_version=c.manifest_version ORDER BY c.collection_id"
-    ):
-        if text is None or tokens.manifest_hash(text) != digest:
-            raise unavailable()
+    ).fetchall()
+    if any(text is None or tokens.manifest_hash(text) != digest for _cid, _path, _source, _layout, text, digest in rows):
+        raise unavailable()
+    # Every call rereads and rechecks the rows, so a re-proof still sees any change; within a
+    # request, the parse of an unchanged namespace is reused. Each caller gets its own marker. The
+    # vocabulary overlay is read once per request too; `finish` re-proves in a fresh scope.
+    key = (str(root), sid, generation, tuple((*row[:4], row[5]) for row in rows))
+    marker, declared = state_paths.request_memo(
+        "ownership_declarations", key, lambda: _declarations(root, sid, rows, generation))
+    return copy.deepcopy(marker), declared
+
+
+def _declarations(root, sid, rows, generation):
+    entries, declarations = [], []
+    # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
+    planning_values = PlanningValues(root, server_side=True)
+    for cid, path, source, layout, text, _digest in rows:
         manifest = collections.parse_manifest_bytes(root, path, text.encode(), planning_values=planning_values)
         if (manifest.collection_id, manifest.storage.source, manifest.storage.strategy) != (cid, source, layout):
             raise unavailable()
@@ -277,9 +289,10 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
             if recorded or authority.read_marker(root) is not None:
                 raise unavailable()
             return Proof((placement, None), None)
+        from .runtime import reader_pool
+
         # Ownership declarations use the unchanged metadata wire; payload reads still require the current schema.
-        reader, _ = connection._open_read_only(path, connection.BUSY_TIMEOUT_MS)
-        with closing(reader):
+        with connection.ownership_reader(path, reader_pool(root, path)) as reader:
             reader.execute("BEGIN")
             return _canonical(root, reader, placement, recorded, private=private, manager=manager)
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, collections.CollectionError,
@@ -320,7 +333,8 @@ class ReadScope:
 
         manager = _manager(self.root)
         try:
-            # A fresh connection and fresh placement bypass the body's WAL snapshot and resolution memo.
+            # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
+            # so neither this proof nor the body's WAL snapshot is reused.
             with state_paths.outside_resolution_scope(), state_paths.resolution_scope(), \
                     manager.consistency_guard(self.root, operation="collection_ownership_release"):
                 writer = bound_writer(self.root)

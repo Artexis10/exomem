@@ -245,6 +245,18 @@ def missing_gateway_env(container: dict[str, Any]) -> list[str]:
     return [name for name in GATEWAY_REQUIRED_ENV if name not in present]
 
 
+def trust_storage_ca(stack: Stack, documents: list[dict]) -> str:
+    """Point cellctl's S3 clients at the run CA; returns the overlay it records."""
+    controller = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]
+    container = controller["containers"][0]
+    container.setdefault("env", []).append({"name": "AWS_CA_BUNDLE", "value": "/rehearsal-ca/ca.pem"})
+    container.setdefault("volumeMounts", []).append({"name": "rehearsal-ca", "mountPath": "/rehearsal-ca", "readOnly": True})
+    controller.setdefault("volumes", []).append({"name": "rehearsal-ca", "configMap": {"name": "rehearsal-ca"}})
+    documents.append({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "rehearsal-ca", "namespace": CLOUD_NAMESPACE},
+                      "data": {"ca.pem": stack.object_store.ca_path.read_text()}})
+    return "cellctl: AWS_CA_BUNDLE trusts the run CA for both S3 clients"
+
+
 def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, dict[str, str]],
           pki: tls.RehearsalPki, ingress_source_value: str, ingress_image: str) -> Platform:
     platform = _render(stack, config)
@@ -260,14 +272,7 @@ def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, di
 
     platform.overlays.append(overlay_cellctl(documents))
     if stack.object_store.ca_path:
-        controller = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]
-        container = controller["containers"][0]
-        container.setdefault("env", []).append({"name": "AWS_CA_BUNDLE", "value": "/rehearsal-ca/ca.pem"})
-        container.setdefault("volumeMounts", []).append({"name": "rehearsal-ca", "mountPath": "/rehearsal-ca", "readOnly": True})
-        controller.setdefault("volumes", []).append({"name": "rehearsal-ca", "configMap": {"name": "rehearsal-ca"}})
-        documents.append({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "rehearsal-ca", "namespace": CLOUD_NAMESPACE},
-                          "data": {"ca.pem": stack.object_store.ca_path.read_text()}})
-        platform.overlays.append("cellctl: AWS_CA_BUNDLE trusts the run CA for both S3 clients")
+        platform.overlays.append(trust_storage_ca(stack, documents))
 
     gateway = _find(documents, "Deployment", "exomem-cloud-gateway")
     gateway_container = gateway["spec"]["template"]["spec"]["containers"][0]

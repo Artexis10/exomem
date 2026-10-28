@@ -558,7 +558,9 @@ def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject
 
 #: Row subjects the writer's release cache keeps across collections before shedding them.
 _MAX_CACHED_SUBJECTS = 65536
-_MAX_CACHED_STATES = 8
+#: Collection states kept at once: as many as one discovery sweep can reach. A smaller cap evicts
+#: each state before a scan in path order returns to it, so every pass reloaded every collection.
+_MAX_CACHED_STATES = collections._MAX_DISCOVERY_CANDIDATES
 
 
 @dataclass(slots=True)
@@ -916,6 +918,7 @@ class OperationAuthorization:
         # A verified base proof excludes unpublished file imports in a migration snapshot.
         self._ownership_proof = ownership_proof
         self.points = {}
+        self.manifest_subjects = {}
         self.summary_memo = {}
         self.grants_loaded = False
         self.failed = self.context is not None and not isinstance(
@@ -1262,15 +1265,36 @@ class OperationAuthorization:
             "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
         ).fetchone() is not None
 
+    def manifest_subject(self, cid: str) -> CanonicalSubject:
+        """The collection's manifest subject, from one point read per read operation.
+
+        A read operation is one SQLite snapshot, so the subject cannot change under it. A mutation
+        can edit the manifest, so it reads the subject each time.
+        """
+        # A non-mutation operation can still run on a connection that writes; its writes move the key.
+        memo = (cid, self.conn.total_changes)
+        if memo in self.manifest_subjects:
+            return self.manifest_subjects[memo]
+        try:
+            found = self.conn.execute("SELECT manifest_path FROM collections WHERE collection_id=?", (cid,)).fetchone()
+            subject = None if found is None else next(
+                iter(subjects(self.conn, cid, self.logical_vault_id, identity=found[0])))
+            self._load_grants()
+        except (ValueError, TypeError, StopIteration, sqlite3.Error,
+                authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            self.refuse()
+        if subject is None:
+            self.refuse()
+        if not self.mutation:
+            self.manifest_subjects[memo] = subject
+        return subject
+
     def summary_manifest(self, cid: str) -> tuple[CanonicalSubject, Decision] | None:
         """A summary collection's manifest subject and decision from one point read; None for items."""
-        found = self.conn.execute(
-            "SELECT manifest_path FROM collections WHERE collection_id=? AND view_mode='summary'", (cid,),
-        ).fetchone()
-        if found is None:
+        if self.conn.execute(
+                "SELECT 1 FROM collections WHERE collection_id=? AND view_mode='summary'", (cid,)).fetchone() is None:
             return None
-        self._load_grants()
-        manifest = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=found[0])))
+        manifest = self.manifest_subject(cid)
         return manifest, self.decision(manifest)
 
     def _release_selection(self, cid: str, *, full=False):
@@ -1760,14 +1784,14 @@ class OperationAuthorization:
         ).fetchone()
         self._load_grants()
         if projection is not None and projection[2] == "history":
-            return subjects(self.conn, cid, self.logical_vault_id, identity=manifest_path)
+            return (self.manifest_subject(cid),)
         if projection is not None and projection[2] == "summary":
             release = self.summary_release(cid)
             return (release.manifest,) if release is not None else ()
         if path == manifest_path:
             if projection is not None and projection[2] != "manifest":
                 return ()
-            return subjects(self.conn, cid, self.logical_vault_id, identity=path)
+            return (self.manifest_subject(cid),)
         if path == source_path and layout == "markdown-log":
             if projection is not None and projection[2] != "log":
                 return ()

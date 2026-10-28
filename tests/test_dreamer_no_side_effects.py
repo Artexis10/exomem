@@ -108,6 +108,7 @@ def _install_all(monkeypatch: pytest.MonkeyPatch) -> Spies:
         (embeddings, "get_model"),
         (embeddings, "get_reranker"),
         (embeddings, "get_clip_model"),
+        (embeddings, "get_clip_query_model"),
         (embeddings, "embed_texts"),
         (claims, "verifier_polarity"),
     ):

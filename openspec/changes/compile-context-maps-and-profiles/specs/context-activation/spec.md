@@ -20,7 +20,7 @@ The shared working-set index SHALL collect owner-derived inputs inside the exist
 - **THEN** the prior principal and disclosure collector are restored
 
 ### Requirement: Packet modes
-Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected by the process setting `EXOMEM_ACTIVATION_PACKET`. When the setting is absent, activation SHALL serve `anchors`.
+Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected by the process setting `EXOMEM_ACTIVATION_PACKET`. `maps` is the default: when the setting is absent or holds another value, activation SHALL serve `maps`. The value `anchors` SHALL restore the `anchors` packet.
 - These requirements SHALL bind both modes:
   - "Read-only activation operation", including the kill switch, which disables both modes;
   - "Derived activation index";
@@ -36,16 +36,20 @@ Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected b
 - The role lanes' bounds and lifecycle rules SHALL also bind profiles that are compiled through those lanes.
 - The `continuity` and `conversation` contracts of the conversation-aware activation and continuity capabilities, and the retrieve-inject-hook rendering contract, SHALL bind `anchors` mode. `maps` mode SHALL follow "The maps packet".
 
-#### Scenario: The default mode is unchanged
-- **WHEN** `EXOMEM_ACTIVATION_PACKET` is absent
-- **THEN** activation returns the same packet as `anchors` mode for the same inputs
+#### Scenario: The default mode is maps
+- **WHEN** `EXOMEM_ACTIVATION_PACKET` is absent, or holds a value other than `anchors` or `maps`
+- **THEN** activation serves the `maps` packet
+
+#### Scenario: The setting restores the anchors packet
+- **WHEN** `EXOMEM_ACTIVATION_PACKET` is `anchors`
+- **THEN** activation serves the `anchors` packet and no map
 
 #### Scenario: The kill switch disables both modes
 - **WHEN** the working-set kill switch is set and `EXOMEM_ACTIVATION_PACKET` is `maps`
 - **THEN** activation returns the disabled abstention and no map
 
 ### Requirement: The maps packet
-In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT resolve anchors, call a model other than retrieval scorers, or write to the vault. The map and any attached profile SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. Unless the turn-slice development probe is enabled, `conversation`, `focus` and `trigger` SHALL NOT change the map.
+In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT resolve anchors, call a model other than retrieval scorers, or write to the vault. The map and any attached profile SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. Unless the turn-slice development probe is enabled, `conversation`, `focus` and `trigger` SHALL NOT change the map. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
 
 #### Scenario: An empty vault returns an empty map
 - **WHEN** no context-catalogue entry is visible to the caller
@@ -58,6 +62,15 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 #### Scenario: Conversation does not change the map
 - **WHEN** two `maps`-mode calls differ only in `conversation`
 - **THEN** both return the same map
+
+#### Scenario: The episode advisory rides on a map
+- **WHEN** the conditions of the `episode_due` advisory hold and activation serves the `maps` packet
+- **THEN** the packet carries `episode_due`
+- **AND** nothing else in the packet differs from the same call without the advisory
+
+#### Scenario: The call ledger does not report a map as zero pages
+- **WHEN** activation serves the `maps` packet
+- **THEN** the call ledger records the released-item count as unknown, not zero
 
 ### Requirement: A context catalogue with bounded projections
 The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, note, thread and collection.
@@ -174,21 +187,21 @@ The egress guard SHALL cover every new packet block and field.
 - **WHEN** a withheld entry is added to a topic that a non-owner can see
 - **THEN** that caller's map, domain map and topic profile are unchanged, including their order and counts
 
-### Requirement: The mode switch follows a frozen paired evaluation
-The default SHALL change to `maps` only after an evaluation passes. These parts of the evaluation SHALL be fixed before any held-out generation:
+### Requirement: The default packet mode follows an operator ruling
+The default packet mode SHALL be `maps` by operator ruling, not by the result of an evaluation. A paired evaluation SHALL keep measuring first answers and finding gaps in `maps` mode, and it SHALL NOT gate the default. Its held-out split SHALL stay sealed and unread until one later measure, which is not a switch gate. These parts of the evaluation SHALL be fixed before any held-out generation:
 - the cases, their groups and the arms, with each arm's server mode, tools and instructions;
 - the agent and its pull budget;
 - the scoring rule and the judge's verdict schema;
 - the retry and failure policy;
 - the tolerances and the decision rule.
 
-The arms SHALL include a pull-instructions arm with no map. The cases SHALL include ordinary turns sampled without regard to any arm's outcome, beside the cases of known misses. The primary measure SHALL be whether the answer to each case's scored turn uses the required current facts and constraints and asserts no forbidden claim as current. The switch SHALL require all of these:
+The arms SHALL include a pull-instructions arm with no map. The cases SHALL include ordinary turns sampled without regard to any arm's outcome, beside the cases of known misses. The primary measure SHALL be whether the answer to each case's scored turn uses the required current facts and constraints and asserts no forbidden claim as current. The report SHALL state whether each of these holds:
 - on held-out cases that expect memory, miss cases and ordinary turns pooled, `maps` is superior to `anchors` on the primary measure, with each stratum also reported;
 - on held-out ordinary turns, `maps` is non-inferior to `anchors` within the fixed tolerance;
 - `maps` is superior to the pull-instructions arm, or non-inferior to it within the fixed tolerance and superior on memory calls per case;
 - contamination on cases without relevant memory is non-inferior within the fixed tolerance;
 - `maps` loses no activation-audit positive case that `anchors` passes.
 
-#### Scenario: The default stays until the evaluation passes
-- **WHEN** the frozen evaluation has not passed
-- **THEN** activation serves the `anchors` packet by default
+#### Scenario: The evaluation does not gate the default
+- **WHEN** the held-out evaluation has not run, or has run and not met every comparison
+- **THEN** activation still serves the `maps` packet by default

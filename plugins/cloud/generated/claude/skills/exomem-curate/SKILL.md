@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: 1a4111303fdcae235cc709b5f66df9fd235d3f70552626d460148dabbb082aba
+  skill_contract: 81ebaf185b557ce24afb3155ae8599d909d176ef5fc73a87fe1639412d86e528
   version: "0.2.0"
 ---
 
@@ -39,6 +39,7 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 ## Workflow
+0. To organize by topic, or when maps show few topics, do not edit pages one by one. Read the topic-carrier items from `review_memory(mode="vocabulary")` and follow "Topic carriers" in [vocabulary](references/vocabulary.md): one carrier save files every page of a project key, folder or tag. When no existing domain names the pages' shared subject, register one with `schema_memory(subject="domains", operation="save")` and declare it; within this step that needs no separate approval. Then show the person the review list.
 1. Search related notes with `search_memory`; use `connect_memory(operation="suggest-links")` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
 2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `review_memory(mode="relation-debt")` for pages with no outbound edges and `mode="relation-queue"` for already-reviewed candidates.
 3. For a bounded set of explicitly selected pages, call `maintain_memory(mode="curation", curation_action="work-item", refs=[...], paths=[...])`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.

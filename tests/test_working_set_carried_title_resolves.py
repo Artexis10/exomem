@@ -22,6 +22,9 @@ from test_working_set_carry import seed_ordinary_notes
 
 from exomem import commands, lexstore, working_set_index, working_set_runtime
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 NOTES = "Knowledge Base/Notes/Research"
 CHECKLIST = f"{NOTES}/kelvane-intake-checklist.md"
 BODY_ONLY = f"{NOTES}/quarry-shift-notes.md"

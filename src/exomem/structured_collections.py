@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import itertools
 import json
 import math
+import os
 import re
 import stat
 import unicodedata
@@ -18,7 +20,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote, unquote
 
-from . import memory_refs, query_compat, reserved_paths, vault
+from . import item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
 
@@ -939,6 +941,9 @@ class CollectionManifest:
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
     derived: bool = False
+    #: How the store derives this collection's item keys. It is store state, not manifest text: the store
+    #: records it at creation and the writer overlays it on every manifest it hands out.
+    item_key_scheme: str = item_keys.HASHED_V1
 
 
 @dataclass(frozen=True, slots=True)
@@ -1166,6 +1171,7 @@ def discover_collections_with_errors(
     max_raw_candidates: int = _MAX_DISCOVERY_CANDIDATES,
     reject_duplicates: bool = True,
     ownership_proof=None,
+    semantic_profile: str | None = None,
 ) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
     """Discover releasable manifests AND the ones this sweep could not read.
 
@@ -1180,6 +1186,10 @@ def discover_collections_with_errors(
     fails closed: `load_manifest` and `resolve_collection`'s path branch raise
     exactly as before. The discovery bounds also still raise -- a limit is a
     refusal to look further, not a manifest that was looked at and failed.
+
+    ``semantic_profile`` limits the store's own collections to that profile, for a caller that
+    discards the others. Files are still swept whole, and a duplicate identity still refuses
+    when it involves a releasable store collection of any profile.
     """
     if (
         type(max_candidates) is not int
@@ -1208,7 +1218,8 @@ def discover_collections_with_errors(
         proof = ownership.current(root, conn=None if writer is None else writer.connection,
                                   private=writer is not None and not production_bound(root))
     stored, store_errors = ((), ()) if writer is None else writer.discover_collections(
-        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates)
+        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
+        semantic_profile=semantic_profile)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
@@ -1229,22 +1240,27 @@ def discover_collections_with_errors(
                                                  UNSERVED, entry["semantic_profile"]))
     if len(stored) + len(unreadable) > max_raw_candidates:
         raise CollectionError("COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect")
+    from .governance import artifact_census
+
     candidates = []
-    for candidate in kb.rglob(MANIFEST_FILENAME):
-        safe = _safe_candidate_rel(root, candidate)
+    # The Knowledge Base's listing only proposes: `_declared_candidate_rel` still drops whatever lies
+    # outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
+    proposed = sorted(root / rel for rel in artifact_census.vault_listing(root).files_named(MANIFEST_FILENAME))
+    for candidate in proposed:
+        rel = _declared_candidate_rel(root, candidate)
         # Recoverable trash retains bytes but declares no live collection ownership.
-        if safe is None or safe[0].is_relative_to(trash_root):
+        if rel is None or candidate.is_relative_to(trash_root):
             continue
-        if proof.selected(root, safe[1]) is not None:
+        if proof.selected(root, rel) is not None:
             continue  # A physical declaration cannot replace canonical ownership, including an unpublished view.
-        if not authorize(safe[1]):
+        if not _is_plain_file_path(root, rel) or not authorize(rel):
             continue
         candidates.append(candidate)
         if len(candidates) + len(stored) + len(unreadable) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
-    for candidate in sorted(candidates):
+    for candidate in candidates:
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
@@ -1260,7 +1276,12 @@ def discover_collections_with_errors(
         except CollectionError as error:
             unreadable.append(UnreadableManifest(rel, error.code, error.reason))
     if reject_duplicates:
-        raise_duplicate_ids(manifest.collection_id for manifest in manifests)
+        identities = [manifest.collection_id for manifest in manifests]
+        if writer is not None and semantic_profile is not None:
+            # The store pass left out the other profile, so a physical manifest reusing its identity is checked here.
+            files = {manifest.collection_id for manifest in manifests[len(stored):]}
+            identities.extend(writer.released_identities(sorted(files - visible), authorize_path=authorize_path))
+        raise_duplicate_ids(identities)
     return tuple(manifests), tuple(unreadable)
 
 
@@ -1269,8 +1290,14 @@ def discover_legacy_trackers(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     max_raw_candidates: int = 4_096,
+    owned_views: Container[str] = frozenset(),
 ) -> tuple[tuple[LegacyCollection, ...], bool]:
-    """Discover bounded exact-Records-layer tracker manifests without parsing items."""
+    """Discover bounded exact-Records-layer tracker manifests without parsing items.
+
+    ``owned_views`` are the exact vault-relative files a collection store publishes as
+    views. The store wrote them, so none is a legacy tracker, and the sweep skips them
+    before authorizing or parsing. Every other file, even beside a view, is still swept.
+    """
     if type(max_raw_candidates) is not int or not 1 <= max_raw_candidates <= 16_384:
         raise CollectionError(
             "INVALID_DISCOVERY_LIMIT", "legacy discovery limit is outside supported bounds"
@@ -1280,8 +1307,17 @@ def discover_legacy_trackers(
     if not records_root.is_dir():
         return (), False
     authorize = authorize_path or (lambda _path: True)
+    from .governance import artifact_census
+
     candidates = []
-    for candidate in records_root.rglob("*.md"):
+    # The listing only proposes; the guards below read the disk and decide. Sorted before the bound applies.
+    records_rel = records_root.relative_to(root).as_posix()
+    proposed = sorted(
+        root / rel for rel in artifact_census.vault_listing(root, records_rel).files_under(records_rel)
+        # Like `rglob("*.md")`: the extension compares by the platform's case rule.
+        if os.path.normcase(rel).endswith(".md") and rel not in owned_views
+    )
+    for candidate in proposed:
         safe = _safe_candidate_rel(root, candidate)
         if safe is None or not authorize(safe[1]):
             continue
@@ -1290,7 +1326,7 @@ def discover_legacy_trackers(
             break
     truncated = len(candidates) > max_raw_candidates
     trackers: list[LegacyCollection] = []
-    for candidate in sorted(candidates[:max_raw_candidates]):
+    for candidate in candidates[:max_raw_candidates]:
         if candidate.name == "_collection.md":
             continue
         safe = _safe_candidate_rel(root, candidate)
@@ -1469,13 +1505,60 @@ def derived_item_key(manifest: CollectionManifest, values: Mapping[str, Any]) ->
     """The identity a complete natural key implies, or `None` when one is absent.
 
     A partial natural key cannot be serialised, so it cannot carry identity; the
-    caller falls back to a random key rather than deriving one from a hole.
+    caller falls back to a deterministic or random key rather than deriving one from a hole.
+    The manifest's `item_key_scheme` decides the key: a hash of the serialization, or an order-preserving encoding.
     """
     try:
+        if manifest.item_key_scheme == item_keys.ORDERED_V1:
+            return item_keys.spell(item_keys.ordered_key(
+                _ordered_components(manifest, values), lambda: manifest_natural_key(manifest, values)))
         serialized = manifest_natural_key(manifest, values)
     except ValueError:
         return None
     return inferred_item_key(manifest.collection_id, serialized)
+
+
+def _ordered_components(manifest: CollectionManifest, values: Mapping[str, Any]) -> list[tuple[str, Any]]:
+    """The natural key's `(field type, normalised value)` in declared order, as the hashed scheme normalises them."""
+    components = []
+    for name in manifest.schema.natural_key:
+        if name not in values:
+            raise ValueError(f"natural key field is missing: {name}")
+        field_type = manifest.schema.fields[name].type
+        components.append((field_type, _natural_key_value(values[name], field_type)))
+    return components
+
+
+def member_position_item_key(manifest: CollectionManifest, member_sha256: str, position: int) -> str:
+    """The deterministic key of a derived row whose natural key is incomplete: its member and its place in it."""
+    if manifest.item_key_scheme == item_keys.ORDERED_V1:
+        return item_keys.spell(item_keys.member_position_key(member_sha256, position))
+    return inferred_item_key(manifest.collection_id, f"\0member\0{member_sha256}\0{position}")
+
+
+def ordered_keys_encode(manifest: CollectionManifest) -> bool:
+    """Whether every natural-key field of the manifest has an `ordered-v1` encoding."""
+    fields = manifest.schema.fields
+    return all(item_keys.encodes(fields[name].type, fields[name].enum) for name in manifest.schema.natural_key)
+
+
+def item_key_contract(manifest: CollectionManifest) -> dict[str, Any]:
+    """What a collection reports about its item keys: the scheme and, for a derived collection, the bytes an index
+    holds for one (bounds, not a scan). A collection that keeps its rows in the store holds the key as text, so it has no
+    byte length to report."""
+    if manifest.item_key_scheme == item_keys.ORDERED_V1:
+        return {"scheme": item_keys.ORDERED_V1, "stored_key_bytes": {"min": 1, "max": item_keys.MAX_KEY_BYTES}}
+    contract: dict[str, Any] = {"scheme": item_keys.HASHED_V1}
+    if manifest.derived:
+        contract["stored_key_bytes"] = {"min": 16, "max": 16}
+    return contract
+
+
+def item_key_stored_bytes(manifest: CollectionManifest, key: str) -> int:
+    """The bytes a derived row's item key takes in its index: raw for `ordered-v1`, 16 for a UUID."""
+    if manifest.item_key_scheme == item_keys.ORDERED_V1:
+        return len(item_keys.unspell(key))
+    return len(uuid.UUID(key).bytes)
 
 
 def render_item_path(
@@ -3243,7 +3326,8 @@ def _absent_leaf(root: Path, key: str) -> bool:
     return False
 
 
-def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
+def _declared_candidate_rel(root: Path, candidate: Path) -> str | None:
+    """The candidate's vault-relative path when its spelling is admissible; touches no disk."""
     try:
         rel = candidate.relative_to(root).as_posix()
     except ValueError:
@@ -3252,6 +3336,11 @@ def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
         return None
     if reserved_paths.classify_logical(rel).blocked:
         return None
+    return rel
+
+
+def _is_plain_file_path(root: Path, rel: str) -> bool:
+    """Whether `rel` is a regular, singly linked file reached through no link or reparse point."""
     current = root
     try:
         parts = Path(rel).parts
@@ -3262,13 +3351,20 @@ def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
             if stat.S_ISLNK(info.st_mode) or attributes & getattr(
                 stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
             ):
-                return None
+                return False
             if index < len(parts) - 1:
                 if not stat.S_ISDIR(info.st_mode):
-                    return None
+                    return False
             elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                return None
+                return False
     except OSError:
+        return False
+    return True
+
+
+def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
+    rel = _declared_candidate_rel(root, candidate)
+    if rel is None or not _is_plain_file_path(root, rel):
         return None
     return candidate, rel
 
@@ -3309,6 +3405,8 @@ def _require_profile_layer(profile: str, path: str, name: str) -> None:
         )
 
 
+# Pure function of one string; the cache keeps marker-wide lookups linear in collection count.
+@functools.lru_cache(maxsize=8192)
 def _portable_path_key(path: str) -> str:
     return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in path.split("/"))
 

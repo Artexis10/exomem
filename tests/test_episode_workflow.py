@@ -700,6 +700,7 @@ def _fresh_session_index(vault: Path) -> None:
     working_set_index.WorkingSetIndex(vault).rebuild()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_fresh_session_activates_bounded_provenance_bearing_context(vault: Path, enabled) -> None:
     with request_scope(owner_principal(surface="mcp")):
         _seed_entity(vault)
@@ -725,6 +726,7 @@ def test_a_fresh_session_activates_bounded_provenance_bearing_context(vault: Pat
     assert episode_entries and episode_entries[0].get("episode") == KEY
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_shared_name_with_two_owners_is_not_resolved_to_either(vault: Path, enabled) -> None:
     with request_scope(owner_principal(surface="mcp")):
         _seed_entity(vault)
@@ -821,6 +823,7 @@ def _three_notes(vault: Path) -> None:
         _workflow(vault, action="disposition", candidate=key, disposition="routed", reason="r")
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
     vault: Path, owner, enabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:

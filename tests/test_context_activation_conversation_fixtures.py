@@ -519,6 +519,7 @@ def test_must_include_facts_live_on_gold_pages_and_must_exclude_facts_on_others(
             assert holders.isdisjoint(case.gold), (case.case_id, phrase)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_withheld_page_is_governed_and_withheld_from_the_restricted_audience(
     corpus, monkeypatch: pytest.MonkeyPatch
 ) -> None:

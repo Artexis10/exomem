@@ -25,6 +25,7 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
     assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 6
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("cloud", (False, True))
 def test_mcp_discovery_and_both_names_reach_guarded_execution(vault, monkeypatch, cloud) -> None:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)

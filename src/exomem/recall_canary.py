@@ -6,12 +6,14 @@ import argparse
 import asyncio
 import hashlib
 import importlib.resources
+import inspect
 import json
 import logging
 import math
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -86,10 +88,12 @@ def _compile_response_schema(schema):
     return Draft202012Validator(schema, registry=Registry())
 
 
-def _canary_cases(raw: bytes):
+def load_cases(raw: bytes):
+    """Parse and validate a case file; the sole loader for every runner of this observer."""
     from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
-    # These three tools are the canary protocol's closed read-only API, not vocabulary.
+    operation_validators = {}
+
     class Reference(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         path: list[str | int] = Field(min_length=1)
@@ -134,9 +138,48 @@ def _canary_cases(raw: bytes):
     class Case(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         id: str = Field(min_length=1)
-        tool: Literal["ask_memory", "activate_context", "read_memory"]
+        # These are the canary protocol's closed tool tokens, not vault vocabulary.
+        tool: Literal[
+            "ask_memory",
+            "activate_context",
+            "read_memory",
+            "search_memory",
+            "recall_context",
+            "read_records",
+            "read_plans",
+        ]
+        bar_id: str = Field(default="programme-public-warm", min_length=1)
+        # A runner-owned label for reporting cases together; the observer never reads it.
+        group: str | None = Field(default=None, min_length=1)
         arguments: dict[str, JsonValue]
         expected: Expected | SchemaExpected
+
+        @model_validator(mode="after")
+        def read_only_operation(self):
+            # These tool tokens fix the observer's collection-read protocol.
+            if self.tool not in ("read_records", "read_plans"):
+                return self
+            from . import commands
+            from .operation_entries import split_operation
+            from .operation_schema import operation_schema
+
+            parsed = split_operation(self.arguments)
+            # Inspect and query are the observer protocol's closed collection operation tokens.
+            if parsed is None or parsed[0] not in ("inspect", "query"):
+                raise ValueError("collection cases require inspect or query")
+            if self.tool not in operation_validators:
+                command, rendering = next(
+                    (command, rendering)
+                    for command in commands.product_commands_for("mcp")
+                    for rendering in command.renderings
+                    if rendering.name == self.tool
+                )
+                grouped = commands.bind_vault(command.leaf, None, command=command)
+                operation_validators[self.tool] = _compile_response_schema(
+                    operation_schema(rendering, inspect.signature(grouped).parameters)
+                )
+            operation_validators[self.tool].validate(self.arguments["operation"])
+            return self
 
     def reject_nonfinite(value):
         raise ValueError("non-finite JSON value")
@@ -148,6 +191,10 @@ def _canary_cases(raw: bytes):
     if len({case.id for case in cases}) != len(cases):
         raise ValueError("case identities must be unique")
     return cases
+
+
+# canary_systemd imports the old private name; it moves to load_cases with its next edit.
+_canary_cases = load_cases
 
 
 def _at_path(data: Any, path: list[str | int]) -> Any:
@@ -220,6 +267,52 @@ def _canary_result(result, expected, *, diagnostics=None) -> tuple[str, str | No
             pass
         return outcome, "missing-material"
     return outcome, None
+
+
+@dataclass(frozen=True, slots=True)
+class Measurement:
+    """One timed call: elapsed time to the parsed terminal, then the assertion verdict."""
+
+    elapsed_ms: float
+    outcome: str
+    failure: str | None
+    terminal_received: bool
+    # Safe projection of a mismatch; empty unless the failure is `unexpected-response`.
+    diagnostics: dict[str, Any]
+
+
+async def measure_call(client, case, timeout: float) -> Measurement:
+    """Time one case call on a connected client, then run the case's assertions.
+
+    The timer stops when the client returns its parsed terminal or fails, before any
+    source or schema assertion. Every runner of this observer measures through here.
+    """
+    call_start = time.perf_counter()
+    diagnostics: dict[str, Any] = {}
+    terminal_received = False
+    try:
+        try:
+            async with asyncio.timeout(timeout):
+                result = await client.call_tool(
+                    case.tool,
+                    case.arguments,
+                    raise_on_error=False,
+                    timeout=timeout,
+                )
+                terminal_received = True
+        finally:
+            # Parsed caller terminals end timing before observer assertions.
+            elapsed = (time.perf_counter() - call_start) * 1000
+        outcome, failure = _canary_result(result, case.expected, diagnostics=diagnostics)
+    except Exception:  # noqa: BLE001 - no remote exception text enters evidence
+        outcome, failure = "error", "call-failed"
+    return Measurement(
+        elapsed_ms=elapsed,
+        outcome=outcome,
+        failure=failure,
+        terminal_received=terminal_received,
+        diagnostics=diagnostics if failure == "unexpected-response" else {},
+    )
 
 
 def _canary_warning(report: dict[str, Any]) -> dict[str, Any]:
@@ -318,10 +411,18 @@ async def run_mcp_canary(
             .read_bytes()
         )
         contract = LatencyContract.model_validate_json(contract_bytes)
-        bar = contract.bar("programme-public-warm")
+        bars = [contract.bar(case.bar_id) for case in cases]
+        for case, bar in zip(cases, bars, strict=True):
+            # MCP is the contract protocol's surface token; the contract owns coverage.
+            if bar.surface != "mcp" or not bar.covers(
+                case.tool, latency_watch.deep_flag(case.arguments)
+            ):
+                raise ValueError("case bar does not cover its MCP operation")
         # Availability needs one actual call; acceptance uses the contract's series.
         samples = (
-            (1 if check == "availability" else bar.min_samples) if samples is None else samples
+            (1 if check == "availability" else max(bar.min_samples for bar in bars))
+            if samples is None
+            else samples
         )
         report["contract"] = {
             "revision": contract.revision,
@@ -340,9 +441,13 @@ async def run_mcp_canary(
             {
                 "id_sha256": _digest(case.id),
                 "tool": case.tool,
+                "bar_id": case.bar_id,
                 "availability": "unattempted",
                 "warmth": "unknown",
                 "measured_attempts": 0,
+                "observed_terminals": 0,
+                "p50_ms": None,
+                "p95_ms": None,
                 "requested_samples": samples,
                 "attempts": [],
                 "latency": [],
@@ -355,37 +460,25 @@ async def run_mcp_canary(
         async with client:
             report["initialization_ms"] = (time.perf_counter() - initialization_start) * 1000
             phase = "cases"
-            for case, series in zip(cases, report["cases"], strict=True):
+            for case, series, bar in zip(cases, report["cases"], bars, strict=True):
                 observations = []
                 for repetition in range(samples + int(warm_up)):
                     warming = warm_up and repetition == 0
-                    call_start = time.perf_counter()
-                    diagnostics = {}
-                    try:
-                        async with asyncio.timeout(timeout_seconds):
-                            result = await client.call_tool(
-                                case.tool,
-                                case.arguments,
-                                raise_on_error=False,
-                                timeout=timeout_seconds,
-                            )
-                            outcome, failure = _canary_result(
-                                result, case.expected, diagnostics=diagnostics
-                            )
-                    except Exception:  # noqa: BLE001 - no remote exception text enters evidence
-                        outcome, failure = "error", "call-failed"
-                    elapsed = (time.perf_counter() - call_start) * 1000
+                    measurement = await measure_call(client, case, timeout_seconds)
+                    elapsed = measurement.elapsed_ms
+                    outcome, failure = measurement.outcome, measurement.failure
                     series["attempts"].append(
                         {
                             "phase": "warm-up" if warming else "measured",
                             "elapsed_ms": elapsed,
                             "outcome": outcome,
                             "failure": failure,
-                            **(diagnostics if failure == "unexpected-response" else {}),
+                            **measurement.diagnostics,
                         }
                     )
                     if not warming:
                         series["measured_attempts"] += 1
+                        series["observed_terminals"] += int(measurement.terminal_received)
                         observations.append(
                             latency_watch.make_sample(
                                 at=time.time(),
@@ -398,6 +491,7 @@ async def run_mcp_canary(
                                 outcome=outcome,
                                 source="mcp-canary",
                                 contract=contract,
+                                trusted_tool=True,
                             )
                         )
                     elif failure is None:
@@ -426,11 +520,19 @@ async def run_mcp_canary(
         if report["initialization_ms"] is None:
             report["initialization_ms"] = (time.perf_counter() - initialization_start) * 1000
     report["ended_at"] = time.time()
+    for series in report["cases"]:
+        measured = sorted(
+            attempt["elapsed_ms"]
+            for attempt in series["attempts"]
+            if attempt["phase"] == "measured"
+        )
+        series["p50_ms"] = round(latency_watch.nearest_rank(measured, 50), 3) if measured else None
+        series["p95_ms"] = round(latency_watch.nearest_rank(measured, 95), 3) if measured else None
     complete = all(
         series["availability"] != "incomplete"
         and series["measured_attempts"] == samples
         and samples >= bar.min_samples
-        for series in report["cases"]
+        for series, bar in zip(report["cases"], bars, strict=True)
     )
     positive_coverage = {}
     for tool in dict.fromkeys(case.tool for case in cases):

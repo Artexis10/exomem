@@ -170,6 +170,7 @@ def test_a_link_to_an_existing_entity_yields_an_edge_not_a_block(tmp_path: Path)
 # --------------------------------------------------------------------- task 4.1/4.2
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_create_entity_closes_the_candidate_and_both_notes_hold_their_edge(
     tmp_path: Path,
 ) -> None:

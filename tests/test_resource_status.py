@@ -115,7 +115,8 @@ def test_collect_reports_already_loaded_modules_without_loading_missing_ones(
     fake_embeddings = types.SimpleNamespace(
         _MODEL=object(),
         _RERANKER=None,
-        _CLIP_MODEL=object(),
+        _CLIP_MODEL=None,
+        _CLIP_QUERY_MODEL=object(),
         index_cache_status=lambda: {
             "embedding": {"loaded": 1, "indexes": 1, "rows": 3, "bytes": 96},
             "clip": {"loaded": 0, "indexes": 0, "rows": 0, "bytes": 0},

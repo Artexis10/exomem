@@ -42,8 +42,8 @@ def _activate(root: Path, caller=OWNER, **kwargs):
         return invoke_command(command, root, **kwargs)
 
 
-def test_the_default_mode_is_unchanged(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    """An absent or invalid setting must preserve the explicit anchors packet and its token bytes."""
+def test_the_default_mode_is_maps_and_anchors_is_the_rollback(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """An absent or invalid setting serves maps; `anchors` restores the anchors packet and its token bytes."""
     _seed_structure(vault)
     _built(vault).close()
     # Freeze only caller-local token fields, so the complete packets can be compared.
@@ -54,7 +54,7 @@ def test_the_default_mode_is_unchanged(vault: Path, monkeypatch: pytest.MonkeyPa
     _activate(vault, **options)  # warm the published recall inputs before comparing modes
     monkeypatch.delenv("EXOMEM_ACTIVATION_PACKET", raising=False)
     absent = _activate(vault, **options)
-    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     explicit = _activate(vault, **options)
     monkeypatch.setattr(working_set_runtime, "_PACKET_WARNING_EMITTED", False)
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "invalid")
@@ -62,7 +62,12 @@ def test_the_default_mode_is_unchanged(vault: Path, monkeypatch: pytest.MonkeyPa
     assert absent == explicit == invalid
     assert _activate(vault, **options) == invalid
     assert sum("invalid EXOMEM_ACTIVATION_PACKET" in record.message for record in caplog.records) == 1
-    assert "map" not in absent
+    assert absent["map"]["items"] and absent["anchors"] == []
+    # The rollback: the one setting restores the anchors packet.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+    rollback = _activate(vault, **options)
+    assert "map" not in rollback
+    assert [anchor["ref"] for anchor in rollback["anchors"]] == ["Knowledge Base/Products/Cargo Sled.md"]
     # The old encoder's exact wire shape remains unchanged when map_generation is omitted.
     expected = '{"conventions_hash":"c","generation":2,"identity":"i","refs":["p"],"roles":["r"],"roles_hash":"h","v":1}'
     assert encode(identity="i", roles_hash="h", conventions_hash="c", generation=2, refs=["p"], roles=["r"]) == base64.urlsafe_b64encode(expected.encode()).decode().rstrip("=")
