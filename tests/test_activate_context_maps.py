@@ -314,6 +314,7 @@ def test_notes_without_map_rows_still_point_to_the_unfiled_map(vault: Path, monk
     assert len(unfiled["items"]) == 1
 
 
+@pytest.mark.usefixtures("no_turn_slice")  # the budget is sized to the whole map; the slice reserve would shrink the map
 def test_equal_rendered_lines_do_not_select_an_extra_entry(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Copied pages can retain a ref and display; fitting one line must serve only that row."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
