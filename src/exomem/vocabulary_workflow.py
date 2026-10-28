@@ -104,6 +104,16 @@ _CATALOG = FamilyCatalog(
             frozenset({"reuse", "propose-new", "generic", "no-edge", "defer"}),
             frozenset({"relation_type.add", "edge.add"}),
         ),
+        FamilyDescriptor(
+            "topic-carrier/v1",
+            "topic-carrier-evidence/v1",
+            "schema_memory.topic-carriers",
+            "topic_carriers.admission",
+            "topic_carriers",
+            frozenset({"defer"}),
+            # A declaration is an owner-only registry save, which is the authority; no workflow action reads this field.
+            frozenset(),
+        ),
     )
 )
 FAMILIES = _CATALOG.families
@@ -161,6 +171,8 @@ _CHOICE_CONTRACTS = MappingProxyType(
             "no-edge": {"choice": None},
             "defer": {"choice": None},
         },
+        # A declaration is a registry save, so the only decision is to leave the carrier for now.
+        "topic-carrier/v1": {"defer": {"choice": None}},
     }
 )
 

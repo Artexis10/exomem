@@ -13,6 +13,7 @@ from . import (
     get_page,
     memory_refs,
     relation_registry,
+    topic_carrier_considerations,
     vault,
     vocabulary_evidence,
 )
@@ -267,6 +268,9 @@ def _path(vault_root: Path, item: Mapping[str, Any], ref: str) -> str:
 
 
 def _visible(vault_root: Path, item: Mapping[str, Any]) -> bool:
+    if item.get("signal") == topic_carrier_considerations.SIGNAL:
+        # A carrier consideration aggregates the whole vault: the owner's, and its only target is a carrier, not a page.
+        return topic_carrier_considerations.permitted(vault_root)
     if item.get("signal") == REGISTRY_PROPOSAL_SIGNAL:
         # A registry proposal is the owner's to decide, whatever its target.
         from .governance.principal import effective_principal
@@ -318,6 +322,9 @@ def _read(vault_root: Path, item: Mapping[str, Any], ref: str) -> dict[str, Any]
 def _fresh(
     vault_root: Path, stored: Mapping[str, Any]
 ) -> tuple[WorkItem, dict[str, dict[str, Any]]]:
+    if stored["signal"] == topic_carrier_considerations.SIGNAL:
+        # The evidence is the carrier's current counts, not pages: stale when it no longer files unfiled entries.
+        return topic_carrier_considerations.refresh(vault_root, stored["logical_identity"]), {}
     if stored["signal"] == "entity-lifecycle":
         from . import vocabulary_entities
 
@@ -380,13 +387,24 @@ def review(
 
     recovery = vocabulary_delivery.recover(vault_root) if continuation is None else None
     owner = VocabularyState(vault_root)
+    # Explicit review ranks the vault's carriers, whatever the family disposition says, on every
+    # page, so the continuation pages through the whole offer. A carrier item stays listed only
+    # while the ranking still offers it at that fingerprint.
+    ranked = (
+        {work.fingerprint for work in topic_carrier_considerations.publish(vault_root)}
+        if state == "open" else None
+    )
     result = owner.page(
         limit=limit,
         continuation=continuation,
         state=state,
         # The index composes vocabulary and originating-family dispositions. Egress still
         # runs for this fixed candidate window immediately before disclosure.
-        visible=lambda item: _visible(vault_root, item),
+        visible=lambda item: _visible(vault_root, item) and (
+            ranked is None
+            or item["signal"] != topic_carrier_considerations.SIGNAL
+            or item["fingerprint"] in ranked
+        ),
     )
     if not result["items"] or any(item["signal"] != REGISTRY_PROPOSAL_SIGNAL for item in result["items"]):
         _require_registry_observation(vault_root)
@@ -416,6 +434,16 @@ def context(
     current, pages = _fresh(vault_root, stored)
     if expected_fingerprint is not None and current.fingerprint != expected_fingerprint:
         raise ValueError("VOCABULARY_DECISION_STALE: refresh the changed consideration")
+    if current.signal == topic_carrier_considerations.SIGNAL:
+        return {
+            "item": store.observe(current),
+            "choice_contract": choice_contract(current.family),
+            "carrier": topic_carrier_considerations.evidence(vault_root, current.logical_identity),
+            "authority": {
+                "mutation_granted": False,
+                "application": "declare a topic with a topic-carriers save; defer leaves the carrier unfiled",
+            },
+        }
     offset = 0
     page_evidence = list(current.evidence)
     source_continuation = current.continuation

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import itertools
 import json
@@ -1314,11 +1315,9 @@ def discover_legacy_trackers(
     proposed = sorted(
         root / rel for rel in artifact_census.vault_listing(root, records_rel).files_under(records_rel)
         # Like `rglob("*.md")`: the extension compares by the platform's case rule.
-        if os.path.normcase(rel).endswith(".md")
+        if os.path.normcase(rel).endswith(".md") and rel not in owned_views
     )
     for candidate in proposed:
-        if candidate.relative_to(root).as_posix() in owned_views:
-            continue
         safe = _safe_candidate_rel(root, candidate)
         if safe is None or not authorize(safe[1]):
             continue
@@ -3406,6 +3405,8 @@ def _require_profile_layer(profile: str, path: str, name: str) -> None:
         )
 
 
+# Pure function of one string; the cache keeps marker-wide lookups linear in collection count.
+@functools.lru_cache(maxsize=8192)
 def _portable_path_key(path: str) -> str:
     return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in path.split("/"))
 
