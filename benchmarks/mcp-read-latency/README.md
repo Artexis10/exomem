@@ -114,8 +114,8 @@ loader adds parents first and builds each child's `parent` reference from the ad
 the same profile, so the generator's input is the source of truth for each expected value.
 The `recall` cases send a page title as the whole turn and expect the default map packet.
 Each packet must contain a generated collection's path, title and description within the same item, at any rank.
-The expected material comes from the fixture's authored manifest. The map does not depend on the turn;
-these cases measure the map path, not turn-specific anchor resolution.
+The expected material comes from the fixture's authored manifest. The oracle checks the turn-independent map material.
+Default activation also compiles a turn slice; that work stays inside the elapsed time.
 Every fragment pins `profile_sha256` and `cases_sha256`; the contract pins the profile as
 `fixture_profile_sha256`. A changed profile needs a new digest in the contract.
 
