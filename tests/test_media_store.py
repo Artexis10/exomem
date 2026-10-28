@@ -117,6 +117,22 @@ def test_corrupt_ciphertext_never_places_an_original(vault: Path, selected_store
     assert not path.exists()
 
 
+def test_a_vault_taken_off_its_store_reads_an_evicted_original_as_unavailable(vault: Path, selected_store):
+    """cellctl renders a deselected cell's store with its identity only; a read must not crash or delete."""
+    from exomem import media_store
+
+    values, config = selected_store
+    path = _preserved(vault)
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    config.write_text(json.dumps({"vaults": {str(vault): {
+        "store": values["store"], "adapter": values["adapter"], "enabled": False}}}))
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+        with media_store.open_original(vault, path):
+            pytest.fail("a store without hydration limits must not hydrate")
+    assert originals.original_state(vault, path).state == "evicted"
+
+
 def test_offload_demand_survives_processing_completion_and_discard(vault: Path):
     from exomem.media_jobs import MediaJob, MediaJobStore
 

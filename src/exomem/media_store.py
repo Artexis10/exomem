@@ -1,7 +1,8 @@
 """Encrypted, version-pinned originals; the volume is a verified local cache.
 
-The filesystem adapter requires explicit test configuration. No store is selected
-by default. Jobs share the media ledger; protection records outlive those jobs.
+A store is selected only by explicit configuration: the media edge for Cloud cells,
+and a filesystem adapter for tests. No store is selected by default. Jobs share the
+media ledger; protection records outlive those jobs.
 """
 
 from __future__ import annotations
@@ -141,6 +142,10 @@ def _settings(vault: Path) -> dict[str, object]:
 
 def store_for(vault: Path) -> Store:
     config = _settings(vault)
+    if config.get("adapter") == "media-edge":
+        from .media_edge_store import EdgeStore
+
+        return EdgeStore.from_configuration(config)
     if config.get("adapter") != "filesystem-test":
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
     bound = config.get("max_object_bytes")
@@ -256,6 +261,8 @@ def _pin(vault: Path, path: Path):
 def _reserve(store: MediaJobStore, token: str, snapshot: OriginalSnapshot, config: dict[str, object]) -> None:
     assert snapshot.reference is not None and snapshot.binary_size is not None
     needed = snapshot.binary_size + snapshot.reference.ciphertext_size
+    if config.get("max_temporary_bytes") is None or config.get("max_hydrations") is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "media hydration limits are not configured")
     maximum = int(config["max_temporary_bytes"])
     concurrent = int(config["max_hydrations"])
     if maximum <= 0 or concurrent <= 0:

@@ -458,12 +458,12 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
         jobs.clear()
         finalize = db.finalize_import
 
-        async def cancel_after_snapshot(connection, cell_id, selected_id):
+        async def cancel_after_snapshot(connection, cell_id, selected_id, **options):
             async with app.transaction():
                 await app.fetchval("SELECT cell_id FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", CELL)
                 await app.execute("UPDATE exomem_cloud_imports SET requested_state='cancelled' WHERE import_id=$1", import_id)
                 await app.execute("UPDATE exomem_cloud_cells SET desired_state='stopped' WHERE cell_id=$1", CELL)
-            return await finalize(connection, cell_id, selected_id)
+            return await finalize(connection, cell_id, selected_id, **options)
 
         with monkeypatch.context() as patch:
             patch.setattr(db, "finalize_import", cancel_after_snapshot)

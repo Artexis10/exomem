@@ -1,0 +1,235 @@
+{{- if .Values.mediaEdge.enabled }}
+{{- include "exomem.requirePrivateRangesDenied" (dict "root" . "feature" "mediaEdge") }}
+{{- if not (regexMatch "^[^\\s]+@sha256:[a-f0-9]{64}$" .Values.artifactBroker.image) }}
+{{- fail "mediaEdge runs the broker's image: artifactBroker.image must be a digest-pinned reference" }}
+{{- end }}
+{{- $edge := .Values.mediaEdge }}
+{{- /* The Service address is the endpoint's host; the schema fixes the form and the port. */ -}}
+{{- $edgeIp := $edge.endpoint | trimPrefix "http://" | trimSuffix "/" | splitList ":" | first }}
+{{- /* A mounted file path the edge reads, and the one state directory it writes. */ -}}
+{{- $keyDir := "/run/exomem/media-edge/key" }}
+{{- $setDir := "/run/exomem/media-edge/active-set" }}
+{{- $stateDir := "/var/lib/exomem-media-edge" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-media-edge
+  namespace: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-media-edge
+    app.kubernetes.io/part-of: exomem-cloud
+spec:
+  replicas: 1
+  strategy:
+    # One writer on a ReadWriteOnce state volume: the old pod is gone before the new one starts.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-media-edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-media-edge
+        app.kubernetes.io/part-of: exomem-cloud
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: media-edge
+          image: {{ .Values.artifactBroker.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "exomem.media_edge"]
+          ports:
+            - name: http
+              containerPort: 8769
+              protocol: TCP
+          env:
+            - name: EXOMEM_MEDIA_EDGE_PORT
+              value: "8769"
+            - name: EXOMEM_MEDIA_EDGE_PUBLIC_KEY_FILE
+              value: {{ printf "%s/%s" $keyDir $edge.publicKeySecretKey | quote }}
+            - name: EXOMEM_MEDIA_EDGE_ACTIVE_SET_FILE
+              value: {{ printf "%s/active-set.json" $setDir | quote }}
+            - name: EXOMEM_MEDIA_EDGE_STATE_DIR
+              value: {{ $stateDir | quote }}
+            - name: EXOMEM_MEDIA_EDGE_BUCKET
+              value: {{ $edge.bucket | quote }}
+            - name: EXOMEM_MEDIA_EDGE_MAX_OBJECT_BYTES
+              value: {{ int64 $edge.maxObjectBytes | quote }}
+            - name: EXOMEM_MEDIA_EDGE_B2_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edge.b2SecretName }}
+                  key: keyId
+            - name: EXOMEM_MEDIA_EDGE_B2_APPLICATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edge.b2SecretName }}
+                  key: applicationKey
+            - name: TMPDIR
+              value: /tmp
+          resources:
+            {{- $edge.resources | toYaml | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: public-key
+              mountPath: {{ $keyDir }}
+              readOnly: true
+            - name: active-set
+              mountPath: {{ $setDir }}
+              readOnly: true
+            - name: state
+              mountPath: {{ $stateDir }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        # The verifying key only. The signing key stays with cellctl.
+        - name: public-key
+          secret:
+            secretName: {{ $edge.publicKeySecretName }}
+            items:
+              - key: {{ $edge.publicKeySecretKey }}
+                path: {{ $edge.publicKeySecretKey }}
+        # The one ConfigMap key the edge reads; cellctl's own bookkeeping key stays out of the pod.
+        - name: active-set
+          configMap:
+            name: exomem-media-edge-active-set
+            items:
+              - key: active-set.json
+                path: active-set.json
+        - name: state
+          persistentVolumeClaim:
+            claimName: exomem-media-edge-state
+---
+# The edge's recovery state outlives its pod and its release: losing it orphans provider writes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: exomem-media-edge-state
+  namespace: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-media-edge
+    app.kubernetes.io/part-of: exomem-cloud
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $edge.state.storageClassName }}
+  storageClassName: {{ $edge.state.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $edge.state.size | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-media-edge
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  type: ClusterIP
+  clusterIP: {{ $edgeIp | quote }}
+  selector:
+    app.kubernetes.io/name: exomem-media-edge
+  ports:
+    - name: http
+      port: 8769
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-media-edge
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-media-edge
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        # cellctl reads the generation the edge reports, to learn when a revocation has taken effect.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cellctl
+        {{- if $edge.allCells }}
+        # Every cell runtime, including cells created later; the listed cells are a subset.
+        - namespaceSelector:
+            matchExpressions:
+              - key: exomem.io/cloud-cell
+                operator: Exists
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+        {{- else }}
+        {{- range $edge.cellIds }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ printf "exo-cell-%s" . }}
+              exomem.io/cloud-cell: {{ . }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+              exomem.io/cell: {{ . }}
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+        {{- end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8769
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- .Values.cells.jobEgressExcept | toYaml | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

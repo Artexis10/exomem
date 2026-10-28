@@ -164,6 +164,39 @@ subjects:
   - kind: ServiceAccount
     name: cellctl
     namespace: {{ .Values.cellctl.namespace }}
+{{- if .Values.mediaEdge.enabled }}
+---
+# add-cloud-media-store D6: cellctl publishes the media edge's active set, one
+# ConfigMap in its own namespace. A create request carries no resource name, so
+# admission (exomem-cellctl-scope) confines it to that name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cellctl-media-edge-active-set
+  namespace: {{ .Values.cellctl.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["exomem-media-edge-active-set"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cellctl-media-edge-active-set
+  namespace: {{ .Values.cellctl.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cellctl-media-edge-active-set
+subjects:
+  - kind: ServiceAccount
+    name: cellctl
+    namespace: {{ .Values.cellctl.namespace }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -265,6 +298,24 @@ spec:
               value: {{ .Values.artifactBroker.cellIds | toJson | quote }}
             {{- if .Values.artifactBroker.allCells }}
             - name: CELLCTL_ARTIFACT_BROKER_ALL_CELLS
+              value: "true"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.mediaEdge.enabled }}
+            - name: CELLCTL_MEDIA_EDGE_URL
+              value: {{ .Values.mediaEdge.endpoint | quote }}
+            - name: CELLCTL_MEDIA_EDGE_SIGNING_KEY_FILE
+              value: {{ printf "/run/cellctl/media-edge/%s" .Values.mediaEdge.signingKeySecretKey | quote }}
+            - name: CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES
+              value: {{ int64 .Values.mediaEdge.maxObjectBytes | quote }}
+            - name: CELLCTL_MEDIA_EDGE_CELL_IDS
+              value: {{ .Values.mediaEdge.cellIds | toJson | quote }}
+            - name: CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS
+              value: {{ .Values.mediaEdge.credentialEpochs | toJson | quote }}
+            - name: CELLCTL_MEDIA_EDGE_STORE_POLICY
+              value: {{ .Values.mediaEdge.storePolicy | toJson | quote }}
+            {{- if .Values.mediaEdge.allCells }}
+            - name: CELLCTL_MEDIA_EDGE_ALL_CELLS
               value: "true"
             {{- end }}
             {{- end }}
@@ -381,9 +432,23 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.mediaEdge.enabled }}
+            - name: media-edge-signing-key
+              mountPath: /run/cellctl/media-edge
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.mediaEdge.enabled }}
+        - name: media-edge-signing-key
+          secret:
+            secretName: {{ .Values.mediaEdge.signingKeySecretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.mediaEdge.signingKeySecretKey }}
+                path: {{ .Values.mediaEdge.signingKeySecretKey }}
+        {{- end }}
 ---
 # D5: "Namespace exomem-cloud is default-deny too. cellctl may egress only
 # to the Kubernetes API, the control database on 5432 and object storage on
@@ -425,6 +490,16 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
+    {{- if .Values.mediaEdge.enabled }}
+    # add-cloud-media-store D6: the generation the edge reports, from the edge's pod alone.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-media-edge
+      ports:
+        - port: 8769
+          protocol: TCP
+    {{- end }}
     {{- if $local }}
     {{- $metrics := include "exomem.cellMetrics" . | fromJson }}
     # Tasks 5.5 and 5.6: the host alerts read /metrics from TopoLVM's node plugin
@@ -502,9 +577,23 @@ spec:
     # but for the cluster-scoped Retain patch rule 11 confines.
     - expression: >-
         {{ if $relocation }}request.resource.resource == 'persistentvolumes' || {{ end -}}
+        {{ if .Values.mediaEdge.enabled }}(request.resource.resource == 'configmaps' &&
+          request.namespace == {{ .Values.cellctl.namespace | quote }}) || {{ end -}}
         variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$'){{ if and $local $storage.local.reservations }} ||
         {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
-      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>{{ if and $local $storage.local.reservations }}, or an immutable family capability in the reservation namespace{{ end }}.
+      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>{{ if .Values.mediaEdge.enabled }}, or the media edge active set in its own namespace{{ end }}{{ if and $local $storage.local.reservations }}, or an immutable family capability in the reservation namespace{{ end }}.
+    {{- if .Values.mediaEdge.enabled }}
+    # add-cloud-media-store D6: the one ConfigMap cellctl writes is the media edge's
+    # active set. It holds the two active-set keys and no other, and is never deleted
+    # (rule 6 denies a ConfigMap delete).
+    - expression: >-
+        request.resource.resource != 'configmaps' || request.operation == 'DELETE' ||
+        (variables.target.metadata.name == 'exomem-media-edge-active-set' &&
+          (!has(variables.target.data) ||
+            variables.target.data.all(k, k in ['active-set.json', 'credential-epochs.json'])) &&
+          !has(variables.target.binaryData))
+      message: cellctl may write only the ConfigMap exomem-media-edge-active-set, with the keys active-set.json and credential-epochs.json.
+    {{- end }}
     # 2. A namespace cellctl creates or updates must carry the restricted
     # Pod Security labels at the platform's pinned version (v1.35, as every
     # other platform namespace and cellctl's own renderer use), so cellctl can
@@ -716,7 +805,24 @@ spec:
             {'app.kubernetes.io/name': 'exomem-cell', 'exomem.io/cell': variables.namespaceName.substring(9)} &&
           !has(variables.np.podSelector.matchExpressions) &&
           ((!has(variables.np.egress) || size(variables.np.egress) == 0)
+          {{- if .Values.mediaEdge.enabled }}
+          {{- /* The broker and the media edge each add one egress rule to a selected cell. Each rule is exactly one peer on one port. */}}
+          {{- $peers := list }}
           {{- if .Values.artifactBroker.enabled }}
+          {{- $peers = append $peers (dict "name" "exomem-artifact-broker" "port" 8767 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.artifactBroker.cellIds)) .Values.artifactBroker.allCells)) }}
+          {{- end }}
+          {{- $peers = append $peers (dict "name" "exomem-media-edge" "port" 8769 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.mediaEdge.cellIds)) .Values.mediaEdge.allCells)) }}
+            || (size(variables.np.egress) <= {{ len $peers }} && variables.np.egress.all(e,
+              size(e.to) == 1 && !has(e.to[0].ipBlock) &&
+              e.to[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': {{ .Values.cellctl.namespace | quote }}} &&
+              !has(e.to[0].namespaceSelector.matchExpressions) &&
+              !has(e.to[0].podSelector.matchExpressions) &&
+              size(e.ports) == 1 && e.ports[0].protocol == 'TCP' && !has(e.ports[0].endPort) &&
+              ({{ range $i, $peer := $peers }}{{ if $i }} || {{ end }}({{ $peer.selected }} &&
+                e.to[0].podSelector.matchLabels == {'app.kubernetes.io/name': {{ $peer.name | quote }}} &&
+                e.ports[0].port == {{ $peer.port }}){{ end }})))
+          {{- else if .Values.artifactBroker.enabled }}
             || ({{ if not .Values.artifactBroker.allCells }}variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
               {{ end }}size(variables.np.egress) == 1 &&
               size(variables.np.egress[0].to) == 1 &&
@@ -745,7 +851,7 @@ spec:
           variables.np.ingress[0].ports[0].protocol == 'TCP' &&
           variables.np.ingress[0].ports[0].port == 8765 &&
           !has(variables.np.ingress[0].ports[0].endPort))
-      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767.
+      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767{{ if .Values.mediaEdge.enabled }} and media edge egress on TCP 8769{{ end }}.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
         variables.target.metadata.name != 'job-egress' ||
