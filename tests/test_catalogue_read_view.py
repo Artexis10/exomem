@@ -244,6 +244,258 @@ def test_data_publication_preserves_an_admitted_recall(
     assert "recall_projection" in degraded
 
 
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+@pytest.mark.parametrize("publish_during_query", [False, True])
+@pytest.mark.parametrize("changed_visible", [False, True])
+def test_catalogue_data_lag_follows_the_restricted_readers_view(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch,
+    mode: str, publish_during_query: bool, changed_visible: bool,
+) -> None:
+    """A private edit stays silent; an unrelated visible edit still reports lag."""
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import find as find_module
+    from exomem.governance.principal import request_scope
+
+    shown = vault / "Knowledge Base/Notes/Insights/coverage-shown.md"
+    hidden = vault / "Knowledge Base/Notes/Patterns/coverage-hidden.md"
+    shown.parent.mkdir(parents=True, exist_ok=True)
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    shown.write_text("# Shown\n\nretainedcoveragemarker\n", encoding="utf-8")
+    hidden.write_text("# Hidden\n\nprivate before\n", encoding="utf-8")
+    later = vault / "Knowledge Base/Notes/Insights/coverage-later.md" if changed_visible else hidden
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    warm_managed_cell(vault)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_kw: None)
+    store = lexstore.get_store(vault)
+    published = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+
+    def recall():
+        degraded: list[str] = []
+        with request_scope(_external()):
+            hits = find_module.find(
+                vault, query="retainedcoveragemarker", scope="kb-only", mode=mode,
+                result_level="page", graph=False, rerank=False, degraded_out=degraded,
+            )
+        return [hit.path for hit in hits], degraded
+
+    before = recall()
+    assert before == ([shown.relative_to(vault).as_posix()], [])
+    changed = False
+
+    def change_page():
+        nonlocal changed
+        changed = True
+        later.write_text("# Later\n\nunrelated after\n", encoding="utf-8")
+        freshness.on_files_changed(vault, changed=[later])
+        if publish_during_query:
+            for scope in freshness.SCOPES:
+                delta = freshness.recall_delta_since(vault, scope, published[scope])
+                assert delta.complete and not delta.requires_source_proof
+                store.apply_catalog_delta(scope, delta)
+
+    if publish_during_query:
+        original = store._serve_from_ready_catalog_result
+
+        def publish_before_query(*args, **kwargs):
+            if not changed:
+                change_page()
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_serve_from_ready_catalog_result", publish_before_query)
+    else:
+        change_page()
+
+    paths, degraded = recall()
+    assert paths == before[0]
+    assert ("recall_projection" in degraded) is changed_visible
+    assert changed
+
+
+@pytest.mark.parametrize("primed", [False, True])
+def test_withheld_deletion_uses_only_the_selections_exact_published_verdict(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, primed: bool,
+) -> None:
+    """Another request may replace verdicts before this hybrid selection finishes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import find as find_module
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+    from exomem.published_admission import admission_of
+
+    shown = vault / "Knowledge Base/Notes/Insights/deletion-shown.md"
+    hidden = vault / "Knowledge Base/Notes/Patterns/deletion-hidden.md"
+    shown.parent.mkdir(parents=True, exist_ok=True)
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    shown.write_text("# Shown\n\nselectiondeletionmarker\n", encoding="utf-8")
+    hidden.write_text("# Hidden\n\nprivate before\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    warm_managed_cell(vault)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_kw: None)
+    store = lexstore.get_store(vault)
+    published = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+
+    def publish_verdicts():
+        with request_scope(_external()):
+            admission = admission_of(egress.visible_page_filter(vault))
+            assert admission is not None
+            for scope in freshness.SCOPES:
+                checkpoint = store.published_recall_checkpoint(scope)
+                paths = store.recall_admitted_paths(scope, checkpoint)
+                assert paths is not None
+                assert store.published_admitted_paths(scope, checkpoint, admission, paths) is not None
+
+    if primed:
+        publish_verdicts()
+    original = store._serve_from_ready_catalog_result
+    changed = False
+
+    def delete_and_publish(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            hidden.unlink()
+            freshness.on_files_changed(vault, deleted=[hidden])
+            for scope in freshness.SCOPES:
+                delta = freshness.recall_delta_since(vault, scope, published[scope])
+                assert delta.complete and not delta.requires_source_proof
+                store.apply_catalog_delta(scope, delta)
+            # A fresh request sees the new catalogue, replacing the shared entry.
+            with ThreadPoolExecutor(max_workers=1) as worker:
+                worker.submit(publish_verdicts).result(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_serve_from_ready_catalog_result", delete_and_publish)
+    degraded: list[str] = []
+    with request_scope(_external()):
+        hits = find_module.find(
+            vault, query="selectiondeletionmarker", scope="kb-only", mode="hybrid",
+            result_level="page", graph=False, rerank=False, degraded_out=degraded,
+        )
+
+    assert changed
+    assert [hit.path for hit in hits] == [shown.relative_to(vault).as_posix()]
+    assert ("recall_projection" in degraded) is not primed
+
+
+def test_optional_verdict_metadata_failure_preserves_valid_recall(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted retention query loses deletion proof, not the shown hit."""
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import find as find_module
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+    from exomem.published_admission import admission_of
+
+    shown = vault / "Knowledge Base/Notes/Insights/proof-shown.md"
+    hidden = vault / "Knowledge Base/Notes/Patterns/proof-hidden.md"
+    shown.parent.mkdir(parents=True, exist_ok=True)
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    shown.write_text("# Shown\n\noptionalproofmarker\n", encoding="utf-8")
+    hidden.write_text("# Hidden\n\nprivate before\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    warm_managed_cell(vault)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_kw: None)
+    store = lexstore.get_store(vault)
+    with request_scope(_external()):
+        admission = admission_of(egress.visible_page_filter(vault))
+        assert admission is not None
+        for scope in freshness.SCOPES:
+            checkpoint = store.published_recall_checkpoint(scope)
+            paths = store.recall_admitted_paths(scope, checkpoint)
+            assert paths is not None
+            store.published_admitted_paths(scope, checkpoint, admission, paths)
+    hidden.unlink()
+    freshness.on_files_changed(vault, deleted=[hidden])
+    interrupted: list[bool] = []
+    original = lexstore._CatalogReadView.retain_withheld_verdicts
+
+    def interrupt_metadata(view, admission):
+        def interrupt():
+            interrupted.append(True)
+            return 1
+
+        view.connection.set_progress_handler(interrupt, 1)
+        try:
+            return original(view, admission)
+        finally:
+            view.connection.set_progress_handler(None, 0)
+
+    monkeypatch.setattr(lexstore._CatalogReadView, "retain_withheld_verdicts", interrupt_metadata)
+    degraded: list[str] = []
+    with request_scope(_external()):
+        hits = find_module.find(
+            vault, query="optionalproofmarker", scope="kb-only", mode="keyword",
+            graph=False, rerank=False, degraded_out=degraded,
+        )
+
+    assert interrupted
+    assert [hit.path for hit in hits] == [shown.relative_to(vault).as_posix()]
+    assert "recall_projection" in degraded
+
+
+def test_grant_changes_during_hybrid_finish_retire_deleted_withheld_proof(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held row snapshot must not extend a withheld verdict across new grants."""
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import embeddings
+    from exomem import find as find_module
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+    from exomem.published_admission import admission_of
+
+    shown = vault / "Knowledge Base/Notes/Insights/grant-shown.md"
+    hidden = vault / "Knowledge Base/Notes/Patterns/grant-hidden.md"
+    shown.parent.mkdir(parents=True, exist_ok=True)
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    shown.write_text("# Shown\n\nchangedgrantmarker\n", encoding="utf-8")
+    hidden.write_text("# Hidden\n\nprivate before\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    warm_managed_cell(vault)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_kw: None)
+    store = lexstore.get_store(vault)
+    with request_scope(_external()):
+        admission = admission_of(egress.visible_page_filter(vault))
+        assert admission is not None
+        for scope in freshness.SCOPES:
+            checkpoint = store.published_recall_checkpoint(scope)
+            paths = store.recall_admitted_paths(scope, checkpoint)
+            assert paths is not None
+            store.published_admitted_paths(scope, checkpoint, admission, paths)
+    changed: list[bool] = []
+
+    def change_grant(query, passages):
+        assert lexstore._admitted_catalog_view(vault) is None
+        hidden.unlink()
+        freshness.on_files_changed(vault, deleted=[hidden])
+        write_rule(vault, ceiling=5)
+        changed.append(True)
+        return [1.0] * len(passages)
+
+    monkeypatch.setattr(embeddings, "rerank_pairs", change_grant)
+    degraded: list[str] = []
+    with request_scope(_external()):
+        hits = find_module.find(
+            vault, query="changedgrantmarker", scope="kb-only", mode="hybrid",
+            graph=False, rerank=True, degraded_out=degraded,
+        )
+
+    assert changed
+    assert [hit.path for hit in hits] == [shown.relative_to(vault).as_posix()]
+    assert "recall_projection" in degraded
+
+
 @library_scope()
 @pytest.mark.parametrize("evidence", ["page", "frame"])
 def test_changed_selected_ranking_page_is_omitted_and_the_partial_answer_is_not_cached(
