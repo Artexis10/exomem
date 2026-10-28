@@ -1647,21 +1647,22 @@ def find(
         }
         if not lagging:
             return False
-        # Rebuild the release predicate: retained row proof never freezes live authority.
-        visible = egress.visible_page_filter(vault_root)
-        offered = admission_of(visible)
-        for projection_scope, checkpoint in lagging.items():
-            if visible is None:
-                return True
-            proof = None
-            if catalog_view is not None and offered is not None:
-                proof = partial(
-                    catalog_view.published_withheld_paths, projection_scope, checkpoint, offered,
-                )
-            if view_lag.recall_withheld_lag(
-                vault_root, projection_scope, checkpoint, visible, withheld_before=proof,
-            ) is None:
-                return True
+        # Only this coverage proof reads live authority; selected rows keep their snapshot.
+        with governance_policy.outside_request_policy_snapshot():
+            visible = egress.visible_page_filter(vault_root)
+            offered = admission_of(visible)
+            for projection_scope, checkpoint in lagging.items():
+                if visible is None:
+                    return True
+                proof = None
+                if catalog_view is not None and offered is not None:
+                    proof = partial(
+                        catalog_view.published_withheld_paths, projection_scope, checkpoint, offered,
+                    )
+                if view_lag.recall_withheld_lag(
+                    vault_root, projection_scope, checkpoint, visible, withheld_before=proof,
+                ) is None:
+                    return True
         return False
 
     # Trustworthy pending suppression precedes every persistent catalogue read.

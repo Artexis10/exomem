@@ -271,9 +271,10 @@ The owner keeps the vault-wide flag, and invalid selected evidence always report
 
 For deleted pages, the selection retains references to existing verdict maps that match its exact SQL generation and admission identity.
 The maps remain immutable, so another request can replace the shared cache entry without changing this selection's proof.
-Finalization builds the current release predicate and checks its identity before using those retained verdicts.
+Finalization builds the current release predicate outside the cached policy snapshot and checks its identity before using those retained verdicts.
 
-Missing verdicts, changed authority or unbridgeable history leave the lag visible.
+For a deleted path, missing verdicts, changed authority or unbridgeable history leave the lag visible.
+A failed optional metadata read discards that retention attempt; selected rows still serve.
 The selection creates no historical verdict and copies no corpus map.
 These catalogue proofs do not attest the resolver or graph, whose publication gaps remain separate work.
 

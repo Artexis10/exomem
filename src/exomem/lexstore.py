@@ -116,7 +116,11 @@ class _CatalogReadView:
             }
         if not any(entry is not None for entry in entries.values()):
             return
-        generation = self.store._snapshot_generation(self.connection)
+        try:
+            generation = self.store._snapshot_generation(self.connection)
+        except sqlite3.Error:
+            # Optional deletion proof may be unknown; valid selected rows still serve.
+            return
         # Published maps are replaced, never patched; a reference preserves this SQL generation.
         self.withheld_verdicts.update(
             (key, entry) for key, entry in entries.items()
