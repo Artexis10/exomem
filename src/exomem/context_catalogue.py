@@ -1314,12 +1314,21 @@ def keep_current(vault_root: Path) -> bool:
             return True
         refreshed = working_set_index.WorkingSetIndex(root).update()
         if refreshed.get("unavailable"):
+            log.info("context catalogue keep_current retry owed: working-set index unavailable")
             return False
         result = catalogue.update(fill_tags=True)
         if result.get("unavailable") or result.get("pending"):
+            log.info(
+                "context catalogue keep_current retry owed: update unavailable=%s pending=%s",
+                bool(result.get("unavailable")),
+                bool(result.get("pending")),
+            )
             return False
         # A graph still being built owes the membership edges; its own pipeline publishes them and a retry reads them.
-        return catalogue.graph_state() != EDGES_WARMING
+        if catalogue.graph_state() == EDGES_WARMING:
+            log.info("context catalogue keep_current retry owed: graph edges still warming")
+            return False
+        return True
     finally:
         catalogue.close()
 

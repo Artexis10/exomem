@@ -33,7 +33,8 @@ NORMAL_PASS_LIMIT = 16
 QUIET_PASS_LIMIT = 1
 PERFORMANCE_PASS_LIMIT = 32
 
-ComponentDispatchResult = bool | Literal["pending"]
+#: `"not_required"` settles an optional component whose work can no longer apply.
+ComponentDispatchResult = bool | Literal["pending", "not_required"]
 ComponentDispatcher = Callable[[Path, DerivedComponentStatus], ComponentDispatchResult]
 CanonicalGenerationObserver = Callable[[Path], str | None]
 PendingVisibilityPublisher = Callable[
@@ -211,17 +212,35 @@ def component_dispatcher() -> ComponentDispatcher:
                 call_ledger.note_derived_event("advisory_replayed")
             elif execution.outcome == "superseded":
                 call_ledger.note_derived_event("receipt_superseded")
-            return execution.outcome in {
+            if execution.outcome == "expired":
+                log.info(
+                    "derived write_advisory settled as not required: result expired"
+                )
+                return "not_required"
+            accepted = execution.outcome in {
                 "published",
                 "already_published",
                 "superseded",
             }
+            if not accepted:
+                log.info(
+                    "derived write_advisory not published outcome=%s reason=%s",
+                    execution.outcome,
+                    execution.failure_code,
+                )
+            return accepted
         from . import index_sync
 
         receipt = derived_receipts._load_receipt(vault_root, status.batch_id)
-        return index_sync.converge_derived_component(
+        converged = index_sync.converge_derived_component(
             vault_root, receipt, status.component
         )
+        if not converged:
+            log.info(
+                "derived component not converged component=%s",
+                status.component.value,
+            )
+        return converged
 
     return dispatch
 
@@ -237,7 +256,12 @@ def drain_once(
     now: float | None = None,
     owner: str | None = None,
 ) -> int:
-    """Bound component dispatch and imported-custody handoff; return progress."""
+    """Bound component dispatch and imported-custody handoff; return progress.
+
+    Progress counts completed batches, handed-on custody and every component
+    that was claimed and dispatched, so the scheduler keeps its pace while work
+    is due even if no batch completed this pass.
+    """
     if limit <= 0:
         return 0
     started_at = time.time() if now is None else float(now)
@@ -271,6 +295,7 @@ def drain_once(
         now=started_at,
     )
     completed_batches: list[str] = []
+    dispatched_total = 0
     claimed_total = 0
     max_attempt_count = 0
     oldest_due_at: float | None = None
@@ -281,7 +306,7 @@ def drain_once(
         )
         due = [status.next_attempt_at for status in claims]
         oldest_due_at = min(due if oldest_due_at is None else [oldest_due_at, *due])
-        completed_now = _dispatch_claims(
+        completed_now, dispatched = _dispatch_claims(
             vault_root,
             claims,
             dispatch=dispatch,
@@ -289,6 +314,7 @@ def drain_once(
             started_at=started_at,
         )
         completed_batches.extend(completed_now)
+        dispatched_total += dispatched
         remaining = int(limit) - claimed_total
         if remaining <= 0 or not completed_now:
             break
@@ -323,7 +349,7 @@ def drain_once(
         oldest_due_at=oldest_due_at,
         at=started_at,
     )
-    return len(completed_batches) + handed_on
+    return handed_on + max(len(completed_batches), dispatched_total)
 
 
 def _dispatch_claims(
@@ -333,11 +359,16 @@ def _dispatch_claims(
     dispatch: ComponentDispatcher | None,
     observe_current_generation: CanonicalGenerationObserver | None,
     started_at: float,
-) -> list[str]:
-    """Prove, dispatch and complete one claimed prefix; return completed batches."""
+) -> tuple[list[str], int]:
+    """Prove, dispatch and complete one claimed prefix.
+
+    Returns the completed batches and how many components were dispatched.
+    """
     completed: list[str] = []
+    dispatched = 0
     for status in claims:
         pending = False
+        result: ComponentDispatchResult = False
         failure_code = "component_unhandled"
         if observe_current_generation is not None:
             try:
@@ -370,8 +401,13 @@ def _dispatch_claims(
             failure_code = "component_unhandled"
             try:
                 with call_spans.span("derived.component_dispatch"):
+                    if dispatch is not None:
+                        dispatched += 1
                     result = False if dispatch is None else dispatch(vault_root, status)
                     pending = result == "pending"
+                    if pending:
+                        # Awaiting its executor, which signals the drain itself.
+                        dispatched -= 1
                     handled = not pending and bool(result)
                 if dispatch is not None:
                     failure_code = "dispatch_failed"
@@ -383,6 +419,22 @@ def _dispatch_claims(
                     status.component.value,
                     exc_info=True,
                 )
+        if result == "not_required":
+            try:
+                settled = derived_receipts.settle_component_not_required(
+                    vault_root, status, now=started_at
+                )
+            except Exception:  # noqa: BLE001 - exact claim remains retryable
+                log.warning(
+                    "derived component settle failed component=%s",
+                    status.component.value,
+                    exc_info=True,
+                )
+                settled = "stale"
+            if settled == "batch_completed":
+                completed.append(status.batch_id)
+                call_ledger.note_derived_event("component_completed")
+            continue
         if pending:
             try:
                 derived_receipts.defer_component(vault_root, status, now=started_at)
@@ -431,7 +483,7 @@ def _dispatch_claims(
                 "derived component retry lost current custody component=%s",
                 status.component.value,
             )
-    return completed
+    return completed, dispatched
 
 
 class DerivedDrain:
