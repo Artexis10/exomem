@@ -826,12 +826,13 @@ def _attach_handoff(args, *, transport=None) -> int:
             raise ValueError("handoff descriptor is too large")
         descriptor = json.loads(serialized)
         # These are the fields of the upload handoff protocol, not caller-defined vocabulary.
+        # Only they are read: after an earlier write, the result also carries `graph_sync`.
         fields = {"token", "upload_url", "ttl_seconds", "hold", "lane", "expected_sha256",
                   "max_bytes", "handoff_status", "committed"}
-        if not isinstance(descriptor, dict) or set(descriptor) != fields:
+        if not isinstance(descriptor, dict) or not fields <= set(descriptor):
             raise ValueError("expected an upload handoff descriptor")
         token = descriptor["token"]
-        if (upload_handoff.parse_ticket(token) is None
+        if (upload_handoff.parse_handoff_token(token) is None
                 or descriptor["hold"] is not True or descriptor["committed"] is not False
                 or descriptor["handoff_status"] != "handoff_prepared"
                 or descriptor["lane"] not in upload_tokens.UPLOAD_LANES
@@ -1955,11 +1956,8 @@ def _warm_main(argv: list[str]) -> int:
         required=lane_serves_torch_models,
     )
     if embeddings.clip_enabled():
-        _step(
-            f"CLIP model {embeddings.CLIP_MODEL_NAME}",
-            embeddings.get_clip_model,
-            required=lane_serves_torch_models,
-        )
+        _step("multilingual image queries", embeddings.get_clip_query_model)
+        _step(f"CLIP image model {embeddings.CLIP_MODEL_NAME}", embeddings.get_clip_model)
     else:
         print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
 

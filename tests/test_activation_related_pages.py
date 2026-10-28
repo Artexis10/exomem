@@ -41,7 +41,8 @@ from exomem import (
 )
 from exomem.governance.principal import request_scope
 
-pytestmark = pytest.mark.timeout(600)
+# These tests exercise the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = [pytest.mark.timeout(600), pytest.mark.usefixtures("anchors_packet")]
 
 DIM = embeddings.VECTOR_DIM
 AXIS = np.eye(DIM, dtype=np.float32)[0]

@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: cce010a36a23f8276207491062559f5a9cf6221aabd399b1443043226cb6547c
+  skill_contract: cd8faaf33dbc66badb8aa5c65c253aa17c5da6234f2548a3c314d7a57a7955d8
   version: "0.32.0"
 ---
 
@@ -68,6 +68,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
 | Review, adopt, audit, restructure, or maintain a vault | `read_review/triage_memory`, `triage_memory`, `read_import` and `import_memory`, `check_memory/repair_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `read_schema/change_schema` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
+| Give maps topics, or file unfiled pages under topics | `read_review(operation={'kind': 'vocabulary'})` topic-carrier items, then `read_schema/change_schema` with `subject="topic-carriers"` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
 | Configured governance policy or a reserved withhold notice | `read_governance/change_governance`, `manage_authorization_session`, `grant_session_access/change_session_access` | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
 
 If the vocabulary reference is missing, inspect the exposed bootstrap schema.
@@ -144,6 +145,8 @@ Before a substantive turn with no prior context, call `recall_context` with the 
 
 If activation returns a map, read it as an index of what exists. Pull by ref
 with `read_memory` or use `search_memory` before answering; cite the refs you use.
+A map whose entries are mostly unfiled lacks topic declarations: declare them on
+topic carriers, as the routing row above says.
 
 After new evidence, a task change, or continuation restoration, judge whether
 the context needs refresh. When the exposed tool supports it, set

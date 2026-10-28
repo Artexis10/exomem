@@ -21,7 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
-from .. import foreground_priority, state_paths
+from .. import call_spans, foreground_priority, state_paths
 from . import connection, legacy_originals, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,16 @@ class _Publisher:
         if not self.runtime.replica_matches():
             with self.condition:
                 self.foreign = True
+
+
+def reader_pool(root, path):
+    """The reader pool of the serving runtime's cached writer for the store at ``path``, else None.
+
+    None means open a fresh reader, as every read did before the pool: no runtime serves ``root``
+    here, it holds no live writer, or that writer is not on this store file (R2).
+    """
+    runtime = _SERVING.get(root) or _SERVING.get(Path(root).resolve())
+    return None if runtime is None else runtime.reader_pool(path)
 
 
 def flush_for_export(vault_root, *, timeout=30.0):
@@ -345,8 +355,17 @@ class CollectionStoreRuntime:
         if self._publisher is None:
             self._publisher = _Publisher(self)
 
+    def reader_pool(self, path=None):
+        """The cached writer's reader pool when it is open on ``path`` (this runtime's store by default), else None."""
+        handle = self._handle
+        if handle is None or handle._closed or handle.path != self.path:
+            return None
+        if path is not None and Path(path) != self.path and Path(path).resolve() != self.path:
+            return None
+        return handle.readers
+
     def _meta(self, *keys):
-        with closing(connection.open_reader(self.path)) as reader:
+        with connection.store_reader(self.path, self.reader_pool()) as reader:
             found = dict(reader.execute(
                 f"SELECT key,value FROM store_meta WHERE key IN ({','.join('?' * len(keys))})", keys))
         return [found.get(key) for key in keys]
@@ -391,7 +410,7 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        with closing(connection.open_head_reader(self.path)) as reader:
+        with connection.head_reader(self.path, self.reader_pool()) as reader:
             intent = authority.pending_create(reader)
         if intent is None:
             return True
@@ -419,7 +438,9 @@ class CollectionStoreRuntime:
         if handle is not None:
             if handle.connection.in_transaction:
                 return False
-            # Quiescent close is the only cross-thread handle operation.
+            # Quiescent close and the reader pool are the only cross-thread handle operations. The pool
+            # has its own lock and lends one reader to one borrower at a time; close leaves a lent
+            # reader to close when its lend ends.
             self._handle = None
             self._writer_token = None
             handle.close()
@@ -455,7 +476,7 @@ class CollectionStoreRuntime:
             )
         # A store an earlier release wrote keeps its head where this reads it; its writer
         # migrates the schema once this head lets the lease manager acquire for the store.
-        with closing(connection.open_head_reader(self.path)) as reader:
+        with connection.head_reader(self.path, self.reader_pool()) as reader:
             reader.execute("BEGIN")
             metadata = legacy_originals.metadata(reader)
             head = CollectionStoreHead(
@@ -772,6 +793,14 @@ VIEW_BATCH_PATHS = 16
 #: Longest run of edit-back windows in one checkout: it bounds how long that checkout's admission
 #: is reused and how long a publication waits for an idle instant.
 VIEW_SLICE_SECONDS = 0.05
+#: Quiet a tick needs before it starts. A call in flight already shuts the gate (its foreground mark,
+#: then ``_served_at``), so the gap only parts back-to-back calls; it stays under a 50 ms client poll.
+FOREGROUND_GRACE_SECONDS = 0.02
+#: Under continuous demand a tick with work due still runs every 2 s, so due edit-back keeps bounded turns.
+MAINTENANCE_DEFER_SECONDS = 2.0
+#: A views tick with no view work due only checks history pages' release inputs; under continuous
+#: demand that check runs this often, which keeps its cost off most reads and still bounds its delay.
+VIEWS_POLL_DEFER_SECONDS = 10.0
 # Bound watcher metadata independently of collection size; overflow requests a later census.
 _VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
@@ -1085,7 +1114,9 @@ class StoreServer:
     one batch at a time; each batch runs under its job's own bound principal, never the
     service's. As the in-process owner, it also advances building projections and rollups
     and publishes pending views, one bounded batch at a time. Between two requests it
-    runs one tick, the one that has waited longest. A request it cannot take within the
+    runs one tick, the one that has waited longest, once foreground work has been quiet for
+    ``FOREGROUND_GRACE_SECONDS``; a tick that has starved (``_starved``) runs regardless, so
+    continuous demand still leaves it a turn. A request it cannot take within the
     mutation timeout refuses as retryable, so a running batch never holds an
     acknowledgement past that timeout. A vault it cannot open refuses store-routed
     requests with the reason and retries; file collections never wait on it.
@@ -1099,10 +1130,12 @@ class StoreServer:
         self._retry_at = 0.0
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
+        self._served_at = 0.0  # when the store thread last finished a request
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
+        self._views_owed = False  # a publication pass that a wake or a yielding tick left unstarted
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._edit_handle = None
         self._history_policy = None  # the handle and release inputs whose history pages the drain has queued
@@ -1133,7 +1166,8 @@ class StoreServer:
         # A store handoff, such as an idle release, refuses every checkout until it ends. Wait it out
         # here, where this thread holds nothing: a waiter at the deep refusals could stall the handoff.
         # The wait ends at the acceptance deadline, which the queue wait below shares.
-        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), \
+                call_spans.span("store.admission_wait"):
             self.manager.await_store_admission(deadline)
         request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
@@ -1142,7 +1176,8 @@ class StoreServer:
                 self._condition.notify_all()
         # Between two rebuild steps this thread waits as a bulk pass while other requests run;
         # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
-        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition:
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition, \
+                call_spans.span("store.queue_wait"):
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -1154,7 +1189,7 @@ class StoreServer:
         # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
         waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
                    else foreground_priority.outside_foreground)
-        with waiting():
+        with waiting(), call_spans.span("store.serve"):
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
         if not completed and read_only:
             # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.
@@ -1203,29 +1238,87 @@ class StoreServer:
         try:
             while not self._stopping():
                 # Routing demand can precede queue insertion; yield outside every checkout before checking the queue.
-                foreground_priority.yield_to_foreground()
+                # The wait ends where the most overdue tick starves, so the starvation bound holds under demand.
+                foreground_priority.yield_to_foreground(max_wait=self._yield_allowance(time.monotonic()))
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
                 if self._view_work_due(now):
                     self._ticks["views"] = min(self._ticks["views"], now)
-                due = min(self._ticks.values())
-                request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
+                name = self._next_tick(now)
+                request = self._take(self._idle_wait(name, now))
                 if request is not None:
                     self._serve(request)
+                    served = self._served_at = time.monotonic()
                     if request.wake_maintenance:
                         # The request may have started a job, revised a declaration or left views pending.
-                        self._ticks = dict.fromkeys(self._ticks, 0.0)
-                        self._views_after, self._views_passes = None, 0
-                    if self._view_work_due(time.monotonic()):
-                        # Saved views get one bounded turn even when requests never stop arriving.
+                        # A tick already overdue keeps its age: a stream of writes must not restart its starvation clock.
+                        self._ticks = {tick: min(due, served) for tick, due in self._ticks.items()}
+                        # The wake's publication pass is views work until a tick starts it, even if no request ever pauses.
+                        self._views_after, self._views_passes, self._views_owed = None, 0, True
+                    if self._starved("views", served):
+                        # Saved views get one bounded turn per starvation bound even when requests never stop.
                         self._ticks["views"] = time.monotonic() + self._views_tick()
-                elif time.monotonic() >= due:
+                elif self._tick_may_start(name, time.monotonic()):
                     # One tick per turn, so a waiting request is taken between any two.
-                    name = min(self._ticks, key=self._ticks.get)
                     self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
+
+    def _starves_at(self, name, now):
+        """When a tick starves: ``MAINTENANCE_DEFER_SECONDS`` after it fell due, or, for a views tick
+        with no view work due, which only checks history pages' release inputs, ``VIEWS_POLL_DEFER_SECONDS``."""
+        polling = name == "views" and not self._view_work_due(now)
+        return self._ticks[name] + (VIEWS_POLL_DEFER_SECONDS if polling else MAINTENANCE_DEFER_SECONDS)
+
+    def _starved(self, name, now):
+        """Whether a due tick has waited out its starvation bound without a quiet gap to run in."""
+        return now >= self._starves_at(name, now)
+
+    def _next_tick(self, now):
+        """The tick the gate is asked about: the most overdue starved one, else the most overdue.
+
+        A views poll starves later than other ticks, so the most overdue tick need not be the one starved.
+        """
+        starved = [name for name in self._ticks if self._starved(name, now)]
+        return min(starved or self._ticks, key=self._ticks.get)
+
+    def _tick_may_start(self, name, now):
+        """Whether the gate admits a due tick: foreground work has been quiet, or the tick starved.
+
+        It runs outside every checkout and boundary, and no foreground thread waits on it. Quiet follows
+        ``foreground_priority.bulk_free_since``, so a thread that awaits bulk work opens it after the gap,
+        and the gap also counts from the end of this thread's own last request. Here a lease handoff
+        holds back even a starved tick, so the handoff drains the store first. The starved views turn
+        after a request (``_run``) does not ask about a handoff, as the views turn there never did.
+        """
+        if now < self._ticks[name]:
+            return False
+        if self._starved(name, now) and not self.manager._store_handoff:
+            return True
+        free_since = foreground_priority.bulk_free_since()
+        return (free_since is not None and not self._aside()
+                and now - max(free_since, self._served_at) >= FOREGROUND_GRACE_SECONDS)
+
+    def _idle_wait(self, name, now):
+        """Seconds to wait for a request before the next look at the tick gate."""
+        due = self._ticks[name]
+        if due > now:
+            return min(due, now + IMPORT_IDLE_SECONDS) - now
+        if self._tick_may_start(name, now):
+            return 0.0
+        # Closed: look again when the quiet gap ends. While foreground work holds bulk work, or when the
+        # gap has ended and the gate is still shut (a handoff, a writer at the boundary), look again after
+        # one gap, or this loop would spin. The loop's yield (``_yield_allowance``) ends at starvation.
+        free_since = foreground_priority.bulk_free_since()
+        quiet_in = (FOREGROUND_GRACE_SECONDS if free_since is None
+                    else max(free_since, self._served_at) + FOREGROUND_GRACE_SECONDS - now)
+        return quiet_in if quiet_in > 0 else FOREGROUND_GRACE_SECONDS
+
+    def _yield_allowance(self, now):
+        """How long the loop may wait for foreground work to end: until the first tick starves."""
+        starves = min(self._starves_at(name, now) for name in self._ticks) - now
+        return max(0.0, min(foreground_priority.MAX_YIELD_SECONDS, starves))
 
     def _take(self, timeout):
         with self._condition:
@@ -1244,7 +1337,7 @@ class StoreServer:
         with self._condition:
             notified = any(not checked for checked in self._view_changes.values())
         return notified or (self._ticks["views"] <= now and (
-            self._views_after is not None or self._views_passes == 1
+            self._views_owed or self._views_after is not None or self._views_passes == 1
             or self._edit_back is not None and self._edit_back.wait(now) <= 0
         ))
 
@@ -1378,7 +1471,7 @@ class StoreServer:
             return IMPORT_IDLE_SECONDS
         try:
             # The resume migrates a store an earlier release left with this intent; until then only its head reads.
-            with closing(connection.open_head_reader(self.runtime.path)) as reader:
+            with connection.head_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 intent = authority.pending_create(reader)
             if intent is None:
                 self.pending_create = None
@@ -1408,7 +1501,7 @@ class StoreServer:
             return IMPORT_IDLE_SECONDS
         try:
             # A plain read first: an idle store takes no lease and no checkout.
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM import_jobs WHERE state='running' LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
             with preview_store(self.root, self.runtime):
@@ -1436,7 +1529,7 @@ class StoreServer:
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 due = index_migrations.backfill_due(reader)
         except Exception:  # noqa: BLE001 - an unreadable store is retried later
             logger.warning("derived backfill could not read its work; retrying later", exc_info=True)
@@ -1482,7 +1575,7 @@ class StoreServer:
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM collections WHERE derived=1 LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
             if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
@@ -1522,8 +1615,21 @@ class StoreServer:
                 or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
                 or foreground_priority.foreground_elsewhere())
 
+    def _write(self, method, *args, **kwargs):
+        """Run one of a views tick's store writes on live placement and policy, not the tick's read scope.
+
+        The same rule as ``_serve``: a write decides on the policy and placement it finds after
+        waiting for the mutation boundary, never on the ones the tick read before the wait.
+        """
+        from ..governance import policy
+        from .preview import _mutate
+
+        with state_paths.outside_resolution_scope(), policy.outside_request_policy_snapshot():
+            return _mutate(self.root, method, *args, **kwargs)
+
     def _views_tick(self):
-        """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
+        """Apply settled view edits, then publish pending views; returns the seconds until the next tick,
+        negative for a tick that yielded and stays overdue.
 
         It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
         unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
@@ -1540,11 +1646,29 @@ class StoreServer:
         census turn uses one bounded window. While no request waits (``_aside``), one checkout
         runs further windows for up to ``VIEW_SLICE_SECONDS``, so a census pays its checkout,
         policy and release checks once per slice, not once per window.
+
+        The tick reads under one view of path placement and governance policy, opened per tick
+        and never kept across two. Its store writes decide live (``_write``).
+
+        A tick that starts after a quiet gap (``_tick_may_start``) works as above, but returns
+        before its first publication path when a request waits. The pass then stays owed and the
+        tick keeps its age, so the starvation bound still counts from when it fell due. A starved
+        tick (``_starved``) runs a single bounded window and publishes a single path, even beside
+        a waiting request, so each pass still moves under continuous demand.
         """
+        from ..governance import policy
+
+        with state_paths.resolution_scope(), policy.request_policy_snapshot():
+            return self._views_work()
+
+    def _views_work(self):
         from ..governance import principal
         from . import capability, chain, edit_back
-        from .preview import _mutate, preview_store
+        from .preview import preview_store
 
+        # A starved tick runs one bounded turn whatever else is going on; any other yields at its next seam.
+        starved = self._starved("views", time.monotonic())
+        self._views_owed = False  # this tick runs the owed pass, unless it yields before publishing
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
@@ -1572,7 +1696,7 @@ class StoreServer:
 
                     def mutate(method, *args, **kwargs):
                         before = chain.recorded_head(writer.connection)
-                        result = _mutate(self.root, method, *args, **kwargs)
+                        result = self._write(method, *args, **kwargs)
                         if chain.recorded_head(writer.connection) != before:
                             # A new canonical edit needs its own install and confirmation passes.
                             self._views_after, self._views_passes = None, 0
@@ -1589,7 +1713,7 @@ class StoreServer:
                     changes, dirty = [], False
                     # Each window still proves ownership and authorizes its own writes; only the
                     # checkout's admission is shared, and a waiting request ends the slice.
-                    while (wait <= 0 and not self._aside() and not self._stopping()
+                    while (wait <= 0 and not starved and not self._aside() and not self._stopping()
                            and time.monotonic() - started < VIEW_SLICE_SECONDS):
                         wait = self._edit_back.run(writer, now=time.monotonic(), mutate=mutate,
                                                    limit=VIEW_BATCH_PATHS)
@@ -1613,18 +1737,23 @@ class StoreServer:
             history_policy = (self.runtime._handle, history.release_inputs(self.root))
             if history_policy != self._history_policy:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                    inputs = _mutate(self.root, writer.invalidate_history_pages)
+                    inputs = self._write(writer.invalidate_history_pages)
                     self._history_policy = (self.runtime._handle, inputs)
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
                     return min(wait, IMPORT_IDLE_SECONDS)
+            if not starved and self._aside():
+                # Leave the pass where it is and owed, so it stays views work, and keep this tick's age, so
+                # a run of yields cannot reset the starvation clock: a starved tick still publishes a path.
+                self._views_owed = True
+                return self._ticks["views"] - time.monotonic()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 # Finish one path even under continuous demand; release its boundary before checking for readers.
                 for _ in range(VIEW_BATCH_PATHS):
-                    result = _mutate(self.root, writer.reconcile_views, limit=1,
-                                     after=self._views_after, pending_only=True,
-                                     missing_ready=writer.handle.census(self.root).missing_ready if views else None)
+                    result = self._write(writer.reconcile_views, limit=1,
+                                         after=self._views_after, pending_only=True,
+                                         missing_ready=writer.handle.census(self.root).missing_ready if views else None)
                     self._views_after = result["next_path"]
                     if self._views_after is None or self._aside() or self._stopping():
                         break

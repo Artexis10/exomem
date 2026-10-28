@@ -2350,6 +2350,7 @@ def test_optional_reference_uses_the_proven_destination_of_a_pending_move(
     )
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_activation_keeps_admitted_material_when_a_budget_pointer_origin_is_uncertain(
     tmp_path: Path, managed_runtime,
 ) -> None:

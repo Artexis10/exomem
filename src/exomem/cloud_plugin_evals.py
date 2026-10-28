@@ -306,9 +306,11 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
                 issues.append("capability_mismatch")
             # Imported here, not at module load: the registry is heavy and only
             # this check needs it. Reading it keeps one list of excluded tools.
-            from .commands import CLOUD_SURFACE_EXCLUSIONS
+            # A cell configured for upload handoffs may serve a liftable one.
+            from .commands import cloud_surface_exclusions
 
-            if set(tools).intersection(CLOUD_SURFACE_EXCLUSIONS):
+            never_served = {exclusion.command for exclusion in cloud_surface_exclusions(upload_bridge=True)}
+            if set(tools).intersection(never_served):
                 issues.append("excluded_capability_exposed")
             engagement = result.get("engagement", {})
             envelope = engagement.get("envelope")

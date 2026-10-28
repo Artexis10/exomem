@@ -459,19 +459,24 @@ def _with_post_terminal_fanout_acknowledgement(
     )
 
 
-def _fast_ack_enabled() -> bool:
-    return os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
+def _fast_ack_enabled(command: str | None = None, action: str | None = None) -> bool:
+    flag = os.environ.get("EXOMEM_FAST_DURABLE_ACK")
+    if flag is not None:
+        return flag == "1"
+    # Fixed command/action protocol: bulk apply uses existing durable custody by
+    # default; an explicit flag still provides the synchronous rollback.
+    return command == "adoption_studio" and action == "apply"
 
 
 def fast_durable_ack_active() -> bool:
     """Whether the fast durable acknowledgement capability is currently active.
 
-    ``EXOMEM_FAST_DURABLE_ACK=1`` enables the fast path. Any other value --
-    including the shipped default of absent -- restores the prior wide
-    synchronous fanout and declares this capability, and its latency SLO,
-    inactive. It is deliberately not a knob that widens the enabled path's
-    fixed 2.0-second budget (design decision 3); it only chooses which of the
-    two behaviours is in force.
+    ``EXOMEM_FAST_DURABLE_ACK=1`` enables the fast path globally. An absent
+    value enables it only for bulk import apply. This global predicate remains
+    false for that operation-specific default. Every explicit value other than
+    ``1`` restores synchronous fan-out. The flag does not widen the fast path's
+    fixed 2.0-second acknowledgement budget; bulk apply retains its own request
+    budget for canonical writes.
     """
     return _fast_ack_enabled()
 
@@ -782,9 +787,15 @@ def _acknowledge_derived_batches(
     if not session.batches:
         return result
     with call_spans.span("derived.acknowledgement"):
-        return _acknowledge_derived_batches_timed(
-            result, session, budget_deadline=budget_deadline
-        )
+        try:
+            return _acknowledge_derived_batches_timed(
+                result, session, budget_deadline=budget_deadline
+            )
+        finally:
+            call_spans.record_span(
+                "derived.post_canonical",
+                (_fast_ack_monotonic() - min(batch.canonical_commit_monotonic for batch in session.batches)) * 1000.0,
+            )
 
 
 _CLOSED_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
@@ -972,6 +983,8 @@ def _acknowledge_derived_batches_timed(
             owed[receipt.batch_id] = batch_owed
             statuses = []
             for component in derived_receipts.DerivedComponent:
+                if _fast_ack_monotonic() >= deadline:
+                    break
                 where.update(stage="component_status", component=component.value)
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
@@ -1002,16 +1015,26 @@ def _acknowledge_derived_batches_timed(
                     index_sync.superseded_acknowledgement_snapshot(statuses)
                 )
                 continue
-            snapshots.append(index_sync.derived_acknowledgement_snapshot(statuses))
-            advisory_status = next(
-                status
-                for status in statuses
-                if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY
+            snapshot = index_sync.derived_acknowledgement_snapshot(
+                statuses,
+                required=(
+                    status.component for status in receipt.components
+                    if status.state != "not_required"
+                ),
             )
-            if advisory_status.state != "not_required":
-                result_ref = derived_receipts.advisory_result_ref(
-                    session.vault_root, receipt
+            snapshots.append(snapshot)
+            if snapshot.advisory_sync != "not_required":
+                # Prepared custody already carries this stable ref, even if its read was skipped.
+                result_ref = next(
+                    (status.advisory_result_ref for status in (*statuses, *receipt.components)
+                     if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY
+                     and status.advisory_result_ref),
+                    None,
                 )
+                if result_ref is None:
+                    result_ref = derived_receipts.advisory_result_ref(
+                        session.vault_root, receipt
+                    )
                 if not result_ref:
                     raise RuntimeError("applicable advisory custody has no stable result ref")
                 advisory_refs.append(result_ref)
@@ -1032,14 +1055,6 @@ def _acknowledge_derived_batches_timed(
             for snapshot in snapshots
             for component, state, code in snapshot.diagnostics
         ]
-        call_spans.record_span(
-            "derived.post_canonical",
-            (
-                _fast_ack_monotonic()
-                - min(batch.canonical_commit_monotonic for batch in session.batches)
-            )
-            * 1000.0,
-        )
         return with_fast_acknowledgement(
             result,
             derived_sync=derived_sync,
@@ -5323,7 +5338,7 @@ class LeaseManager:
                 + (expires_after or _IMPLICIT_RETRY_TTL_SECONDS),
                 advisory_required=True,
             )
-            if _fast_ack_enabled()
+            if _fast_ack_enabled(command.name, kwargs.get("action"))
             and not kwargs.get("suggestions")
             and receipt_vault_root is not None
             and _is_receipt_vault_root(receipt_vault_root)
@@ -7536,10 +7551,13 @@ def _collection_store_thread(func):
                     # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
                     import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
                                      and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
+                    read_only = _store_request_is_read_only(command, kwargs)
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
-                        wake_maintenance=not import_status,
-                        read_only=_store_request_is_read_only(command, kwargs),
+                        # A read cannot start a job, revise a declaration or leave views pending; waking
+                        # every tick after it kept the store thread busy beside the next request.
+                        wake_maintenance=not (read_only or import_status),
+                        read_only=read_only,
                     )
         return func(command, *injected, **kwargs)
 
@@ -7736,6 +7754,8 @@ def invoke_command(
 
     with ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector:
+        # The dispatcher's own checks before the body, which the leaf span alone does not separate.
+        call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
             # Fixed phase labels carry timing only, never caller or vault data.
             with body_meter as measured, call_spans.span("command.body", measured):
@@ -7754,7 +7774,8 @@ def invoke_command(
                         emit_boundary_receipt(collector)
             raise
         try:
-            ownership_scope.finish()
+            with call_spans.span("command.ownership_finish"):
+                ownership_scope.finish()
         finally:
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)

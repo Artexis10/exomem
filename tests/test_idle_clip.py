@@ -100,7 +100,7 @@ def test_idle_clip_preload_finishes_readiness_without_loading(vault, monkeypatch
     monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
     monkeypatch.setattr(embeddings, "get_model", lambda: object())
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
-    monkeypatch.setattr(embeddings, "get_clip_model", lambda: pytest.fail("idle model preload"))
+    monkeypatch.setattr(embeddings, "get_clip_query_model", lambda: pytest.fail("idle model preload"))
     readiness.begin_warm()
     durations = warmup.warm_all(vault)
     assert readiness.is_ready("clip")

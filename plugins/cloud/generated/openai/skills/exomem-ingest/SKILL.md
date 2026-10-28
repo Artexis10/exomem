@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: cce010a36a23f8276207491062559f5a9cf6221aabd399b1443043226cb6547c
+  skill_contract: cd8faaf33dbc66badb8aa5c65c253aa17c5da6234f2548a3c314d7a57a7955d8
   version: "0.1.0"
 ---
 
@@ -40,25 +40,39 @@ identity after an uncertain commit.
 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
-2. Preserve the raw source first with `capture_source` — `content` for text, `files` for an attached transcript, article, or screenshot. Reach for `preserve_evidence`, `preserve_artifacts`, or the `transfer_artifact` fallback only when the artifact is proof-bearing rather than raw material.
+2. Preserve raw material with `capture_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
+   Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
+   Use `preserve_evidence` or `preserve_artifacts` for proof-bearing material.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
    For a whole folder or collection of existing files, use `import_memory` instead of
-   capturing one by one: set `operation.kind` to `start` with a `collection` name, then `select` folders (with a
-   `source_kind` and `domain` per folder rule where known), `plan`, `apply`, then `finish`.
-   Repeat `plan` or `apply` with the returned `continuation` until none returns, and report
-   the `coverage` from `finish`, including what was refused or is still pending.
-3. Media processing is automatic; use `read_media/change_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `search_memory`.
-4. If distilling, reuse the returned proposal, or call `prepare_note` when none exists, to obtain a draft.
-
-   Request `compile_guidance=true` during capture to get the proposal in that call.
-   Include the captured path in `sources:` to link provenance and mark the Source processed.
-
-5. Reuse known connections; use `read_connections(operation={'kind': 'suggest-links'})` only for missing candidates, then review them.
-6. Write with `create_note`, carrying sources and accepted links in the first write.
-7. After a bulk import, the Sources that no live note cites are the backlog. Work it in
-   batches as `exomem-review` describes; a dismissal is not completion.
+   capturing one by one. A folder outside the vault is staged first: run
+   `exomem import <folder>` and start on the path it prints, because `start` refuses an
+   absolute path. (Exomem Cloud takes `exomem cloud import <folder>` instead.) Then set `operation.kind` to `start`
+   with a `collection` name, `select` folders (with a `source_kind` and `domain` per folder rule where known),
+   `plan`, `apply`, then `finish`. Repeat `plan` or `apply` with the returned `continuation`
+   until none returns, and report the `coverage` from `finish`, including what was refused,
+   what is still pending and how many notes were created.
+   A folder of the person's own notes can also become notes. Ask which folders hold them;
+   never guess from file names. Give that folder the rule
+   `{path, adopt_as: "note", note_type, project?, domain?}`, with a `note_type` that
+   `read_schema(operation={'kind': 'inspect', 'subject': 'note-types'})` lists as compiled, and
+   `project` or `domain` where that type needs one. Each Markdown file in the folder keeps
+   its Source and also gets a draft note that cites it and keeps its original body. Other
+   files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
+   after review with the usual writers; a live citation still does not prove semantic coverage.
+3. Inspect available original media or extracted content; record the scope actually read.
+   Media processing is automatic. Use `read_media/change_media` for reconciliation, status or retry,
+   and `read_media` or the exposed source-read route for inspection. Pending extraction
+   does not prevent using an available original. Extraction completion says nothing
+   about semantic compilation. Respect source-version guards on dependent writes.
+4. When preparing compiled knowledge, request `compile_guidance=true` or use `prepare_note`; the optional scaffold is available.
+   A proposal prepares one note, not a source-wide semantic plan. Its opening excerpt
+   covers only the opening; use the returned read route for the full available source.
+   Adjacent pages and `suggested_connections` are unreviewed candidates, never accepted edges.
+5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
+   Raw capture may end after custody when compilation is outside the request and live policy.
 
 ## Vocabulary
 
@@ -77,7 +91,9 @@ meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
+Report preserved originals, compiled outputs and the scope actually inspected.
+Distinguish custody, extraction, citation linkage and the agent's semantic coverage judgment.
+Name unread, unavailable or uncompiled material without claiming that counts prove completion.
 
 ## Save rules
 Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typed compiled notes with source links.

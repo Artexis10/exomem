@@ -49,6 +49,9 @@ from exomem import (
 from exomem.governance import scrubber
 from exomem.governance.principal import library_scope, request_scope
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 FOLLOW_UP = "what about the second one?"
 
 

@@ -17,6 +17,8 @@
 # members of those topics, e.g. `work: { folder: Work, category: domain, domain: ops }`.
 # A value must resolve through the domains registry (`_Schema/source-taxonomy.yaml`
 # or a built-in); one that does not joins no topic and is counted as unresolved.
+# Exomem itself declares topics for a key, a folder or a tag as `project`, `folder`
+# or `tag` carriers in `_Schema/topic-carriers.yaml`; a hand-written `domain` stays a reviewed input and is never rewritten.
 #
 # These are starter examples — rename or replace them with your own.
 

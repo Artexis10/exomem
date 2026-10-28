@@ -395,7 +395,7 @@
         },
         "compile_guidance": {
           "default": false,
-          "description": "Reusable compilation proposal.",
+          "description": "Optional scaffold or source read routes.",
           "type": "boolean"
         },
         "suggested_title": {
@@ -2219,7 +2219,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -2231,6 +2231,7 @@
                         "planning-values",
                         "note-types",
                         "homes",
+                        "topic-carriers",
                         "sync-providers"
                       ]
                     },
@@ -2258,7 +2259,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
@@ -2298,7 +2299,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -2310,6 +2311,7 @@
                         "planning-values",
                         "note-types",
                         "homes",
+                        "topic-carriers",
                         "sync-providers"
                       ]
                     },
@@ -2334,7 +2336,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
@@ -2377,7 +2379,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -2419,7 +2421,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "default": "contract"
                     },
@@ -2518,7 +2520,7 @@
                 },
                 "name": {},
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "workflow-contracts"
@@ -2544,7 +2546,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "context-roles"
@@ -2571,7 +2573,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "activation-conventions"
@@ -2598,7 +2600,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "relations"
@@ -2626,7 +2628,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "default": "contract"
                 },
@@ -4246,7 +4248,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "For `start`, subtree to scan (default: vault root).",
+                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
                   "type": "string",
                   "default": ""
                 },
@@ -4293,7 +4295,7 @@
                     ]
                   },
                   "type": "array",
-                  "description": "For `select`, paths whose files are selected, or {path, source_kind?, domain?} to file a folder under registered keys, or {path, adopt_as: note, note_type, project?, domain?} for a draft note of each Markdown file."
+                  "description": "For `select`, paths or folder rules {path, source_kind?, domain?} using registered keys; {path, adopt_as: note, note_type, project?, domain?} drafts a note for each Markdown file."
                 },
                 "exclude": {
                   "items": {
@@ -4480,7 +4482,7 @@
               "type": "array"
             },
             "run_id": {
-              "description": "From `start`; required except for `start` and run-listing `status`.",
+              "description": "From `start`; omit only to start or list runs.",
               "type": "string"
             },
             "continuation": {
@@ -5476,7 +5478,12 @@
                   "const": "status",
                   "type": "string"
                 },
-                "run_id": {}
+                "run_id": {},
+                "path": {
+                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
+                  "type": "string",
+                  "default": ""
+                }
               },
               "required": [
                 "kind"
@@ -5520,7 +5527,7 @@
           "properties": {
             "run_id": {
               "type": "string",
-              "description": "From `start`; required except for `start` and run-listing `status`."
+              "description": "From `start`; omit only to start or list runs."
             }
           }
         }
@@ -6739,7 +6746,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -6751,6 +6758,7 @@
                         "planning-values",
                         "note-types",
                         "homes",
+                        "topic-carriers",
                         "sync-providers"
                       ]
                     },
@@ -6773,7 +6781,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
@@ -6796,7 +6804,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "query-engine"
@@ -6831,7 +6839,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -6843,6 +6851,7 @@
                         "planning-values",
                         "note-types",
                         "homes",
+                        "topic-carriers",
                         "sync-providers"
                       ]
                     },
@@ -6906,7 +6915,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
@@ -6945,7 +6954,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "entity-types",
@@ -6957,6 +6966,7 @@
                         "planning-values",
                         "note-types",
                         "homes",
+                        "topic-carriers",
                         "sync-providers"
                       ]
                     },
@@ -6976,7 +6986,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
@@ -7013,7 +7023,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -7057,7 +7067,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "default": "contract"
                     },
@@ -7169,7 +7179,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -7211,7 +7221,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "traversal-profiles"
@@ -7253,7 +7263,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "workflow-contracts"
@@ -7277,7 +7287,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
@@ -7317,7 +7327,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "contract"
@@ -7359,7 +7369,7 @@
                     },
                     "name": {},
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "categories",
@@ -7402,7 +7412,7 @@
                       "type": "string"
                     },
                     "subject": {
-                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                      "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "enum": [
                         "context-roles",
@@ -7430,7 +7440,7 @@
                 },
                 "name": {},
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "categories",
@@ -7472,7 +7482,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "workflow-contracts"
@@ -7494,7 +7504,7 @@
                 },
                 "name": {},
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "workflow-contracts"
@@ -7520,7 +7530,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "entity-types"
@@ -7549,7 +7559,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "relations"
@@ -7578,7 +7588,7 @@
                   "type": "string"
                 },
                 "subject": {
-                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types or homes); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
+                  "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values, note-types, homes, topic-carriers); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
                   "enum": [
                     "relations"

@@ -950,6 +950,72 @@ def paths_for_optional_references_read_only(
     }
 
 
+def reference_owner_lookup(
+    vault_root: Path,
+    owners: Mapping[str, tuple[str, ...]],
+    *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]],
+) -> Callable[[str], tuple[str, ...] | None]:
+    """Resolve identities against `owners` with pending custody applied, writing nothing.
+
+    `owners` is identity -> every page holding it, from an identity projection the
+    caller borrowed. The returned function answers one identity: every page holding
+    it once committed-but-unpublished custody is applied, or None when pending
+    identity is unknown and the answer cannot be trusted. It never raises
+    `RetrievalIndexWarming`, and it never looks at the sidecar or scans the vault.
+
+    The pending projection is read once, on the first identity asked, so a caller
+    that asks none never opens the deferred store. When that projection is not
+    servable, every identity answers None: an optional reference is withheld, never
+    turned into a warming error. `admit_pending_paths` keeps the pending paths the
+    caller cannot prove hidden, as in `paths_for_ids_read_only`; an unknown identity
+    on a page the caller may see leaves every identity unanswered.
+    """
+    from .find import RetrievalIndexWarming
+
+    root = Path(vault_root)
+    # Read once: (servable, projection), where projection None means nothing pending.
+    read: list[tuple[bool, ReferenceProjection | None]] = []
+
+    def owners_of(identity: str) -> tuple[str, ...] | None:
+        if not read:
+            try:
+                read.append((True, _admitted_projection(
+                    _pending_reference_projection(root), admit_pending_paths
+                )))
+            except RetrievalIndexWarming:
+                read.append((False, None))
+        servable, projection = read[0]
+        if not servable:
+            return None
+        held = owners.get(identity, ())
+        if projection is None:
+            return held
+        try:
+            return tuple(_apply_pending_identity(root, identity, list(held), projection=projection))
+        except RetrievalIndexWarming:
+            return None
+
+    return owners_of
+
+
+def _admitted_projection(
+    projection: ReferenceProjection | None,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None,
+) -> ReferenceProjection | None:
+    """Narrow `projection`'s blocked paths to those the caller cannot prove hidden.
+
+    Hidden pages cannot affect governed uniqueness. Every footprint withdrawal is
+    kept; only proven hidden uncertainty is excluded.
+    """
+    if projection is None or admit_pending_paths is None or not projection.blocked_paths:
+        return projection
+    return replace(
+        projection,
+        blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
+    )
+
+
 @dataclass(frozen=True)
 class _ReferenceOwnerView:
     owners: Mapping[str, tuple[str, ...]]
@@ -1097,13 +1163,7 @@ def _reference_owner_view_read_only(
         return _ReferenceOwnerView({}, None, frozenset())
     projection = _pending_reference_projection(root)
     unprovable = frozenset() if projection is None else projection.blocked_paths
-    if projection is not None and admit_pending_paths is not None and projection.blocked_paths:
-        # Hidden pages cannot affect governed uniqueness. Keep every
-        # footprint withdrawal, and exclude only proven hidden uncertainty.
-        projection = replace(
-            projection,
-            blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
-        )
+    projection = _admitted_projection(projection, admit_pending_paths)
     return _ReferenceOwnerView(_prepared_owners.owners, projection, unprovable)
 
 

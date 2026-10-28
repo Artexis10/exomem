@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: cce010a36a23f8276207491062559f5a9cf6221aabd399b1443043226cb6547c
+  skill_contract: cd8faaf33dbc66badb8aa5c65c253aa17c5da6234f2548a3c314d7a57a7955d8
   version: "0.2.0"
 ---
 
@@ -39,6 +39,7 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 ## Workflow
+0. To organize by topic, or when maps show few topics, do not edit pages one by one. Read the topic-carrier items from `read_review(operation={'kind': 'vocabulary'})` and follow "Topic carriers" in [vocabulary](references/vocabulary.md): one carrier save files every page of a project key, folder or tag. When no existing domain names the pages' shared subject, register one with `change_schema(operation={'kind': 'save', 'subject': 'domains'})` and declare it; within this step that needs no separate approval. Then show the person the review list.
 1. Search related notes with `search_memory`; use `read_connections(operation={'kind': 'suggest-links'})` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
 2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `read_review(operation={'kind': 'relation-debt'})` for pages with no outbound edges and `operation.kind="relation-queue"` for already-reviewed candidates.
 3. For a bounded set of explicitly selected pages, call `check_memory(operation={'kind': 'curation-work-item', 'curation_action': 'work-item', 'refs': [...], 'paths': [...]})`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.

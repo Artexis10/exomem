@@ -204,7 +204,12 @@ def dependencies_present(media_type: str | None) -> bool:
     from importlib.util import find_spec
 
     if media_type in ("audio", "video"):
-        return find_spec("faster_whisper") is not None or _mlx_available()
+        if (os.environ.get("EXOMEM_ASR_BACKEND") or "").strip().lower() == "onnx":
+            return find_spec("onnx_asr") is not None and find_spec("av") is not None
+        return (
+            find_spec("faster_whisper") is not None or _mlx_available()
+            or (find_spec("onnx_asr") is not None and find_spec("av") is not None)
+        )
     if media_type == "image":
         return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
     if media_type == "pdf":
@@ -386,8 +391,13 @@ class TranscriptionSegment(Protocol):
 
 
 class TranscriptionBackend(Protocol):
-    def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
+    def transcribe(
+        self, path: Path, *, vault_root: Path | None = None
+    ) -> tuple[Iterable[TranscriptionSegment], str]:
         """Transcribe `path` → ``(segments, engine_label)``.
+
+        ``vault_root`` lets a backend that resumes keep this input's progress in
+        the vault's state directory; other backends ignore it.
 
         ``segments`` yields objects exposing ``.text`` / ``.start`` / ``.end``;
         ``engine_label`` is the provenance string stored on the sidecar (e.g.
@@ -404,7 +414,9 @@ class FasterWhisperBackend:
     """CTranslate2 faster-whisper — CUDA or CPU (never Metal). Device and compute_type
     live in `_get_whisper`; this wrapper keeps the loader seam that tests patch."""
 
-    def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
+    def transcribe(
+        self, path: Path, *, vault_root: Path | None = None
+    ) -> tuple[Iterable[TranscriptionSegment], str]:
         # faster-whisper decodes the media's audio stream via PyAV (handles video
         # containers too), so a video file can be passed directly — no ffmpeg step.
         def guarded_segments():
@@ -461,7 +473,9 @@ class MlxWhisperBackend:
             return str(path)
         return decode_audio(str(path), sampling_rate=16000)
 
-    def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
+    def transcribe(
+        self, path: Path, *, vault_root: Path | None = None
+    ) -> tuple[Iterable[TranscriptionSegment], str]:
         mlx_whisper = self._require_mlx()
         result = mlx_whisper.transcribe(
             self._load_audio(path), path_or_hf_repo=MLX_WHISPER_MODEL
@@ -496,12 +510,22 @@ def get_transcriber() -> TranscriptionBackend:
     else faster-whisper (CUDA/CPU). Force the choice with
     ``EXOMEM_ASR_BACKEND=mlx|faster-whisper``."""
     pref = (os.environ.get("EXOMEM_ASR_BACKEND") or "auto").strip().lower()
+    if pref == "onnx":
+        from .onnx_asr_runtime import get_backend
+
+        return get_backend()
     if pref == "mlx":
         return MlxWhisperBackend()
     if pref in ("faster-whisper", "faster_whisper", "ctranslate2"):
         return FasterWhisperBackend()
     if _mlx_available():  # auto
         return MlxWhisperBackend()
+    from importlib.util import find_spec
+
+    if find_spec("faster_whisper") is None and find_spec("onnx_asr") is not None:
+        from .onnx_asr_runtime import get_backend
+
+        return get_backend()
     return FasterWhisperBackend()
 
 
@@ -552,7 +576,7 @@ def _transcribe(
     # per-keyframe CLIP (embeddings.embed_video_frames). A video IS a sequence of images.
     if media_type == "video" and not _has_audio_stream(path):
         return ExtractResult(text="", media_type=media_type, engine="no-audio")
-    segments, engine = get_transcriber().transcribe(path)
+    segments, engine = get_transcriber().transcribe(path, vault_root=vault_root)
     seg_list = list(segments)  # materialize once: diarization needs per-segment timing
 
     # OPTIONAL speaker diarization (EXOMEM_DIARIZE, default OFF). A pretrained

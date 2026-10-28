@@ -707,6 +707,7 @@ def test_probe_p8_an_evaluator_constant_is_part_of_the_evaluator_digest(monkeypa
     assert sc.evaluator_sha256("brand") != first
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_later_shared_name_turn_is_ambiguous_for_the_owner_audience(
     worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

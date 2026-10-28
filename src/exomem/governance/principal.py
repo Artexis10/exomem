@@ -438,10 +438,12 @@ def cloud_owner_binding_matches(cell_id: str) -> bool:
 
 def cloud_owner_principal(cell_id: str, *, surface: str) -> RequestPrincipal:
     """Bind an authenticated Cloud operation after checking the current cell configuration."""
+    from ..cloud_cell import issuer_family
+
     if not cloud_owner_binding_matches(cell_id):
         return most_restrictive_principal(surface=surface)
     return RequestPrincipal(
-        audience_id=OWNER_AUDIENCE, surface=surface, issuer_family=f"cloud-cell:{cell_id}"
+        audience_id=OWNER_AUDIENCE, surface=surface, issuer_family=issuer_family(cell_id)
     )
 
 
@@ -453,7 +455,9 @@ def resolve_mcp_principal() -> RequestPrincipal:
 
     token = _verified_access_token()
     if type(token) is CloudCellAccessToken and cloud_owner_binding_matches(token.client_id):
-        return cloud_owner_principal(token.client_id, surface="mcp")
+        from .. import cloud_origin
+
+        return cloud_origin.with_origin(cloud_owner_principal(token.client_id, surface="mcp"))
     claims, expectation = _mcp_identity_claims()
     if claims is not None:
         audience = normalize_audience(subject=claims.get("sub"), issuer=claims.get("iss"))

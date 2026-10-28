@@ -42,6 +42,9 @@ from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.published_admission import admission_of
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 ANCHOR = "Knowledge Base/Notes/Insights/coverage-anchor.md"
 OUTLINKED = "Knowledge Base/Notes/Insights/coverage-outlinked.md"
 BACKLINKER = "Knowledge Base/Notes/Insights/coverage-backlinker.md"
@@ -102,7 +105,9 @@ def _pack_truncation(vault: Path, *, restricted: bool) -> tuple[list[str], list[
     page = find_module._CACHE.get(vault / ANCHOR, vault)
     assert page is not None
     with _caller(restricted):
-        neighbours, _dropped, incomplete = context_pack._neighborhood(vault, [page], 10)
+        neighbours, _dropped, incomplete = context_pack._neighborhood(
+            vault, [page], 10, under_strip=lambda _path: False
+        )
     return sorted(item["path"] for item in neighbours), sorted(incomplete)
 
 

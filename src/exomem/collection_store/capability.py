@@ -23,8 +23,6 @@ added it to ``RELEASED``; the per-vault rollback narrows it too.
 
 from __future__ import annotations
 
-from contextlib import closing
-
 from .. import structured_collections as collections
 from . import connection
 
@@ -46,8 +44,10 @@ def records_summary_disabled(root) -> bool:
     path = connection.store_path(root)
     if not path.exists():
         return False
+    from .runtime import reader_pool
+
     # store_meta keeps this key in every schema version, so a store awaiting its writer's migration answers too.
-    with closing(connection.open_head_reader(path)) as reader:
+    with connection.head_reader(path, reader_pool(root, path)) as reader:
         return _disabled(reader)
 
 

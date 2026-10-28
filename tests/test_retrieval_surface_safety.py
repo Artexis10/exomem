@@ -25,17 +25,14 @@ def _mcp_tools(mcp) -> dict[str, dict]:
     return {t.name: t.to_mcp_tool().model_dump(mode="json", by_alias=True) for t in tools}
 
 
-def test_find_compact_is_metadata_only(vault: Path) -> None:
+def test_find_compact_has_no_signals_or_page_body(vault: Path) -> None:
     out = commands.op_find(vault, query="metabolism", detail="compact")
 
     assert isinstance(out, list)
     assert out, "fixture vault should match 'metabolism'"
     for hit in out:
         assert {"path", "type", "scope", "title", "updated"} <= set(hit)
-        serialized = json.dumps(hit)
-        assert "excerpt" not in serialized
-        assert "signals" not in serialized
-        assert "body" not in serialized
+        assert not {"signals", "body", "content"} & set(hit)
 
 
 def test_get_can_return_bounded_body(vault: Path) -> None:

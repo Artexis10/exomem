@@ -640,6 +640,45 @@ def test_annotate_hits_uses_the_bound_principal_when_none_passed(vault: Path) ->
 
 
 # --------------------------------------------------------------------------
+# Compact page hits release no more than the full hit does
+# --------------------------------------------------------------------------
+
+
+def _page_excerpts(hits: list[dict]) -> dict[str, str]:
+    """Excerpt by path for the page hits, leaving out any withheld-hit notice."""
+    return {hit["path"]: hit["excerpt"] for hit in hits if "path" in hit}
+
+
+def test_op_find_compact_releases_nothing_of_a_page_the_ceiling_withholds(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_ABSTRACT)
+    query = "kill switch risky releases"
+    with request_scope(_external()):
+        full = commands.op_find(vault, query=query, limit=10)
+        compact = commands.op_find(vault, query=query, limit=10, detail="compact")
+
+    assert _page_excerpts(compact) != {}
+    assert RESTRICTED_PATH not in _page_excerpts(compact)
+    # A phrase from the withheld page's own excerpt: no other hit may carry it.
+    assert "misbehaving in production" not in json.dumps(compact)
+    assert _page_excerpts(compact) == _page_excerpts(full)
+
+
+def test_compact_excerpt_is_a_prefix_of_the_excerpt_full_mode_releases() -> None:
+    """A cut compact excerpt never reaches past what full mode releases for the hit."""
+    hit = _hit(OPEN_PATH, excerpt="filler words " * 40)
+
+    full = egress.project(hit, egress.LEVEL_FULL)
+    compact = egress.project(hit, egress.LEVEL_FULL, compact=True)
+
+    assert full is not None and compact is not None
+    assert compact["excerpt"].endswith("…")
+    cut = compact["excerpt"].removesuffix(" …")
+    assert len(cut) <= egress.COMPACT_HIT_EXCERPT_MAX
+    assert " ".join(full["excerpt"].split()).startswith(cut)
+
+
+# --------------------------------------------------------------------------
 # D2 — op_find integration: annotation strictly after find(), before pack
 # --------------------------------------------------------------------------
 
@@ -2299,6 +2338,26 @@ def test_filter_withheld_entries_drops_bare_path_strings(vault: Path) -> None:
     assert out["inbound"] == [OPEN_PATH]
 
 
+def test_filter_withheld_entries_decides_a_reference_to_a_symlinked_page(vault: Path) -> None:
+    """A page that is a symlink is still a page, so its reference is decided.
+
+    Reading the link's own file type instead of the file it points to would call the
+    alias "not a vault item" and keep a reference to a withheld page.
+    """
+    _restricted_vault(vault)
+    alias = "Knowledge Base/Notes/Patterns/alias.md"
+    try:
+        (vault / alias).symlink_to(vault / OPEN_PATH)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    out = egress.filter_withheld_entries(
+        vault, {"inbound": [alias, OPEN_PATH]}, principal=_external()
+    )
+
+    assert out["inbound"] == [OPEN_PATH]
+
+
 def test_structure_filter_gates_governed_csv_and_resource_entries(vault: Path) -> None:
     csv_path = "Knowledge Base/Notes/Patterns/private.csv"
     target = vault / csv_path
@@ -3487,7 +3546,7 @@ def test_pack_governance_block_is_absent_when_there_are_no_notices() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack({"packed_paths": []}, release, strip_for=lambda _path: ())
     assert pack is not None
     assert "governance" not in pack
 
@@ -3500,7 +3559,7 @@ def test_pack_governance_block_is_present_when_a_notice_exists() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack({"packed_paths": []}, release, strip_for=lambda _path: ())
     assert pack is not None
     assert pack["governance"]["notices"]
 

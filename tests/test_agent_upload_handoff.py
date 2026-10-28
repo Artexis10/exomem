@@ -114,6 +114,17 @@ def test_cli_handoff_holds_exact_bytes_for_only_the_issuing_session(upload_env, 
     assert _post(upload_env, descriptor, original).status_code == 401
 
 
+def test_cli_accepts_the_result_of_a_handoff_issued_after_a_write(upload_env, tmp_path):
+    # Once a write has synced the graph, every later write result also carries graph_sync.
+    descriptor = {**_prepare(upload_env), "graph_sync": "completed"}
+    (tmp_path / "handoff.json").write_text(json.dumps(descriptor))
+    (tmp_path / "original.bin").write_bytes(b"exact original\n")
+    assert _attach_main(
+        ["--handoff-file", str(tmp_path / "handoff.json"), "--root", str(tmp_path), "original.bin"],
+        transport=_ASGISyncTransport(upload_env[-1]),
+    ) == 0
+
+
 def test_revoked_expired_and_foreign_tickets_share_one_refusal(upload_env, monkeypatch):
     from exomem import upload_handoff
     revoked = _prepare(upload_env)

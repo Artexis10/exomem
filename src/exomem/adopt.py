@@ -66,7 +66,47 @@ class AdoptError(Exception):
         self.reason = reason
 
 
-def _safe_next_actions(kb_present: bool) -> list[dict]:
+def _carrier_review_action(root: Path, kb_present: bool) -> dict | None:
+    """Name the topic-carrier review when entries are unfiled; it names a route and never writes.
+
+    A catalogue that is not built, or that this caller may not total, is `unknown`: never 0.
+    """
+    if not kb_present:
+        return None
+    from . import context_catalogue
+
+    route = 'review_memory(mode="vocabulary")'
+    unknown = {
+        "action": "review-topic-carriers",
+        "status": "unknown",
+        "description": (
+            "Unfiled entries are not counted yet: the context catalogue is not built or this caller "
+            f"may not total the vault. Run {route} once it is."
+        ),
+    }
+    if not context_catalogue.sidecar_path(root).exists():
+        return unknown
+    catalogue = context_catalogue.ContextCatalogue(root)
+    try:
+        coverage = catalogue.owner_coverage() if catalogue.built() else {}
+    finally:
+        catalogue.close()
+    unfiled = coverage.get("unfiled_entries") if coverage.get("available") else None
+    if unfiled is None:
+        return unknown
+    if not unfiled:
+        return None
+    return {
+        "action": "review-topic-carriers",
+        "status": "available",
+        "description": (
+            f"{unfiled} entries file under no topic. Run {route} to read the carrier considerations, "
+            "save inferred carriers, then show the person one list to accept, change or skip."
+        ),
+    }
+
+
+def _safe_next_actions(kb_present: bool, carrier_review: dict | None = None) -> list[dict]:
     actions = [
         {
             "action": "scan-only",
@@ -116,6 +156,8 @@ def _safe_next_actions(kb_present: bool) -> list[dict]:
                 ),
             }
         )
+    if carrier_review is not None:
+        actions.append(carrier_review)
     return actions
 
 
@@ -479,7 +521,12 @@ def create_draft_note(
     one the plan froze. Returns the leaf's result; the leaf's `NoteError` reaches
     the caller unchanged.
     """
+    from . import find as find_module
     from . import note as note_module
+
+    # The Source is committed, but deferred fan-out has not updated the writer
+    # resolver. Register its namespace; the note leaf still checks its custody.
+    find_module.shared_resolver(root).add_pending(source_path.removesuffix(".md"))
 
     note = planned["note"]
     arguments: dict[str, Any] = {
@@ -890,14 +937,23 @@ def _run_manifest_counts(summary: dict) -> list[str]:
         for outcome in outcomes.values()
         if isinstance(outcome, dict) and outcome.get("status") in _APPLIED_OUTCOME_STATUSES
     )
-    recall_ok = bool((summary.get("recall_check") or {}).get("ok"))
+    recall = summary.get("recall_check") or {}
+    if recall.get("ok") is not None:
+        recall_label = "ok" if recall["ok"] else "needs attention"
+    # Only fixed recall-result markers enter this count-only manifest.
+    elif recall.get("status") == "pending":
+        recall_label = "pending"
+    elif recall.get("status") == "failed":
+        recall_label = "failed"
+    else:
+        recall_label = "unknown"
     return [
         f"- Selected: {len(summary.get('selection') or [])}",
         f"- Applied: {applied}",
         f"- Not applied: {len(outcomes) - applied}",
         f"- Verified unchanged: {summary.get('verified_unchanged', 0)} of "
         f"{summary.get('verified_total', 0)}",
-        f"- Recall check: {'ok' if recall_ok else 'needs attention'}",
+        f"- Recall check: {recall_label}",
     ]
 
 
@@ -1182,7 +1238,7 @@ def adopt(
         "pack_suggestions": knowledge_packs.suggest_packs(scan, limit=pack_limit),
         "available_packs": knowledge_packs.list_builtin_packs(),
         "pack_schema": knowledge_packs.pack_schema(),
-        "next_actions": _safe_next_actions(kb_present),
+        "next_actions": _safe_next_actions(kb_present, _carrier_review_action(root_path, kb_present)),
         "refs": {"root": context_refs.vault_ref(path or "")},
         "overview": scan,
     }

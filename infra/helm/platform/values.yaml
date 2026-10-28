@@ -344,6 +344,9 @@ cellStorage:
   maxCellGib: null
   local:
     enabled: false
+    # Enable only with a reservation provider image qualified by the disposable drill.
+    reservations: false
+    reservationNamespace: exomem-local-reservations
     # D3: hourly backups that may run at once on one node.
     backupConcurrencyPerNode: 2
     # D10: a local cell past 80% use grows online by the 4 GiB default size, up
@@ -386,9 +389,22 @@ cellStorage:
 topolvm:
   fullnameOverride: exomem-platform-topolvm
   image:
+    repository: ghcr.io/topolvm/topolvm-with-sidecar
     reference: 0.41.1@sha256:70548dbe0c6addcccf79a557f29e95db2e6dc2cba2102988c91f30086004d0fc
   lvmd:
     managed: true
+    # The platform derives the optional reservation policy from the shared cap and concurrency.
+    args: ["--config=/etc/topolvm-policy/lvmd.yaml"]
+    additionalVolumes:
+      - name: reservation-config
+        configMap:
+          name: exomem-local-lvmd-config
+    volumeMounts:
+      - name: lvmd-socket-dir
+        mountPath: /run/topolvm
+      - name: reservation-config
+        mountPath: /etc/topolvm-policy
+        readOnly: true
     deviceClasses:
       - name: thin
         volume-group: cells

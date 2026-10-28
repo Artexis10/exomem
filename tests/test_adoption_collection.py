@@ -423,6 +423,67 @@ def test_recall_check_accepts_only_the_exact_target_page(
     assert wrong["coverage"]["recall"] == {"sampled": 1, "found": 0, "missed": [target]}
 
 
+@pytest.mark.parametrize("read_state", ["pending", "failed"])
+def test_finish_does_not_report_incomplete_recall_as_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_state: str
+) -> None:
+    vault = _vault(tmp_path, {"Coll/plan.md": "# Plan\n\nRetain this plan.\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    def incomplete_find(*_args, degraded_out=None, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+        if read_state == "failed":
+            raise OSError("the recall store is unavailable")
+        if degraded_out is not None:
+            degraded_out.append("pending_visibility")
+        return []
+
+    monkeypatch.setattr(find, "find", incomplete_find)
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    recall = finished["finish"]["recall_check"]
+    sample = finished["coverage"]["recall"]
+
+    assert recall["ok"] is None
+    assert recall["status"] == read_state
+    assert "next_action" not in recall
+    assert sample["status"] == read_state
+    assert sample["sampled"] == 1 and sample["evaluated"] == 0
+    assert sample["found"] is None and sample["missed"] == []
+    assert sample[read_state] == 1
+    manifest = (vault / finished["finish"]["manifest_path"]).read_text(encoding="utf-8")
+    assert f"- Recall check: {read_state}" in manifest
+    assert "- Recall check: needs attention" not in manifest
+    if read_state == "pending":
+        assert recall["warming"]["components"] == ["pending_visibility"]
+
+
+def test_finish_retains_confirmed_hits_when_other_recall_is_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {
+        "Coll/alpha.md": "# Alpha\n\nAn alpha observation.\n",
+        "Coll/beta.md": "# Beta\n\nA beta observation.\n",
+    })
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/alpha.md"]["target_path"]
+
+    def partial_find(*_args, query, degraded_out=None, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+        if query == "Alpha":
+            return [type("Hit", (), {"path": target})()]
+        if degraded_out is not None:
+            degraded_out.append("pending_visibility")
+        return []
+
+    monkeypatch.setattr(find, "find", partial_find)
+    sample = adoption_run.finish(vault, run_id=run_id, today=TODAY)["coverage"]["recall"]
+
+    assert sample["status"] == "pending"
+    assert sample["sampled"] == 2 and sample["evaluated"] == 1
+    assert sample["found"] == 1 and sample["pending"] == 1
+    assert sample["missed"] == []
+
+
 def test_default_detail_result_carries_what_a_caller_needs_to_continue(
     vault: Path, monkeypatch: pytest.MonkeyPatch, tiny_budget: None
 ) -> None:

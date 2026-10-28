@@ -16,6 +16,7 @@ fresh whole-vault rebuild.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -30,7 +31,14 @@ from test_graph_handoff_convergence import (
     _titled,
 )
 
-from exomem import deferred_index, epistemic_graph, freshness, index_sync
+from exomem import (
+    deferred_index,
+    derived_receipts,
+    epistemic_graph,
+    freshness,
+    graph_sync,
+    index_sync,
+)
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 REPLAYED = f"{GENERATED}/generated-note-0003.md"
@@ -214,6 +222,32 @@ def test_a_replayed_full_index_receipt_the_graph_reflects_rebuilds_nothing(
     _assert_matches_a_fresh_rebuild(root)
 
 
+def test_a_derived_receipt_does_not_rebuild_an_already_published_creation(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """Recovered derived custody must not rebuild every historical creation again."""
+    root = _built(vault, whole_vault_passes)
+    receipt = derived_receipts.prepare_batch(
+        root,
+        batch_id="historical-creation",
+        mutation_attempt_digest="a" * 64,
+        canonical_generation="already-published",
+        checkpoint_id="historical-checkpoint",
+        paths=(derived_receipts.DerivedBatchPath(
+            rel_path=REPLAYED, before_hash=None,
+            after_hash=hashlib.sha256((root / REPLAYED).read_bytes()).hexdigest(),
+        ),),
+        required_components={derived_receipts.DerivedComponent.FRESHNESS},
+    )
+
+    assert index_sync.converge_derived_component(
+        root, receipt, derived_receipts.DerivedComponent.FRESHNESS
+    ) is True
+
+    assert whole_vault_passes == [], "historical derived custody rebuilt a current graph"
+    _assert_matches_a_fresh_rebuild(root)
+
+
 def test_a_current_replayed_path_does_not_hold_back_the_delta(
     vault: Path, whole_vault_passes: list[str]
 ) -> None:
@@ -265,6 +299,35 @@ def test_a_replayed_page_the_registry_does_not_vouch_for_still_rebuilds(
 
     assert "reason=caller_path_outside_delta" in caplog.text
     assert len(whole_vault_passes) == 1
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_background_replay_of_a_page_edited_since_its_drain_stops_at_queued(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The periodic reconcile's replay is background work: it queues, it does not rebuild.
+
+    The same page as above, replayed inside the join waiver the receipt-owned
+    fan-out and the watcher hold. Nobody waits on that caller for a converged
+    graph, yet it paid the whole-vault pass a library caller pays. The queued
+    receipt converges the page once the registry records its bytes.
+    """
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    (root / RETITLED).write_text(_titled("Newer Title", "moved again"), encoding="utf-8")
+
+    with graph_sync.standalone_join_waived():
+        _replay(root, [root / RETITLED])
+
+    assert whole_vault_passes == [], "a background replay rebuilt the vault"
+    assert RETITLED in deferred_index.list_graph_paths(root)
+
+    freshness.on_files_changed(root, changed=[root / RETITLED])
+    index_sync.drain_graph_work(root)
+
+    assert whole_vault_passes == []
+    assert deferred_index.list_graph_paths(root) == []
+    assert EpistemicGraphIndex(root).available() is True
     _assert_matches_a_fresh_rebuild(root)
 
 

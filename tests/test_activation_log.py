@@ -87,6 +87,7 @@ def test_the_row_says_which_kind_of_principal_activated(
         assert row["principal_hash"] not in (None, "owner")
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_abstentions_are_logged_with_their_reason(vault: Path, activation_log: Path) -> None:
     commands.op_activate_context(vault, turn="   ")
 
@@ -236,6 +237,7 @@ def test_finalization_error_is_one_observed_activation(vault, activation_log, mo
     assert logged["outcome"] == "error" and logged["duration_ms"] >= 15
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_mcp_activation_has_one_dispatch_and_one_leaf(vault, monkeypatch) -> None:
     import asyncio
     import time

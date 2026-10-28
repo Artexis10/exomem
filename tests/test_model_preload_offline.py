@@ -19,7 +19,6 @@ import pytest
 
 from exomem import accel, embedding_backend, embeddings, mode, model_cache, model_reaper, warmup
 
-
 # --------------------------------------------------------------------- fixtures
 
 
@@ -41,9 +40,9 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_singletons() -> None:
-    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
+    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = embeddings._CLIP_QUERY_MODEL = None
     yield
-    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
+    embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = embeddings._CLIP_QUERY_MODEL = None
 
 
 @pytest.fixture

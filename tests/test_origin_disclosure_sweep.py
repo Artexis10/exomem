@@ -154,6 +154,7 @@ def test_no_restricted_door_serves_an_unreleased_origin_payload(vault: Path, pla
     assert created.path not in json.dumps(found, default=str)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_activation_never_quotes_an_unreleased_origin_carrier_as_an_entity_lede(vault: Path) -> None:
     block, reference = _carrier(vault)
     _write_source_rule(vault, ceiling=0)

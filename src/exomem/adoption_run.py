@@ -76,7 +76,8 @@ INITIAL_SECONDS_PER_MIB = 0.05
 # MiB; lighter chunks teach the per-item rate, which a huge file would otherwise inflate.
 BYTE_RATE_MIN_ITEM_MIB = 1.0
 # Work a call owes after its loop, inside the same MCP call, which the loop cannot
-# time. Media sidecars are indexed by a fan-out deferred until the mutation's
+# time. Durable custody still needs proof and pending publication after the leaf.
+# Media sidecars are indexed by a fan-out deferred until the mutation's
 # terminal is persisted (a fast-acknowledgement session moves it behind the reply
 # instead); its first graph step waits on the graph the background media worker
 # also holds, and the reply names every written path for the egress checks to
@@ -84,7 +85,7 @@ BYTE_RATE_MIN_ITEM_MIB = 1.0
 # terminal drains took 3.4-15.2 s, with one outlier of 30.4 s on a short final
 # call; once the first had run, each further sidecar cost about 0.1 s; reply
 # handling took about 2.4 s for 456 written paths (0.005 s each).
-TERMINAL_FANOUT_RESERVE_SECONDS = 20.0
+TERMINAL_WORK_RESERVE_SECONDS = 20.0
 TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
 REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
@@ -251,22 +252,78 @@ class AdoptionRunStore:
         )
 
     def list_runs(self) -> list[dict]:
-        if not self.base.exists():
-            return []
+        return self.listing()["runs"]
+
+    def listing(self, *, path: str = "") -> dict:
         rows: list[dict] = []
-        for d in sorted(self.base.iterdir()):
-            if not d.is_dir():
+        adopted: set[PurePosixPath] = set()
+        complete = True
+        scope = _status_path(path) if path else None
+        if path and scope is None:
+            raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", "status takes a vault-relative subtree")
+        try:
+            folders = sorted(self.base.iterdir())
+        except FileNotFoundError:
+            folders = []
+        except OSError:
+            if scope is None:
+                raise
+            folders, complete = [], False
+        for folder in folders:
+            try:
+                if not stat.S_ISDIR(folder.stat().st_mode):
+                    continue
+                run = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                complete = False
                 continue
-            f = d / "run.json"
-            if not f.exists():
+            if not isinstance(run, dict):
+                complete = False
                 continue
             try:
-                run = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                rows.append(_compact_row(run))
+            except (AttributeError, TypeError):
+                # Legacy listings skip malformed rows; scoped counts still inspect their scope.
+                pass
+            if scope is None:
                 continue
-            rows.append(_compact_row(run))
-        rows.sort(key=lambda r: r.get("created", ""), reverse=True)
-        return rows
+            source_root = _status_path(run.get("source_root"))
+            if source_root is None:
+                complete = False
+                continue
+            if not (source_root.is_relative_to(scope) or scope.is_relative_to(source_root)):
+                continue
+            outcomes = run.get("outcomes")
+            if not isinstance(outcomes, dict):
+                complete = False
+                continue
+            for original, outcome in outcomes.items():
+                original_path = _status_path(original)
+                # Apply's writers define these fixed protocol states, not vault vocabulary.
+                if (
+                    original_path is None or original_path == source_root
+                    or not original_path.is_relative_to(source_root) or not isinstance(outcome, dict)
+                    or outcome.get("status") not in (*_APPLIED_STATUSES, _SOURCE_ONLY, "failed")
+                ):
+                    complete = False
+                elif original_path.is_relative_to(scope) and outcome.get("status") in _APPLIED_STATUSES:
+                    adopted.add(original_path)
+        rows.sort(key=lambda r: r.get("created") if isinstance(r.get("created"), str) else "", reverse=True)
+        result = {"runs": rows}
+        if scope is not None:
+            result.update(adopted_files=len(adopted) if complete else None, complete=complete)
+        return result
+
+
+def _status_path(raw: object) -> PurePosixPath | None:
+    """Read historical vault-relative paths without requiring originals to remain on disk."""
+    if not isinstance(raw, str) or "\0" in raw:
+        return None
+    normalized = posixpath.normpath(raw.replace("\\", "/"))
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or PureWindowsPath(raw).anchor or normalized == ".." or normalized.startswith("../"):
+        return None
+    return path
 
 
 def _compact_row(run: dict) -> dict:
@@ -275,6 +332,7 @@ def _compact_row(run: dict) -> dict:
     return {
         "run_id": run.get("run_id"),
         "run_ref": run.get("run_ref"),
+        "source_root": run.get("source_root"),
         "phase": run.get("phase"),
         "created": run.get("created"),
         "counts": {
@@ -991,11 +1049,11 @@ def _pending(run: dict) -> list[dict]:
     ]
 
 
-def status(root: Path, *, run_id: str | None = None) -> dict:
+def status(root: Path, *, run_id: str | None = None, path: str = "") -> dict:
     root = Path(root)
     store = AdoptionRunStore(root)
     if not run_id:
-        return {"mode": "adoption", "mutated": False, "runs": store.list_runs()}
+        return {"mode": "adoption", "mutated": False, **store.listing(path=path)}
     run = store.load(run_id)
     extra: dict = {}
     if run.get("phase") == "applying":
@@ -1343,9 +1401,11 @@ class _ApplyPacer:
         return seen if rate is None else max(rate, seen)
 
     def _owed_after_loop(self, artifacts: int) -> float:
-        if not self._owes_fanout or not artifacts:
+        if not self._owes_fanout:
+            return TERMINAL_WORK_RESERVE_SECONDS
+        if not artifacts:
             return 0.0
-        return TERMINAL_FANOUT_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
+        return TERMINAL_WORK_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
 
     @staticmethod
     def _media(chunk: list[dict]) -> int:
@@ -1388,6 +1448,10 @@ class _ApplyPacer:
             chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
             cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         return chunk if first or cost <= self._room(chunk) else []
+
+    def note_fits(self, chunk: list[dict], seconds: float) -> bool:
+        """Keep the same terminal headroom between the chunk's individual notes."""
+        return seconds <= self._room(chunk)
 
     def record(self, chunk: list[dict], elapsed: float, extractions: list[float]) -> None:
         """Learn from a finished chunk: `extractions` are its media requests' seconds."""
@@ -1511,7 +1575,7 @@ def _commit_chunk(
 def _apply_chunk(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], *,
     run_date: dt.date, ceiling: int, budget: request_budget.RequestBudget, stats: Counter,
-    written: list[str], reads: _CallReads,
+    written: list[str], reads: _CallReads, pacer: _ApplyPacer,
 ) -> list[float]:
     """Apply one chunk; returns the seconds each media extraction request took."""
     plan = run["plan"]
@@ -1599,14 +1663,14 @@ def _apply_chunk(
         reads.notes = adoption_plan.NoteIndex(root)
     _create_notes(
         root, store, run, chunk, texts,
-        label=label, notes=reads.notes, budget=budget, stats=stats, written=written,
+        label=label, notes=reads.notes, pacer=pacer, stats=stats, written=written,
     )
     return extractions
 
 
 def _create_notes(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], texts: dict[str, str], *,
-    label: str | None, notes: adoption_plan.NoteIndex, budget: request_budget.RequestBudget,
+    label: str | None, notes: adoption_plan.NoteIndex, pacer: _ApplyPacer,
     stats: Counter, written: list[str],
 ) -> None:
     """Create the draft note of every own-note item in `chunk` whose Source is on disk.
@@ -1622,9 +1686,7 @@ def _create_notes(
         path = planned["original_path"]
         if path not in outcomes or outcomes[path]["status"] != _SOURCE_ONLY:
             continue
-        if stats["notes_started"] and not budget.can_afford(
-            request_budget.DELIVERY_RESERVE_SECONDS + stats["note_ms_max"] / 1000
-        ):
+        if stats["notes_started"] and not pacer.note_fits(chunk, stats["note_ms_max"] / 1000):
             stats["notes_deferred"] += 1
             break
         started = time.monotonic()
@@ -1842,7 +1904,7 @@ def apply(
             started = time.monotonic()
             extractions = _apply_chunk(
                 root, store, run, chunk, run_date=run_date, ceiling=ceiling,
-                budget=budget, stats=stats, written=written, reads=reads,
+                budget=budget, stats=stats, written=written, reads=reads, pacer=pacer,
             )
             pacer.record(chunk, time.monotonic() - started, extractions)
             pending = pending[len(chunk):]
@@ -1950,15 +2012,23 @@ def _same_page(left: str, right: str) -> bool:
     return left.removesuffix(".md") == right.removesuffix(".md")
 
 
-def _find_paths(root: Path, query: str) -> list[str] | None:
-    """Paths of the first keyword hits for `query`, or None when search failed."""
+def _find_paths(root: Path, query: str) -> tuple[list[str] | None, list[str]]:
+    """Keep confirmed keyword hits separate from incomplete or failed recall."""
     from . import find as find_module
 
+    degraded: list[str] = []
     try:
-        hits = find_module.find(root, query=query, mode="keyword", limit=5, graph=False)
+        hits = find_module.find(
+            root, query=query, mode="keyword", limit=5, graph=False,
+            degraded_out=degraded,
+        )
     except Exception:  # noqa: BLE001 - recall failure never blocks finish
-        return None
-    return [str(getattr(hit, "path", "")) for hit in hits]
+        return None, degraded
+    return [str(getattr(hit, "path", "")) for hit in hits], degraded
+
+
+def _recall_warming(components: list[str]) -> dict:
+    return {"components": sorted(set(components)), "since_s": None}
 
 
 def _applied_items(run: dict) -> list[tuple[dict, dict]]:
@@ -1984,11 +2054,16 @@ def _recall_check(root: Path, run: dict) -> dict:
     else:
         packs = run.get("pack_suggestions") or []
         title, target = (packs[0].get("name") if packs else "") or "", ""
-    paths = _find_paths(root, title) if title else None
+    paths, degraded = _find_paths(root, title) if title else ([], [])
     ok = bool(target) and any(_same_page(path, target) for path in paths or [])
     result: dict = {"query": title, "ok": ok, "hits": paths or []}
     if not ok:
-        result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
+        if paths is None or degraded:
+            result.update(ok=None, status="failed" if paths is None else "pending")
+            if degraded:
+                result["warming"] = _recall_warming(degraded)
+        else:
+            result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
     return result
 
 
@@ -2008,13 +2083,29 @@ def _recall_sample(root: Path, run: dict) -> dict:
         depth += 1
     found = 0
     missed: list[str] = []
+    pending, failed = 0, 0
+    degraded: list[str] = []
     for item, outcome in picks:
-        paths = _find_paths(root, item.get("title") or item["original_path"])
+        paths, incomplete = _find_paths(root, item.get("title") or item["original_path"])
         if paths is not None and any(_same_page(path, outcome["target_path"]) for path in paths):
             found += 1
+        elif paths is None:
+            failed += 1
+        elif incomplete:
+            pending += 1
+            degraded.extend(incomplete)
         else:
             missed.append(outcome["target_path"])
-    return {"sampled": len(picks), "found": found, "missed": missed}
+    result: dict = {"sampled": len(picks), "found": found, "missed": missed}
+    if pending or failed:
+        evaluated = found + len(missed)
+        result.update(
+            status="failed" if failed else "pending", evaluated=evaluated,
+            found=found if evaluated else None, pending=pending, failed=failed,
+        )
+        if degraded:
+            result["warming"] = _recall_warming(degraded)
+    return result
 
 
 def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:

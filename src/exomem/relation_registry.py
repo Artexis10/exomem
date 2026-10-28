@@ -631,6 +631,7 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
         if not isinstance(old, dict):
             raise ValueError(f"UNKNOWN_RELATION: {key}")
         _merge_existing_extension(old, {"status": "deprecated", "replaced_by": replacement})
+    before = _parse_extension_data(current, "", core_registry(), saved=True)
     # An extension already in `current` keeps its immutable family, so a
     # mismatch it carries is grandfathered; one added by this delta is not.
     registry = _parse_extension_data(
@@ -639,10 +640,13 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
         core_registry(),
         grandfathered=frozenset(map(str, current.get("extensions") or {})),
         # An alias this delta adds to an older extension is not grandfathered.
-        saved_aliases=_alias_pairs(_parse_extension_data(current, "", core_registry(), saved=True)),
+        saved_aliases=_alias_pairs(before),
     )
-    if _blocking(registry):
-        raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
+    # A finding `current` already carries, such as a field a later release
+    # wrote, refuses only the save that introduces it.
+    blocking = vocabulary_registry.new_findings(before.findings, registry.findings)
+    if blocking:
+        raise ValueError(f"INVALID_RELATION_REGISTRY: {blocking!r}")
     return result
 
 
@@ -783,13 +787,14 @@ def save_registry(
     if not connector_boundary.permits(vault_root, path, principal.effective_principal()):
         raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry is unavailable")
     registry = load_registry(vault_root, proposal=proposal)
-    if _blocking(registry):
-        raise ValueError(f"INVALID_RELATION_REGISTRY: {_blocking(registry)!r}")
+    inspected = vocabulary_registry.load(SPEC, Path(vault_root))
+    blocking = vocabulary_registry.new_findings(inspected.findings, registry.findings)
+    if blocking:
+        raise ValueError(f"INVALID_RELATION_REGISTRY: {blocking!r}")
     proposed_keys = set(registry.extensions) | set(registry.aliases)
     removed = sorted(set(observed_keys) - proposed_keys - set(registry.core))
     if removed:
         raise ValueError(f"OBSERVED_RELATION_DELETION: deprecate observed keys instead: {removed}")
-    inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     current_hash: str | None = None
     if inspected.overlay_text is not None:
         current_hash = inspected.content_hash
@@ -822,6 +827,11 @@ def save_registry(
         "created": current_hash is None,
         "history": history,
     }
+
+
+def saved_document(vault_root: Path) -> dict[str, Any]:
+    """The overlay as saved, each entry with the fields it was written with."""
+    return SPEC.adapter.document(vocabulary_registry.load(SPEC, Path(vault_root)).overlay_text)
 
 
 def empty_proposal() -> dict[str, Any]:
@@ -1323,22 +1333,16 @@ def _replacement_closure(
                 terminal_key = current
                 break
             if not replacement:
-                findings.append(
-                    _finding(
-                        "invalid_replacement",
-                        f"extensions.{key}.replaced_by",
-                        "replacement chain must end in an active survivor",
-                        relation=key,
-                    )
-                )
                 break
             current = replacement
         if current in core:
             terminal_key = current
-        if terminal_key is None:
-            continue
-        terminal = core.get(terminal_key) or extensions.get(terminal_key)
-        if terminal is None or terminal.status != "active":
+        # Every key whose chain stops short, dangles or cycles carries its own
+        # finding, so a save that newly points a key at a broken chain is refused.
+        terminal = (
+            None if terminal_key is None else core.get(terminal_key) or extensions.get(terminal_key)
+        )
+        if terminal_key is None or terminal is None or terminal.status != "active":
             findings.append(
                 _finding(
                     "invalid_replacement",

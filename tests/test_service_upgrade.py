@@ -6,11 +6,13 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
 import sys
 import threading
+import uuid
 import zipfile
 from base64 import urlsafe_b64encode
 from pathlib import Path
@@ -109,6 +111,7 @@ def _control(
     phase: str = "ready",
     count: int | None = None,
     launcher_python: str | None = None,
+    active_python: str | None = None,
 ) -> tuple[list[dict], threading.Thread]:
     runtime = tmp_path / "managed"
     runtime.mkdir(mode=0o700)
@@ -144,7 +147,7 @@ def _control(
                         response = {
                             "ok": True,
                             "phase": phase,
-                            "active": {"python": str(launcher), "version": "0.1.0"},
+                            "active": {"python": active_python or str(launcher), "version": "0.1.0"},
                             "launcher_python": str(launcher),
                             "unit": "exomem.service",
                             "port": 8765,
@@ -274,6 +277,187 @@ def test_staging_failure_never_requests_handoff(tmp_path: Path) -> None:
     thread.join(3)
     assert result.returncode != 0
     assert requests == [{"command": "status"}]
+
+
+def _staging_uv(tmp_path: Path, *, install_exit: int = 0) -> Path:
+    """A fake uv whose venv step writes a stub interpreter into the release."""
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = venv ]; then\n"
+        "  mkdir -p \"$4/bin\"\n"
+        "  cat > \"$4/bin/python\" <<'STUB'\n"
+        "#!/bin/sh\n"
+        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": []}'\n"
+        "STUB\n"
+        "  chmod +x \"$4/bin/python\"\n"
+        "  exit 0\n"
+        "fi\n"
+        f"exit {install_exit}\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    return fake_uv
+
+
+def _old_release(releases: Path) -> Path:
+    release = releases / uuid.uuid4().hex
+    (release / "bin").mkdir(parents=True)
+    (release / "bin" / "python").write_bytes(os.urandom(8192))
+    return release
+
+
+def _private_record(path: Path, value: dict) -> None:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+        json.dump(value, handle)
+
+
+def test_verified_promotion_keeps_only_serving_rollback_and_recorded_releases(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    releases.mkdir(mode=0o700)
+    rollback = _old_release(releases)
+    recorded = _old_release(releases)
+    stale = {_old_release(releases).name, _old_release(releases).name}
+    # uv links installed files from its cache; removing those frees nothing.
+    cached = tmp_path / "uv-cache-file"
+    cached.write_bytes(os.urandom(1 << 20))
+    os.link(cached, releases / sorted(stale)[0] / "cached")
+    # The manager recorded the rollback through a spelling that `..` only resolves physically.
+    (tmp_path / "deep" / "er").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "deep" / "er", target_is_directory=True)
+    spelled = tmp_path / "link" / ".." / ".." / "releases" / rollback.name / "bin" / "python"
+    requests, thread = _control(tmp_path, active_python=str(spelled))
+    _private_record(
+        tmp_path / "managed" / "transition.json",
+        {"target": {"python": str(recorded / "bin" / "python"), "version": "0.1.5"}, "phase": "failed"},
+    )
+
+    result = _operator(
+        tmp_path, "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(_staging_uv(tmp_path))},
+    )
+    thread.join(3)
+
+    assert result.returncode == 0, result.stderr
+    serving = Path(requests[1]["target"]["python"]).parents[1]
+    assert {entry.name for entry in releases.iterdir()} == {serving.name, rollback.name, recorded.name}
+    retention = json.loads(result.stdout)["release_retention"]
+    assert set(retention["removed"]) == stale
+    assert 2 * 8192 <= retention["bytes_freed"] < 1 << 20
+    assert retention["failures"] == []
+
+
+def test_failed_staging_leaves_no_release_directory(tmp_path: Path) -> None:
+    requests, thread = _control(tmp_path, count=1)
+    result = _operator(
+        tmp_path, "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(_staging_uv(tmp_path, install_exit=2))},
+    )
+    thread.join(3)
+
+    assert result.returncode != 0
+    assert list((tmp_path / "releases").iterdir()) == []
+
+
+def test_retention_keeps_symlinked_and_unrecognized_entries(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    releases.mkdir(mode=0o700)
+    elsewhere = _old_release(tmp_path / "elsewhere")
+    linked = releases / uuid.uuid4().hex
+    linked.symlink_to(elsewhere, target_is_directory=True)
+    hand_made = releases / "before-upgrade-backup"
+    hand_made.mkdir()
+    stray_file = releases / uuid.uuid4().hex
+    stray_file.write_text("not a release", encoding="utf-8")
+    requests, thread = _control(tmp_path)
+
+    result = _operator(
+        tmp_path, "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(_staging_uv(tmp_path))},
+    )
+    thread.join(3)
+
+    assert result.returncode == 0, result.stderr
+    assert linked.is_symlink() and (elsewhere / "bin" / "python").is_file()
+    assert hand_made.is_dir() and stray_file.is_file()
+    retention = json.loads(result.stdout)["release_retention"]
+    assert retention["removed"] == [] and retention["failures"] == []
+
+
+def test_retention_removes_nothing_while_a_manager_record_is_unreadable(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    releases.mkdir(mode=0o700)
+    stale = _old_release(releases)
+    requests, thread = _control(tmp_path)
+    record = tmp_path / "managed" / "transition.json"
+    record.write_text("{}", encoding="utf-8")
+    record.chmod(0o644)
+
+    result = _operator(
+        tmp_path, "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(_staging_uv(tmp_path))},
+    )
+    thread.join(3)
+
+    assert result.returncode == 0, result.stderr
+    assert stale.is_dir()
+    retention = json.loads(result.stdout)["release_retention"]
+    assert retention["removed"] == [] and retention["skipped"]
+
+
+def test_retention_failure_is_reported_without_failing_the_upgrade(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    releases.mkdir(mode=0o700)
+    stuck = _old_release(releases)
+    (stuck / "bin").chmod(0o500)
+    requests, thread = _control(tmp_path)
+    try:
+        result = _operator(
+            tmp_path, "--package-version", "0.2.0", "--profile", "lean",
+            env={"EXOMEM_UV": str(_staging_uv(tmp_path))},
+        )
+        thread.join(3)
+    finally:
+        (stuck / "bin").chmod(0o700)
+
+    assert result.returncode == 0, result.stderr
+    assert stuck.is_dir()
+    retention = json.loads(result.stdout)["release_retention"]
+    assert [failure["release"] for failure in retention["failures"]] == [stuck.name]
+    assert stuck.name not in retention["removed"]
+    assert retention["bytes_freed_is_lower_bound"] is True
+
+
+def test_interrupted_retention_still_reports_what_it_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from exomem import service_upgrade
+
+    runtime = tmp_path / "managed"
+    runtime.mkdir(mode=0o700)
+    releases = tmp_path / "releases"
+    releases.mkdir(mode=0o700)
+    serving = _old_release(releases)
+    first, second = sorted(
+        (_old_release(releases), _old_release(releases)), key=lambda release: release.name
+    )
+    remove = shutil.rmtree
+
+    def interrupted_rmtree(path: str, *args: object, **kwargs: object) -> None:
+        if Path(path).name == second.name:
+            raise KeyboardInterrupt
+        remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(service_upgrade.shutil, "rmtree", interrupted_rmtree)
+    active = {"python": str(serving / "bin" / "python"), "version": "0.2.0"}
+
+    report = service_upgrade._retain_releases(runtime, {"active": active}, {"active": active}, active)
+
+    assert report["skipped"] == "interrupted"
+    assert report["bytes_freed_is_lower_bound"] is True
+    assert {release.name for release in releases.iterdir()} == {serving.name, second.name}
+    assert report["removed"] == [first.name]
+    assert "removing 2 unused release directories" in capsys.readouterr().err
 
 
 def test_operator_lock_refuses_symlink_without_touching_target(tmp_path: Path) -> None:
@@ -571,6 +755,7 @@ def test_wheel_package_mismatch_refuses_staging(tmp_path: Path) -> None:
     wheel = _wheel(tmp_path / "exomem-9.9.9-py3-none-any.whl", name="not-exomem")
     with pytest.raises(RuntimeError, match="not an Exomem wheel"):
         service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "", wheel, "a" * 40)
+    assert list((tmp_path / "releases").iterdir()) == []
 
 
 def test_wheel_source_mutation_refuses_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

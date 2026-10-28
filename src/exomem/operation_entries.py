@@ -573,7 +573,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection")),
-        _row("status", "read_import", ("run_id",)),
+        _row("status", "read_import", ("run_id", "path")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",)),
         _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),

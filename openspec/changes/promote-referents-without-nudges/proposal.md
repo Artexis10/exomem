@@ -14,6 +14,10 @@ This change measures the current behaviour first, then ships the smallest prompt
 
 ## What Changes
 
+The source-quality repair also restores honest relation qualification and separates custody from semantic compilation.
+It adds deterministic feedback and agent guidance without a new refusal, completion database, or server-side semantic author.
+The deferred entity barrier and paired behaviour measurement retain their existing holds.
+
 - Deliver the organisation substrate without a model-measurement gate. Before building the behaviour layers, a separate case-authoring lane files the revised amendment.
   Development uses at most five rounds and eighty sessions; one blind final comparison covers forty situations and 160 sessions.
   The behaviour layers merge only with an established paired gain or the owner's ruling.
@@ -40,6 +44,8 @@ This change measures the current behaviour first, then ships the smallest prompt
 - `delegation-envelope`: the ceiling requirement adds the owner's promotions to `proactive_capture`, and a scoped edge removal and the promotion revert to `restructure_execution`.
 - `write-time-identity-candidates`: detection, not the server, never creates an entity; writes carry `undeclared_referents`.
 - `epistemic-relation-registry`: relation labels, the display formatter, endpoint families and the generic marker.
+- `semantic-write-contract`: registry-marked generic relations remain connectivity, never typed-specific qualification; authored all-generic relations receive bounded advisory feedback.
+- `adoption-compile-planning`: source descriptions, capture guidance, proposals and compact write feedback distinguish citation linkage from unassessed semantic compilation.
 - `relation-vocabulary-evolution`: a generic edge between entities offers fitting predicates that replace it in place.
 - `graph-traversal-profiles` and `context-activation` (conditional): pack profiles, the `entity` profile and typed expansion of entity anchors.
 

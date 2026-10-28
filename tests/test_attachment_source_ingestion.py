@@ -21,6 +21,9 @@ import datetime as dt
 from pathlib import Path
 
 import pytest
+from test_connector_boundary import SCOPE
+from test_connector_boundary import configured_boundary as configured_boundary
+from test_private_vocabulary_instances import private_instances as private_instances
 
 from exomem import note as note_module
 from exomem import preserve as preserve_module
@@ -1046,8 +1049,9 @@ def test_no_artifact_is_written_to_both_trees(
     assert "Sources" in copies[0].parts
 
 
-def test_capture_source_accepts_files_through_the_mcp_surface(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mode", ("text", "attachment", "adoption", "pending-media"))
+def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
     """Through the tool surface, as a generic client actually sends it.
 
@@ -1069,8 +1073,10 @@ def test_capture_source_accepts_files_through_the_mcp_surface(
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
 
-    blob = tmp_path / "transcript.txt"
-    blob.write_bytes(b"Speaker A: the pier reopened.")
+    original = _PNG if mode == "pending-media" else b"Speaker A: the pier reopened."
+    filename = "map.png" if mode == "pending-media" else "transcript.txt"
+    blob = tmp_path / filename
+    blob.write_bytes(original)
 
     def _fake_stage(file, budget, *, batch_deadline=None, **_kwargs):
         return client_artifacts.StagedArtifact(
@@ -1078,8 +1084,8 @@ def test_capture_source_accepts_files_through_the_mcp_surface(
             path=blob,
             size=blob.stat().st_size,
             sha256="0" * 64,
-            content_type="text/plain",
-            filename="transcript.txt",
+            content_type="image/png" if mode == "pending-media" else "text/plain",
+            filename=filename,
         )
 
     monkeypatch.setattr(client_artifacts, "stage_artifact", _fake_stage)
@@ -1090,12 +1096,20 @@ def test_capture_source_accepts_files_through_the_mcp_surface(
             {
                 "title": "Riverside transcript over the wire",
                 "source_kind": "session",
+                "compile_guidance": True,
                 "files": [
                     {"download_url": "https://example.invalid/a", "file_id": "f1"}
                 ],
             }
         )
     )
+    if mode == "text":
+        arguments.pop("files")
+        arguments["content"] = original.decode()
+    if mode == "adoption":
+        arguments["adoption"] = {
+            "key": "source-guidance-adoption", "trigger": "selected", "selected_file_id": "f1",
+        }
     with principal_module.request_scope(
         principal_module.owner_principal(surface="mcp")
     ):
@@ -1108,18 +1122,112 @@ def test_capture_source_accepts_files_through_the_mcp_surface(
         else json.loads(result.content[0].text)
     )
 
-    files = payload.get("files") or payload.get("result", {}).get("files")
-    assert files, payload
-    [outcome] = files
-    assert outcome["outcome"] == "stored", outcome
-    # `stored_path`, not `path`: the compact terminal projects artifact receipts
-    # through a bounded allowlist, so this is what a client actually receives.
-    stored_path = outcome["stored_path"]
-    assert stored_path.startswith("Knowledge Base/Sources/")
-    assert (vault / stored_path).read_bytes() == b"Speaker A: the pier reopened."
-    # The page is derivable from it, which is why dropping `page` costs nothing.
-    assert (vault / f"{stored_path}.md").exists()
-    assert outcome["hash_algorithm"] == "sha256"
+    if mode == "text":
+        page_path = payload["path"]
+        assert original.decode() in (vault / page_path).read_text(encoding="utf-8")
+    else:
+        files = payload.get("files") or payload.get("result", {}).get("files")
+        assert files, payload
+        [outcome] = files
+        assert outcome["outcome"] == "stored", outcome
+        stored_path = outcome["stored_path"]
+        assert stored_path.startswith("Knowledge Base/Sources/")
+        assert (vault / stored_path).read_bytes() == original
+        page_path = f"{stored_path}.md"
+        assert (vault / page_path).exists()
+        assert outcome["hash_algorithm"] == "sha256"
+        if mode == "pending-media":
+            from exomem import media_processing
+
+            media_processing.reconcile_media(vault, vault / stored_path, explicit=True)
+            assert "processing_state: pending" in (vault / page_path).read_text(encoding="utf-8")
+    semantic = payload["semantic_compilation"]
+    assert semantic["state"] == "unassessed"
+    assert semantic["preparation_route"] == {
+        "tool": "prepare_note", "args": {"sources": [page_path]},
+    }
+    assert semantic["full_source_reads"] == [{
+        "tool": "read_memory",
+        "args": {"path": page_path, "include_raw": True},
+    }]
+    assert payload["state"] == "committed"
+    assert "outline_markdown" not in str(semantic)
+
+    with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+        result = asyncio.run(mcp.call_tool("create_note", {
+            "title": "Reopening changes local access",
+            "note_type": "insight",
+            "content": (
+                "## Observations\n\n- [constraint] Verify access after the reopening.\n\n"
+                "## Relations\n\n- relates_to [[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]\n"
+            ),
+            "sources": [f"{page_path}#Capture" if mode == "text" else page_path],
+        }, run_middleware=False))
+    written = result.structured_content
+    assert written["state"] == "committed", written
+    assert written["semantic_compilation"]["state"] == "unassessed"
+    if mode == "text":
+        guidance = written["semantic_compilation"]
+        [read_route] = guidance["full_source_reads"]
+        assert read_route["args"]["path"] == page_path
+        with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+            readback = asyncio.run(mcp.call_tool(
+                read_route["tool"], read_route["args"], run_middleware=False,
+            )).structured_content
+            prepared = asyncio.run(mcp.call_tool(
+                guidance["preparation_route"]["tool"],
+                guidance["preparation_route"]["args"], run_middleware=False,
+            )).structured_content
+        assert original.decode() in readback["body"], readback
+        assert prepared["suggested_sources"] == [page_path.removesuffix(".md")], prepared
+    assert [item["code"] for item in written["semantic_advisory"]["findings"]] == [
+        "RELATION_AUTHORED_ALL_GENERIC",
+    ]
+    assert written["semantic_advisory"]["findings"][0]["remediation"]
+    next_action = written["semantic_advisory"]["next_action"]
+    with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+        inspected = asyncio.run(mcp.call_tool(
+            next_action["tool"], next_action["args"], run_middleware=False,
+        ))
+    vocabulary = inspected.structured_content
+    assert vocabulary["subject"] == "relations", vocabulary
+    assert vocabulary["entries"], vocabulary
+    assert all(entry["key"] and entry["description"] for entry in vocabulary["entries"])
+    if mode == "text":
+        assert original.decode() in (vault / page_path).read_text(encoding="utf-8")
+    else:
+        assert (vault / stored_path).read_bytes() == original
+
+
+def test_selected_private_relation_alias_keeps_registered_rich_feedback(private_instances, vault) -> None:
+    from exomem import relation_registry
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import instances
+
+    with request_scope(private_instances("full")):
+        overlay = instances.select(vault, relation_registry.SPEC, SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\nextensions:\n  vault.accounts_for:\n"
+            "    parent: supports\n    description: Accounts for a synthetic claim.\n"
+            "    aliases: [accounts]\n",
+            encoding="utf-8",
+        )
+        result = note_module.note(
+            vault, title="A supported private claim", note_type="insight",
+            projects=["private-project"],
+            content=(
+                "## Claim\n- relations: accounts: "
+                "[[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]\n\n"
+                "The claim follows the retry pattern.\n"
+            ),
+        )
+
+    assert result.creation["contract_result"]["relation_disposition"]["qualifying_signal"] == "typed"
+    feedback = result.write_feedback["relations"]
+    assert feedback["typed_block"] == 1
+    assert feedback["relation_debt"] is False
+    assert "unregistered" not in feedback
 
 
 # --------------------------------------------------------------------------

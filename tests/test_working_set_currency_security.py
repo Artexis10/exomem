@@ -492,6 +492,7 @@ def test_withheld_canonical_statement_does_not_displace_visible_units(tmp_path, 
     assert "SECRETFACT" in json.dumps(_owner(a, turn))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("fixture", [_profile_vault, _neighbourhood_vault])
 def test_withheld_neighbourhood_note_cannot_supply_title_or_date(tmp_path, fixture):
     """P2/P2b (D2): choose the newest note from the audience's neighbourhood."""
@@ -507,6 +508,7 @@ def test_withheld_neighbourhood_note_cannot_supply_title_or_date(tmp_path, fixtu
     assert "2026-09-25" not in json.dumps(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_withheld_standing_unit_does_not_take_a_role_slot(tmp_path):
     """P3 (D3): standing material must be filtered before role caps."""
     a = _study_vault(tmp_path / "a", with_standing=True)
@@ -575,6 +577,7 @@ def test_withheld_reverse_supersession_does_not_change_lane_or_hook(tmp_path):
     assert packets["a"] == packets["b"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_unlinked_withheld_note_has_no_recent_context_effect(tmp_path):
     """P5: adding an unrelated restricted page cannot change the visible packet."""
     a = _plain_vault(tmp_path / "a", with_secret=True)
@@ -584,6 +587,7 @@ def test_unlinked_withheld_note_has_no_recent_context_effect(tmp_path):
     assert "unrelated-secret.md" in json.dumps(_owner(a, turn)["recent_context"])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("fixture", [_p6_vault, _p6b])
 def test_withheld_same_stem_page_does_not_make_current_state_ambiguous(tmp_path, fixture):
     """P6/P6b (D4): direct links and backlinks count only visible candidates."""

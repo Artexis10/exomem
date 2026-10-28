@@ -11,6 +11,7 @@ knowledge and inspect matching pages before creating another. Capture external
 originals into Source/Evidence first and include their returned references in
 `sources:` on the first compiled write; a URL or derivative is not the original.
 Honest `sources: []` is valid for live reasoning with no captured external input.
+For source ingestion, follow the [source compilation pass](writing.md#source-compilation-pass); a valid citation proves linkage, not semantic coverage.
 Use `read_connections(operation={'kind': 'suggest-links'})` on a draft when relevant connections
 are missing, and `suggest-relations` when their direction is unresolved. Reuse
 current evidence instead of repeating discovery; accept only reviewed, meaningful
