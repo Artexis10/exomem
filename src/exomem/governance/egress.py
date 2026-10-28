@@ -7710,50 +7710,6 @@ def visible_page_filter(
     return None if keep is None else page_filter_over(vault_root, keep, withheld=withheld)
 
 
-class _PageFiles:
-    """`Path.is_file` for page paths under one root, for one reader view's life.
-
-    A ranking decides every catalogue page, and a stat each is most of what
-    admission costs. A directory asked about a second time is listed once,
-    and a name that the listing shows as a regular file is a file. Any other
-    name is stat'ed as before. Like the held set and tombstones, the listing
-    is read once with the view, so it answers for the tree as the view first
-    saw it: a page deleted later still counts as a file, and so does a file in
-    a folder that can be listed but not entered. Either only sends a reference
-    to the release verdict, so the listing can narrow what a reader sees,
-    never widen it.
-    """
-
-    def __init__(self, root: Path) -> None:
-        self._root = root
-        self._asked: set[str] = set()
-        self._listed: dict[str, frozenset[str]] = {}
-
-    def is_file(self, rel: str) -> bool:
-        folder, _sep, name = rel.rpartition("/")
-        # An absolute or drive path replaces the root when joined, so it is stat'ed. The OS resolves
-        # any other step (`.`, `..`, a doubled slash) alike in the listing and in the stat.
-        if os.path.isabs(rel) or os.path.splitdrive(rel)[0]:
-            return (self._root / rel).is_file()
-        listed = self._listed.get(folder)
-        if listed is None:
-            if folder in self._asked:
-                listed = self._listed[folder] = self._list(folder)
-            else:
-                self._asked.add(folder)
-        if listed is not None and name in listed:
-            return True
-        return (self._root / rel).is_file()
-
-    def _list(self, folder: str) -> frozenset[str]:
-        try:
-            with os.scandir(self._root / folder) as entries:
-                # A symlink resolves on stat, so only a plain regular file is answered here.
-                return frozenset(entry.name for entry in entries if entry.is_file(follow_symlinks=False))
-        except (OSError, ValueError):  # ValueError: a NUL in the folder name, which `is_file` answers False for
-            return frozenset()
-
-
 def page_filter_over(
     vault_root: Path, keep: Callable[[str], bool], *, withheld: frozenset[str] | None = None
 ) -> Callable[[str], bool]:
@@ -7765,7 +7721,6 @@ def page_filter_over(
     # Read once with the filter, like `held`: a ranking decides every admitted page, and `is_tombstoned`
     # stats the tombstone files again for each one.
     tombstones = lifecycle.tombstoned_paths(root)
-    files = _PageFiles(root)
 
     def decide(rel_path: str, publish: bool = False) -> tuple[bool, bool]:
         rel = str(rel_path or "").strip()
@@ -7776,7 +7731,7 @@ def page_filter_over(
             return False, False
         if not lifecycle.is_tombstoned_in(tombstones, rel):
             try:
-                if not files.is_file(rel):
+                if not (root / rel).is_file():
                     return True, False
             except OSError:
                 return False, False

@@ -497,13 +497,10 @@ def query_words(
     ))
 
 
-#: Postings slots one `CorpusPostings` keeps: a slot is one page that holds one
-#: word. A slot costs one dictionary entry, 26 to 38 bytes measured at 2,000 and
-#: 50,000 slots, because its path is the length map's own interned string, so
-#: 2^18 slots is at most about 10 MB for each admitted corpus a store retains.
-#: That holds the words of a few turns even where every page holds them: about a
-#: hundred such words at 2,000 pages, five at 50,000. A word past the limit is
-#: counted for the request that asks and not kept.
+#: Bound retained page-word slots per admitted corpus; a slot is one page
+#: holding one word. Total bytes depend on the number of word dictionaries
+#: and their overhead; the slot limit does not bound those bytes.
+#: A word past the limit is counted for its request and not kept.
 POSTINGS_SLOTS_MAX = 1 << 18
 
 
