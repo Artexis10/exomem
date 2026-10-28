@@ -56,6 +56,10 @@ class RecoveryUnavailable(ValueError):
         )
 
 
+class RecoveryBusy(RecoveryUnavailable):
+    """Both private spools are in use. The slot is taken before any path is resolved, so this says nothing about a path."""
+
+
 class _CapabilityRedaction(logging.Filter):
     def filter(self, record):
         if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
@@ -262,8 +266,10 @@ def stage(
     byte_proofs: dict | None = None,
 ):
     """Own private storage for one request, including refusal and cancellation cleanup."""
-    if not who.resolved or not _SLOTS.acquire(blocking=False):
+    if not who.resolved:
         raise RecoveryUnavailable
+    if not _SLOTS.acquire(blocking=False):
+        raise RecoveryBusy
     try:
         from contextlib import ExitStack
 
@@ -395,6 +401,15 @@ def complete_native_grant(grant: str) -> None:
     if state is None or state.grant is None or state.grant != grant:
         raise RecoveryUnavailable
     state.completed = True
+
+
+def describe(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:
+    """The descriptor of a readable original under the caller's current authority; it mints no delivery."""
+    from dataclasses import replace
+
+    who = replace(effective_principal(), administrative_ingress=False)
+    with stage(root, selected, who, expected_sha256=expected_sha256) as (_copied, descriptor):
+        return descriptor
 
 
 def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:

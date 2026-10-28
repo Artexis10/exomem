@@ -299,6 +299,9 @@ def _dispatch_main(raw: list[str]) -> int:
         if raw[1:2] == ["export"]:
             from .cloud_export_client import main as cloud_export_main
             return cloud_export_main(raw[2:])
+        if raw[1:2] == ["download"]:
+            from .cloud_download_client import main as cloud_download_main
+            return cloud_download_main(raw[2:])
         from .cloud_import_client import main as cloud_main
         return cloud_main(raw[1:])
     if raw and raw[0] == "cell-import":

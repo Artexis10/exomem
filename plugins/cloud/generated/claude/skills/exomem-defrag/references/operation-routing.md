@@ -132,7 +132,9 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   it needs no hidden header. Large originals use HTTPS before base64 encoding.
   A prepared handoff proves no consumption: verify the recovered bytes before
   claiming success. Native attachment rendering in other clients remains unverified.
-  Desktop/personal endpoints serve recovery; Cloud outbound delivery remains unavailable.
+  Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
+  blob: run its `next_step`, `exomem cloud download -- '<path>'`, which fetches the exact
+  original over the owner's sign-in and keeps it only if its size and SHA-256 match.
   Notes and exports use their separate read and export paths.
 - **Media hits in `find` are first-class.** An extracted media sidecar carries
   `media_type` and `media_file` (a pointer to the original binary). Treat the

@@ -26,6 +26,7 @@ import logging
 import mimetypes
 import os
 import re
+import shlex
 import time
 from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
@@ -2127,7 +2128,7 @@ def op_bootstrap(
                     if profile != "compact"
                     else {}
                 ),
-                "cloud": "outbound delivery is unavailable",
+                "cloud": "no link or blob; the result names `exomem cloud download <path>`, which fetches the exact original over the owner's sign-in",
             },
         },
         "performance_profiles": {
@@ -8681,8 +8682,19 @@ def op_transfer_artifact(
     from . import cloud_cell
 
     if cloud_cell.cloud_mode_enabled() and not hold:
-        # A Cloud cell has only the gateway's held-upload receiver: no download or credential upload route.
-        raise ValueError("INVALID_MODE: an Exomem Cloud cell supports only hold=true uploads")
+        # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
+        if operation != "download" or not artifact:
+            raise ValueError("INVALID_MODE: an Exomem Cloud cell supports hold=true uploads and original downloads")
+        from . import artifact_recovery
+
+        # The agent fetches the bytes itself over its own sign-in; no link or native resource leaves the cell.
+        found = artifact_recovery.describe(vault_root, artifact, expected_sha256=expected_sha256)
+        return {
+            "handoff_status": "handoff_prepared",
+            "committed": False,
+            "artifact": found,
+            "next_step": "exomem cloud download -- " + shlex.quote(found["path"]),
+        }
     if hold:
         if operation != "upload" or artifact is not None or expected_sha256 is None:
             raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
@@ -13936,11 +13948,13 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                 command="transfer_artifact",
                 reason=(
                     "This Exomem Cloud cell is not configured for the gateway's "
-                    "upload handoff, and direct browser transfers are out of "
-                    "scope for Exomem Cloud (design Non-Goals)."
+                    "upload handoff and proved original download, and direct "
+                    "browser transfers are out of scope for Exomem Cloud "
+                    "(design Non-Goals)."
                 ),
                 lifted_when=(
-                    "the cell is configured for gateway upload handoffs"
+                    "the cell is configured for gateway upload handoffs "
+                    "and original downloads"
                 ),
                 lifted_by_upload_bridge=True,
             ),
