@@ -186,6 +186,12 @@ def _place(rollup: Rollup, values: Mapping, key: str):
             tuple(values.get(field) for field, _ in rollup.values))
 
 
+def membership(rollup: Rollup, values: Mapping, key: str) -> tuple[str, str] | None:
+    """The bucket and groups whose indexed members hold this row, or None when it is flagged or the rollup keeps none."""
+    place = _place(rollup, values, key)
+    return None if place is _FLAGGED or not rollup.members else place[:2]
+
+
 def _same(old, new) -> bool:
     """Whether a row's contribution is unchanged, telling 1 from 1.0 and 0.0 from -0.0."""
     if old is _FLAGGED or new is _FLAGGED:

@@ -60,6 +60,26 @@ Report a committed promotion with its subject, key, meaning, and returned restor
 route. If `state="pending_review"` and `saved` is null, report the queued item and
 that the registry remains unchanged. A refusal or invalid proposal is not a save.
 
+## Topic carriers
+
+A `topic-carriers` entry files the pages of one project key, folder or tag under
+the domains it names; the map uses a save at once and no page changes. Declare them
+from evidence, never from a list of your own.
+
+1. Read the owner's considerations from `review_memory(mode="vocabulary")`, following `continuation` until it is empty. Each names one carrier, and `review_item_context` returns its counts and a bounded sample of titles.
+2. Infer a topic from that evidence: reuse a domain key from `schema_memory(subject="domains", operation="inspect")` only when it names the subject the pages share; a neighbouring or broader domain is not a fit. When none fits, register one with `schema_memory(subject="domains", operation="save")` first; that is part of this workflow and needs no separate approval. Skip a carrier whose pages share no subject, such as a status tag or a folder that mixes topics.
+3. Save the carrier with `schema_memory(subject="topic-carriers", operation="save")`: `proposal.upsert` maps a key to `attributes` of `kind` (`project`, `folder` or `tag`), `match`, `topics` and `origin` (`inferred` for each topic). Add `expected_hash` and `why`.
+4. Show the person one review list. Each row names the carrier, its topic, the origin and a few entry titles. They can accept all, change a row, or skip.
+
+Accepting saves the same carrier with origin `reviewed`. Changing a row saves new `topics`
+by replace and lists the turned-down key in `rejected`, so it is never offered again.
+Skipping keeps every declaration `inferred` and in effect; it stays listed for later
+review. A hand-written `domain` on a project key is read as `reviewed` and never rewritten.
+A refusal names its reason (unresolved or rejected topic, a type folder); fix it from
+the finding instead of retrying the same save.
+A page that no carrier reaches joins a topic through its own `topics` field. A page's
+`domain` field names a source's subject or an experiment's folder and files no topic.
+
 ## Revert without rewriting pages
 
 1. Call `schema_memory(operation="history", subject=<subject>)` to obtain kept versions and the current `content_hash`.

@@ -295,3 +295,84 @@ def test_a_new_mismatched_extension_is_still_refused_beside_a_grandfathered_one(
     with pytest.raises(ValueError, match="family_mismatch"):
         _save(vault, delta, current)
     assert "vault.runs_site" not in relation_registry.load_registry(vault).extensions
+
+
+def test_a_delta_save_leaves_every_untouched_entry_as_it_was_saved(vault: Path) -> None:
+    path = relation_registry.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    untouched = {
+        "parent": "used_for",
+        "description": "Stores earlier fixture bytes.",
+        "aliases": [],
+        "status": "active",
+    }
+    path.write_text(
+        yaml.safe_dump({"schema_version": 1, "extensions": {"vault.keeps_bytes": untouched}}),
+        encoding="utf-8",
+    )
+
+    _save(vault, _delta(), relation_registry.load_registry(vault).extension_hash)
+
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))["extensions"]
+    assert saved["vault.keeps_bytes"] == untouched
+    assert saved["vault.applies_to"]["aliases"] == ["applies_to"]
+
+
+def test_a_field_a_later_release_wrote_neither_blocks_nor_vanishes_on_a_delta_save(
+    vault: Path,
+) -> None:
+    path = relation_registry.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    later = {
+        "parent": "used_for",
+        "description": "Carries a field this release does not know.",
+        "endpoints": {"subject": "entity:*"},
+    }
+    path.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "written_by": "a later release",
+             "extensions": {"vault.from_later": later}}
+        ),
+        encoding="utf-8",
+    )
+
+    _save(vault, _delta(), relation_registry.load_registry(vault).extension_hash)
+
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert saved["written_by"] == "a later release"
+    assert saved["extensions"]["vault.from_later"] == later
+    assert "vault.applies_to" in saved["extensions"]
+
+
+def test_a_delta_cannot_deprecate_into_a_saved_chain_without_a_survivor(vault: Path) -> None:
+    path = relation_registry.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "vault.applies_to": {
+                        "parent": "relates_to",
+                        "description": "A reviewed relation.",
+                        "aliases": ["applies_to"],
+                    },
+                    "vault.gone": {
+                        "parent": "relates_to",
+                        "description": "Gone.",
+                        "status": "deprecated",
+                        "replaced_by": "vault.missing",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid_replacement"):
+        _save(
+            vault,
+            {"deprecate": {"vault.applies_to": "vault.gone"}},
+            relation_registry.load_registry(vault).extension_hash,
+        )
+    assert relation_registry.load_registry(vault).definition("vault.applies_to").status == "active"

@@ -3289,6 +3289,20 @@ def test_blocked_write_names_what_blocked_it(tmp_path: Path) -> None:
     assert _PAGE in reason
 
 
+def test_an_observe_refusal_names_its_own_validate_form_for_the_omitted_findings(
+    tmp_path: Path,
+) -> None:
+    """observe_memory validates with operation=validate; it has no validate_only."""
+    preflight = _feedback_preflight(tmp_path)
+    findings = tuple(_blocking_finding(f"RULE_{i}", i) for i in range(7))
+    result = replace(preflight.contract_result, operation="observe", blocking_findings=findings)
+
+    reason = semantic_writes._blocking_reason(result)
+
+    assert "+4 more (operation=validate returns the full set)" in reason
+    assert "validate_only" not in reason
+
+
 def test_blocked_write_states_what_it_omitted(tmp_path: Path) -> None:
     """A truncated finding list must never read as the complete set."""
     preflight = _feedback_preflight(tmp_path)

@@ -521,3 +521,117 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   admission-flipped manifest test retired its receipt with the old rule for pages recall
   does not admit. Scoped suites (the 10.3 set): 62 modules, 1930 passed, 26 skipped,
   0 failed.
+
+## 11. Background callers stop at queued
+
+- [x] 11.1 Red tests: watcher echo of a create, receipt replay of a moved page,
+  acknowledged generation behind a withdrawn marker, owned watcher repair, barrier
+  with queued work: each runs no whole-vault pass. A standalone caller in the
+  acknowledged state still converges. Evidence, each red on the base:
+  `test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue` (the
+  echo rebuilt the vault),
+  `test_a_background_replay_of_a_page_edited_since_its_drain_stops_at_queued` (the
+  replay rebuilt the vault),
+  `test_a_background_dispatch_behind_a_covering_acknowledgement_stops_at_queued`
+  (the dispatch rebuilt the vault),
+  `test_a_fan_out_whose_repair_is_owned_marks_nothing` for a queued receipt and for
+  a standing marker (the watcher marked an owned repair as unknown), and
+  `test_a_barrier_behind_queued_repair_waits_for_the_queue` unmarked and with a
+  scoped mark (recovery rebuilt the vault, or queued whole-vault debt). The
+  standalone companion,
+  `test_a_standalone_dispatch_behind_a_covering_acknowledgement_still_converges`,
+  passes on the base and on this change.
+- [x] 11.2 Callers inside the join waiver may defer; only callers under a response
+  boundary skip starting registered work. `_caller_can_carry_pending` is the waiver
+  or a pending boundary, and `_caller_has_pending_boundary` alone decides whether
+  the refresh starts registered work and whether the dispatch joins it. The inline
+  marker convergence in `index_sync.upsert_after_write` defers for waiver callers
+  only: a request without derived-batch custody keeps the synchronous path that an
+  explicit `EXOMEM_FAST_DURABLE_ACK` rollback restores, as
+  `test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled`
+  requires.
+- [x] 11.3 A deferring caller never runs a whole-vault pass on its thread; a rebuild
+  disposition becomes the full marker. Without a checkpoint,
+  `_leave_rebuild_to_the_drain` advances the full marker; a receipted parent handoff
+  keeps its own durable full receipt; a marker that cannot be written leaves the
+  pass to the caller. With a checkpoint the caller registers the pass, and the
+  boundary or the background thread starts it. A standing full marker owns the
+  whole-vault pass for a caller that may stop at queued. `_standing_marker_owns_the_pass`
+  decides this at the refresh fallback for a rebuild disposition and at the
+  dispatch's unproven-predecessor door. There the caller queues its paths at its
+  generation, advances the marker over that generation and reports
+  `graph_repair_queued`. With no standing marker, or when the enqueue or the marker
+  advance fails, it registers as before. The drain pays a standing marker after its
+  quiet window, and that publication retires the marker and acknowledges the
+  checkpoint it sampled. Evidence: the watcher-echo and background-replay tests in
+  11.1. `test_writes_after_a_worker_replacement_stay_incremental` now runs its writes
+  inside a mutation request. Before the rule it failed three of three serial runs on
+  a deferral without queue coverage. After the rule no write registered a pass in
+  three serial runs. One serial run and the parallel suite run missed the 1.0 s
+  median bound, at 1.11 s and 1.07 s; the base misses that bound the same way on this
+  host.
+  `test_a_request_behind_a_standing_marker_registers_when_its_paths_cannot_be_queued`
+  covers the failed enqueue.
+- [x] 11.4 A covering acknowledgement routes a deferring caller to the incremental
+  path. The predecessor probe reports `graph_sync_acknowledgement_covers` when the
+  stored acknowledgement is exactly this checkpoint, and the dispatch logs `graph
+  dispatch routed a covering acknowledgement to incremental repair`. A standalone
+  caller still rebuilds. Evidence: the covering-acknowledgement pair in 11.1.
+- [x] 11.5 The watcher marks nothing when the queue or a marker owns its repair.
+  `index_sync.graph_repair_is_owned` also owns a no-checkpoint
+  `graph_repair_queued_for_drain` outcome, and the watcher logs that the repair is
+  already owned. Evidence: `test_a_fan_out_whose_repair_is_owned_marks_nothing`.
+  Two existing tests changed with this rule. The live-acknowledgement watcher test
+  drains the queue after the flush before it asserts convergence. The re-arm test
+  is now `test_a_standing_whole_vault_marker_owns_the_watcher_rearm`, because a
+  standing marker owns the repair the old test re-armed.
+- [x] 11.6 Barrier recovery declines while per-path receipts are queued and per-path
+  repair is admissible.
+  `recovery_decline_reason` returns `queue_owns_repair` first when receipts are
+  queued and no marker stands. The drain asks for whole-vault debt behind a barrier
+  only on an external-epoch decline, and the stall count resets only on a full
+  marker. Evidence: `test_a_barrier_behind_queued_repair_waits_for_the_queue`, and
+  the stall-ladder test with a barrier, red on the base. Scoped suites on this
+  change: graph write, queue, replay, availability, join, drain and decline modules,
+  336 passed, 3 skipped, 2 failed (the worker-replacement test that 11.3 closes, and
+  the covered-gap live test, which also fails on the base); 16 related modules, 473 passed; file watcher,
+  freshness liveness, watcher publication intent and index_sync modules, 182
+  passed; graph-reading and
+  write-path modules, 1064 passed, 18 skipped, 15 failed. Of those 15, one is the
+  rollback test named in 11.2, which passes after that rule. Thirteen are the
+  lifecycle replay driver's environment checks, which fail on the base the same
+  way. The last reads the installed CLI's help and passes on a rerun on both trees.
+  The queue owns nothing while the drain's latest per-path attempt could not repair
+  per path: the epoch refused it, or the vault was not ready, as a restarted worker
+  leaves it. The drain records that outcome through `graph_drain.note_per_path_repair`,
+  and a publication clears it. Declining there kept the graph unavailable for longer
+  than the 120 s that the installed stdio journey waits. Evidence:
+  `test_a_barrier_behind_queued_repair_that_cannot_drain_recovers_at_once`, red on the
+  previous head. The installed stdio journey, run alone, failed on the previous head
+  and passes with the rule. The same seven graph modules: 338 passed, 3 skipped, 3
+  failed, with the same three names and reasons as the base. The four watcher and
+  index_sync modules: 182 passed.
+  The queue also owns nothing once its oldest receipt has waited the drain's stall
+  threshold, read from `deferred_index.graph_queue_age`, which keeps a receipt's first
+  enqueue time across rotation. Without this bound, one receipt that never drains held
+  the barrier for good while other writes drained, because their progress restarts the
+  stall escalation's count. A held-boundary refusal of the batch keeps the drain's last
+  per-path verdict, and the age bounds a refusal that persists. Evidence:
+  `test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waited_the_stall`,
+  red on the previous head.
+- [ ] 11.7 Sandbox A/B (orchestrator): zero whole-vault passes per ordinary governed
+  write on the real managed worker with its watcher on; drift 0.
+- [x] 11.8 A classified dispatch failure is queued repair for a caller that may stop
+  at queued. The sandbox A/B found the route. The derived drain's dispatch met
+  `MUTATION_BUSY` while the graph drain held the boundary, and the failure branch
+  registered a whole-vault pass for one write. `_failure_left_to_the_queue` queues the
+  write's paths when `may_mark_external_pending` is false and the caller may stop at
+  queued; otherwise the branch registers as before. Evidence:
+  `test_a_background_dispatch_that_meets_a_busy_boundary_stops_at_queued`, red on the
+  previous head, and
+  `test_a_background_dispatch_that_fails_unclassified_still_registers`, which fails
+  when the classification is dropped. Scoped suites (all graph modules, freshness
+  liveness, bounded join, index_sync and relation-registry sync): 975 passed, 13
+  skipped, 8 failed, all in `test_graph_post_handoff_writes.py`. A serial rerun of that
+  file fails seven, each on a timing bound, and the previous head fails the same file
+  on timing bounds on this host.

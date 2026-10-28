@@ -135,12 +135,24 @@ rather than assumed.
 
 ### Requirement: An externally fenced graph barrier recovers through durable full debt
 
-When a graph read barrier remains after an external-pending epoch, the drain SHALL
-not treat a declined barrier recovery as settled. It SHALL persist the existing
-full-rebuild marker and let the guarded marker convergence reconcile and rebuild
-the complete recall corpus. It SHALL retain the existing publication-refusal
-backoff and active-owner coalescing behavior, and SHALL NOT create duplicate
-markers while one is pending.
+When a graph read barrier remains after an external-pending epoch and no per-path
+receipt is queued, the drain SHALL not treat a declined barrier recovery as settled.
+It SHALL persist the existing full-rebuild marker and let the guarded marker
+convergence reconcile and rebuild the complete recall corpus. It SHALL retain the
+existing publication-refusal backoff and active-owner coalescing behavior, and SHALL
+NOT create duplicate markers while one is pending.
+
+While per-path receipts are queued, no full-rebuild marker stands, and per-path repair
+is admissible, the queue owns the repair. Barrier recovery SHALL decline with its own
+reason, ahead of the external change check, and the drain SHALL NOT raise whole-vault
+debt for that barrier. Per-path repair is not admissible while the drain's latest
+per-path attempt could not repair per path at all: the epoch refused it, or the vault
+was not ready for it, as a restarted worker leaves it. The queue also SHALL NOT own the
+repair once its oldest receipt has waited longer than the drain's stall threshold,
+counted from that receipt's first enqueue. Then barrier recovery SHALL go on to its
+other reasons. A queue that the drain can repair but that makes no progress reaches the
+whole-vault route through the drain's stall escalation, and a standing barrier SHALL
+NOT reset that escalation's count.
 
 Before reconciliation clears an observed external epoch, it SHALL evict the
 resolver and inbound caches affected by that recall publication. Clearing SHALL
@@ -157,6 +169,23 @@ complete, but it SHALL NOT repopulate the shared cache.
 - **THEN** the drain creates one full-rebuild marker
 - **AND** guarded marker convergence publishes a current graph only after a
   complete recall reconciliation
+
+#### Scenario: Queued receipts hold barrier recovery
+
+- **WHEN** per-path receipts are queued
+- **AND** per-path repair is admissible
+- **AND** the oldest queued receipt has waited less than the stall threshold
+- **THEN** barrier recovery waits and only the stall escalation may raise whole-vault debt
+
+#### Scenario: Queued receipts that cannot drain release barrier recovery
+
+- **WHEN** per-path receipts are queued behind a read barrier
+- **AND** the drain's latest per-path attempt found the vault not ready for per-path
+  repair, or the oldest queued receipt has waited past the stall threshold
+- **THEN** barrier recovery does not decline for the queue, even when other receipts
+  drained in the same pass
+- **AND** the barrier recovers, or the drain raises whole-vault debt for an external
+  epoch, without waiting for the stall escalation
 
 #### Scenario: Cold recovery includes unqueued recall content
 
@@ -295,8 +324,9 @@ marker, or a queue it cannot read. This holds even when the batch covers the com
 checkpoint. The marker and the acknowledgement describe the whole graph, and that
 page's rows may be stale. The drain that leaves nothing queued publishes. An
 acknowledgement that is still behind afterwards is closed by one bounded drain of the
-committed checkpoint. While a drain clears receipts and leaves work queued, barrier
-recovery SHALL wait for the queue rather than run a whole-vault pass.
+committed checkpoint. While per-path receipts are queued, no full-rebuild marker
+stands, and per-path repair is admissible, barrier recovery SHALL wait for the queue
+rather than run a whole-vault pass.
 
 Coverage SHALL be membership in the processed batch rather than in the indexed set. A
 deletion named by a checkpoint is processed by removing its rows and has no source bytes
@@ -361,13 +391,80 @@ the single failure the pending outcome exists to prevent.
 - **THEN** the terminal reports the graph as pending with a queued-repair code
 - **AND** the response is distinguishable from a write whose graph is current
 
-Only a caller that can report the pending outcome SHALL defer. A caller inside a mutation
-request has a terminal that carries the graph outcome; a direct library caller returns a
-leaf result with nowhere to put one, and its contract is a converged graph. Deferring for
-such a caller does not merely under-report — it changes what the next call in the same
-process observes, because the graph that used to be current by the time that call ran no
-longer is. The predicate SHALL be the same one that decides whether a caller joins a
-registered rebuild: the caller that joins is precisely the caller that must not defer.
+Only a caller whose contract is not a converged graph SHALL defer: a mutation request, a
+direct mutation guard, a receipted parent handoff, or a background caller inside the join
+waiver. Such a caller SHALL NOT run a whole-vault pass on its own thread for the repair
+it defers. A deferral without a checkpoint leaves its queued paths to the drain, and a
+whole-vault disposition becomes the full-rebuild marker; a marker that cannot be written
+is paid on the caller's thread. A background caller SHALL also leave a standing
+full-rebuild marker to the drain. A request without derived custody that writes no graph
+input still converges that marker, because the explicit fast-acknowledgement rollback
+restores that synchronous path. A direct library caller returns a leaf result with nowhere to put a pending
+outcome, and its contract is a converged graph. Deferring for such a caller does not
+merely under-report — it changes what the next call in the same process observes,
+because the graph that used to be current by the time that call ran no longer is. The
+predicate SHALL be the same one that decides whether a caller joins a registered rebuild:
+the caller that joins is precisely the caller that must not defer.
+
+A covering graph_sync acknowledgement, one whose generation and checkpoint hash equal the
+dispatch's checkpoint, SHALL route a deferring caller to the incremental path rather than
+to a whole-vault rebuild. A standalone caller in that state still registers and joins the
+rebuild.
+
+A standing full marker owns the whole-vault pass for a caller that may stop at queued.
+When such a caller meets a whole-vault fallback or an unproven predecessor while the
+marker stands, it SHALL queue its own paths at its generation, advance the marker over
+that generation, and report a queued-repair code. It SHALL NOT register a second pass.
+With no standing marker, or when the enqueue or the marker advance fails, the caller
+registers the pass as before.
+
+When a dispatch fails for a caller that may stop at queued, and the failure is one that
+may not mark the registry (a busy boundary, a refused publication, a moved projection or
+a rebuild already running), the caller SHALL queue the write's own paths at its
+generation and report a queued-repair code. Such a failure says that the registry
+observed the write and only this projection did not publish. An unclassifiable failure
+marks the whole vault, so it registers the pass as before, and so does a failed enqueue.
+
+The file watcher SHALL NOT mark a graph fan-out that it could not complete as an external
+change when that repair is already owned: a whole-vault marker stands, or the batch's own
+dispatch registered a rebuild or left every graph input of the batch on the queue. Such a
+mark only fenced later writes. A marker that cannot be read is an unknown scope, and the
+watcher still marks the whole vault.
+
+#### Scenario: A background caller stops at queued
+
+- **WHEN** the file watcher or a receipt replay dispatches a graph refresh that defers
+- **THEN** the affected paths are queued or the full-rebuild marker is advanced
+- **AND** no whole-vault pass runs on that caller's thread
+
+#### Scenario: A covering acknowledgement keeps a deferring write incremental
+
+- **WHEN** the graph is unavailable and its graph_sync acknowledgement equals the
+  dispatch's checkpoint
+- **THEN** a deferring caller takes the incremental path and registers no rebuild
+- **AND** a standalone caller in the same state still converges through a rebuild
+
+#### Scenario: A write behind a standing full marker registers no second pass
+
+- **WHEN** a mutation request needs a whole-vault pass while a full-rebuild marker stands
+- **THEN** its paths are queued at its generation and the marker covers that generation
+- **AND** the request reports a queued-repair code and registers no rebuild
+- **AND** a request whose paths cannot be queued still registers the pass
+
+#### Scenario: A background dispatch that meets a busy boundary queues its paths
+
+- **WHEN** a background caller's graph dispatch fails because another graph operation
+  holds the vault mutation boundary
+- **THEN** the write's paths are queued and the dispatch reports a queued-repair code
+- **AND** no whole-vault pass runs
+- **AND** an unclassifiable dispatch failure still registers the pass
+
+#### Scenario: An owned fan-out repair is not marked as an external change
+
+- **WHEN** a watcher fan-out leaves the graph not current while a whole-vault marker
+  stands or the batch's receipts are queued
+- **THEN** the watcher marks no external change
+- **AND** later governed writes to those paths are not fenced
 
 #### Scenario: A standalone caller still gets a converged graph
 

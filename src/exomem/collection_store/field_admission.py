@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
-from .. import record_formats
+from .. import item_keys, record_formats
 from ..governance import policy, raw_protection
 from .connection import CollectionStoreError
 
@@ -113,7 +113,7 @@ def _mapping_sources(mapping, manifest, fmt):
             if spec.items is not None:
                 descendants(target, source, spec.items)
 
-    from .import_time import basis_paths
+    from .import_time import TIME_TARGETS, basis_paths
 
     for target, source in mapping.get("fields", {}).items():
         if isinstance(source, dict) and "const" in source:
@@ -123,7 +123,7 @@ def _mapping_sources(mapping, manifest, fmt):
     time_mapping = mapping.get("time") or {}
     # All time outputs share the declared source dependencies, an interval read from the source included.
     time_sources = tuple(source_path(path) for basis in time_mapping.get("from", []) for path in basis_paths(basis))
-    time_targets = tuple((time_mapping[key],) for key in ("instant", "offset", "local_date") if time_mapping.get(key))
+    time_targets = tuple((time_mapping[key],) for key in TIME_TARGETS if time_mapping.get(key))
     links = fields + [(target, source, manifest.schema.fields.get(target[0]))
                       for target in time_targets for source in time_sources]
     protected = {path for path, declaration in coverage.items() if declaration["classification"] == "location"}
@@ -185,12 +185,29 @@ def mapping_classes(mapping, manifest, fmt):
             for path, value in mapped.items()}
 
 
+def _bound_mappings(conn, manifest):
+    """The ``(declared mapping, format)`` of every import job the collection has bound."""
+    bound = (json.loads(encoded)["mapping"] for (encoded,) in conn.execute(
+        "SELECT binding_json FROM import_jobs WHERE collection_id=?", (manifest.collection_id,)))
+    return [(mapping["declared"], mapping["format"]) for mapping in bound]
+
+
+def location_key_fields(conn, manifest, pending=()):
+    """The natural-key fields that the manifest, or any one import of the collection or in ``pending``, classifies as location.
+
+    Each declaration counts alone, because another import's missing coverage resolves a field to unresolved
+    and would hide a location that this one declares. Missing coverage on its own is not a location.
+    """
+    declarations = [*_bound_mappings(conn, manifest), *pending]
+    found = set()
+    for authority in (_mapping_authority([], manifest), *(_mapping_authority([each], manifest) for each in declarations)):
+        found.update(name for name in manifest.schema.natural_key if _dependency(manifest, *authority, name) == "location")
+    return [name for name in manifest.schema.natural_key if name in found]
+
+
 def canonical_basis(conn, manifest):
-    jobs, declarations = [], set()
-    for (encoded,) in conn.execute("SELECT binding_json FROM import_jobs WHERE collection_id=?", (manifest.collection_id,)):
-        mapping = json.loads(encoded)["mapping"]
-        declarations.add(_json([mapping["format"], mapping["declared"]]))
-        jobs.append((mapping["declared"], mapping["format"]))
+    jobs = _bound_mappings(conn, manifest)
+    declarations = {_json([fmt, declared]) for declared, fmt in jobs}
     mappings, inferred = _mapping_authority(jobs, manifest)
     store_id = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     declaration = {name: _spec(spec) for name, spec in manifest.schema.fields.items()}
@@ -208,6 +225,8 @@ class FieldPlan:
     manifest: object
     owner: bool
     grants: tuple
+    # An ordered-v1 item key spells the natural key, so it is withheld with any natural-key field the plan withholds.
+    item_key_withheld: bool = False
 
     @property
     def whole_fields(self):
@@ -290,7 +309,12 @@ def resolve(operation, manifest):
                       fields=MappingProxyType({name: spec for name, spec in manifest.schema.fields.items() if name in selected}),
                       natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)))
     # A false refusal hides the unresolved field from recipients; accepting could disclose a private subtree.
-    return FieldPlan(basis, MappingProxyType(selected), visible, False, grants)
+    # The store records the scheme; a manifest parsed from its text carries the default.
+    scheme = operation.conn.execute("SELECT item_key_scheme FROM collections WHERE collection_id=?",
+                                    (manifest.collection_id,)).fetchone()
+    spelled = (scheme is not None and scheme[0] == item_keys.ORDERED_V1
+               and len(visible.schema.natural_key) < len(manifest.schema.natural_key))
+    return FieldPlan(basis, MappingProxyType(selected), visible, False, grants, item_key_withheld=spelled)
 
 
 def public_basis(operation, manifest):

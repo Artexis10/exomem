@@ -437,19 +437,25 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
 
 
-@pytest.mark.parametrize("readable_for", [0.0, 400.0])
+@pytest.mark.parametrize(
+    ("readable_for", "barrier"),
+    [(0.0, False), (400.0, False), (0.0, True)],
+    ids=["unreadable", "readable_first", "behind_a_barrier"],
+)
 def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_the_ladder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable_for: float
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable_for: float, barrier: bool
 ) -> None:
     """A queue that never drains still converges, but not inside a write storm.
 
-    The availability arm stays out while receipts are queued, because the queue
-    owns that repair. A queue that can never drain would then leave the graph
-    unreadable forever, so the loop asks for a whole-vault rebuild once queued
-    work has been stuck behind an unreadable graph for the whole backoff
-    ladder. Write signals cut each backoff wait short, so the bound is wall
-    time, not a count of passes: a burst of transient refusals must not buy a
-    whole-vault pass. Time the graph stayed readable does not count either.
+    The availability arm and barrier recovery stay out while receipts are
+    queued, because the queue owns that repair. A queue that can never drain
+    would then leave the graph unreadable forever, so the loop asks for a
+    whole-vault rebuild once queued work has been stuck behind an unreadable
+    graph for the whole backoff ladder. Write signals cut each backoff wait
+    short, so the bound is wall time, not a count of passes: a burst of
+    transient refusals must not buy a whole-vault pass. Time the graph stayed
+    readable does not count either. A standing barrier does not reset the
+    count, or a queue stuck behind one would never escalate.
 
     Simulated time: each wait returns at the next write signal, 0.2 s apart,
     or at its own timeout when that comes first.
@@ -483,6 +489,10 @@ def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_
         graph_drain, "_availability_pending", lambda _root: now[0] >= unreadable_from
     )
     monkeypatch.setattr(graph_drain, "_work_once", lambda _root: 0)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: barrier)
+    # A barrier holds each pass like whole-vault work, and per-path work drains
+    # on every wake of that hold. This queue never drains.
+    monkeypatch.setattr(graph_drain, "_drain_once", lambda _root: 0)
     requests: list[float] = []
     # The requested marker stands from then on, as the real one does.
     monkeypatch.setattr(graph_drain, "_marker_pending", lambda _root: bool(requests))
@@ -902,6 +912,138 @@ def test_cold_recovery_rebuilds_unqueued_recall_content_before_advertising_curre
         ).fetchone() is not None
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("scoped_mark", [False, True], ids=["unmarked", "scoped_mark"])
+def test_a_barrier_behind_queued_repair_waits_for_the_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+    scoped_mark: bool,
+) -> None:
+    """Queued per-path repair owns the barrier; recovery waits instead of rebuilding.
+
+    The page's receipt is queued, but the registry has not recorded its bytes
+    yet, so the drain leaves it queued and the queue does not shrink. Recovery
+    then ran a whole-vault pass, or, with the page's own scoped mark, queued
+    the full marker. Once the page is recorded the queued receipt converges
+    the graph by itself.
+    """
+    vault = _published_vault(tmp_path)
+    page = vault / "Knowledge Base/Notes/Insights/c.md"
+    rel = page.relative_to(vault).as_posix()
+    page.write_text(_page("C", "C links to [[a]] before the registry saw it."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [rel])
+    EpistemicGraphIndex(vault).suspend_reads()
+    epoch = freshness.mark_external_pending(vault, paths=[page]) if scoped_mark else 0
+    passes: list[str] = []
+    real_pass = EpistemicGraphIndex._rebuild_all_off_boundary
+
+    def counted(self: EpistemicGraphIndex, **kwargs: Any) -> Any:
+        passes.append("pass")
+        return real_pass(self, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_off_boundary", counted)
+
+    graph_drain._work_once(vault)
+
+    assert passes == [], "barrier recovery rebuilt the vault behind queued repair"
+    assert deferred_index.graph_full_rebuild_pending(vault) is None, (
+        "barrier recovery queued whole-vault debt behind queued repair"
+    )
+    assert deferred_index.list_graph_paths(vault) == [rel]
+
+    freshness.on_files_changed(vault, changed=[page])
+    if scoped_mark:
+        freshness.clear_external_pending(vault, through=epoch)
+    graph_drain._work_once(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert passes == []
+
+
+@pytest.mark.parametrize("scoped_mark", [False, True], ids=["unmarked", "scoped_mark"])
+def test_a_barrier_behind_queued_repair_that_cannot_drain_recovers_at_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    real_barrier: None,
+    scoped_mark: bool,
+) -> None:
+    """Queued receipts own a barrier's repair only while the drain can repair per path.
+
+    A restarted worker has no live recall registry, so the drain cannot repair
+    the queued page per path and leaves it queued. Recovery declined behind it
+    as `queue_owns_repair` until the stall escalation, 275 s later, and a client
+    polling the unavailable graph gave up after 120 s. With the page's own
+    scoped mark, recovery routes the barrier through the full marker instead.
+    """
+    vault = _published_vault(tmp_path)
+    page = vault / "Knowledge Base/Notes/Insights/c.md"
+    page.write_text(_page("C", "C changed before the worker restarted."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [page.relative_to(vault).as_posix()])
+    EpistemicGraphIndex(vault).suspend_reads()
+    if scoped_mark:
+        freshness.mark_external_pending(vault, paths=[page])
+    freshness.invalidate(vault)
+    assert not freshness.recall_is_live(vault, "vault"), "the restart shape needs a cold registry"
+
+    with caplog.at_level("INFO", logger="exomem.epistemic_graph"):
+        graph_drain._work_once(vault)
+        graph_drain._work_once(vault)
+
+    assert "graph barrier repair declined reason=queue_owns_repair" not in caplog.text, (
+        "recovery declined behind a queue the drain cannot repair per path"
+    )
+    assert EpistemicGraphIndex(vault).available(), "the barrier was not recovered"
+
+
+def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waited_the_stall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """Writes that drain around a stuck receipt do not hold the barrier for good.
+
+    The stuck page's registry never records its bytes, so its receipt stays
+    queued while a recorded page drains on every pass. That progress restarts
+    the stall escalation's clock, and recovery declined behind the queue on
+    every pass. The oldest receipt's age bounds it at the stall threshold.
+    """
+    vault = _published_vault(tmp_path)
+    notes = vault / "Knowledge Base/Notes/Insights"
+    stuck = notes / "stuck.md"
+    stuck.write_text(_page("Stuck", "Stuck links to [[a]]."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [stuck.relative_to(vault).as_posix()])
+    EpistemicGraphIndex(vault).suspend_reads()
+    real_clock = time.time
+    waited = 0.0
+    monkeypatch.setattr(deferred_index, "time", SimpleNamespace(time=lambda: real_clock() + waited))
+
+    def drainable_write(name: str) -> str:
+        page = notes / f"{name}.md"
+        page.write_text(_page(name, f"{name} links to [[b]]."), encoding="utf-8")
+        freshness.on_files_changed(vault, changed=[page])
+        rel = page.relative_to(vault).as_posix()
+        deferred_index.add_graph_receipts(vault, [rel])
+        return rel
+
+    early = drainable_write("early")
+    graph_drain._work_once(vault)
+
+    assert early not in deferred_index.list_graph_paths(vault)
+    assert not EpistemicGraphIndex(vault).available(), (
+        "recovery ran behind a queue the drain is still repairing"
+    )
+
+    waited = graph_drain.stall_seconds() + 1.0
+    late = drainable_write("late")
+    graph_drain._work_once(vault)
+
+    assert late not in deferred_index.list_graph_paths(vault)
+    assert EpistemicGraphIndex(vault).available(), (
+        "a receipt that never drains held the barrier past the stall threshold"
+    )
 
 
 def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(
@@ -1325,7 +1467,7 @@ def test_a_publication_elsewhere_ends_the_drains_backoff(
     time.sleep(0.3)
     assert len(attempts) == 1, "a write signal cut a 30 s whole-vault backoff short"
 
-    graph_drain.note_graph_progress()
+    graph_drain.note_graph_progress(tmp_path)
 
     assert _wait_for(lambda: len(attempts) >= 2, timeout=5.0), (
         "a publication by another owner did not wake the backed-off drain"
