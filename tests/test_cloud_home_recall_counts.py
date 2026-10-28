@@ -12,6 +12,9 @@ from test_governance_egress import write_rule, write_scope
 
 from exomem import call_ledger, working_set_index, working_set_runtime
 
+# These tests count the `anchors` packet's delivered pages, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 activation_vault = activation_surface.activation_vault
 planned = planning_surface.planned
 
@@ -87,3 +90,19 @@ def test_home_counts_planning_items_without_counting_their_filing_home(
     assert [(event["action"], event["items"]) for event in activity["events"]] == [
         ("recalled", None if missing_item_pages else 4),
     ]
+
+
+def test_home_counts_a_map_packet_as_unknown_not_zero(activation_vault, cell, monkeypatch):
+    """A map lists catalogue entries without a per-page basis, so Home cannot say how many pages it released."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+
+    async def scenario(client):
+        packet = await _call(client, "activate_context", {"turn": activation_surface.TURN}, oauth_client="claude.ai")
+        assert packet["abstained"] is False
+        assert "map" in packet
+        return await _call(client, "bootstrap", {"section": "activity"})
+
+    activity = cell(scenario)
+    rows = [json.loads(line) for line in call_ledger.ledger_path().read_text().splitlines()]
+    assert [row["item_count"] for row in rows if row["tool"] == "activate_context"] == [None]
+    assert [(event["action"], event["items"]) for event in activity["events"]] == [("recalled", None)]

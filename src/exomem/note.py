@@ -52,8 +52,10 @@ from . import (
     note_types,
     relation_registry,
     relation_review,
+    semantic_contract,
     semantic_units,
     semantic_writes,
+    source_coverage,
     tag_variants,
     temporal,
     vocabulary_resolution,
@@ -310,6 +312,7 @@ class _PreparedNote:
 def _build_write_feedback(
     *,
     vault_root: Path,
+    registry: relation_registry.RelationRegistry,
     note_type: str,
     rel_path: str,
     status: str | None,
@@ -322,7 +325,6 @@ def _build_write_feedback(
     suggestions_count: int,
     suggestions_requested: bool,
 ) -> dict:
-    registry = relation_registry.load_registry(vault_root)
     document = semantic_units.parse_semantic_units(
         body_clean,
         relation_registry=registry,
@@ -358,7 +360,10 @@ def _build_write_feedback(
             generic_targets.append(target)
 
     typed_note_relations = len(registered_note_relations)
-    typed_block_relations = sum(len(unit.relations) for unit in document.rich_units)
+    typed_block_relations = sum(
+        registry.resolve(relation.kind).status != "unregistered"
+        for unit in document.rich_units for relation in unit.relations
+    )
     relation_kinds = {relation.kind for relation in document.note_relations} | {
         relation.kind for unit in document.rich_units for relation in unit.relations
     }
@@ -396,8 +401,9 @@ def _build_write_feedback(
         else:
             next_actions.append(
                 "cite the `Sources/` page this drew from in `sources:` — each entry "
-                "appends this note's wikilink to that source's `ingested_into:`, which "
-                "is what marks the source processed"
+                "appends this note's wikilink to that source's `ingested_into:`. "
+                "A live citing derivative clears the citation backlog; semantic "
+                "compilation remains unassessed"
             )
     if relation_debt:
         next_actions.append(
@@ -429,6 +435,7 @@ def _build_write_feedback(
     relation_feedback: dict[str, object] = {
         "typed_note": typed_note_relations,
         "typed_block": typed_block_relations,
+        "count_basis": "registered relation syntax, including generic associations; not semantic specificity",
         "errors": [error.as_dict() for error in document.note_relation_errors],
         "relation_debt": relation_debt,
     }
@@ -457,6 +464,7 @@ def _build_write_feedback(
             "backrefs_planned": backrefs_planned,
             "required": note_type in SOURCES_REQUIRED_TYPES,
             "missing": note_type in SOURCES_REQUIRED_TYPES and not sources_norm,
+            "semantic_compilation": source_coverage.compilation_guidance(vault_root, sources_norm),
         },
         "links": {
             "body_wikilinks": len(body_targets),
@@ -754,6 +762,9 @@ def _legacy_note(
     kb = kb_root(vault_root)
     write_feedback = _build_write_feedback(
         vault_root=vault_root,
+        registry=relation_registry.load_for_page(
+            vault_root, note_path.relative_to(vault_root).as_posix(), parse_frontmatter(note_md)[0],
+        ),
         note_type=note_type,
         rel_path=note_path.relative_to(vault_root).as_posix(),
         status=status,
@@ -2184,6 +2195,13 @@ def note(
             destination,
             encoded_token,
         )
+    # Feedback shares the candidate's selected definitions, without a post-commit page reread.
+    feedback_registry = semantic_contract._authored_relations(
+        preflight.semantic_state,
+        preflight.corpus.registry if preflight.corpus is not None else relation_registry.load_for_page(
+            root, destination, preflight.semantic_state.frontmatter,
+        ),
+    )
     commit_started = time.perf_counter()
     from . import writer_lease
 
@@ -2271,6 +2289,7 @@ def note(
     )
     feedback = _build_write_feedback(
         vault_root=root,
+        registry=feedback_registry,
         note_type=note_type,
         rel_path=destination,
         status=status,

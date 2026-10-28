@@ -1309,22 +1309,29 @@ def _delegated_paths(
     unreadable, or not explained by newer custody or the lanes -- makes the
     whole batch unprovable, exactly as before.
     """
-    if any(state not in {"after", "other", "before"} for state in path_states):
+    retired = frozenset(str(row[0]) for row in connection.execute(
+        "SELECT rel_path FROM pending_recall_rows WHERE batch_id=? AND state='retired'",
+        (receipt.batch_id,),
+    ))
+    open_states = [(path, state) for path, state in zip(receipt.paths, path_states, strict=True)
+                   if path.rel_path not in retired]
+    # nosemgrep: ep-word-membership -- _canonical_path_state fixes these exact receipt observations.
+    if any(state not in {"after", "other", "before"} for _, state in open_states):
         return None
     moved = [
         path.rel_path
-        for path, state in zip(receipt.paths, path_states, strict=True)
+        for path, state in open_states
         if state == "other"
     ]
     returned = [
         (path.rel_path, path.before_hash)
-        for path, state in zip(receipt.paths, path_states, strict=True)
+        for path, state in open_states
         if state == "before"
     ]
     if not moved and not returned:
-        return frozenset()
+        return retired
     handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved, returned)
-    return handed_on if len(handed_on) == len(moved) + len(returned) else None
+    return retired | handed_on if len(handed_on) == len(moved) + len(returned) else None
 
 
 def _retire_delegated_rows(
@@ -1948,6 +1955,72 @@ def pending_visibility_snapshot_is_current(
             connection.close()
     except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
         return False
+
+
+def retire_imported_visibility(
+    vault_root: Path, *, limit: int, after: tuple[str, str] = ("", ""), now: float | None = None,
+) -> tuple[tuple[str, str], int]:
+    """Hand a bounded file-custody prefix to its verified SQL successor.
+
+    The worker cursor visits unknown siblings without changing their custody.
+    Readers keep their bounded hydration and never make this mutation.
+    """
+    if limit <= 0 or not deferred_index.store_path(vault_root).exists():
+        return ("", ""), 0
+    from .collection_store import legacy_originals, ownership
+    from .collection_store.connection import CollectionStoreError
+    from .cli_ops import OpError
+    from .writer_lease import active_manager
+
+    retired_at = _timestamp(now)
+    with active_manager().consistency_guard(
+        vault_root, operation="derived_imported_custody", holder_kind="derived-worker",
+    ):
+        reader = _connect_receipt_read(vault_root)
+        try:
+            rows = reader.execute(
+                "SELECT p.rel_path,p.batch_id,p.component_revision,p.canonical_generation,p.state,"
+                "d.after_hash,b.state FROM pending_recall_rows p INDEXED BY pending_recall_active "
+                "JOIN derived_batch_paths d ON d.batch_id=p.batch_id AND d.rel_path=p.rel_path "
+                "JOIN derived_batches b ON b.batch_id=p.batch_id "
+                "WHERE p.state!='retired' AND (p.rel_path,p.batch_id)>(?,?) "
+                "ORDER BY p.rel_path,p.batch_id LIMIT ?", (*after, int(limit)),
+            ).fetchall()
+        finally:
+            reader.close()
+        cursor = (str(rows[-1][0]), str(rows[-1][1])) if len(rows) == limit else ("", "")
+        candidates = [row for row in rows if ownership.relevant(row[0])
+                      and row[6] not in {"aborted", "superseded"}]
+        if not candidates:
+            return cursor, 0
+        try:
+            # Lock order is manager, canonical SQL snapshot, then deferred CAS.
+            # Keep ownership fenced through commit, including during export.
+            with ownership.read_snapshot(vault_root) as (canonical, proof):
+                successors = [row for row in candidates if legacy_originals.owns_file_receipt(
+                    canonical, proof, vault_root, row[0], row[5])]
+                if not successors:
+                    return cursor, 0
+                connection = deferred_index._connect(vault_root, create=True)
+                try:
+                    with connection:
+                        connection.execute("BEGIN IMMEDIATE")
+                        retired = 0
+                        for rel, batch, revision, generation, state, digest, batch_state in successors:
+                            retired += connection.execute(
+                                "UPDATE pending_recall_rows SET state='retired',updated_at=? "
+                                "WHERE rel_path=? AND batch_id=? AND component_revision=? "
+                                "AND canonical_generation=? AND state=? AND EXISTS ("
+                                "SELECT 1 FROM derived_batch_paths d JOIN derived_batches b USING(batch_id) "
+                                "WHERE d.batch_id=? AND d.rel_path=? AND d.after_hash IS ? AND b.state=?)",
+                                (retired_at, rel, batch, revision, generation, state, batch, rel, digest, batch_state),
+                            ).rowcount
+                    return cursor, retired
+                finally:
+                    connection.close()
+        except (CollectionStoreError, OpError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+            # File-only cells and incomplete ownership retain custody for another pass.
+            return cursor, 0
 
 
 def retire_pending_visibility(

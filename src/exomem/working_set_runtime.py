@@ -81,17 +81,17 @@ _PACKET_WARNING_EMITTED = False
 
 
 def activation_packet_mode() -> str:
-    """The two packet modes fixed by the activation specification; invalid settings keep the default."""
+    """The two packet modes fixed by the activation specification; `maps` is the default, `anchors` the rollback."""
     global _PACKET_WARNING_EMITTED
-    mode = os.environ.get("EXOMEM_ACTIVATION_PACKET", "anchors")
+    mode = os.environ.get("EXOMEM_ACTIVATION_PACKET", "maps")
     # nosemgrep: ep-word-set -- The activation specification fixes both packet modes.
     if mode in ("anchors", "maps"):
         return mode
     with _CACHE_LOCK:
         if not _PACKET_WARNING_EMITTED:
-            log.warning("invalid EXOMEM_ACTIVATION_PACKET; using anchors")
+            log.warning("invalid EXOMEM_ACTIVATION_PACKET; using maps")
             _PACKET_WARNING_EMITTED = True
-    return "anchors"
+    return "maps"
 
 
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(

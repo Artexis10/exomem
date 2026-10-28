@@ -1,0 +1,6 @@
+# Topic carriers name the domains that the entries of a project key, a folder or a tag join.
+# Exomem ships none: a vault declares them in `_Schema/topic-carriers.yaml`, one entry per carrier, with
+# `attributes: {kind: project|folder|tag, match: <key|folder|tag>, topics: [<domain key>], origin: {<domain key>: inferred|reviewed}, rejected: [<domain key>]}`.
+schema_version: 1
+registry: topic-carriers
+entries: {}

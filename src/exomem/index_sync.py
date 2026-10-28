@@ -29,7 +29,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -132,13 +132,23 @@ class DerivedAcknowledgementSnapshot:
 
 def derived_acknowledgement_snapshot(
     statuses: Iterable[DerivedComponentStatus],
+    *,
+    required: Iterable[DerivedComponent] | None = None,
 ) -> DerivedAcknowledgementSnapshot:
-    """Separate non-graph, graph and advisory outcomes from one exact snapshot."""
+    """Project observed outcomes; unread required components remain pending."""
     by_component = {status.component: status for status in statuses}
-    if set(by_component) != set(DerivedComponent):
+    if required is None and set(by_component) != set(DerivedComponent):
         raise ValueError("derived acknowledgement requires every closed component")
+    required_components = frozenset(DerivedComponent if required is None else required)
+    if not (set(by_component) | required_components) <= set(DerivedComponent):
+        raise ValueError("derived acknowledgement requires closed components")
 
-    def outcome(status: DerivedComponentStatus, *, advisory: bool = False) -> str:
+    def outcome(component: DerivedComponent, *, advisory: bool = False) -> str:
+        status = by_component.get(component)
+        if status is None:
+            if component in required_components:
+                return "pending"
+            return "not_required" if advisory else "completed"
         if status.state == "not_required":
             return "not_required" if advisory else "completed"
         if status.state == "completed":
@@ -156,7 +166,7 @@ def derived_acknowledgement_snapshot(
     unfinished: list[str] = []
     non_graph_outcomes: list[str] = []
     for component in _FAST_ACK_NON_GRAPH_COMPONENTS:
-        component_outcome = outcome(by_component[component])
+        component_outcome = outcome(component)
         non_graph_outcomes.append(component_outcome)
         if component_outcome != "completed":
             unfinished.append(component.value)
@@ -181,9 +191,7 @@ def derived_acknowledgement_snapshot(
     return DerivedAcknowledgementSnapshot(
         derived_sync=derived_sync,
         derived_sync_components=tuple(sorted(unfinished)),
-        advisory_sync=outcome(
-            by_component[DerivedComponent.WRITE_ADVISORY], advisory=True
-        ),
+        advisory_sync=outcome(DerivedComponent.WRITE_ADVISORY, advisory=True),
         diagnostics=diagnostics,
     )
 
@@ -795,6 +803,75 @@ def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
     return deferred_index.add_full(vault_root, _rel_md_paths(vault_root, paths))
 
 
+def graph_repair_is_owned(
+    vault_root: Path,
+    component: IndexComponentOutcome,
+    replaced_rels: set[str],
+    *,
+    note: Callable[[str], None] = lambda _reason: None,
+) -> bool:
+    """Whether a graph component left its repair to a flight or to the queue.
+
+    A registration owns it when a flight exists for the exact checkpoint. A
+    deferral owns it when its code claims durable coverage and the queue holds
+    every graph input in `replaced_rels`. Without a checkpoint only
+    `graph_repair_queued_for_drain` claims that coverage, and that epoch has no
+    generation to compare, so any queued receipt for a path counts. Any other
+    component answers False. `full_upsert_succeeded` and the watcher's fan-out
+    both ask this; `note` counts the queue judgement for `deferral_telemetry`.
+    """
+    from . import graph_sync
+
+    if component.component != "epistemic_graph":
+        return False
+    checkpoint = component.graph_checkpoint
+    if checkpoint is None:
+        if component.code != "graph_repair_queued_for_drain":
+            return False
+    # A closed `GraphDispatchResult` outcome set: only these two may own repair.
+    elif component.outcome not in {"registered", "deferred"}:
+        return False
+    elif graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
+        return True
+    elif component.outcome != "deferred" or component.code not in _GRAPH_COVERAGE_CODES:
+        return False
+    # Mirror of the embeddings warm-up carve-out in `full_upsert_succeeded`:
+    # per-path graph receipts ARE the exact durable demand for those paths, so
+    # minting a whole-component refresh on top is the same double-accounting.
+    # This matters most precisely where it used to hurt: during
+    # `recovery_required` the registered checkpoint never equals the live one,
+    # so the clause above never fires and EVERY write minted -- backlog feeding
+    # the backlog.
+    #
+    # Only a code that means "durably queued" may be blessed;
+    # `graph_index_disabled`/`graph_scheduling_disabled` record nothing, so a
+    # stale queue entry can never launder them.
+    graph_rels = {rel for rel in replaced_rels if graph_sync.is_graph_input_path(rel)}
+    if graph_rels:
+        # Only receipts queued at or after the generation this deferral
+        # reports. A row naming the same path from an earlier generation is
+        # repair that is already owed for older bytes; blessing this batch with
+        # it would let a stale queue entry launder a fresh deferral, and the
+        # path would sit with nothing scheduled for what just changed. An
+        # unknown generation cannot clear that bar either: a receipt that
+        # cannot say what it owes proves nothing about this checkpoint. A
+        # deferral without a checkpoint reports no generation and sets no bar.
+        graph_receipt_rels = {
+            receipt.rel_path
+            for receipt in deferred_index.snapshot_graph(vault_root)
+            if checkpoint is None
+            or (
+                receipt.graph_generation is not None
+                and receipt.graph_generation >= checkpoint.generation
+            )
+        }
+        if graph_rels <= graph_receipt_rels:
+            note("covered_deferral_accepted")
+            return True
+    note("uncovered_deferral_escalated")
+    return False
+
+
 def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object) -> bool:
     """Whether a full-upsert report completed or retained exact durable work."""
     from . import graph_sync, index_paths
@@ -811,7 +888,6 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
     ):
         return False
     receipt_rels: set[str] | None = None
-    graph_receipt_rels: set[str] | None = None
     replaced_rels: set[str] = set()
     root = Path(vault_root).resolve()
     for path in replaced:
@@ -839,51 +915,9 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
             "registered",
             "deferred",
         }:
-            checkpoint = component.graph_checkpoint
-            if checkpoint is None:
-                return False
-            if graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
+            if graph_repair_is_owned(vault_root, component, replaced_rels, note=_note_deferral):
                 continue
-            if component.outcome == "deferred" and component.code in _GRAPH_COVERAGE_CODES:
-                # Mirror of the embeddings warm-up carve-out above: per-path
-                # graph receipts ARE the exact durable demand for those paths,
-                # so minting a whole-component refresh on top is the same
-                # double-accounting. This matters most precisely where it used
-                # to hurt: during `recovery_required` the registered checkpoint
-                # never equals the live one, so the clause above never fires and
-                # EVERY write minted — backlog feeding the backlog.
-                #
-                # Only a code that means "durably queued" may be blessed;
-                # `graph_index_disabled`/`graph_scheduling_disabled` record
-                # nothing, so a stale queue entry can never launder them.
-                graph_rels = {
-                    rel for rel in replaced_rels if graph_sync.is_graph_input_path(rel)
-                }
-                if graph_rels:
-                    if graph_receipt_rels is None:
-                        # Only receipts queued at or after the generation this
-                        # deferral reports. A row naming the same path from an
-                        # earlier generation is repair that is already owed for
-                        # older bytes; blessing this batch with it would let a
-                        # stale queue entry launder a fresh deferral, and the
-                        # path would sit with nothing scheduled for what just
-                        # changed. An unknown generation cannot clear that bar
-                        # either: a receipt that cannot say what it owes proves
-                        # nothing about this checkpoint.
-                        required_generation = checkpoint.generation
-                        graph_receipt_rels = {
-                            receipt.rel_path
-                            for receipt in deferred_index.snapshot_graph(vault_root)
-                            if (
-                                receipt.graph_generation is not None
-                                and receipt.graph_generation >= required_generation
-                            )
-                        }
-                    if graph_rels <= graph_receipt_rels:
-                        _note_deferral("covered_deferral_accepted")
-                        continue
-                _note_deferral("uncovered_deferral_escalated")
-                return False
+            return False
         if component.component == "embeddings" and component.outcome == "deferred":
             # A deferral that is already durably queued path-by-path is not a
             # batch failure — declaring it one is what escalated an O(1) cause
@@ -1134,10 +1168,13 @@ def _drain_graph_work(
         # Whole-vault convergence covers every receipt in this exact snapshot;
         # compare-and-swap receipt clearing preserves anything newer.
         return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
+    from . import graph_drain
+
     if not index.epoch_admits_incremental_repair():
         # Not a warning: under a live writer the ordinary cause is a batch
         # mid-flight, which the next tick clears. The work stays queued.
         log.info("deferred graph drain skipped; graph epoch is not settled")
+        graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0
     processed = 0
     batch = [vault_root / receipt.rel_path for receipt in receipts]
@@ -1149,6 +1186,10 @@ def _drain_graph_work(
             # Not any page's fault, so no receipt moves: a writer's debt signal
             # or the drain's backoff retries the whole batch. Isolating would
             # meet the same refusal once per page, each with a boundary wait.
+            # The per-path record keeps its last verdict: a held boundary says
+            # nothing about per-path readiness, and releasing barrier recovery
+            # would start a whole-vault pass against that same boundary. A
+            # refusal that persists releases it through the oldest receipt's age.
             log.info("deferred graph batch refused (%s); work remains queued", refusal)
             return 0
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
@@ -1162,7 +1203,12 @@ def _drain_graph_work(
         # retries, and the paths that genuinely require a rebuild reach one
         # through the checkpoint's own full-scope marker.
         log.info("deferred graph drain deferred; vault not ready for incremental repair")
+        graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0
+    if report:
+        # The pass ran per path. A failed batch, isolated below, says nothing
+        # about readiness either way.
+        graph_drain.note_per_path_repair(vault_root, admissible=True)
     covered = set(report.get("indexed", ()))
     if covered:
         done = [receipt for receipt in receipts if receipt.rel_path in covered]
@@ -1791,11 +1837,18 @@ def upsert_after_write(
     requested_report, requested_truncated = _bounded_paths(requested_rels)
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
     if not eligible and not watcher_mode:
-        from . import epistemic_graph
+        from . import epistemic_graph, graph_sync
+        from .writer_lease import active_derived_batch_custody
 
         graph_component = (
             _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
-            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            # Operational writes must leave existing graph debt with its durable
+            # owner, and so must a background caller that nobody waits on: the
+            # drain converges the marker off this thread. A request without
+            # custody keeps the synchronous path the explicit rollback restores.
+            if not active_derived_batch_custody(vault_root)
+            and deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            and not graph_sync.standalone_join_is_waived()
             else None
         )
         return IndexSyncReport(
@@ -2300,9 +2353,10 @@ def converge_derived_component(
             if removed:
                 publications.append(delete_after_remove(root, removed))
             if written:
+                # Receipt-owned fan-out replays committed paths through the graph's currency proof.
                 publications.append(upsert_after_write(
                     root, written, created_paths=created,
-                    publish_corpus_change=True, semantic_edited=not service,
+                    publish_corpus_change=True, semantic_edited=not service, replayed=True,
                 ))
         reports = tuple(publications)
         if any(item.reconcile_required for item in reports):

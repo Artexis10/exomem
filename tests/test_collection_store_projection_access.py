@@ -2,6 +2,7 @@
 
 import pytest
 from test_collection_store_governance import inspection_token, redeem, session
+from test_collection_store_migration import env as env
 from test_collection_store_service import service as service
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
@@ -111,9 +112,8 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store, 
     bound = command_surface.bind_vault(command.leaf, store.root, command=command)
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
         result = bound(action=action, collection=CID, **({"include_agent_history": True} if action == "query" else {}))
-        if action == "inspect":
-            assert path in {entry["path"] for entry in result["source_versions"]}
-        else:
+        assert path in {entry["path"] for entry in result["source_versions"]}
+        if action == "query":
             assert path in {event["canonical_path"] for event in result["agent_history"]["events"]}
         clone = json.loads(json.dumps(result))
         filtered = egress.postfilter("record_memory", clone, store.root)
@@ -143,10 +143,109 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store, 
             duplicate["agent_history"]["events"] *= 2
             with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
                 governance._seal_metadata_projection(duplicate, evidence)
+            shifted = deepcopy(dict(result))
+            shifted["source_versions"] = shifted["source_versions"][1:]
+            shifted = governance._seal_metadata_projection(shifted, evidence)
+            assert egress.postfilter("record_memory", shifted, store.root)["source_versions"] == shifted["source_versions"]
+            duplicate = deepcopy(dict(shifted))
+            duplicate["source_versions"] *= 2
+            with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                governance._seal_metadata_projection(duplicate, evidence)
 
 
+@pytest.mark.parametrize("include_history", [False, True])
+@pytest.mark.parametrize("restricted", [False, True])
+def test_serving_mcp_query_keeps_canonical_sources_after_an_unaccepted_view_edit(
+        env, capsys, include_history, restricted):
+    """The serving store's independent MCP pass must retain canonical row versions despite edited view bytes."""
+    from test_collection_store_migration import legacy_vault, migrate, printed, start_service
+
+    from exomem import command_surface, commands
+
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    printed(capsys)
+    assert migrate(root, "apply") == 0
+    printed(capsys)
+    started = start_service(root)
+    try:
+        command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+        bound = command_surface.bind_vault(command.leaf, root, command=command)
+        with request_scope(_external() if restricted else owner_principal()):
+            before = bound(action="query", collection=CID, include_agent_history=include_history)
+            path = next(entry["path"] for entry in before["source_versions"]
+                        if entry["path"] != manifest_path())
+            page = root / path
+            page.write_text(page.read_text() + "\nUnaccepted local edit\n")
+            after = bound(action="query", collection=CID, include_agent_history=include_history)
+        assert after["rows"] == before["rows"]
+        assert after["source_versions"] == before["source_versions"]
+        assert "Unaccepted local edit" not in str(after)
+    finally:
+        started.stop()
+
+
+@pytest.mark.parametrize("layout", ["markdown-items", "markdown-log"])
+@pytest.mark.parametrize("change", ["hidden-field", "unreturned-row", "returned-row"])
+def test_query_source_freshness_tracks_only_returned_public_values(store, layout, change):
+    """A hidden field or an unreturned row cannot invalidate a sealed public source; a returned public edit must."""
+    text = (_log_manifest() if layout == "markdown-log" else manifest_text()).replace(
+        "    count: {type: integer}", "    count: {type: integer, classification: location}").replace(
+        "details: {type: array,", "details: {type: array, classification: location,")
+    store.create_collection(manifest_path(), text, why="create")
+    first = store.append_record(CID, item={"title": "One", "count": 1} if layout == "markdown-items"
+                                else {"title": "One"}, item_key=KEY, why="capture")
+    second = store.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        result = _through_dispatcher(store.root, "record_memory", action="query", collection=CID,
+                                     columns=["title"], sort_by="title", limit=1)
+        assert result["rows"][0]["title"] == "One"
+        if change == "hidden-field" and layout == "markdown-log":
+            changes = {"details": [{"field": "private", "value": "changed"}]}
+        else:
+            changes = {"count": 2} if change == "hidden-field" else {"title": "Changed"}
+        key = OTHER if change == "unreturned-row" else KEY
+        with request_scope(owner_principal()):
+            store.update_record(CID, item_key=key, changes=changes,
+                                expected_container_hash=second["after_container_hash"],
+                                expected_item_version=(second if key == OTHER else first)["after_item_hash"],
+                                why="correct")
+        if change == "returned-row":
+            with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                egress.postfilter("record_memory", result, store.root)
+        else:
+            assert egress.postfilter("record_memory", result, store.root) == result
+
+
+@pytest.mark.parametrize("include_history", [False, True])
+def test_planning_query_rechecks_sources_for_hierarchy_nodes_outside_the_row_limit(store, include_history):
+    """A hierarchy-only ancestor owns source metadata and cannot retain a stale public version."""
+    store.create_collection(manifest_path("planning"), manifest_text("planning"), why="create")
+    parent = store.append_record(CID, item={"title": "Parent", "kind": "outcome"}, item_key=KEY, why="capture")
+    child = store.append_record(CID, item={"title": "Child", "kind": "initiative",
+                                "parent": f"exomem://plan/{CID}/{KEY}"}, item_key=OTHER, why="capture")
+    store.reconcile_views()
+    path = parent["affected_paths"][0]
+    page = store.root / path
+    page.write_text(page.read_text() + "\nUnaccepted ancestor edit\n")
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        result = _through_dispatcher(store.root, "plan_memory", action="query", collection=CID,
+                                     filters=[{"column": "plan_id", "op": "eq", "value": OTHER}],
+                                     hierarchy_mode="ancestors", include_agent_history=include_history)
+        assert result["returned"] == 1
+        assert {node["plan_id"] for node in result["hierarchy"]["nodes"]} == {KEY, OTHER}
+        assert path in {entry["path"] for entry in result["source_versions"]}
+        store.update_record(CID, item_key=KEY, changes={"title": "Changed parent"},
+                            expected_container_hash=child["after_container_hash"],
+                            expected_item_version=parent["after_item_hash"], why="correct")
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            egress.postfilter("plan_memory", result, store.root)
+
+
+@pytest.mark.parametrize("include_history", [False, True])
 @pytest.mark.parametrize("keeps_changing", [False, True])
-def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(store, monkeypatch, keeps_changing):
+def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
+        store, monkeypatch, keeps_changing, include_history):
     """An edit between release passes yields a fresh read, or bounded BUSY under continuous edits."""
     from test_collection_store_edit_back import SETTLED, passes
 
@@ -176,7 +275,7 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(store, mo
     command = next(command for command in commands.COMMANDS if command.name == "record_memory")
     bound = command_surface.bind_vault(command.leaf, store.root, command=command)
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
-        result = bound(action="query", collection=CID, view="recent", include_agent_history=True)
+        result = bound(action="query", collection=CID, view="recent", include_agent_history=include_history)
     assert reads == 2
     if keeps_changing:
         assert result["success"] is False
@@ -185,12 +284,14 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(store, mo
     else:
         assert result["rows"][0]["title"] == "Two"
         assert result["total_matched"] == 1
-        assert [event["operation"] for event in result["agent_history"]["events"]].count("update") == 1
+        if include_history:
+            assert [event["operation"] for event in result["agent_history"]["events"]].count("update") == 1
     adopted = store.connection.execute("SELECT count(*) FROM txns WHERE operation='view_edit'").fetchone()[0]
     assert adopted == (2 if keeps_changing else 1)
 
 
-def test_mcp_history_refresh_drops_a_row_that_loses_authority_between_passes(store, monkeypatch):
+@pytest.mark.parametrize("include_history", [False, True])
+def test_mcp_history_refresh_drops_a_row_that_loses_authority_between_passes(store, monkeypatch, include_history):
     """A still-readable collection cannot disclose stale rows or history after row authority changes."""
     from exomem import command_surface, commands, writer_lease
 
@@ -216,12 +317,13 @@ def test_mcp_history_refresh_drops_a_row_that_loses_authority_between_passes(sto
     command = next(command for command in commands.COMMANDS if command.name == "record_memory")
     bound = command_surface.bind_vault(command.leaf, store.root, command=command)
     with preview_store(store.root, store.handle), request_scope(_external()):
-        result = bound(action="query", collection=CID, include_agent_history=True)
+        result = bound(action="query", collection=CID, include_agent_history=include_history)
     assert reads == 2
     assert [row["title"] for row in result["rows"]] == ["Public value"]
     assert result["total_matched"] == 1
-    assert result["agent_history"]["complete"] is False
-    assert result["agent_history"]["status"] == "history_incomplete"
+    if include_history:
+        assert result["agent_history"]["complete"] is False
+        assert result["agent_history"]["status"] == "history_incomplete"
     assert all(secret not in str(result) for secret in ("Restricted value", "Restricted rationale", KEY, path))
 
 
@@ -266,7 +368,8 @@ def test_canonical_metadata_does_not_authorize_the_same_resource_reference(store
     assert egress.WITHHELD_REFERENCE in value
 
 
-def test_admitted_source_versions_still_scrub_and_filter_ordinary_copies(store):
+@pytest.mark.parametrize("action", ["inspect", "query"])
+def test_admitted_source_versions_still_scrub_and_filter_ordinary_copies(store, action):
     """Admitted metadata is not a credential bypass or authority for another occurrence."""
     from test_governance_egress import _receipt_records
     from test_governance_postfilter import AWS_KEY
@@ -281,7 +384,7 @@ def test_admitted_source_versions_still_scrub_and_filter_ordinary_copies(store):
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
-        result = _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+        result = _through_dispatcher(store.root, "record_memory", action=action, collection=CID)
         version = next(entry for entry in result["source_versions"] if entry["path"] == path)
         version["hash"] = AWS_KEY
         result["ordinary_versions"] = [dict(version)]
@@ -299,7 +402,8 @@ def test_admitted_source_versions_still_scrub_and_filter_ordinary_copies(store):
     assert AWS_KEY not in str(records)
 
 
-def test_source_version_extra_fields_keep_generic_filtering_and_scrub_collisions(store):
+@pytest.mark.parametrize("action", ["inspect", "query"])
+def test_source_version_extra_fields_keep_generic_filtering_and_scrub_collisions(store, action):
     """An admitted path cannot exempt nested authored content in an extended version row."""
     from test_governance_postfilter import AWS_KEY
 
@@ -313,7 +417,7 @@ def test_source_version_extra_fields_keep_generic_filtering_and_scrub_collisions
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
-        result = _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+        result = _through_dispatcher(store.root, "record_memory", action=action, collection=CID)
         version = next(entry for entry in result["source_versions"] if entry["path"] == path)
         version["details"] = {"entries": [{"path": path}], "ReSoUrCe_text": f"Read [[{path}]] next.",
                               AWS_KEY: "scrubbed key", scrubber.NOTICE: "authored key"}
@@ -325,20 +429,37 @@ def test_source_version_extra_fields_keep_generic_filtering_and_scrub_collisions
         assert egress.postfilter("record_memory", cleaned, store.root) == cleaned
 
 
-@pytest.mark.parametrize("change", ["row", "release", "payload"])
-def test_terminal_inspection_refuses_a_changed_basis_or_payload(store, change):
+@pytest.mark.parametrize("action", ["inspect", "query"])
+@pytest.mark.parametrize("change", ["row", "manifest", "release", "tombstone", "payload"])
+def test_terminal_inspection_refuses_a_changed_basis_or_payload(store, change, action):
     """Old counts/values cannot survive a later mutation or loss of authority."""
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
-    with preview_store(store.root, store.handle), request_scope(_external()):
-        result = _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+    store.reconcile_views()
+    if change == "tombstone":
+        write_scope(store.root, paths=first["affected_paths"][0].removeprefix("Knowledge Base/"))
+        write_rule(store.root, ceiling=0)
+    with preview_store(store.root, store.handle), request_scope(
+            owner_principal() if change == "tombstone" else _external()):
+        result = _through_dispatcher(store.root, "record_memory", action=action, collection=CID)
         if change == "row":
             store.update_record(CID, item_key=KEY, changes={"title": "Two"},
                                 expected_container_hash=first["after_container_hash"],
                                 expected_item_version=first["after_item_hash"], why="correct")
+        elif change == "manifest":
+            with request_scope(owner_principal()):
+                guards = store.inspect_collection(CID)["lifecycle_guards"]
+                store.revise_collection(CID, manifest_text=manifest_text().replace("title: Work", "title: Revised"),
+                                        why="revise", **guards)
         elif change == "release":
             write_scope(store.root, paths="Records/**/Items/**")
             write_rule(store.root, ceiling=0)
+        elif change == "tombstone":
+            from exomem.governance import lifecycle
+
+            operation = lifecycle.begin_deletion(store.root, source_rel=first["affected_paths"][0],
+                                                trash_rel="Knowledge Base/_trash/current.md")
+            assert operation.governed
         else:
             result["body"] = "Untrusted addition"
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
@@ -371,6 +492,7 @@ def test_inspection_cannot_release_a_connector_change_during_notice_assembly(sto
         origin_session=OriginSessionBinding("fixture-session", "fixture-generation", "fixture-audience"))
     with preview_store(store.root, store.handle), request_scope(who):
         assert _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)["coverage"]["committed"] == 2
+        query = _through_dispatcher(store.root, "record_memory", action="query", collection=CID)
         original_key = governance.OperationAuthorization._decision_key
         changed = False
 
@@ -389,6 +511,8 @@ def test_inspection_cannot_release_a_connector_change_during_notice_assembly(sto
                 _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
             assert refused.value.code == "COLLECTION_NOT_FOUND"
         assert changed
+        with pytest.raises((collections.CollectionError, OpError), match="COLLECTION_NOT_FOUND"):
+            egress.postfilter("record_memory", query, store.root)
         config.write_text(json.dumps(document))
         current = _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
         assert current["coverage"]["committed"] == 1
@@ -464,6 +588,8 @@ def test_terminal_filter_observes_a_new_deletion_tombstone(store):
 
 @pytest.mark.parametrize("stale", [False, True], ids=["edited-current", "old-version"])
 def test_current_row_grant_cannot_release_unproven_projection_bytes(store, monkeypatch, stale):
+    from dataclasses import replace
+
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     path = first["affected_paths"][0]
@@ -487,6 +613,12 @@ def test_current_row_grant_cannot_release_unproven_projection_bytes(store, monke
                 "Two" if stale else "One"
             )
             page.write_bytes(original if stale else original.replace(b"title: One", b"title: Forged"))
+            query = _through_dispatcher(store.root, "record_memory", action="query", collection=CID)
+            assert path in {entry["path"] for entry in query["source_versions"]}
+            assert egress.postfilter("record_memory", query, store.root) == query
+            with request_scope(replace(who, purpose="different")):
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.postfilter("record_memory", query, store.root)
             with pytest.raises(ValueError, match="NOT_FOUND"):
                 _through_dispatcher(store.root, "get", path=path)
 

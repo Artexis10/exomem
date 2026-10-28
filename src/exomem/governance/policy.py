@@ -1347,6 +1347,20 @@ def request_policy_snapshot() -> Iterator[None]:
         _REQUEST_POLICIES.reset(token)
 
 
+@contextmanager
+def outside_request_policy_snapshot() -> Iterator[None]:
+    """Run a write's decisions on live policy, even inside a read's snapshot.
+
+    A write waits for the mutation boundary and must then decide on the policy it finds,
+    not on the one a scope read before the wait. Without an open snapshot this does nothing.
+    """
+    token = _REQUEST_POLICIES.set(None)
+    try:
+        yield
+    finally:
+        _REQUEST_POLICIES.reset(token)
+
+
 def load(vault_root: Path) -> Policy:
     """Load policy behind a non-creating seqlock-style authoring guard."""
     snapshot = _REQUEST_POLICIES.get()

@@ -887,6 +887,26 @@ def _restore(session, manager, fence_client, raw, changed=()):
             "head": {"commit_seq": publication.commit_seq, "head_hash": publication.head_hash}}
 
 
+def _withdraw_admission(manager):
+    """Withdraw the admission a restore gave this process's runtime; returns the call that gives it back.
+
+    An admitted runtime's lease renewal and replica publisher read the live store in the
+    background, and a reader open at ``takeover.replace_live`` makes it refuse BUSY. So a
+    cutover replaces only an unadmitted store, as a fresh cutover's is, until
+    ``admission._resume_locked`` admits the replacement. The report lock orders this with
+    the renewal's head read, as admission's own withdrawals do.
+    """
+    runtime = manager._collection_store
+    with manager._report_lock:
+        admitted, runtime._admitted_token = runtime._admitted_token, None
+
+    def readmit():
+        with manager._report_lock:
+            runtime._admitted_token = admitted
+
+    return readmit
+
+
 def _unproven(changed=()):
     named = f" ({', '.join(changed)})" if changed else ""
     return CollectionStoreError(STALE, (
@@ -1032,7 +1052,10 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             # cutover's checks read; the route migrates again under a new acquisition.
             return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
                     "status": RESTORED, "restored": restored}
-        with ExitStack() as inputs:
+        with ExitStack() as unreplaced, ExitStack() as inputs:
+            if restored is not None:
+                # A cutover that stops before it replaces the restored store leaves it admitted, as before.
+                unreplaced.callback(_withdraw_admission(manager))
             supersede = pending is not None
             # Staging runs under the mutation boundary alone, which keeps the files and the live
             # store still only for processes that share this lease state directory. The lease waits
@@ -1124,6 +1147,7 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
                         takeover.replace_live(session, _STAGING, lambda: session.require(token),
                                               subdirectory=directory.name, expected_identity=staged_file.identity,
                                               expected_version=sealed_version)
+                        unreplaced.pop_all()  # The replacement stays unadmitted until _resume_locked admits it.
                         if supersedes is not None:
                             # The runtime opened the superseded store; it now serves the store the fence moves to.
                             runtime.rebind(identity)

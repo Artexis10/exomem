@@ -1,4 +1,4 @@
-This delivery ships attachable limits and import growth, Job limits and CLI support. Local import growth remains open in tasks 1.2, 1.3, 1.7 and 5.1. Local cells publish NULL and preserve legacy imports and backup growth.
+The attachable delivery shipped limits, import growth, Job limits and CLI support. The guarded local follow-up implements the D12 provider contract; tasks 1.2, 1.3, 1.7 and 5.1 remain open until their proof and delivery. Unguarded local cells publish NULL and preserve legacy behavior.
 
 Packets P2, P3, P6 and P7 of the paired Substrate change `admit-cloud-imports-against-published-limits`, which holds P1, P4 and P5. Tasks marked **Control-plane review** change cellctl or the controller contract, so the Cloud control-plane owner reviews them.
 

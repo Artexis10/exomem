@@ -189,6 +189,7 @@ def test_length_is_not_a_criterion() -> None:
 THREAD = {"recent": [_user("How did Ottilie Marsh do in the spring?"), _assistant("Fine, all things told.")]}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_rich_follow_up_keeps_the_conversations_subject(cvault: Path) -> None:
     plain = _activate(cvault, RICH)
     assert plain["abstention"] == {"reason": "unresolved"}
@@ -219,6 +220,7 @@ def test_an_ordinary_turn_is_never_carried_from_the_conversation(cvault: Path, t
     assert "Ottilie Marsh" not in _titles(packet), turn
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("turn", ["it's still on track for the autumn?", "that's what I meant"])
 def test_a_contracted_anaphor_is_carried(cvault: Path, turn: str) -> None:
     packet = _activate(cvault, turn, conversation=THREAD)
@@ -226,6 +228,7 @@ def test_a_contracted_anaphor_is_carried(cvault: Path, turn: str) -> None:
     assert _titles(packet) == ["Ottilie Marsh"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_newest_subject_wins_over_an_older_one(cvault: Path) -> None:
     packet = _activate(
         cvault,
@@ -242,6 +245,7 @@ def test_the_newest_subject_wins_over_an_older_one(cvault: Path) -> None:
     assert "Harbor Lantern" not in str([unit["text"] for unit in packet["units"]])
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_two_subjects_in_the_newest_entry_abstain_ambiguous_and_choose_nothing(cvault: Path) -> None:
     packet = _activate(
         cvault,
@@ -254,6 +258,7 @@ def test_two_subjects_in_the_newest_entry_abstain_ambiguous_and_choose_nothing(c
     assert "carried_by" not in packet["generation"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_refs_only_conversation_never_carries(cvault: Path) -> None:
     packet = _activate(
         cvault, RICH, conversation={"refs": ["Knowledge Base/Entities/People/Ottilie Marsh.md"]}
@@ -262,6 +267,7 @@ def test_a_refs_only_conversation_never_carries(cvault: Path) -> None:
     assert "carried_by" not in packet["generation"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_assistant_entries_are_never_walked(cvault: Path) -> None:
     packet = _activate(
         cvault, RICH, conversation={"recent": [_assistant("Ottilie Marsh did well in the spring round.")]}
@@ -269,6 +275,7 @@ def test_assistant_entries_are_never_walked(cvault: Path) -> None:
     assert packet["abstention"] == {"reason": "unresolved"}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_turn_that_names_its_own_subject_is_not_carried(cvault: Path) -> None:
     packet = _activate(
         cvault,
@@ -322,6 +329,7 @@ def _assert_bounded_conversation(packet: dict, title: str, limit: int) -> None:
     assert packet["budget"]["limit_chars"] == limit
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_compiler_classifies_all_disclosed_fifth_cases(fifth_disclosures_vault: Path) -> None:
     assert len(CONTENT_FREE_FIFTH_IDS | RESIDUAL_TOPIC_SWITCH_IDS) == 20
     for case_id, turn, title in FIFTH_NEGATIVES:
@@ -336,6 +344,7 @@ def test_the_compiler_classifies_all_disclosed_fifth_cases(fifth_disclosures_vau
             assert title not in _titles(packet), case_id
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("limit", [500, 600, 700])
 def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Path, limit: int) -> None:
     # A long lede and eight facts: partial anchors read the lede lane, while
@@ -358,6 +367,7 @@ def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Pat
     assert named["budget"]["limit_chars"] == limit
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_round7_the_rest_of_the_budget_keeps_unresolved_recent_context(cvault: Path, monkeypatch) -> None:
     from exomem import working_set
 
@@ -371,6 +381,7 @@ def test_round7_the_rest_of_the_budget_keeps_unresolved_recent_context(cvault: P
     assert carried["budget"]["used_chars"] <= 1000
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("turn", CONTENT_FREE_VARIANTS)
 def test_round7_full_compiler_content_free_variants_use_the_footprint(cvault: Path, turn: str) -> None:
     packet = _activate(cvault, turn, max_chars=1000, conversation=THREAD)
@@ -385,6 +396,7 @@ def test_round7_full_compiler_topic_switches_do_not_carry(cvault: Path, turn: st
     assert "Ottilie Marsh" not in _titles(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_compiler_restores_temporal_positives_and_excludes_drop_it(fifth_disclosures_vault: Path) -> None:
     failures = []
     for case_id, turn, title in FIFTH_POSITIVES:
@@ -412,6 +424,7 @@ def test_without_a_conversation_nothing_is_carried(cvault: Path) -> None:
 KESTREL_ENTRY = {"recent": [_user("did the Kestrel Hiring Plan slip again?")]}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_referential_recency_still_wins(cvault: Path) -> None:
     named = _activate(cvault, "tell me about Ottilie Marsh")
     plain = _activate(cvault, "continue", continuity=named["continuity"])
@@ -423,6 +436,7 @@ def test_referential_recency_still_wins(cvault: Path) -> None:
     assert with_conversation["generation"].get("carried_by") != "conversation"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_shipped_follow_up_carry_still_wins(cvault: Path) -> None:
     named = _activate(cvault, "tell me about Ottilie Marsh")
     working_set_runtime.reset_caches_for_tests()
@@ -445,6 +459,7 @@ WINDOW_THREAD = {
 }
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_shared_turn_words_do_not_license_the_conversation_carry(cvault: Path) -> None:
     turn = f"{CARRY_TURN} and what do we think of that"
     baseline = _activate(cvault, turn)
@@ -455,6 +470,7 @@ def test_shared_turn_words_do_not_license_the_conversation_carry(cvault: Path) -
     assert CARRY_PAGE in [unit["provenance"]["path"] for unit in packet["units"]]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_turn_with_new_content_words_is_a_topic_switch_and_never_carried(cvault: Path) -> None:
     """The same turn after a thread that never spoke its words: they are new
     content, so the conversation carry stands aside and recall decides."""
@@ -464,6 +480,7 @@ def test_a_turn_with_new_content_words_is_a_topic_switch_and_never_carried(cvaul
     assert "Ottilie Marsh" not in _titles(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_unlicensed_content_does_not_enter_the_ambiguous_carry(cvault: Path) -> None:
     turn = f"{CARRY_TURN} and what do we think of that"
     packet = _activate(
@@ -482,12 +499,14 @@ def test_unlicensed_content_does_not_enter_the_ambiguous_carry(cvault: Path) -> 
     assert not {"Kestrel Hiring Plan", "Marlow Quay Survey"} & set(_titles(packet))
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_conversation_that_names_nothing_falls_through_to_the_retrieval_carry(cvault: Path) -> None:
     turn = f"{CARRY_TURN} and what do we think of that"
     packet = _activate(cvault, turn, conversation={"recent": [_user("the harbour was quiet today")]})
     assert packet["generation"]["carried_by"] == "retrieval"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_every_existing_carry_is_untouched_without_a_conversation(cvault: Path) -> None:
     assert _activate(cvault, CARRY_TURN)["generation"]["carried_by"] == "retrieval"
 

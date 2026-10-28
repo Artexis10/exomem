@@ -16,7 +16,7 @@ A private replay of twelve field reports measured the gap on one live vault. Its
 - Filter by the caller's view **before** any synthesis, selection, ranking or budget.
 - Probe a **turn slice** (profiles selected by meaning from the turn) on development cases only; it ships only through its own frozen evaluation. Test a pull-instructions arm with no map, so the context catalogue must earn its cost, and sample ordinary turns beside known misses, so the switch cannot win only on cases the current packet failed.
 - Tell clients to read the map, pull profiles, pages and units by ref or by their own `ask_memory` queries, and cite refs.
-- Keep the anchor-first packet as the default until a frozen, paired evaluation of first answers decides the switch.
+- Serve the `maps` packet by default, by operator ruling (design amendment 12). Keep the anchor-first packet as the one-line rollback. Keep measuring with a frozen, paired evaluation of first answers, which no longer gates the default.
 - Build shared index inputs inside the existing internal-producer scope. Keep caller authorization and disclosure at every external read.
 - Recover an unproven state checkpoint through a separate successor path that preserves the failed attempt and earns fresh publication and quiescence proof.
 
@@ -28,11 +28,11 @@ None.
 
 ### Modified Capabilities
 
-- `context-activation`: Add a `maps` packet mode, selected by `EXOMEM_ACTIVATION_PACKET`, that serves a map projected from the context catalogue with profile reads by ref, alongside the current `anchors` mode. The continuity, conversation-aware activation and retrieve-hook contracts keep binding `anchors` mode; `maps` mode defines its own continuity and conversation behaviour.
+- `context-activation`: Add a `maps` packet mode, selected by `EXOMEM_ACTIVATION_PACKET`, that serves a map projected from the context catalogue with profile reads by ref and is the default, alongside the `anchors` mode, which stays as the rollback. The continuity, conversation-aware activation and retrieve-hook contracts keep binding `anchors` mode; `maps` mode defines its own continuity and conversation behaviour.
 - `command-surface`: Add an optional `continuation` to `read_memory` for derived-view refs, the `CONTINUATION_STALE` refusal, and optional `summary` and `topics` inputs on `remember`, generated on every surface.
 
 ## Impact
 
-The change adds a context catalogue and its derived projections, a profile read contract, a `maps` packet mode behind a setting, description upkeep on writes, a one-time description backfill, and new client instructions in the server instructions, tool description, skill scaffold and retrieve hook. It reuses the role lanes, the Records-first current-state resolver, the caller's-view rules (`audience_view`, `anchor_visible`) and the egress guard. Profiles and maps are built from units and index rows, never by parsing page text, so they carry over to a SQLite store. The `anchors` mode, its resolver and its audit stay in force until the switch.
+The change adds a context catalogue and its derived projections, a profile read contract, a `maps` packet mode that a setting selects, description upkeep on writes, a one-time description backfill, and new client instructions in the server instructions, tool description, skill scaffold and retrieve hook. It reuses the role lanes, the Records-first current-state resolver, the caller's-view rules (`audience_view`, `anchor_visible`) and the egress guard. Profiles and maps are built from units and index rows, never by parsing page text, so they carry over to a SQLite store. The `anchors` mode, its resolver and its audit stay in force as the rollback.
 
 This change carries the ordinary-use acceptance that `close-memory-loop` task 6.32 requires for context delivery.

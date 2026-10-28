@@ -17,12 +17,13 @@ timeout.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import schema
 
@@ -275,6 +276,8 @@ class WriterConnection:
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
         self.derived: Any = None
         self.view_census: Any = None
+        # Read-only connections this tenure lends to any thread; closed first by ``close``.
+        self.readers = ReaderPool(path)
 
     def census(self, root):
         """This writer tenure's disposable view evidence; replacing the handle starts a fresh sweep."""
@@ -400,6 +403,8 @@ class WriterConnection:
     def close(self) -> None:
         if not self._closed:
             self._release_cache = None
+            # Before the writer's own connection: an open reader keeps the last commits in the WAL.
+            self.readers.close()
             for reader in self.import_readers.values():
                 reader.close()
             self.import_readers.clear()
@@ -540,9 +545,13 @@ def open_head_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> s
     writer migrates it. SQLite refuses any other table or column, so no row reader can see
     a store that its writer has not migrated yet. A newer schema refuses as in ``open_reader``.
     """
-    conn, _ = _open_read_only(path, busy_timeout_ms)
+    return _open_head(path, busy_timeout_ms)[0]
+
+
+def _open_head(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int]:
+    conn, found = _open_read_only(path, busy_timeout_ms)
     conn.set_authorizer(_head_only)
-    return conn
+    return conn, found
 
 
 # These closed SQL columns let a file writer verify routing without reading canonical item payloads.
@@ -644,6 +653,157 @@ def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connectio
         conn.close()
         raise
     return conn, found
+
+
+def _file_identity(path: Path) -> tuple[int, int]:
+    status = os.stat(path)
+    return status.st_dev, status.st_ino
+
+
+def _recorded_version(conn: sqlite3.Connection) -> int:
+    """The schema version a store records, read from ``store_meta`` alone so a head reader may ask.
+
+    A lend checks this number only, where a fresh open also checks the alembic revision: a migration
+    changes both in one transaction, so only an edit from outside Exomem can set them apart.
+    """
+    rows = conn.execute("SELECT value FROM store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchall()
+    try:
+        return int(rows[0][0]) if rows else 0
+    except (TypeError, ValueError) as error:
+        raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", "the recorded schema version is invalid") from error
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    with suppress(sqlite3.Error):
+        conn.close()
+
+
+class _Idle(NamedTuple):
+    conn: sqlite3.Connection
+    identity: tuple[int, int]
+
+
+class ReaderPool:
+    """Read-only connections that one writer tenure lends to any thread, one borrower at a time.
+
+    A fresh open pays a connect and a schema parse (about 3.5 ms) on every read, and the cached writer
+    already outlives those reads. The pool belongs to its ``WriterConnection`` and closes with it: an idle
+    reader outliving the writer would keep the last commits in the WAL, block ``journal_mode=DELETE``
+    and, on Windows, a replacement of the file. A lend that finds no idle reader opens one, and a lend
+    that no longer fits (the pool is closed or full, or the file changed) falls back to what every read
+    did before the pool: a reader opened for this call alone.
+
+    Each lend checks that the path still names the reader's file and re-reads the recorded schema
+    version, so it refuses exactly as the matching opener would. A reader returns to idle only with no
+    open transaction and no active statement. The lock covers bookkeeping only, never a read or a close.
+    Lock order: manager locks, then this lock; this lock is a leaf.
+    """
+
+    #: Idle readers kept per protection class; extra concurrent demand opens one more for its call.
+    IDLE_PER_CLASS = 2
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._closed = False
+        # Two protection classes, fixed by code and not a vocabulary: True is the head reader (authorizer
+        # ``_head_only``), False the plain one (no authorizer). A reader keeps its class for life.
+        self._idle: dict[bool, list[_Idle]] = {True: [], False: []}
+
+    @contextmanager
+    def lend(self, *, head: bool, current: bool) -> Iterator[sqlite3.Connection]:
+        """Lend a head or plain reader; ``current`` also refuses a store that awaits its writer's migration."""
+        conn, version, identity = self._take(head)
+        healthy = False
+        try:
+            if version > schema.SCHEMA_VERSION:
+                raise CollectionStoreError(
+                    "COLLECTION_STORE_SCHEMA_NEWER", str(schema.SchemaVersionError(version, schema.SCHEMA_VERSION)))
+            if current and version < schema.SCHEMA_VERSION:
+                raise CollectionStoreError(
+                    "COLLECTION_STORE_SCHEMA_PENDING", "the collection store has not been migrated by its writer yet")
+            yield conn
+            healthy = identity is not None and _quiet(conn)
+        finally:
+            self._give_back(head, conn, identity if healthy else None)
+
+    def close(self) -> None:
+        """Close the idle readers now; a lent reader closes when its lend ends."""
+        with self._lock:
+            self._closed = True
+            idle = [reader for readers in self._idle.values() for reader in readers]
+            for readers in self._idle.values():
+                readers.clear()
+        for reader in idle:
+            _close_quietly(reader.conn)
+
+    def _take(self, head: bool) -> tuple[sqlite3.Connection, int, tuple[int, int] | None]:
+        """An idle reader that still names the store's file, else a fresh one; the identity is None for one-call readers."""
+        with self._lock:
+            poolable = not self._closed
+            idle = self._idle[head].pop() if poolable and self._idle[head] else None
+        if idle is not None:
+            try:
+                same = _file_identity(self.path) == idle.identity
+            except OSError:
+                same = False
+            if same:
+                try:
+                    return idle.conn, _recorded_version(idle.conn), idle.identity
+                except BaseException:
+                    _close_quietly(idle.conn)
+                    raise
+            # The path names another file or none, so this call opens its own reader and pools nothing.
+            _close_quietly(idle.conn)
+            poolable = False
+        try:
+            before = _file_identity(self.path)
+        except OSError:
+            before = None
+        conn, version = (_open_head if head else _open_read_only)(self.path, BUSY_TIMEOUT_MS)
+        try:
+            after = _file_identity(self.path)
+        except OSError:
+            after = None
+        return conn, version, after if poolable and before == after else None
+
+    def _give_back(self, head: bool, conn: sqlite3.Connection, identity: tuple[int, int] | None) -> None:
+        if identity is not None:
+            with self._lock:
+                if not self._closed and len(self._idle[head]) < self.IDLE_PER_CLASS:
+                    self._idle[head].append(_Idle(conn, identity))
+                    return
+        _close_quietly(conn)
+
+
+def _quiet(conn: sqlite3.Connection) -> bool:
+    """Whether a returned reader holds no transaction and no active statement, so the next lend sees the latest commit."""
+    try:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        # A cursor left half-read pins its snapshot while ``in_transaction`` is False, and only closing the
+        # reader releases it. ``interrupt`` takes effect only while a statement is active, so then this
+        # SELECT fails as interrupted; with none active it is a no-op.
+        conn.interrupt()
+        conn.execute("SELECT 1").fetchall()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def head_reader(path: Path, pool: ReaderPool | None = None):
+    """A head reader for one ``with`` block: lent by ``pool`` when given, else freshly opened and closed."""
+    return closing(open_head_reader(path)) if pool is None else pool.lend(head=True, current=False)
+
+
+def ownership_reader(path: Path, pool: ReaderPool | None = None):
+    """A plain reader at any supported schema (ownership declarations ride the unchanged metadata wire)."""
+    return closing(_open_read_only(path, BUSY_TIMEOUT_MS)[0]) if pool is None else pool.lend(head=False, current=False)
+
+
+def store_reader(path: Path, pool: ReaderPool | None = None):
+    """A plain reader at the current schema, as ``open_reader`` opens it."""
+    return closing(open_reader(path)) if pool is None else pool.lend(head=False, current=True)
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

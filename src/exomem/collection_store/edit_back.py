@@ -560,11 +560,14 @@ class Observation:
             self.projection["published_sha256"], self.projection["pending_sha256"]}
 
 
-def _served(writer, cid) -> bool:
-    """Whether this release serves the collection's views: eligible, and behind no closed route fence."""
-    from . import authority, capability
+def _served(writer, cid, admitted) -> bool:
+    """Whether this release serves the collection's views: admitted, and behind no closed route fence.
 
-    if not authority.collection_admitted(writer, cid):
+    ``admitted`` is the one ownership proof of the window this decision belongs to.
+    """
+    from . import capability
+
+    if cid not in admitted:
         return False
     try:
         row = writer.connection.execute(
@@ -591,6 +594,7 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
     closed route fence is not read at all. ``force`` bypasses the stat shortcut for explicit
     notifications and views still settling, whose edited bytes can share the published stat.
     """
+    from . import authority
     from .runtime import VIEW_BATCH_PATHS
 
     limit = VIEW_BATCH_PATHS if limit is None else limit
@@ -606,13 +610,14 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                 (json.dumps(OBSERVED_KINDS), json.dumps(sorted(paths)), limit))
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
-        admitted = {cid: _served(writer, cid) for cid in {row["collection_id"] for row in rows}}
+        admitted = authority.admitted_collections(writer) if rows else frozenset()
+        served = {cid: _served(writer, cid, admitted) for cid in {row["collection_id"] for row in rows}}
     found = []
     with ExitStack() as stack:
         fs = stack.enter_context(held_fs.acquire(writer.root).require())
         parents = {}
         for row in rows:
-            if not admitted[row["collection_id"]]:
+            if not served[row["collection_id"]]:
                 continue
             relative = str(Path(row["path"]).parent)
             try:

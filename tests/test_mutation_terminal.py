@@ -1389,6 +1389,45 @@ def _committed_terminal_with_leaf(leaf: dict):
     return mutation_terminal, terminal
 
 
+def test_compact_relation_findings_keep_actions_without_forwarding_arbitrary_payloads() -> None:
+    module, terminal = _committed_terminal_with_leaf({
+        "path": "Knowledge Base/Notes/Insights/example.md",
+        "creation": {"contract_result": {"findings": [
+            {"code": "RELATION_AUTHORED_ALL_GENERIC", "detail": "private-payload-marker"},
+            {"code": "unrelated_finding", "detail": "private-payload-marker"},
+        ]}},
+    })
+    compact = module.project_terminal(terminal)
+    [finding] = compact["semantic_advisory"]["findings"]
+    assert finding["code"] == "RELATION_AUTHORED_ALL_GENERIC"
+    assert finding["remediation"]
+    assert "private-payload-marker" not in str(compact)
+    assert "creation" not in compact
+
+
+def test_compact_source_read_routes_are_bounded_and_report_truncation() -> None:
+    from exomem import source_coverage
+
+    paths = [f"Knowledge Base/Sources/Articles/source-{index}.md" for index in range(20)]
+    module, terminal = _committed_terminal_with_leaf({
+        "source": {"path": paths[0]},
+        "semantic_compilation": {
+            "state": "unassessed",
+            "full_source_reads": [{"tool": "read_memory", "args": {
+                "path": path, "include_raw": True, "purpose": "source compilation",
+            }} for path in paths],
+            "source_body": "unbounded-source-body-marker",
+        },
+    })
+    compact = module.project_terminal(terminal)
+    semantic = compact["semantic_compilation"]
+    assert semantic["state"] == "unassessed"
+    assert len(semantic["full_source_reads"]) == source_coverage.COMPILATION_SOURCES_LISTED
+    assert semantic["truncated"] is True
+    assert semantic["preparation_route"]["args"]["sources"] == paths[:source_coverage.COMPILATION_SOURCES_LISTED]
+    assert "unbounded-source-body-marker" not in str(compact)
+
+
 def _sweep_leaf(container: str | None = None, **overrides):
     block = {**CAPTURE_SWEEP_LEAF, **overrides}
     leaf = {

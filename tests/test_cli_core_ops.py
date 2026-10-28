@@ -930,7 +930,8 @@ def test_simple_ask_alias_uses_compact_product_defaults(vault: Path, capsys) -> 
     hits = payload["data"]["hits"]
     assert isinstance(hits, list)
     assert hits, "ask should surface fixture notes"
-    assert "excerpt" not in hits[0]
+    assert hits[0]["excerpt"]
+    assert "signals" not in hits[0]
 
 
 def test_legacy_find_alias_matches_simple_ask(vault: Path, capsys) -> None:
@@ -940,7 +941,8 @@ def test_legacy_find_alias_matches_simple_ask(vault: Path, capsys) -> None:
     assert payload["success"] is True
     hits = payload["data"]["hits"]
     assert hits, "find should remain a compatibility alias for ask"
-    assert "excerpt" not in hits[0]
+    assert hits[0]["excerpt"]
+    assert "signals" not in hits[0]
 
 
 def test_legacy_find_lean_cli_skips_missing_model_lanes_without_warnings(

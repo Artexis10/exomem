@@ -1456,8 +1456,12 @@ class SessionAuthority:
 
 def _request_verifier(origin: Any) -> tuple[SessionAuthority, str] | None:
     """The authority and bearer that verified this request's origin, if it carries them."""
+    from . import local_ingress
     from .governance.principal import _verified_access_token
 
+    grant = local_ingress.current_grant()
+    if grant is not None and isinstance(grant.authority, SessionAuthority) and grant.origin_session == origin:
+        return grant.authority, grant.bearer
     token = _verified_access_token()
     verifier = getattr(token, "_verifier", None)
     if not isinstance(verifier, SessionAuthority) or getattr(token, "origin_session", None) != origin:
@@ -1479,6 +1483,13 @@ async def origin_session_active(who: Any) -> bool:
     client = who.client_binding
     if client is None:
         return False
+    from . import cloud_cell
+
+    if cloud_cell.is_cloud_issuer_family(who.issuer_family):
+        # A Cloud cell has no session store; the gateway proves the login on each request.
+        from . import cloud_origin
+
+        return cloud_origin.matches(who)
     from . import local_ingress, server_auth
 
     try:

@@ -411,6 +411,7 @@ def test_purpose_never_enters_the_packet_cache_key() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_recall_failure_does_not_bypass_the_guard(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -458,6 +459,7 @@ def test_a_recall_failure_does_not_bypass_the_guard(
     assert "Cargo Sled" not in str(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_release_plane_failure_abstains_rather_than_serving(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -971,6 +973,7 @@ def test_an_unavailable_index_at_guard_time_is_a_release_plane_failure(
             )
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_resolver_failure_abstains_through_the_operation(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1777,6 +1780,7 @@ def _reset_governance_state(vault: Path) -> None:
     working_set_runtime.reset_caches_for_tests()
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_policy_scoped_elsewhere_serves_units_end_to_end(tmp_path: Path) -> None:
     """The defect this closes: ANY active policy abstained every packet.
 
@@ -1813,6 +1817,7 @@ def test_a_policy_scoped_elsewhere_serves_units_end_to_end(tmp_path: Path) -> No
     assert {u["ref"] for u in governed["units"]} == {u["ref"] for u in baseline["units"]}
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_policy_scoped_to_one_page_withholds_only_that_page_end_to_end(
     tmp_path: Path,
 ) -> None:
@@ -2821,6 +2826,7 @@ def _real_page_readings(packet: Mapping[str, Any], real_paths: set[str]) -> set[
     return named
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_every_existing_page_any_field_names_is_reached_by_the_decide_loop(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2912,6 +2918,7 @@ def test_every_existing_page_any_field_names_is_reached_by_the_decide_loop(
     )
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_neighbourhood_survives_when_grafted_onto_a_real_anchor(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3242,6 +3249,7 @@ def _recent_packet(entries: list[dict]) -> dict:
     return packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("hidden_contact", [False, True])
 def test_recent_context_is_identical_without_a_withheld_page(
     vault: Path, tmp_path: Path, hidden_contact: bool
@@ -3379,6 +3387,7 @@ def _stable_recent_packet(packet: dict) -> dict:
     return packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     ("turn", "manifest_heat", "item_count"),
     [
@@ -3492,6 +3501,7 @@ def test_real_planning_item_cannot_reserve_a_recent_slot(
     assert _stable_recent_packet(repeated) == without_hidden
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("public_heat", [False, True])
 @pytest.mark.parametrize("mixed_mark", [False, True])
 def test_hidden_workspace_threads_cannot_evict_a_recent_public_thread(
@@ -3787,6 +3797,7 @@ updated: 2026-09-08
     seed_ordinary_notes(vault)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
     vault: Path,
 ) -> None:
@@ -3835,6 +3846,7 @@ def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
     assert "handover" not in str(packet).casefold(), "the runner-up was carried instead"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
     """The over-restriction half: the same corpus, the same turn, a policy
     that does not reach the carried page — it is served, marked as carried.
@@ -3862,6 +3874,7 @@ def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
     assert packet["units"], packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_withheld_named_page_is_never_counted_as_a_rival(vault: Path) -> None:
     """Two pages answer the turn; the audience may see one. That one is
     carried alone, exactly as in a vault without the other.

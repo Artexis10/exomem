@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import asynccontextmanager, nullcontext
 from copy import copy
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from fastmcp.server.transforms import Transform
+from fastmcp.utilities.versions import dedupe_with_versions
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
@@ -40,7 +42,7 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
 )
 from .server_rest import register_rest_facade
 from .server_runtime import LocalRuntimeActivation, initialize_runtime
-from .server_transfer import register_transfer_routes
+from .server_transfer import register_cloud_upload_route, register_transfer_routes
 from .server_transport import PrimeMcpSSEMiddleware
 
 log = logging.getLogger(__name__)
@@ -184,7 +186,30 @@ class ExomemFastMCP(FastMCP):
         # SDK v2's explicit lax default overrides field-level StrictInt, etc.
         # Keep MCP inputs faithful to the published JSON types before dispatch.
         kwargs["strict_input_validation"] = True
+        kwargs["lifespan"] = _publishing_tool_input_schemas(kwargs.get("lifespan"))
         super().__init__(*args, **kwargs)
+
+    async def publish_tool_input_schemas(self) -> None:
+        """Answer the SDK's per-call `Mcp-Param-*` schema lookup from the advertised catalog.
+
+        Without a lookup the SDK runs a complete `tools/list` before every modern
+        `tools/call` that carries arguments, only to find one `inputSchema`. The catalog is
+        fixed once the server is built and the same for every caller (no per-tool
+        authorization, and the only list-time middleware is FastMCP's own schema
+        dereferencing), so the schemas are read once from the listing itself and looked up
+        by name. A name the listing does not advertise, such as a hidden grouped command,
+        has no entry and stays unvalidated exactly as it was under the SDK's listing.
+        """
+        tools = dedupe_with_versions(list(await self.list_tools()), lambda tool: tool.name)
+        schemas = {
+            tool.name: tool.to_mcp_tool(name=tool.name).model_dump(
+                by_alias=True, mode="json", exclude_none=True
+            )["inputSchema"]
+            for tool in tools
+        }
+        # FastMCP offers no public handle on the SDK server; `_mcp_server` is the only route to
+        # its lookup. Set only now, so until the schemas exist the SDK keeps listing per call.
+        self._mcp_server.get_tool_input_schema = schemas.get
 
     def http_app(self, *args, stateless_http=None, **kwargs):
         import fastmcp
@@ -279,6 +304,23 @@ class ExomemFastMCP(FastMCP):
                         )
         finally:
             reset_transport(token)
+
+
+def _publishing_tool_input_schemas(inner):
+    """Wrap a FastMCP lifespan so the advertised schemas are published before it serves."""
+
+    @asynccontextmanager
+    async def lifespan(server: ExomemFastMCP):
+        async with (inner(server) if inner is not None else nullcontext({})) as state:
+            try:
+                await server.publish_tool_input_schemas()
+            except Exception:
+                # Only a speed-up: the SDK validates by listing when no lookup is set, so a
+                # listing that fails here must not stop the server from starting.
+                log.exception("Mcp-Param schema lookup not published; the SDK lists tools per call")
+            yield state
+
+    return lifespan
 
 
 class RefusalFloorMiddleware(Middleware):
@@ -721,11 +763,20 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     )
     mcp.add_middleware(RefusalFloorMiddleware())
 
+    upload_bridge = False
     if cloud:
         # Only MCP (`/mcp`), `/health` and `/health/ready` are registered
-        # (D1.5): REST (`/api/*`), `/upload`, `/download` and the OAuth
-        # metadata routes are never registered on a cloud cell.
+        # (D1.5): REST (`/api/*`), `/download`, the personal `/upload` and the
+        # OAuth metadata routes are never registered on a cloud cell. A cell
+        # configured for gateway upload handoffs adds only the private ticket
+        # receiver (bridge-cloud-agent-uploads).
         register_health_routes(mcp, on_liveness=runtime_activation.start)
+        from . import cloud_origin
+
+        cloud_origin.validate_configuration()
+        upload_bridge = cloud_origin.enabled()
+        if upload_bridge:
+            register_cloud_upload_route(mcp, vault_root=runtime.vault_root, cell_bearer=auth)
     else:
         register_asset_routes(
             mcp,
@@ -797,7 +848,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     # the Cloud-only control-plane commands; registration below never sees the
     # exclusions, and no other surface sees the Cloud-only commands.
     product_commands = commands_module.product_commands_for(
-        "mcp", expose_tier2=expose_tier2, cloud=cloud
+        "mcp", expose_tier2=expose_tier2, cloud=cloud, upload_bridge=upload_bridge
     )
     tool_shape = _tool_shape_from_environment()
     mcp.add_middleware(PublicCommandNameMiddleware(product_commands, shape=tool_shape))
@@ -846,7 +897,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
                 f"The active surface withholds `{exclusion.command}`. {exclusion.reason} "
                 f"Lifted when {exclusion.lifted_when}.",
             )
-            for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values()
+            for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
     for cmd in product_commands:
@@ -1192,7 +1243,8 @@ def http_middleware(mcp: FastMCP, *, worker_socket: Path | None = None) -> list:
     (design.md Decision 1). A supervisor-owned worker with no auth provider
     also gets the local-ingress gate here; with the OAuth proxy the gate is
     already in the proxy's own middleware, ahead of authentication, and a
-    cell's verifier never arms it.
+    cell's verifier never arms it. A Cloud cell also binds each request's
+    gateway-signed login origin, innermost, for the upload handoff.
     """
     middleware = [
         ASGIMiddleware(EdgeIngressMiddleware),
@@ -1203,6 +1255,10 @@ def http_middleware(mcp: FastMCP, *, worker_socket: Path | None = None) -> list:
         from .local_ingress import LocalIngressMiddleware
 
         middleware.insert(0, ASGIMiddleware(LocalIngressMiddleware))
+    if cloud_cell.cloud_mode_enabled():
+        from .cloud_origin import CloudOriginMiddleware
+
+        middleware.append(ASGIMiddleware(CloudOriginMiddleware))
     return middleware
 
 

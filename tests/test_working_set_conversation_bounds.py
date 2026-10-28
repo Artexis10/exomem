@@ -162,6 +162,7 @@ def cvault(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 TURN = "Ottilie asked about the grant"
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_omitting_the_conversation_changes_nothing_but_the_new_fields(cvault: Path) -> None:
     packet = commands.op_activate_context(cvault, turn=TURN)
     assert packet["generation"]["conversation"] == "absent"
@@ -175,6 +176,7 @@ def test_omitting_the_conversation_changes_nothing_but_the_new_fields(cvault: Pa
         assert served == packet
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_request_without_a_conversation_records_no_conversation_span(cvault: Path) -> None:
     packet = commands.op_activate_context(cvault, turn=TURN, include_timings=True)
     assert "working_set.conversation" not in packet["timings"]["stages"]
@@ -184,6 +186,7 @@ def test_a_request_without_a_conversation_records_no_conversation_span(cvault: P
     assert "working_set.conversation" in withc["timings"]["stages"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_an_oversized_conversation_is_served_and_reported_truncated(cvault: Path) -> None:
     packet = commands.op_activate_context(
         cvault,
@@ -220,6 +223,7 @@ def _shape(packet: dict) -> dict:
     }
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_conversation_reaches_every_door_over_one_leaf(
     cvault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -290,6 +294,7 @@ def _under_budget(remaining: float):
     return token
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_spent_deadline_drops_the_conversation_not_the_packet(cvault: Path) -> None:
     conversation = {"recent": [{"role": "user", "text": "we finished the Tidewater Grant call"}]}
     plain = commands.op_activate_context(cvault, turn=TURN)

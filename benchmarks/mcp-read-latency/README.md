@@ -1,0 +1,110 @@
+# MCP read latency gate
+
+The gate compares the MCP read tools of the working tree (head) with the latest release (base).
+It times each read through the managed worker's socket, the same boundary a service client uses
+(`mcp-worker-socket-v1` in `src/exomem/request_latency_contract.json`).
+
+`scripts/mcp_read_latency_gate.py` is the runner. `profile.json` defines the generated fixture,
+and `summary.schema.json` defines every document the runner writes.
+
+## What one run does
+
+Each arm is one release with its own interpreter, vault, state root, lease coordinator and managed
+worker (`python -m exomem.service_manager worker`). The arms never share state.
+
+1. Create the notes of both arms. They hold the same pages byte for byte.
+2. Load the generated Records and Planning collections through each arm's own `change_records`
+   and `change_plans` tools, then write the legacy trackers.
+3. Stop and restart both arms. The restart is the one that is timed.
+4. Wait for quiet: the worker uses under 20% of one CPU for 10 seconds.
+5. Refuse a run that is not timeable (see Refusals), then pause both workers.
+6. Time every case in adjacent pairs. The inactive worker stays stopped. The arm that goes
+   first alternates. The first repeat of each case is an unmeasured warm-up.
+
+The timer stops when the parsed terminal response arrives (`recall_canary.measure_call`).
+Assertions and statistics stay outside it.
+
+## Modes
+
+| Command | Purpose |
+|---|---|
+| `plan` | Pin the latest release and list the shards from `profile.json`. |
+| `paired --shard N` | Time one shard of the generated fixture on both arms. Write a fragment. |
+| `aggregate FRAGMENT...` | Join the fragments of every shard into per-group verdicts. |
+| `private` | Time a private prepared vault on both arms. See Private mode. |
+| `validate-summary FILE` | Validate a stored plan, fragment or summary against the schema. |
+
+Run it with `uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py ...`.
+The runner needs `gh` and a tag-bearing clone to pin the release.
+
+A reduced run keeps `--max-cases N` cases per group and, with `--notes-pages N`, a corpus of N pages
+with embeddings off. A reduced run states `reduced: true` and its verdict is `reduced`, never `passed`.
+
+## Verdicts
+
+The unit of a verdict is a gating group of the contract. For each group the runner takes, per case,
+the median over the repeats of the paired difference (head minus base). It then takes the mean of the
+case medians and a Student-t interval around it. SciPy supplies the quantile.
+
+The interval is corrected for the whole family with Bonferroni: the confidence per tail is
+`1 - (1 - confidence) / (2 k)`, where `k` is the number of gating groups in the contract.
+
+| Interval against the allowance `B` | Verdict |
+|---|---|
+| Lower bound above `B` | `failed` |
+| Upper bound at or below `B` | `demonstrated` |
+| Otherwise | `inconclusive`: a visible warning, and the run passes |
+
+The contract keeps `allowance_ms` at null until A/A dispatch runs set it. With `B` null the summary
+reports each interval and says `allowance-not-set`. It invents no number.
+
+A broken instrument fails the run: a failed case, a missing pair, a contract digest that differs
+between fragments, or a group below the case floor. List groups are reported, not gated.
+
+## Refusals
+
+The runner refuses to time an arm in two cases. Each refusal is a closed code in the summary.
+
+- `arm-state-created-during-run`. Vault state is keyed by the vault path, so an arm whose state
+  directory did not exist before its timed start would be timed cold. The runner compares the state
+  directories before the start with those after quiet.
+- `derived-collection-not-ready`. A derived (bulk-import) collection in `rebuilding` makes the
+  store retry every 2 seconds under the writer lease and adds a tail to many calls. The runner reads
+  each `collections-derived.sqlite` read-only and refuses when any derived collection is not `ready`.
+  The generated fixture has no derived collections.
+
+An arm that never goes quiet is refused as `arm-not-quiescent`. This catches a worker that
+re-embeds after startup.
+
+## Private mode
+
+`private --golden DIR --cases FILE --arm-roots BASE,HEAD (--prepare | --reuse)` times a prepared
+private vault. The golden directory holds `vault`, `state`, `lease` and `coordinator.sqlite`. The
+cases file uses the shape of `recall_canary.load_cases` and gives every case a group.
+Nothing private enters the repository, the tests or CI: the operator keeps the golden, the
+cases and the arm roots on the host.
+
+- `--prepare` copies the golden into both fixed roots and starts each arm once, so its state exists.
+  It refuses a root that already exists.
+- `--reuse` times the roots as prepared and never rebuilds them. A copy at a new path starts cold,
+  so the roots stay in place between runs.
+- `--embeddings` starts the arms with the real encoder settings. Without it embeddings are off.
+
+The summary adds, per store group, the head p95 against `p95_target_ms` from the contract
+(`meets target` or `misses target`). It records `/proc/pressure/cpu` avg60 at the start and at the end.
+An absolute verdict counts only on a quiet host.
+
+## Fixture
+
+`gen_collection_fixture` in `scripts/synth_vault.py` builds the collections from `profile.json`:
+30 Records collections, 24 Planning collections with skewed row counts and 3 legacy trackers.
+Registry-constrained values come from the shipped vocabulary packs at run time. Planning items form
+the kind hierarchy that the registry's `parents` rules require, sized by `planning.fanout`; the
+loader adds parents first and builds each child's `parent` reference from the add response. The cases come from
+the same profile, so the generator's input is the source of truth for each expected value.
+The `recall` cases send a page title as the whole turn. That turn carries no task, so `recall_context`
+abstains on every page, and each case expects that abstention. A turn with prose resolves on some pages and
+not on others, so no answer key can fix it. The `recall` group therefore times the abstaining path; use
+private mode with real turns to time the resolving path.
+Every fragment pins `profile_sha256` and `cases_sha256`; the contract pins the profile as
+`fixture_profile_sha256`. A changed profile needs a new digest in the contract.

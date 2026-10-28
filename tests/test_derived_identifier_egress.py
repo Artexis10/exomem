@@ -2462,6 +2462,7 @@ def test_a_review_item_for_a_marked_page_reads_as_if_the_page_were_absent(tmp_pa
     assert guest["present"] == guest["absent"]
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_a_guest_activates_as_if_the_marked_page_were_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3171,6 +3172,7 @@ def test_restricted_activation_reads_as_if_the_withheld_anchor_were_absent(
         assert _text(answers["C"][turn]) == _text(answers["B"][turn]), turn
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_owner_still_activates_a_page_withheld_from_others(tmp_path: Path) -> None:
     hub, withheld = _ACTIVATION_SCENARIOS["withheld-only"]
     vault = _materialize(tmp_path / "vault", {**_activation_base(hub), **withheld}, "external")
@@ -3222,6 +3224,7 @@ _ABSTENTION_PATHS = {
 }
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("path", sorted(_ABSTENTION_PATHS))
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_abstention_and_its_token_carry_no_index_generation(

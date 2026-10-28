@@ -267,6 +267,106 @@ def test_typed_relation_reports_typed_and_emits_no_typed_edge_warning(
     assert result.relation_disposition.qualifying_signal == "typed"
     codes = {finding.code for finding in result.findings}
     assert "RELATION_TYPED_EDGE_ABSENT" not in codes
+    assert "RELATION_AUTHORED_ALL_GENERIC" not in codes
+
+
+@pytest.mark.parametrize("incoming", (False, True))
+def test_generic_authorship_stays_writable_and_visible_beside_incoming_specificity(
+    tmp_path: Path, incoming: bool,
+) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + "## Relations\n- relates_to [[Knowledge Base/Notes/Patterns/target]]\n"),
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern", body=(
+            _OBS + "## Relations\n- supports [[Knowledge Base/Notes/Insights/page]]\n"
+            if incoming else _OBS
+        )),
+    )
+
+    result = _disposition(tmp_path, page, target)
+
+    assert result.should_block is False
+    assert result.relation_disposition.qualifying_signal == ("typed" if incoming else "connectivity")
+    advisories = [finding for finding in result.warnings if finding.code == "RELATION_AUTHORED_ALL_GENERIC"]
+    assert len(advisories) == 1
+    assert advisories[0].remediation
+    corpus = _corpus(tmp_path, page, target)
+    [authored] = semantic_contract.writer_authored_facts(page, corpus)
+    assert "generic_relation" in semantic_contract.qualify_relation(
+        authored, registry=corpus.registry_for(page.path), corpus=corpus,
+    ).reasons
+
+
+@pytest.mark.parametrize("specific", ("supports", "refines"))
+def test_specific_authorship_does_not_receive_all_generic_advice(
+    tmp_path: Path, specific: str,
+) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + f"## Relations\n- {specific} [[Knowledge Base/Notes/Patterns/target]]\n"),
+    )
+    result = _disposition(tmp_path, page, _target(tmp_path))
+    assert result.relation_disposition.qualifying_signal == "typed"
+    assert "RELATION_AUTHORED_ALL_GENERIC" not in {finding.code for finding in result.findings}
+
+
+def test_specific_extension_of_generic_parent_still_qualifies_through_its_alias(tmp_path: Path) -> None:
+    registry = relation_registry.load_registry(proposal={
+        "schema_version": 1,
+        "extensions": {"research.shares_method": {
+            "parent": relation_registry.core_registry().generic_key,
+            "description": "Uses the same documented method",
+            "aliases": ["shares_method"],
+        }},
+    })
+    path = "Knowledge Base/Notes/Insights/page.md"
+    page = semantic_contract.build_page_state(
+        tmp_path, path,
+        _source(body=_OBS + "## Relations\n- shares_method [[Knowledge Base/Notes/Patterns/target]]\n"),
+        relation_registry=registry,
+        language_registry=semantic_language_registry.core_registry(),
+    )
+    target = _target(tmp_path)
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path, [page, target], registry=registry,
+        identity_census=semantic_contract.StableIdentityCensus(tuple(
+            semantic_contract.StableIdentityEntry(state.path, None) for state in (page, target)
+        )),
+    )
+    result = semantic_contract.evaluate(
+        before=None, after=page, operation="create", mode="precommit",
+        before_contracts=_contracts(), after_contracts=_contracts(),
+        before_corpus=_corpus(tmp_path, target), after_corpus=corpus,
+    )
+    assert result.relation_disposition.qualifying_signal == "typed"
+    assert "RELATION_AUTHORED_ALL_GENERIC" not in {finding.code for finding in result.findings}
+
+
+def test_withheld_generic_target_and_absent_target_have_the_same_quality_feedback(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    page = _state(
+        tmp_path, "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + "## Relations\n- relates_to [[Knowledge Base/Notes/Patterns/target]]\n"),
+    )
+    target = _target(tmp_path)
+    results = []
+    for states in ((page, target), (page,)):
+        corpus = replace(_corpus(tmp_path, *states), writer_visibility=lambda path: path != target.path)
+        result = semantic_contract.evaluate(
+            before=None, after=page, operation="create", mode="precommit",
+            before_contracts=_contracts(), after_contracts=_contracts(),
+            before_corpus=corpus, after_corpus=corpus,
+        )
+        results.append([finding.as_dict() for finding in result.findings if finding.code.startswith("RELATION_")])
+    assert results[0] == results[1]
+    assert "RELATION_AUTHORED_ALL_GENERIC" not in {finding["code"] for finding in results[0]}
 
 
 def test_cited_provenance_alone_does_not_satisfy_the_disposition(

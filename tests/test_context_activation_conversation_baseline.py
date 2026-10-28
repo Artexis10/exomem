@@ -66,7 +66,13 @@ from membench.utility.context_activation_conversation import (
 from exomem import commands, lexstore, working_set_index, working_set_runtime
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
-pytestmark = [pytest.mark.timeout(1800), pytest.mark.reads_repository_docs]
+# The packets are compiled once per module, so the whole module runs on the `anchors` packet, the rollback
+# mode; `maps` is the shipped default.
+pytestmark = [
+    pytest.mark.timeout(1800),
+    pytest.mark.reads_repository_docs,
+    pytest.mark.usefixtures("anchors_packet"),
+]
 
 BASELINE_PATH = (
     Path(__file__).resolve().parents[1]

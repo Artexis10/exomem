@@ -10,7 +10,7 @@ empty governed corpus.
 
 A relation qualifies as a **typed edge** only when it is authored or explicitly
 reviewer-accepted, its target resolves unambiguously to an eligible governed page at
-evaluation time, its canonical registry entry is active and scope-valid, its registry
+evaluation time, its canonical registry entry is active and scope-valid, is not marked `generic: true`, its registry
 family is not `link`, `citation`, `derivation`, `evidence`, `mention`, `observation`, or
 `provenance`, and either (a) its origin is `markdown_relation`, `semantic_relation`, or
 `semantic_block`, or (b) its origin is `frontmatter` and its registered family is exactly
@@ -38,7 +38,7 @@ disposition a no-op for exactly the bulk-import case that most needs review.
 
 Inbound edges MUST NOT satisfy connectivity. Unresolved or ambiguous forward targets MUST
 NOT satisfy either lane. A disposition satisfied by connectivity SHALL report that signal
-distinctly from a typed edge and SHALL emit a non-blocking typed-edge-absent warning. The
+distinctly from a typed edge and SHALL emit a non-blocking typed-edge-absent warning, except when the authored-all-generic advisory already describes that pattern. The
 disposition SHALL carry any reviewed-none reason and reference it was satisfied by, so
 review decisions are observable rather than write-only. No minimum relation count SHALL be
 imposed in either lane.
@@ -49,7 +49,7 @@ imposed in either lane.
 - **AND** no other inactive target receives this exception
 
 #### Scenario: Typed relation satisfies disposition
-- **WHEN** a new compiled page has a registered canonical relation to an existing page
+- **WHEN** a new compiled page has a registered non-generic canonical relation to an existing page
 - **THEN** its relation disposition is satisfied and reports the typed edge
 - **AND** no typed-edge-absent warning is emitted
 
@@ -140,3 +140,12 @@ imposed in either lane.
 #### Scenario: Inactive body wikilink target does not connect
 - **WHEN** a compiled page's only outbound body wikilink resolves to an inactive page
 - **THEN** that link does not satisfy connectivity or qualify as a typed edge
+
+#### Scenario: A registry-marked generic relation is connectivity only
+- **WHEN** a page authors an active scope-valid relation marked generic in the registry to a connectable governed page
+- **THEN** that relation does not qualify as a typed edge, regardless of its registry family
+- **AND** it remains writable connectivity with non-blocking guidance
+
+#### Scenario: A specific extension remains typed
+- **WHEN** an authored relation resolves to an active non-generic extension and meets the other typed-edge conditions
+- **THEN** it qualifies as a typed edge even when its registry parent is generic

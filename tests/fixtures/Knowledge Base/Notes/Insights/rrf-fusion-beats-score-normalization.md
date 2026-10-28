@@ -24,3 +24,4 @@ Any hybrid search that blends two or more rankers with unlike score distribution
 ## Connections
 
 - [[Knowledge Base/Notes/Research/Project Alpha/engine-architecture]]
+- [[Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited]]

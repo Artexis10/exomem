@@ -122,6 +122,7 @@ def test_a_quoted_path_names_no_project(project_vault: Path, turn: str) -> None:
     assert not reached & {"project:home", "project:records", *PROJECT_PAGES.values()}, reached
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_same_project_named_in_prose_still_resolves(project_vault: Path) -> None:
     packet = commands.op_activate_context(project_vault, turn="How is the Records project going?")
 
@@ -129,6 +130,7 @@ def test_the_same_project_named_in_prose_still_resolves(project_vault: Path) -> 
     assert PROJECT_PAGES["records"] in _reached(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     "turn",
     [
@@ -146,6 +148,7 @@ def test_slash_joined_words_are_prose_not_a_path(project_vault: Path, turn: str)
     assert "project:records" in _reached(packet)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize(
     "turn",
     [

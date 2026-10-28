@@ -30,6 +30,10 @@ bulk pass. Two mechanisms keep it.
 A new wait on bulk-owned work must take one of the two, and a new yield in a
 bulk pass must hold no other lock that a foreground thread can wait on.
 
+A scheduler that starts bulk work from outside a request, such as a maintenance
+tick, asks `bulk_free_since()` and starts only after bulk work has been free for
+a gap. This is the same rule as above, read as a start condition.
+
 Scheduling only: process-local counters, no content, nothing persisted.
 """
 
@@ -67,6 +71,9 @@ _in_flight = 0
 #: Foreground threads waiting on work a bulk pass may own (`awaiting_bulk`).
 #: While any wait, no bulk pass parks.
 _awaiting_bulk = 0
+#: When `_bulk_may_run()` last became true, or None while it is false. Only a
+#: scheduling input (`bulk_free_since`); every change to the two counters updates it.
+_free_since: float | None = time.monotonic()
 #: Per-thread foreground depth: a request that runs bulk work inline must never
 #: wait on itself.
 _local = threading.local()
@@ -75,6 +82,25 @@ _local = threading.local()
 def _bulk_may_run() -> bool:
     """No foreground thread is running, or one is waiting on bulk-owned work."""
     return _in_flight == 0 or _awaiting_bulk > 0
+
+
+def _counted() -> None:
+    """Record whether bulk work may run now. Call under `_condition` after a counter changes."""
+    global _free_since
+    if not _bulk_may_run():
+        _free_since = None
+    elif _free_since is None:
+        _free_since = time.monotonic()
+
+
+def bulk_free_since() -> float | None:
+    """The monotonic time `_bulk_may_run()` last became true, or None while it is false.
+
+    The store thread starts maintenance only after a quiet gap, so it asks how long bulk
+    work has been free. A scheduling counter: it holds no content and leaves nothing persisted.
+    """
+    with _condition:
+        return _free_since
 
 
 @contextmanager
@@ -88,6 +114,7 @@ def foreground() -> Iterator[None]:
     if _local.depth == 1:
         with _condition:
             _in_flight += 1
+            _counted()
     try:
         yield
     finally:
@@ -95,6 +122,7 @@ def foreground() -> Iterator[None]:
         if _local.depth == 0:
             with _condition:
                 _in_flight -= 1
+                _counted()
                 if _bulk_may_run():
                     _condition.notify_all()
 
@@ -119,12 +147,14 @@ def awaiting_bulk() -> Iterator[None]:
         return
     with _condition:
         _awaiting_bulk += 1
+        _counted()
         _condition.notify_all()
     try:
         yield
     finally:
         with _condition:
             _awaiting_bulk -= 1
+            _counted()
 
 
 @contextmanager
@@ -145,6 +175,7 @@ def outside_foreground() -> Iterator[None]:
     _local.depth = 0
     with _condition:
         _in_flight -= 1
+        _counted()
         if _bulk_may_run():
             _condition.notify_all()
     try:
@@ -152,6 +183,7 @@ def outside_foreground() -> Iterator[None]:
     finally:
         with _condition:
             _in_flight += 1
+            _counted()
         _local.depth = depth
 
 

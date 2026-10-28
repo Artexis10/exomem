@@ -119,10 +119,10 @@ rules:
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshotcontents"]
     verbs: ["get", "list"]
-  # D6: pool size is the published free capacity plus the node's volumes.
+  # D12: read physical identities and patch only reservation requests when enabled.
   - apiGroups: ["topolvm.io"]
     resources: ["logicalvolumes"]
-    verbs: ["list"]
+    verbs: ["list"{{ if $storage.local.reservations }}, "get", "patch"{{ end }}]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -512,8 +512,9 @@ spec:
     # but for the cluster-scoped Retain patch rule 11 confines.
     - expression: >-
         {{ if $relocation }}request.resource.resource == 'persistentvolumes' || {{ end -}}
-        variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$')
-      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>.
+        variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$'){{ if and $local $storage.local.reservations }} ||
+        {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
+      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>{{ if and $local $storage.local.reservations }}, or an immutable family capability in the reservation namespace{{ end }}.
     # 2. A namespace cellctl creates or updates must carry the restricted
     # Pod Security labels at the platform's pinned version (v1.35, as every
     # other platform namespace and cellctl's own renderer use), so cellctl can
@@ -642,15 +643,16 @@ spec:
     - expression: >-
         request.operation != 'DELETE' || request.resource.resource in ['namespaces', 'jobs'] ||
         (request.resource.resource == 'secrets' && (variables.target.metadata.name == 'cell-credentials' ||
-          variables.target.metadata.name.matches('^export-[0-9a-f]{32}-verify-get$')))
+          variables.target.metadata.name.matches('^export-[0-9a-f]{32}-verify-get$'))){{ if and $local $storage.local.reservations }} ||
+        {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
         {{- if $relocation }} ||
         (request.resource.resource == 'persistentvolumeclaims' && variables.target.metadata.name == 'cell-data')
         {{- end }}
         {{- if $local }} ||
         (request.resource.resource == 'persistentvolumeclaims' &&
-          variables.target.metadata.name.matches('^cell-clone-[0-9a-f]{10}$')) ||
+          variables.target.metadata.name.matches('^cell-clone-{{ if $storage.local.reservations }}[a-z2-7]{16}-[0-9a-f]{32}{{ else }}[0-9a-f]{10}{{ end }}$')) ||
         (request.resource.resource == 'volumesnapshots' &&
-          variables.target.metadata.name.matches('^cell-snapshot-[0-9a-f]{10}$'))
+          variables.target.metadata.name.matches('^cell-snapshot-{{ if $storage.local.reservations }}[a-z2-7]{16}-[0-9a-f]{32}{{ else }}[0-9a-f]{10}{{ end }}$'))
         {{- end }}
       message: cellctl may delete only a cell namespace, its child Secret, a hold Job, or an admitted retained claim.
     # UUID-derived export Secret names fix the verification capability protocol.
@@ -660,7 +662,8 @@ spec:
         request.resource.resource != 'secrets' || request.operation == 'DELETE' ||
         ((variables.target.metadata.name == 'cell-credentials' ||
           variables.target.metadata.name.matches('^export-[0-9a-f]{32}-verify-get$')) &&
-          (!has(variables.target.type) || variables.target.type == 'Opaque'))
+          (!has(variables.target.type) || variables.target.type == 'Opaque')){{ if and $local $storage.local.reservations }} ||
+        {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
       message: cellctl may write only Opaque cell credentials or an export verification capability.
     # 8. The PVC is the cell's one volume, provisioned fresh on a configured
     # cell class: no data source and no pre-bound volume. With local storage,
@@ -675,8 +678,9 @@ spec:
               variables.target.spec.storageClassName in [{{ join ", " $cellClasses }}] &&
               !has(variables.target.spec.dataSource) && !has(variables.target.spec.dataSourceRef))
           {{- if $local }} ||
-            (variables.target.metadata.name.matches('^cell-clone-[0-9a-f]{10}$') &&
-              variables.target.spec.storageClassName == '{{ $storage.local.clone_class }}' &&
+            (variables.target.metadata.name.matches('^cell-clone-{{ if $storage.local.reservations }}[a-z2-7]{16}-[0-9a-f]{32}{{ else }}[0-9a-f]{10}{{ end }}$') &&
+              {{ if $storage.local.reservations }}variables.target.metadata.name.substring(11, 27) == variables.namespaceName.substring(9) &&
+              {{ end }}variables.target.spec.storageClassName == '{{ $storage.local.clone_class }}' &&
               has(variables.target.spec.dataSourceRef) && !has(variables.target.spec.dataSourceRef.namespace) &&
               variables.target.spec.dataSourceRef.apiGroup == 'snapshot.storage.k8s.io' &&
               variables.target.spec.dataSourceRef.kind == 'VolumeSnapshot' &&
@@ -812,8 +816,9 @@ spec:
     # snapshot class, never bound to an existing snapshot's content.
     - expression: >-
         request.resource.resource != 'volumesnapshots' || request.operation == 'DELETE' ||
-        (variables.target.metadata.name.matches('^cell-snapshot-[0-9a-f]{10}$') &&
-          variables.target.spec.?volumeSnapshotClassName.orValue('') == '{{ $storage.local.snapshot_class }}' &&
+        (variables.target.metadata.name.matches('^cell-snapshot-{{ if $storage.local.reservations }}[a-z2-7]{16}-[0-9a-f]{32}{{ else }}[0-9a-f]{10}{{ end }}$') &&
+          {{ if $storage.local.reservations }}variables.target.metadata.name.substring(14, 30) == variables.namespaceName.substring(9) &&
+          {{ end }}variables.target.spec.?volumeSnapshotClassName.orValue('') == '{{ $storage.local.snapshot_class }}' &&
           variables.target.spec.source.?persistentVolumeClaimName.orValue('') == 'cell-data' &&
           !has(variables.target.spec.source.volumeSnapshotContentName))
       message: cellctl may write only a backup snapshot of its cell-data claim, on the cell snapshot class.

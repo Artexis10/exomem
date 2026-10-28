@@ -217,6 +217,10 @@ Calling `record_memory(action="inspect")` without a collection SHALL return a bo
 - **WHEN** one collection holds a refused candidate
 - **THEN** inventory reports that collection's committed and held counts without returning candidate contents, and targeted inspection lists the held reference, its timestamp, attempted action and a diagnostics summary
 
+#### Scenario: Store item views are not legacy trackers
+- **WHEN** a collection store has published item views under the Records layer, and other Markdown files there carry tracker front matter
+- **THEN** collectionless inventory does not authorize or parse the published views as legacy-tracker candidates, and it still reports every other authorized legacy tracker, including one beside the collection's manifest
+
 ### Requirement: Installed-artifact Records release journey
 The release gate SHALL build and install the Exomem wheel in a clean environment, initialize a temporary human-owned vault, discover `record_memory` through a real MCP transport, and complete one bounded chronological-log Records journey without importing product code from the source checkout. The journey SHALL preserve ordinary template/manual entry, perform a guarded append and targeted guarded update, return a structured query and ephemeral derived view, round-trip an opaque Planning evidence descriptor, survive a server restart, observe a direct canonical-file edit, report its positive audit gap without silently repairing it, and keep row-only content out of ordinary semantic recall. Detailed domain, governance-reduction, mutation-crash, ambiguity, dataset, and scale cases MAY remain focused release-blocking tests rather than duplicate black-box scenarios.
 

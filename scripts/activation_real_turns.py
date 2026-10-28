@@ -80,6 +80,8 @@ def prepare_environment(snapshot: Path, *, state_dir: str | None) -> None:
     for key in [k for k in os.environ if k.startswith("EXOMEM_") and k not in _KEPT_EXOMEM_ENV]:
         del os.environ[key]
     os.environ["EXOMEM_VAULT_PATH"] = str(snapshot)
+    # This check judges resolved and partial anchors, which only the anchors packet carries.
+    os.environ["EXOMEM_ACTIVATION_PACKET"] = "anchors"
     os.environ["XDG_STATE_HOME"] = (
         state_dir if state_dir else str(snapshot.parent / f"{snapshot.name}-activation-state")
     )

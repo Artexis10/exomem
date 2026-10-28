@@ -58,6 +58,50 @@ def get(conn, cid, kind, identity, *, basis=None):
                                    "the imported source bytes cannot be verified") from error
 
 
+def owns_file_receipt(conn, proof, root, path, after_hash):
+    """Whether current SQL ownership succeeded these exact imported file bytes."""
+    from . import legacy_import, tokens
+    from .connection import CollectionStoreError
+
+    owner = proof.owner(root, path)
+    if owner is None or after_hash is None:
+        return False
+    row = conn.execute(
+        "SELECT p.kind,p.collection_id,i.item_key,t.transition_id,t.event_hash,t.receipt_json,"
+        "m.manifest_text,m.manifest_hash FROM projection_state p "
+        "JOIN collections c ON c.collection_id=p.collection_id "
+        "JOIN txns t ON t.txn_id=c.created_txn "
+        "LEFT JOIN items i ON i.row_id=p.row_id AND i.collection_id=p.collection_id "
+        "LEFT JOIN collection_manifests m ON m.collection_id=c.collection_id AND m.manifest_version=1 "
+        "WHERE p.path=? AND p.collection_id=? AND t.operation='legacy_import' AND t.legacy_event_json IS NULL",
+        (path, owner["collection_id"]),
+    ).fetchone()
+    if row is None:
+        return False
+    kind, cid, key, transition, digest, receipt, manifest, manifest_hash = row
+    try:
+        envelope = json.loads(receipt)
+        if (envelope["tag"], envelope["version"], envelope["phase"], envelope["collection_id"],
+                envelope["transition_id"], envelope["manifest_version_after"]) != (
+                "exomem-legacy-import", 1, "checkpoint", cid, transition, 1
+        ) or legacy_import._event_hash(envelope) != digest:
+            return False
+        # These projection kinds are the closed storage schema, not user vocabulary.
+        if kind == "manifest":
+            return (path == owner["manifest_path"] and tokens.manifest_hash(manifest) == manifest_hash
+                    and hashlib.sha256(manifest.encode("utf-8")).hexdigest() == after_hash)
+        if kind not in {"item", "log"}:
+            return False
+        original = get(conn, cid, kind, key if kind == "item" else "source",
+                       basis=(transition, digest))
+        if original is None or original[0] != path or hashlib.sha256(original[1]).hexdigest() != after_hash:
+            return False
+        return kind != "item" or envelope["original_items"][key]["source_sha256"] == after_hash
+    except (CollectionStoreError, KeyError, TypeError, ValueError):
+        # Missing or damaged migration evidence leaves this exact custody owed.
+        return False
+
+
 def projections(conn, cid):
     """The schema's source projections, keyed by immutable item identity or the log source."""
     return conn.execute("SELECT p.path,p.kind,i.item_key,p.published_sha256 FROM projection_state p "
@@ -198,7 +242,7 @@ def backfill(writer, check):
 
 def needs_replica_copy(root, conn):
     """A same-head backfill must reach the replica before its only original file is stamped."""
-    from . import connection, replica
+    from . import connection, replica, schema
 
     def headers(reader):
         return tuple(reader.execute("SELECT key,json_extract(value,'$.sha256'),"
@@ -211,5 +255,8 @@ def needs_replica_copy(root, conn):
     path = replica.replica_path(root)
     if not path.exists():
         return True
-    with closing(connection.open_reader(path)) as reader:
-        return headers(reader) != expected
+    reader, found = connection._open_read_only(path, connection.BUSY_TIMEOUT_MS)
+    with closing(reader):
+        # A replica an earlier schema published is copied at this one; refusing it would stop
+        # the takeover that just migrated the live store on every retry.
+        return found < schema.SCHEMA_VERSION or headers(reader) != expected

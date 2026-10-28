@@ -23,6 +23,9 @@ from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import commands, lexstore, working_set_heat, working_set_index, working_set_runtime
 
+# This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
+pytestmark = pytest.mark.usefixtures("anchors_packet")
+
 SESSION = "thread-session-" + "e5" * 8
 #: Shares two words of the page's title, said too far apart to read as its name.
 OVERLAP_TURN = "is the vantry sizing still right, given how the quillon behaves lately for us all?"

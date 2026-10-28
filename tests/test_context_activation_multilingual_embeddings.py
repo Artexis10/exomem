@@ -54,7 +54,8 @@ from exomem import (  # noqa: E402
     working_set_runtime,
 )
 
-pytestmark = [pytest.mark.embeddings, pytest.mark.timeout(3600)]
+# This gate measures anchor resolution's semantic stage, which only the anchors compile runs.
+pytestmark = [pytest.mark.embeddings, pytest.mark.timeout(3600), pytest.mark.usefixtures("anchors_packet")]
 
 MODEL = "BAAI/bge-m3"
 #: The design's bar for the semantic stage (§9.3), request-thread milliseconds.
