@@ -1942,12 +1942,15 @@ def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster, pl
             return False
         assert not status.get("typeChecking", {}).get("expressionWarnings"), status
         # Type-check status can precede enforcement of an updated policy.
-        # Probe its exact allowed pair before exercising unchanged denials.
-        return dry_run(render_statefulset(selected)).returncode == 0
+        # Require both admission and named-policy denial before the assertions.
+        if dry_run(render_statefulset(selected)).returncode != 0:
+            return False
+        refused = dry_run(render_statefulset(other))
+        return refused.returncode != 0 and "exomem-cellctl-scope" in refused.stderr
 
     _wait_for(policy_ready, timeout=30, description="dedicated placement policy admission")
     refused_other = dry_run(render_statefulset(other))
-    assert "exomem-cellctl-scope" in refused_other.stderr, refused_other.stderr
+    assert refused_other.returncode != 0 and "exomem-cellctl-scope" in refused_other.stderr, refused_other.stderr
     for document in (
         render_statefulset(selected),
         render_backup_job(selected, bucket_name="bucket", endpoint="https://s3.example"),
