@@ -82,6 +82,11 @@ The weights follow the rule of the `shared-model-runtime` capability (change `sh
 
 This change applies that rule to the media engines, and its spec references the capability. So `ship-models-as-shared-onnx` lands first, or in the same delivery.
 
+A file-backed weight file is not enough on its own. At load, ONNX Runtime folds constant expressions into private memory in every process. In the Whisper decoder, it folds the transposes of the tied embedding table: 316 MiB per process.
+So the speech artifact saves its decoder already folded, at ONNX Runtime's hardware-independent basic level, with the folded tables as file-backed initializers. The registry recipe names the graphs that the build folds.
+The transcripts stay byte-identical. Measured on 2026-10-27 at 2 threads, one extra concurrent speech job then adds about 0.45 GiB of private memory instead of 0.78 GiB.
+Two concurrent containers on one host, each with its own memory limit, held one copy of every weight mapping, and the first to fault a page carried it in its cgroup. Task 5.2 still measures this on a node.
+
 ### D4. Documents
 
 Cloud reads every type a personal install reads: PDF through PyMuPDF, DOCX, XLSX, PPTX, HTML, TXT, EML and ICS. Every install gains EPUB, ODT, ODS, ODP and RTF.
@@ -113,7 +118,18 @@ Reuse wins where it fits.
   - Acceptance records the image size the models add.
 - **Image search model.** It is chosen by published benchmarks, not by our own accuracy runs. The candidates are:
   - `clip-ViT-B-32`, today's model, English queries only, with the multilingual text encoder `clip-ViT-B-32-multilingual-v1` aligned to its image space;
+  - `M-CLIP/XLM-Roberta-Large-Vit-B-32`, another multilingual text encoder aligned to the existing OpenAI ViT-B/32 image space;
   - a current multilingual image-text model of the SigLIP 2 class, which handles images and text in many languages in one model.
+
+  Task 3.4 selects `clip-ViT-B-32-multilingual-v1` at fp32 for ordinary queries and preserves stored image vectors.
+  On the same 30 texts and two-CPU host, its p95 was 64.09 ms and peak RSS was 311,176 KiB.
+  M-CLIP Large measured 1,023.14 ms and 1,580,996 KiB, despite stronger published retrieval results.
+  Both reached minimum cosine 0.99999988 against their fp32 references.
+  Large remains an upgrade candidate; it is not a second query path in this delivery.
+  It changes the query encoder only; image tags retain their existing text encoder and calibrated threshold.
+  An image encoder or vector-space change remains separate work under the image tasks and D8.
+  The selected query artifact must include its trained projection, not only the transformer backbone.
+  Its numerical agreement check includes the tokenizer, pooling, projection, normalisation and recorded sequence limit.
 
   The rule:
   - use published multilingual image–text retrieval results, such as Crossmodal-3600 recall@k for English and Japanese;
@@ -141,25 +157,83 @@ Reuse wins where it fits.
 
 ### D6. Speech
 
-The engine and model are chosen by the bake-off recorded below:
-- faster-whisper `small` and `large-v3-turbo`, int8;
-- Parakeet-TDT-0.6B-v3 in ONNX;
-- SenseVoice-Small in ONNX;
-- optionally, Whisper `large-v3-turbo` in ONNX.
+Selection targets automatic transcription across the broadest viable language set.
+Japanese, English and Estonian verify quality; they do not limit supported languages.
+The record separates declared coverage from measured quality.
+The initial delivery uses the selected default; wider quality measurement informs later upgrades.
+A completed fixture alone does not establish usable recognition in its language.
 
-Selection follows the general rule of the `shared-model-runtime` capability. The speech terms add only what speech needs, and the spec states them:
+The candidate inventory includes:
+- Whisper `large-v3` and `large-v3-turbo` through CTranslate2, at int8;
+- Whisper through ONNX Runtime;
+- SenseVoice-Small through ONNX Runtime;
+- Meta MMS, for coverage beyond 100 languages;
+- Omnilingual ASR CTC 300M v2 and 1B v2 through ONNX Runtime;
+- the earlier `small` Whisper and Parakeet-TDT-0.6B-v3 candidates, where their coverage fits.
 
-- **Metric per language.** WER for English and Estonian, which are written with spaces between words, and CER for Japanese, which is not.
-- **One benchmark.** Candidates are compared on the same published benchmark wherever one covers them all: the Open ASR Leaderboard, then FLEURS or Common Voice results from model cards and papers.
-- **Missing results.** When any candidate lacks a published result in a required language, every candidate is measured for that language on the full FLEURS test split. That language is then judged on those measurements only. A measurement is never compared with a published number, because the two differ in normalisation and decoding.
-  - The full split costs only local CPU, and it is expected to give intervals narrower than the 2.0-point margin (to be confirmed by the first run).
-  - Each difference from the best candidate is reported with its 95% bootstrap confidence interval, resampling the utterances. On a measured language, a candidate passes the 2.0-point bound only when the upper end of its interval is within 2.0 points.
-  - The owner's amendment to the bake-off allows this measurement. That amendment is not recorded in this repository.
-- **Cost.** The int8 real-time factor at pinned CPU threads on the cell's CPU, peak memory, and whether the weights can be shared under D3.
-- **Sanity check.** Ten utterances per language catch a broken int8 or ONNX conversion.
-- **Pick.** The lowest-memory candidate whose error rate is within 2.0 points of the best in every required language. Shareable weights count once per node. Routing by language is allowed only if no single candidate passes, and only if the routed pair stays under 1.5 GB.
+The comparison screens redistribution terms, automatic language handling and offline runtime compatibility before expensive measurements.
+It records an excluded candidate's concrete reason; exclusion is not a measured quality failure.
+The shipping image keeps the shared runtime's no-PyTorch contract.
+File-backed immutable weights remain the default; a private-copy runtime needs the shared contract's measured exception.
 
-Bake-off result: *pending; recorded here when the run completes.*
+The initial default is `onnx-community/whisper-large-v3-turbo` at int8 through `onnx-asr` 0.12.0 and ONNX Runtime.
+Its pinned tokenizer declares 100 language tokens, including Cantonese.
+Automatic language detection receives no language hint.
+The file-backed layout keeps the published int8 weights unchanged.
+On 30 additional validation clips, its output matched the upstream layout exactly after NFC and whitespace normalization.
+This proves the layout conversion, not fp32-to-int8 agreement.
+
+The 30-clip quality diagnostic used ten public FLEURS validation clips per verification language.
+It used NFKC, case folding, Unicode punctuation removal and whitespace collapse.
+English and Estonian use WER; Japanese uses CER.
+
+| Candidate | English WER | Japanese CER | Estonian WER | Completion |
+|---|---:|---:|---:|---|
+| ONNX Whisper turbo int8 | 6.50% | 3.27% | 20.51% | 30/30 |
+| CTranslate2 Whisper turbo int8 | 7.50% | 1.84% | 19.87% | 30/30 |
+| Omni CTC 300M v2 int8 | 26.00% | 22.09% | 22.44% | 30/30 |
+| Omni CTC 1B v2 int8 | 21.00% | 18.81% | 17.31% | 30/30 |
+| CTranslate2 Whisper large-v3 int8 | Partial | Partial | Partial | 16/30 before the 900-second bound |
+
+Decoding configurations differ: CTranslate2 used beam five; ONNX Whisper used its maintained greedy adapter.
+These results are diagnostic evidence and do not establish a final confidence-bound winner.
+The initial default prioritizes demonstrated verification quality, automatic coverage and shared weights.
+A full FLEURS comparison and measured quality across at least 100 languages remain upgrade work, not initial-delivery gates.
+
+SenseVoice-Small covers five languages and excludes Estonian.
+MMS weights use CC-BY-NC-4.0, which does not fit commercial redistribution.
+Omni CTC offers broader declared coverage, but its English and Japanese diagnostic losses prevent selection as the sole default.
+No language router ships in this delivery.
+
+A later model or routing switch requires a frozen comparison and one fresh held-out confirmation.
+It must report per-case differences and 95% confidence intervals clustered by source sentence.
+The upper interval bound must stay within 2.0 percentage points of the best candidate in every verification language.
+Among candidates that meet quality and cell resource bounds, broader supported coverage wins, then lower private memory.
+A routing layer must also show a useful ablation against its component engines.
+Language mappings and admission thresholds remain deployment data.
+
+The worker decodes bounded 30-second buffers through PyAV and uses the maintained Whisper adapter.
+A pinned Silero VAD checks peak-normalized chunks and skips those with no detected speech.
+Whisper receives the original waveform, preserving the measured speech input.
+The presence check prevents fabricated text on silent input; a false negative can omit quiet speech.
+The real-model workflow check must therefore include quiet speech and silence before release.
+The existing worker publishes the transcript automatically and preserves completed sidecars.
+Model identities and build recipes live in `src/exomem/media_models.json` and `scripts/build-media-artifacts.py`.
+
+**Long recordings.** 30-minute English and Japanese readings exposed two decoder faults that short clips did not show.
+The adapter detected the language in every window by an argmax over the whole vocabulary, and often returned the transcribe token instead of a language.
+Greedy decoding had no loop guard, so a repeating window ran to its 448-token cap.
+On those readings, 14 of 60 English windows and 13 of 60 Japanese windows looped.
+The engine therefore detects the language once per file, from the language tokens that the pinned generation config declares.
+It decodes each window with the reference Whisper fallback: at most 224 tokens, retried at higher temperatures when the compression ratio exceeds 2.4 or the mean log-probability falls below -1.0.
+The speech entry of `media_models.json` holds these values with their source and a decoding revision, and the revision is part of the engine label.
+
+A 30-minute recording at 2 CPU takes longer than one 900-second job timeout.
+The engine writes an atomic progress record under the vault's derived state after each window, keyed by the file's vault path.
+A later run of the same path, content digest, window length and engine label continues from the next window, with the recorded language; any other record starts again.
+Removing the file discards its record through the deletion fan-out.
+The engine deletes the record when the transcript completes.
+The worker re-queues a stopped speech job. A timeout, pressure or hard-limit stop that advanced the record does not count toward the stop limit, and a stop without progress counts as before.
 
 ### D7. Off until proven, and the disabled state
 
@@ -252,7 +326,7 @@ Run on the owner-sized cell with that engine's backlog active:
 
 ## Open Questions
 
-- The speech engine: pending the bake-off (D6).
+- Later speech upgrades: broader coverage and fresh confirmation under D6.
 - D4 is delivered through MarkItDown, odfdo and striprtf. D5 records the selected HEIC decoder and its distribution terms.
   The offline image gate verifies HEIC format support; owner-sized acceptance and the live rollout remain separate.
 - Documents/OCR ship defaults for fallback OCR packs, consecutive memory stops and pressure stalls. Budgets for later engines still need their own acceptance.

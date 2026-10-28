@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -179,6 +179,41 @@ def _external_edit(watcher: file_watcher.FileWatcher, path: Path, marker: str) -
 
 
 def _governed_write(root: Path, path: Path, marker: str) -> float:
+    """One committed `remember`-shaped write through the lease manager a request uses.
+
+    A governed write reaches the vault inside `writer_lease.invoke_command`, whose
+    leaf binds the mutation request that lets dispatch report pending. A bare
+    `batch_atomic_write` is a standalone library caller instead, whose contract is
+    a converged graph, so it would measure a different caller.
+    """
+    from types import SimpleNamespace
+
+    from exomem.writer_lease import get_manager, mark_active_mutation_committed
+
+    text = path.read_text(encoding="utf-8") + f"\n- {marker}\n"
+
+    def leaf(vault_root: Path, **_kwargs: object) -> dict[str, object]:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(path=path, content=text)], vault_root=vault_root
+        )
+        mark_active_mutation_committed()
+        return {"status": "committed", "mutated": True}
+
+    command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
+    started = time.monotonic()
+    get_manager().invoke(command, (root,), {})
+    return time.monotonic() - started
+
+
+def _library_write(root: Path, path: Path, marker: str) -> float:
+    """One write from a standalone library caller, with no request around it.
+
+    Dispatch reports its distinct pending codes (`graph_repair_external_pending`,
+    `graph_repair_unreadable_predecessor`, `graph_repair_cold_resolver`,
+    `graph_repair_covered_gap`) only to a caller that cannot carry pending; a
+    request reports `graph_repair_queued` first. The tests that pin those codes
+    pin this caller.
+    """
     text = path.read_text(encoding="utf-8") + f"\n- {marker}\n"
     started = time.monotonic()
     vault_module.batch_atomic_write(
@@ -332,13 +367,13 @@ def _messages_from_this_thread(caplog: pytest.LogCaptureFixture, needle: str) ->
     """Records matching `needle` that the calling thread itself emitted.
 
     `caplog` captures every thread in the process, and these tests run a real
-    watcher. A watcher dispatch is a standalone library caller, so
-    `_caller_can_carry_pending` is False for it and a deferral it makes must
-    converge before it returns -- it registers a rebuild of its own and says
-    `reason=incremental_refresh_queued_for_a_caller_that_must_converge`. That
-    is by design and is not what any oracle here is about; it was also making
-    the fence test fail about one full-file run in three, purely on when the
-    watcher's loop landed inside a per-write window.
+    watcher. A watcher dispatch is a background caller inside the join waiver,
+    so it may stop at queued; but it still starts registered rebuilds, and a
+    proven verdict such as an unusable sidecar still registers one with its own
+    `graph dispatch registered a whole-vault rebuild` line. That is by design
+    and is not what any oracle here is about; it was also making the fence test
+    fail about one full-file run in three, purely on when the watcher's loop
+    landed inside a per-write window.
 
     The governed write dispatches synchronously on the thread that called it,
     so the emitting thread is exact attribution rather than a heuristic.
@@ -893,7 +928,7 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     # answers `graph_sync_predecessor_present_at_genesis` -- a proven verdict
     # about a fixture, not about the door under test. Consuming it here keeps
     # the per-write oracle below exact instead of carrying an exception.
-    _governed_write(root, generated / "generated-note-0050.md", "warm-up")
+    _library_write(root, generated / "generated-note-0050.md", "warm-up")
     index_sync.drain_graph_work(root, limit=64)
     outcomes.clear()  # the warm-up's own outcome is fixture setup, not evidence
 
@@ -919,7 +954,7 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
         # The aggregate assertions below still read the whole log, deliberately
         # -- `uncovered` and `fenced` are about the vault, not about a caller.
         caplog.clear()
-        acknowledgements.append(_governed_write(root, target, f"governed {i}"))
+        acknowledgements.append(_library_write(root, target, f"governed {i}"))
         # Before the drain, so the receipt proof inside reads the queue this
         # write's own dispatch decided against.
         reasons = _rebuild_reasons_this_write(root, caplog)
@@ -1009,7 +1044,7 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
     # The fixture publishes through `rebuild_all` and leaves no graph_sync
     # lineage, so the first write to take the probe answers at genesis. Consume
     # it here, as the convergence harness consumes its own warm-up writes.
-    _governed_write(root, generated / "generated-note-0050.md", "warm-up")
+    _library_write(root, generated / "generated-note-0050.md", "warm-up")
     index_sync.drain_graph_work(root, limit=64)
 
     outcomes: list[epistemic_graph.GraphDispatchResult] = []
@@ -1036,7 +1071,7 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
         target = generated / f"generated-note-{i:04d}.md"
         _external_edit(live_watcher, target, f"external editor touch {i}")
         caplog.clear()
-        acknowledgements.append(_governed_write(root, target, f"governed {i}"))
+        acknowledgements.append(_library_write(root, target, f"governed {i}"))
         reasons = _rebuild_reasons_this_write(root, caplog)
         registered.extend(reasons)
         per_write_rebuilds.append(len(reasons))
@@ -1288,13 +1323,16 @@ def test_an_unscoped_fan_out_mark_is_the_only_one_that_fences_a_write(
 def test_a_fan_out_scope_that_cannot_be_established_still_fences_everything(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail closed: an unknown scope is a whole-vault scope."""
+    """Fail closed: an unknown scope is a whole-vault scope.
+
+    A standing whole-vault marker is not an unknown scope. It owns the repair,
+    so the watcher marks nothing (`test_a_fan_out_whose_repair_is_owned_marks_nothing`).
+    """
     root = handoff_vault
-    batch = [f"{GENERATED}/generated-note-{i:04d}.md" for i in range(3)]
     deferred_index.mark_graph_full_rebuild(root, generation=1)
 
-    assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
-        "whole-vault repair outstanding is a whole-vault scope"
+    assert file_watcher._graph_repair_owned(root, batch_owned=False) is True, (
+        "a standing marker owes every path its repair, so nothing is marked"
     )
 
     deferred_index.clear_graph_full_rebuild(root)
@@ -1307,9 +1345,55 @@ def test_a_fan_out_scope_that_cannot_be_established_still_fences_everything(
         "graph_full_rebuild_pending",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("marker unreadable")),
     )
-    assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
-        "an unreadable marker is an unknown scope"
+    assert file_watcher._graph_repair_owned(root, batch_owned=True) is None, (
+        "an unreadable marker is an unknown scope, whatever the batch queued"
     )
+
+
+def _the_queue_owns_the_repair(root: Path) -> None:
+    """Receipts for the batch are queued, and nothing else is owed."""
+
+
+def _a_standing_marker_owns_the_repair(root: Path) -> None:
+    deferred_index.mark_graph_full_rebuild(
+        root, generation=int(graph_sync.status(root).get("generation") or 0)
+    )
+
+
+@pytest.mark.parametrize(
+    "owned_by",
+    [_the_queue_owns_the_repair, _a_standing_marker_owns_the_repair],
+    ids=["queued_receipt", "standing_marker"],
+)
+def test_a_fan_out_whose_repair_is_owned_marks_nothing(
+    handoff_vault: Path, owned_by: Callable[[Path], None]
+) -> None:
+    """The watcher marks an incomplete fan-out only when nothing else owns its repair.
+
+    A receipt-owned write reaches the watcher as an outside edit, and a freshly
+    started worker has no resident resolver, so the watcher's refresh queues
+    the batch instead of deriving it. Queued receipts for the batch, or a
+    standing whole-vault marker, already owe the graph its repair. A mark on
+    top fenced later writes to those paths, or, unscoped, every write, until
+    the watcher acknowledged it.
+    """
+    root = handoff_vault
+    page = root / GENERATED / "generated-note-0004.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(page, page.read_text(encoding="utf-8") + "\n- owned\n")],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    owned_by(root)
+    find_module.unload_ram_caches()
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
+
+    watcher._record(page, deleted=False)
+    watcher._flush()
+
+    assert not EpistemicGraphIndex(root).available(), "the fan-out converged; nothing to own"
+    assert deferred_index.list_graph_paths(root), "the batch's repair is not queued"
+    assert not freshness.external_pending(root), "an owned repair was marked as unknown"
 
 
 def test_an_unrelated_external_edit_does_not_fence_a_write(
@@ -1423,13 +1507,59 @@ def test_an_unreadable_predecessor_is_queued_repair_not_a_lineage_gap(
 
     monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
 
-    _governed_write(root, target, "unreadable predecessor")
+    _library_write(root, target, "unreadable predecessor")
 
     assert spy.count == 0, "an unproven decline scheduled a whole-vault rebuild"
     assert [result.code for result in outcomes] == ["graph_repair_unreadable_predecessor"], (
         f"expected the distinct pending code, got {[result.code for result in outcomes]}"
     )
     assert {result.outcome for result in outcomes} == {"deferred"}
+
+
+def test_a_request_behind_a_standing_marker_registers_when_its_paths_cannot_be_queued(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: a standing marker owns the pass only for paths the queue holds.
+
+    A request whose predecessor cannot be proven leaves the whole-vault pass to
+    a standing full marker once its own paths are queued. When that enqueue
+    fails, nothing durable records this write's repair, so the request still
+    registers the pass.
+    """
+    root = handoff_vault
+    _a_standing_marker_owns_the_repair(root)
+    EpistemicGraphIndex(root).withdraw_availability()
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_state",
+        lambda inner_self, checkpoint: "graph_sync_acknowledgement_absent",
+        raising=True,
+    )
+    enqueue_attempts: list[str] = []
+
+    def failing_enqueue(inner_self: EpistemicGraphIndex, scope: set[str], **kwargs: object):
+        enqueue_attempts.append(str(kwargs["reason"]))
+        return False
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_queue_graph_repair", failing_enqueue, raising=True)
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
+    _governed_write(root, root / GENERATED / "generated-note-0006.md", "behind a marker")
+
+    assert enqueue_attempts == ["graph_sync_acknowledgement_absent"], (
+        "the request never tried to leave its pass to the standing marker"
+    )
+    assert [result.code for result in outcomes] == ["graph_rebuild_registered"], (
+        f"an unqueued write behind a marker did not register: {[r.code for r in outcomes]}"
+    )
 
 
 def test_a_cold_resolver_is_queued_repair_not_a_whole_vault_rebuild(
@@ -1470,7 +1600,7 @@ def test_a_cold_resolver_is_queued_repair_not_a_whole_vault_rebuild(
 
     monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
 
-    elapsed = _governed_write(root, target, "cold resolver")
+    elapsed = _library_write(root, target, "cold resolver")
 
     assert spy.count == 0, (
         "a cold resolver cache scheduled a whole-vault rebuild, which is the "
@@ -1642,6 +1772,7 @@ from test_graph_post_handoff_writes import (  # noqa: E402
     _seed_live_freshness,
 )
 
+import exomem.server  # noqa: F401 - a serving worker has loaded its MCP surface before its first write
 from exomem import deferred_index, epistemic_graph, file_watcher, freshness  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 

@@ -152,8 +152,8 @@ def compute_tags(path: str | Path) -> list[str]:
     """
     p = Path(path)
     try:
+        mat = _vocab_matrix()  # first: without the text tower, skip the image encode
         img_vec = embeddings.embed_image(p)
-        mat = _vocab_matrix()
     except embeddings.ClipUnavailable as e:
         log.debug("image-tags: CLIP unavailable for %s: %s", p.name, e)
         return []

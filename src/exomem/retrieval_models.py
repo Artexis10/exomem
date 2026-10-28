@@ -130,7 +130,9 @@ class SemanticUnitHit(TypedDict):
     unit_ref: str
     category: str
     kind: str
-    excerpt: str
+    # Absent from a unit of a page released under a bridge approval: the release strip withholds
+    # every excerpt rather than cut one through a link to a stripped source.
+    excerpt: NotRequired[str]
     source_anchor: str | None
     parent_path: str
     parent_ref: str | None

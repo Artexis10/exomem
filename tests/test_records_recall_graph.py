@@ -387,7 +387,9 @@ def test_context_neighborhood_drops_raw_record_inbound_link(tmp_path: Path) -> N
     page = find_module._CACHE.get(note, vault)
     assert page is not None
 
-    neighbors, dropped, incomplete = context_pack._neighborhood(vault, [page], 10)
+    neighbors, dropped, incomplete = context_pack._neighborhood(
+        vault, [page], 10, under_strip=lambda _path: False
+    )
 
     assert neighbors == []
     assert dropped == 0

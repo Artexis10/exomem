@@ -4,33 +4,79 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import IO, Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-#: The two directories under the checkout that ``.gitignore`` already excludes.
-_IGNORED_UNDER_REPO = (REPO_ROOT / "benchmarks" / "private", REPO_ROOT / "benchmarks" / "runs")
+#: Variables that point git at a repository other than the one around the directory asked about.
+_GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+)
 
 
 class PrivateDirError(ValueError):
     """The chosen directory could end up in a commit."""
 
 
-def private_root(path: str | Path) -> Path:
-    """Resolve the private directory, refusing a tracked place inside the checkout.
+def _git(directory: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_REPOSITORY_VARIABLES}
+    # English diagnostics for the one message read below, and a repository discovery
+    # that crosses a mount point, so a mount inside a work tree still counts as inside it.
+    env.update(LC_ALL="C", GIT_DISCOVERY_ACROSS_FILESYSTEM="1")
+    try:
+        return subprocess.run(
+            ["git", "-C", str(directory), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+    except OSError:
+        raise PrivateDirError(
+            "git is needed to check the private directory and did not run"
+        ) from None
 
-    Real queries must never reach a commit. A directory outside the checkout is
-    safe by construction; one inside it is safe only where ``.gitignore``
-    already excludes it. Wrongly firing costs the operator one different path.
+
+def _inside_work_tree(directory: Path) -> bool:
+    result = _git(directory, "rev-parse", "--is-inside-work-tree")
+    if result.returncode == 0:
+        return result.stdout.strip() == "true"
+    # Git's fixed diagnostic for "no repository here". Any other failure (for example a
+    # repository owned by someone else) leaves the answer unknown, and unknown is refused.
+    if "not a git repository" in result.stderr:
+        return False
+    raise PrivateDirError("git could not tell whether the private directory is inside a work tree")
+
+
+def private_root(path: str | Path) -> Path:
+    """Resolve the private directory, refusing a place a commit could reach.
+
+    Real queries must never reach a commit. A directory in no git work tree is
+    safe by construction. One inside any work tree, this checkout or another, is
+    safe only where git itself reports it ignored, so the rules stay in the
+    ``.gitignore`` files and are never copied here. Wrongly firing costs the
+    operator one different path.
     """
 
     root = Path(path).expanduser().resolve()
-    inside = root == REPO_ROOT or root.is_relative_to(REPO_ROOT)
-    if inside and not any(root.is_relative_to(ignored) for ignored in _IGNORED_UNDER_REPO):
-        raise PrivateDirError(
-            "the private directory must be outside the repository or under "
-            "benchmarks/private/ or benchmarks/runs/ (both git-ignored)"
-        )
+    # The directory may not exist yet; its nearest existing ancestor sits in the same work tree.
+    anchor = root
+    while not anchor.exists():
+        anchor = anchor.parent
+    if not anchor.is_dir():
+        anchor = anchor.parent
+    if _inside_work_tree(anchor):
+        # A trailing separator marks the target as a directory, so a rule such as
+        # "private/" matches a directory that does not exist yet.
+        if _git(anchor, "check-ignore", "-q", f"{root}{os.sep}").returncode != 0:
+            raise PrivateDirError(
+                "the private directory is inside a git work tree and is not git-ignored; "
+                "choose a directory outside every repository or one that .gitignore excludes"
+            )
     return root
 
 

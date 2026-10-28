@@ -271,7 +271,7 @@ def _blocking_reason_for_evaluations(
     rendered = "; ".join(_blocking_finding_text(item) for item in shown)
     omitted = len(findings) - len(shown)
     if omitted:
-        rendered += f"; +{omitted} more (validate_only returns the full set)"
+        rendered += f"; +{omitted} more ({semantic_contract.VALIDATE_FORM} returns the full set)"
     return f"{prefix}: {rendered}"
 
 

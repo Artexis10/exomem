@@ -435,7 +435,7 @@ def test_warm_all_marks_components_ready_in_semantic_lexical_model_order(
     monkeypatch.setattr(
         embeddings, "get_reranker", lambda: call_order.append("reranker") or object()
     )
-    monkeypatch.setattr(embeddings, "get_clip_model", lambda: call_order.append("clip") or object())
+    monkeypatch.setattr(embeddings, "get_clip_query_model", lambda: call_order.append("clip") or object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
     monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: type("Index", (), {"has_vectors": lambda self: True})())
 
@@ -789,7 +789,7 @@ def test_warm_all_skips_model_preloads_when_embeddings_disabled(
 
     monkeypatch.setattr(embeddings, "get_model", _forbidden)
     monkeypatch.setattr(embeddings, "get_reranker", _forbidden)
-    monkeypatch.setattr(embeddings, "get_clip_model", _forbidden)
+    monkeypatch.setattr(embeddings, "get_clip_query_model", _forbidden)
 
     warmup.warm_all(tmp_path)
 
@@ -835,7 +835,7 @@ def test_warm_all_quiet_mode_skips_preloads_but_marks_ready(
 
     monkeypatch.setattr(embeddings, "get_model", _forbidden)
     monkeypatch.setattr(embeddings, "get_reranker", _forbidden)
-    monkeypatch.setattr(embeddings, "get_clip_model", _forbidden)
+    monkeypatch.setattr(embeddings, "get_clip_query_model", _forbidden)
 
     warmup.warm_all(tmp_path)
 
@@ -950,7 +950,7 @@ def test_warm_all_soft_fails_one_step_and_continues_to_later_steps(
     reranker_called: list[int] = []
     clip_called: list[int] = []
     monkeypatch.setattr(embeddings, "get_reranker", lambda: reranker_called.append(1) or object())
-    monkeypatch.setattr(embeddings, "get_clip_model", lambda: clip_called.append(1) or object())
+    monkeypatch.setattr(embeddings, "get_clip_query_model", lambda: clip_called.append(1) or object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
     monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: type("Index", (), {"has_vectors": lambda self: True})())
 
@@ -1054,7 +1054,7 @@ def test_warm_all_runs_a_throwaway_encode_after_each_preload(
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
     monkeypatch.setattr(embeddings, "get_model", _FakeST)
     monkeypatch.setattr(embeddings, "get_reranker", _FakeCE)
-    monkeypatch.setattr(embeddings, "get_clip_model", _FakeST)
+    monkeypatch.setattr(embeddings, "get_clip_query_model", _FakeST)
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
     monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: type("Index", (), {"has_vectors": lambda self: True})())
 
@@ -1641,7 +1641,7 @@ def test_warm_cli_success_with_faked_models_clip_left_disabled(
     monkeypatch.setattr(embeddings, "get_model", lambda: object())
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
     clip_called: list[int] = []
-    monkeypatch.setattr(embeddings, "get_clip_model", lambda: clip_called.append(1) or object())
+    monkeypatch.setattr(embeddings, "get_clip_query_model", lambda: clip_called.append(1) or object())
 
     code = main(["warm"])
     out = capsys.readouterr().out

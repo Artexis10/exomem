@@ -16,9 +16,9 @@
 ## 2. cellctl and runtime (red-first)
 
 - [x] 2.1 Make the storage classes, driver and topology key configuration rather than constants. Accept a cell PV on any configured cell class in the identity check, and match PVs to nodes for local volumes. Evidence: unit tests, including an unmigrated cell on the old class while the local class is configured.
-- [x] 2.2 Add the storage-capacity term:
-  - pool size minus twice the largest cell per concurrent backup, over the default size;
-  - pool size observed as published free capacity plus the node's LogicalVolume sizes, with read-only `list` on LogicalVolumes;
+- [ ] 2.2 Requalify the storage-capacity term under D12:
+  - physical pool size minus the effective D12 reserve and ordinary physical charges not already represented by counted cell commitments, over the default size;
+  - pool size and reserved bytes from physical provider inventory, including unclaimed volumes and partial operations;
   - larger cells charge more;
   - no published pool means zero;
   - only the configured domain publishes slots, and every non-deleted cell counts against them.
@@ -57,10 +57,10 @@
   - Evidence: unit tests on a recorded mismatch, and a rehearsal etcd restore from an older snapshot.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). The server was reset from an older local etcd snapshot; `cellctl.readopt` reported the newer cell for re-adoption, the runbook steps re-adopted its volume, and it served with its data and a matching identity. Not exercised: the escrowed-key S3 snapshot listing.
 
-- [x] 2.10 Grow a local cell online before it fills (design D10), red-first:
+- [ ] 2.10 Requalify local online growth under D10 and D12:
   - the hourly backup Job reports the filesystem's used and total bytes in its termination message, and cellctl records them;
   - past 80% use, cellctl grows the claim by one default cell size, up to the configured cap, at most once per backup;
-  - only while the node's published free bytes cover the step and the larger snapshot reserve; otherwise an alert through the alert receiver;
+  - only through the provider transaction that retains the prospective reserve; otherwise an alert and a retained target;
   - the grown size is recorded in a cellctl-owned row column (Substrate migration) and the claim renders at the larger of it and `storage_gib`.
   - Evidence: unit tests for growth, the cap, the pool refusal with its alert, and a rehearsal growth of a serving cell.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). At 85% use a serving cell grew from 4 to 8 GiB online: same pod, 0 restarts, filesystem 4143677440 to 8369172480 bytes, quota applied at 16Gi with no refusal, row `grown_storage_gib` 8, next clone 8Gi, published slots matching D6. At the cap the verdict was `at-cap` and cellctl raised `storage-growth-blocked` (no receiver in the rehearsal).
@@ -164,3 +164,14 @@ Source and disposable rehearsals can finish before purchase. Production installa
 - [ ] 9.1 Create a Cloud recovery agent with the dedicated-node label and taint, select a seeded test cell onto it, destroy the agent, and relocate the cell. Record the recovery point and recovery time.
   - Exclude the agent from the `cell-array-degraded` alert's expected nodes first (task 6.3), or the alert stays unknown while it exists.
 - [ ] 9.2 Sync these deltas into canonical specs after `adopt-exomem-cloud-plain-cells` and `add-cloud-service-resource-policy` archive, then archive this change.
+
+## 10. Authoritative reservations before local import growth
+
+The earlier rehearsals prove their recorded workflows. They do not prove concurrent allocation, provider death or delayed CSI cancellation. Tasks 2.2 and 2.10 reopen that qualification; production tasks retain their existing authority boundaries.
+
+- [x] 10.1 Recheck the D12 contract independently, including cancellation before Begin, source incarnation and concurrency reduction.
+- [ ] 10.2 Add provider transactions, physical full-size accounting and atomic bounded family metadata to the pinned source overlay. Verify competing allocations and recovery of every partial command boundary.
+- [ ] 10.3 Carry immutable family identity through the existing LogicalVolume protocol and snapshot Secret transport. Verify old queued requests cannot use a later family's reservation.
+- [ ] 10.4 Integrate Begin and acknowledged closure with cellctl holds, provider budget publication and prospective local claim growth. Keep local import limits NULL until qualification passes.
+- [ ] 10.5 Extend the disposable storage drill with the qualified nsenter/LVM process chain. Verify daemon death, early cancellation, stale tokens, source recreation, orphan charges, concurrency reduction and two complete online-backup cycles.
+- [ ] 10.6 Review the integrated batch, pass CI, merge and qualify its built images through the ordinary release. Keep production activation separate.

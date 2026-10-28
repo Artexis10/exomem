@@ -3192,12 +3192,13 @@ def join_registered_if_settled(
 #: costs. A request deadline in scope wins whenever it is nearer.
 STANDALONE_JOIN_BUDGET_SECONDS = 15.0
 
-#: Set while the receipt-owned fan-out of a fast-acknowledged write runs. That
-#: caller starts a registered rebuild exactly as a standalone caller does, but
-#: its own durable receipt -- not a converged graph -- is its contract, and it
-#: already counts a started graph handoff as convergent. It therefore has no
-#: budget to spend waiting: a wait only held the fan-out's next component
-#: (embeddings) behind a whole-vault pass for up to the budget above.
+#: Set while a background caller runs: the receipt-owned fan-out of a
+#: fast-acknowledged write, the operator's repair of stranded receipts, and the
+#: file watcher's dispatch and reconcile. Nobody waits on such a caller for a
+#: converged graph. Its contract is durable work -- a receipt, or the queue --
+#: and it already counts a started or queued graph handoff as convergent. It
+#: therefore has no budget to spend waiting: a wait only held its next step
+#: behind a whole-vault pass for up to the budget above.
 _STANDALONE_JOIN_WAIVED: ContextVar[bool] = ContextVar(
     "exomem_graph_standalone_join_waived", default=False
 )
@@ -3205,12 +3206,20 @@ _STANDALONE_JOIN_WAIVED: ContextVar[bool] = ContextVar(
 
 @contextlib.contextmanager
 def standalone_join_waived():  # noqa: ANN201 - context manager
-    """Start registered rebuilds as usual, but spend no time joining them."""
+    """Run a background caller: it may stop at queued and joins no rebuild.
+
+    Registered rebuilds still start, exactly as for a standalone caller.
+    """
     token = _STANDALONE_JOIN_WAIVED.set(True)
     try:
         yield
     finally:
         _STANDALONE_JOIN_WAIVED.reset(token)
+
+
+def standalone_join_is_waived() -> bool:
+    """Whether the current caller runs inside `standalone_join_waived`."""
+    return _STANDALONE_JOIN_WAIVED.get()
 
 
 def standalone_join_budget_seconds() -> float:
@@ -3222,7 +3231,7 @@ def standalone_join_budget_seconds() -> float:
     when a request is in scope at all. A caller inside `standalone_join_waived`
     has no budget at all.
     """
-    if _STANDALONE_JOIN_WAIVED.get():
+    if standalone_join_is_waived():
         return 0.0
     from . import request_budget
 

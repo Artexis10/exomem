@@ -39,6 +39,9 @@ DEFAULT_TOOL = "search_memory"
 #: only path and title. ``limit`` is the pool depth the packet and score use.
 DEFAULT_ARGUMENTS: dict[str, Any] = {"limit": 10, "detail": "full"}
 ERROR_DETAIL_CHARS = 300
+#: The discarded warm-up calls send this fixed text, never a sampled query, so a
+#: result cache cannot be primed for a case that is measured afterwards.
+WARMUP_QUERY = "recall parity warm-up"
 
 
 class CaptureError(RuntimeError):
@@ -243,8 +246,8 @@ async def capture_arms(
     """Call every case on both arms, passing each outcome row to ``record``.
 
     Returns each arm's tool-input-schema digest. ``warmup`` extra calls per arm
-    use the first case's query and are discarded, so a cold cell does not
-    inflate the first measured latency.
+    send ``WARMUP_QUERY`` and are discarded, so a cold cell does not inflate the
+    first measured latency.
     """
 
     secrets = list(tokens.values())
@@ -258,8 +261,8 @@ async def capture_arms(
             sessions.append((arm, client))
         for _ in range(warmup):
             for _arm, client in sessions:
-                first = {**arguments, "query": cases[0]["query"]}
-                await ask(client, tool, first, timeout_s=timeout_s, secrets=secrets)
+                call = {**arguments, "query": WARMUP_QUERY}
+                await ask(client, tool, call, timeout_s=timeout_s, secrets=secrets)
         for index, case in enumerate(cases):
             order = sessions if index % 2 == 0 else sessions[::-1]
             for position, (arm, client) in enumerate(order):
@@ -359,6 +362,7 @@ def run_capture(
         ],
         "arm_order": "alternating by case index; the first arm leads on even indexes",
         "warmup_calls_per_arm": warmup,
+        "warmup_query": WARMUP_QUERY if warmup else None,
         "timeout_s": timeout_s,
         "client": {"fastmcp": metadata.version("fastmcp"), "mcp": metadata.version("mcp")},
         "outcomes": {name: dict(sorted(counter.items())) for name, counter in outcomes.items()},

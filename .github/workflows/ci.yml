@@ -18,7 +18,7 @@ env:
   # interpreter (tests/test_collection_store_s1_gate.py fails without it).
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
   # The newest release one store schema back; move it to the next one with each schema bump.
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.127.5"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
@@ -722,6 +722,8 @@ jobs:
   mcp-read-latency-plan:
     name: MCP read latency plan
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -754,6 +756,8 @@ jobs:
   mcp-read-latency-paired:
     name: MCP read latency paired (shard ${{ matrix.shard }})
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
     needs: mcp-read-latency-plan
     # Keep this benchmark on the calibrated Ubuntu 24.04 runtime that the recall benchmark uses.
     runs-on: ubuntu-24.04
@@ -808,6 +812,8 @@ jobs:
   mcp-read-latency-aggregate:
     name: MCP read latency verdicts
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
     needs: [mcp-read-latency-plan, mcp-read-latency-paired]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1276,9 +1282,8 @@ jobs:
       - retrieval-latency
       - recall-latency-series
       - recall-latency-paired
-      - mcp-read-latency-plan
-      - mcp-read-latency-paired
-      - mcp-read-latency-aggregate
+      # The MCP read latency jobs report without gating until a full run completes inside its step
+      # budget: every allowance is still null, so they can fail only on their own breakage.
       - governance-projection-wire
       - governance-projection-wire-vector-cpu
       - semantic-write-latency
