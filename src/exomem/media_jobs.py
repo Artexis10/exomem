@@ -632,16 +632,19 @@ class MediaJobStore:
                 conn.execute("CREATE TABLE IF NOT EXISTS media_protections ("
                              "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, "
                              "object TEXT NOT NULL, created_at REAL NOT NULL)")
+                conn.execute("CREATE INDEX IF NOT EXISTS media_protections_original_object "
+                             "ON media_protections(binary_rel, object)")
                 conn.execute("CREATE TABLE IF NOT EXISTS media_cache ("
                              "binary_rel TEXT PRIMARY KEY, reference TEXT NOT NULL, "
                              "sha256 TEXT NOT NULL, identity TEXT NOT NULL, last_read REAL NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS media_access ("
                              "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, pid INTEGER NOT NULL, "
                              "temporary_bytes INTEGER NOT NULL DEFAULT 0, hydrating INTEGER NOT NULL DEFAULT 0)")
+                conn.execute("CREATE INDEX IF NOT EXISTS media_access_binary_rel ON media_access(binary_rel)")
+                conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
+                             "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
-                conn.execute("CREATE TABLE IF NOT EXISTS media_offload_refusals ("
-                             "binary_rel TEXT PRIMARY KEY, sha256 TEXT NOT NULL, code TEXT NOT NULL, "
-                             "ciphertext_size INTEGER NOT NULL, created_at REAL NOT NULL)")
+                self._migrate_refusal_size(conn)
                 self._migrate_claim_revision(conn)
                 self._migrate_blocked_reasons(conn)
                 conn.execute(
@@ -699,6 +702,21 @@ class MediaJobStore:
                 self._migrate_job_key(conn)
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_refusal_size(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(media_offload_refusals)").fetchall()
+        legacy = any(row["name"] == "ciphertext_size" and row["notnull"] for row in columns)
+        # NULL records that verification failed before ciphertext existed; preserve earlier measured sizes.
+        if legacy:
+            conn.execute("ALTER TABLE media_offload_refusals RENAME TO media_offload_refusals_old")
+        conn.execute("CREATE TABLE IF NOT EXISTS media_offload_refusals ("
+                     "binary_rel TEXT PRIMARY KEY, sha256 TEXT NOT NULL, code TEXT NOT NULL, "
+                     "ciphertext_size INTEGER, created_at REAL NOT NULL)")
+        if legacy:
+            conn.execute("INSERT INTO media_offload_refusals(binary_rel, sha256, code, ciphertext_size, created_at) "
+                         "SELECT binary_rel, sha256, code, ciphertext_size, created_at FROM media_offload_refusals_old")
+            conn.execute("DROP TABLE media_offload_refusals_old")
 
     @staticmethod
     def _migrate_offload_columns(conn: sqlite3.Connection) -> None:
@@ -2459,7 +2477,7 @@ def status(
 TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
 
 
-def tool_status(vault_root: Path | None) -> dict[str, Any]:
+def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str, Any]:
     """The `process_media status` view of `status`, without operator detail."""
     full = status(vault_root)
     result = {field: full[field] for field in TOOL_STATUS_FIELDS}
@@ -2467,8 +2485,9 @@ def tool_status(vault_root: Path | None) -> dict[str, Any]:
         from . import media_store, originals
 
         if originals.binding_for(vault_root) is not None:
-            result["stored_originals"] = media_store.processing_status(vault_root)
-            result["offload_refusals"] = media_store.offload_refusals(vault_root)
+            result["stored_originals"], stored_coverage = media_store.processing_status(vault_root, path=path)
+            result["offload_refusals"], refusal_coverage = media_store.offload_refusals(vault_root, path=path)
+            result["media_inventory"] = {"stored_originals": stored_coverage, "offload_refusals": refusal_coverage}
     return result
 
 

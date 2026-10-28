@@ -8803,9 +8803,10 @@ def _process_media(
                 "MEDIA_PATHS_UNSUPPORTED_FOR_STATUS",
                 "process_media paths is only supported for process or retry",
             )
+        selected = _selected_media_paths(vault_root, path=None, paths=[path]) if path is not None else None
         return {
             "operation": operation,
-            **media_jobs.tool_status(vault_root),
+            **media_jobs.tool_status(vault_root, path=selected[0][1] if selected else None),
             "index_refresh": index_sync.deferred_work_status(vault_root)["full_upserts"],
         }
 

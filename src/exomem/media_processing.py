@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
@@ -1099,6 +1099,14 @@ def _retry_media_local(
             )
 
     result = reconcile_media(vault, binary, commit_guard=commit_guard)
+    from . import media_store
+
+    offloads = 0
+    if originals.binding_for(vault) is not None:
+        boundary = commit_guard() if commit_guard is not None else nullcontext()
+        with boundary:
+            offloads = media_store.retry_offload(vault, binary)
+        result = replace(result, requeued=result.requeued + offloads)
     if result.state == "completed" or result.job_id is None:
         return result
     if _runtime_unavailable(vault) is not None:
@@ -1117,7 +1125,7 @@ def _retry_media_local(
         state,
         result.sidecar_path,
         result.job_id,
-        requeued=requeued,
+        requeued=requeued + offloads,
     )
 
 

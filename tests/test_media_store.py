@@ -361,8 +361,9 @@ def test_store_failure_keeps_offload_demand_retryable_through_the_worker(vault: 
         assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 0
 
 
-def test_an_over_bound_original_stays_local_and_reported_without_retrying(vault: Path, selected_store):
-    """A size refusal retried forever as an outage; it is final for these bytes (D10)."""
+@pytest.mark.parametrize("new_bound", [None, 100_000])
+def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, selected_store, new_bound):
+    """A size refusal must park repeated discovery and recover when its bound changes."""
     import os
 
     from exomem import media_jobs, media_store, media_worker
@@ -378,6 +379,267 @@ def test_an_over_bound_original_stays_local_and_reported_without_retrying(vault:
     assert refusal["path"] == path.relative_to(vault).as_posix()
     assert refusal["code"] == "MEDIA_OBJECT_TOO_LARGE" and refusal["ciphertext_size"] > 64
     assert not list((Path(values["root"])).rglob("*"))
+    updated = values if new_bound is None else {**values, "max_object_bytes": new_bound}
+    config.write_text(json.dumps({"vaults": {str(vault): updated}}))
+    assert media_jobs.tool_status(vault)["offload_refusals"] == []
+    assert media_store.enqueue_offloads(vault) == 1
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_unverified_offload_stays_parked_until_explicit_retry(vault: Path, selected_store):
+    """Discovery must not repeatedly hash corrupt bytes or prevent a repaired original's explicit retry."""
+    import os
+
+    from exomem import media_jobs, media_processing, media_store, media_worker
+
+    path = _preserved(vault)
+    expected = path.read_bytes()
+    sidecar = path.with_name(path.name + ".md")
+    from exomem.vault import parse_frontmatter
+
+    canonical, transcript, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    path.write_bytes(b"corrupt")
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert media_store.enqueue_offloads(vault) == 0
+    [refusal] = media_jobs.tool_status(vault)["offload_refusals"]
+    assert refusal["code"] == "MEDIA_ORIGINAL_UNVERIFIED"
+    assert refusal["ciphertext_size"] is None
+    path.write_bytes(expected)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_object_bytes": 100_000}}}))
+    assert media_store.enqueue_offloads(vault) == 0
+    retried = media_processing.retry_media(vault, path)
+    assert retried.state == "completed" and retried.requeued == 1
+    repaired, restored_transcript, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    assert restored_transcript == transcript
+    assert repaired["extracted_by"] == canonical["extracted_by"]
+    assert repaired["binary_sha256"] == canonical["binary_sha256"]
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_a_new_sidecar_digest_releases_only_its_old_verification_refusal(vault: Path, selected_store):
+    """A replacement original must not inherit a terminal refusal for the previous input."""
+    from exomem import media_processing, media_store
+
+    path = _preserved(vault)
+    previous_digest = originals.original_state(vault, path).binary_sha256
+    path.write_bytes(b"corrupt")
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert refused.value.code == "MEDIA_ORIGINAL_UNVERIFIED"
+    path.write_bytes(b"A replacement original with different bytes and a new binding.")
+    media_processing.reconcile_media(vault, path)
+    assert originals.original_state(vault, path).binary_sha256 != previous_digest
+    assert media_store.offload(vault, path) is not None
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_hydration_reports_local_disk_exhaustion_as_local(vault: Path, selected_store, monkeypatch):
+    """A local staging write must not become a misleading remote-store outage."""
+    import errno
+    from contextlib import contextmanager
+
+    from exomem import media_store
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    temporary_file = media_store.tempfile.TemporaryFile
+
+    class FullDisk:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, _chunk):
+            raise OSError(errno.ENOSPC, "staging disk is full")
+
+    @contextmanager
+    def full_staging(*args, **kwargs):
+        with temporary_file(*args, **kwargs) as stream:
+            yield FullDisk(stream)
+
+    monkeypatch.setattr(media_store.tempfile, "TemporaryFile", full_staging)
+    with pytest.raises(OSError) as error:
+        with media_store.open_original(vault, path):
+            pytest.fail("a full staging disk cannot hydrate an original")
+    assert error.value.errno == errno.ENOSPC
+    assert originals.original_state(vault, path).state == "evicted"
+
+
+def test_page_move_refuses_the_catalog_before_hydrating(vault: Path, selected_store, monkeypatch):
+    """An unavailable object store must not mask a move's catalog refusal or change its files."""
+    from exomem import media_jobs, media_processing, media_store, move_file, preserve
+    from exomem.governance import catalog_publication
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"stored original")
+    media_processing.reconcile_media(vault, path)
+    sidecar = path.with_name(path.name + ".md")
+    preserve.update_sidecar_extraction(vault, sidecar, text="transcript", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    canonical = sidecar.read_bytes()
+    root = Path(selected_store[0]["root"])
+    root.rename(root.with_name("offline-objects"))
+
+    def refuse_catalog(*args, **kwargs):
+        raise catalog_publication.CatalogPublicationError("catalog unavailable")
+
+    monkeypatch.setattr(catalog_publication, "prepare_catalog_membership_batch", refuse_catalog)
+    with pytest.raises(move_file.MoveFileError) as error:
+        move_file.move_file(vault, old_path=sidecar.relative_to(vault).as_posix(),
+                            new_path="Knowledge Base/Notes/Media/renamed.txt.md")
+    assert error.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert sidecar.read_bytes() == canonical and not path.exists()
+    assert not (path.parent / "renamed.txt.md").exists()
+
+
+def test_legacy_refusal_migration_preserves_measured_sizes_and_protections(vault: Path):
+    """Upgrading a retained ledger must not lose a refusal or an upload protection."""
+    from exomem import media_jobs
+
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        # This is the shipped legacy schema, before unmeasured ciphertext became nullable.
+        connection.execute("DROP TABLE media_offload_refusals")
+        connection.execute("CREATE TABLE media_offload_refusals ("
+                           "binary_rel TEXT PRIMARY KEY, sha256 TEXT NOT NULL, code TEXT NOT NULL, "
+                           "ciphertext_size INTEGER NOT NULL, created_at REAL NOT NULL)")
+        connection.execute("INSERT INTO media_offload_refusals VALUES (?, ?, ?, ?, ?)",
+                           ("Knowledge Base/Evidence/sample.bin", "a" * 64, "MEDIA_OBJECT_TOO_LARGE", 2048, 1.0))
+        connection.execute("INSERT INTO media_protections VALUES (?, ?, ?, ?)",
+                           ("protected", "Knowledge Base/Evidence/sample.bin", "b" * 64, 1.0))
+    media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT ciphertext_size FROM media_offload_refusals").fetchall() == [(2048,)]
+        connection.execute("INSERT INTO media_offload_refusals VALUES (?, ?, ?, ?, ?)",
+                           ("Knowledge Base/Evidence/unverified.bin", "c" * 64, "MEDIA_ORIGINAL_UNVERIFIED", None, 2.0))
+        assert connection.execute("SELECT token FROM media_protections").fetchall() == [("protected",)]
+
+
+def test_idle_pins_do_not_spend_hydration_capacity_or_block_unrelated_eviction(vault: Path, selected_store):
+    """Only live hydration reservations spend capacity, and only a target's pins prevent eviction."""
+    import os
+
+    from exomem import media_jobs, media_store
+
+    path = _preserved(vault)
+    expected = path.read_bytes()
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    finished = subprocess.Popen(["true"])
+    dead_pid = finished.pid
+    finished.wait()
+    ledger = media_jobs.MediaJobStore(vault)
+    relative = path.relative_to(vault).as_posix()
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_hydrations": 1}}}))
+    with sqlite3.connect(ledger.path) as connection:
+        connection.executemany("INSERT INTO media_access VALUES (?, ?, ?, 0, 0)",
+                               [(f"idle-{i}", "Knowledge Base/Evidence/other.bin", os.getpid()) for i in range(100)])
+        connection.execute("INSERT INTO media_access VALUES ('dead', ?, ?, 1024, 1)", (relative, dead_pid))
+        connection.execute("INSERT INTO media_access VALUES ('live', ?, ?, 1024, 1)", (relative, os.getpid()))
+    with pytest.raises(media_store.MediaStoreError) as busy:
+        with media_store.open_original(vault, path):
+            pytest.fail("a live reservation must retain its capacity")
+    assert busy.value.code == "MEDIA_STORE_BUSY"
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM media_access WHERE token = 'live'")
+    with media_store.open_original(vault, path) as original:
+        assert original.stream.read() == expected
+        assert not media_store.evict(vault, path)
+    assert media_store.evict(vault, path)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_access").fetchone()[0] == 100
+
+
+def test_stored_status_is_partial_and_exact_paths_survive_custody_loss(vault: Path, selected_store):
+    """A bounded overview must not claim an empty inventory after custody loss hides its candidates."""
+    from exomem import commands, media_jobs, media_store
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    relative = path.relative_to(vault).as_posix()
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.executemany("INSERT INTO media_cache VALUES (?, 'stale', ?, 'stale', 0)",
+            [(f"Knowledge Base/zz-stale/{i:04}.bin", "a" * 64) for i in range(media_jobs.STATUS_JOB_LIMIT + 2)])
+    result = media_jobs.tool_status(vault)
+    assert len(result["stored_originals"]) == media_jobs.STATUS_JOB_LIMIT
+    assert any(row["path"] == relative and row["state"] == "stored" for row in result["stored_originals"])
+    coverage = result["media_inventory"]["stored_originals"]
+    assert coverage == {"source": "media_cache", "limit": media_jobs.STATUS_JOB_LIMIT,
+                        "coverage": "partial", "total": None, "state": "available"}
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DROP TABLE media_cache")
+    overview = media_jobs.tool_status(vault)
+    assert overview["stored_originals"] == []
+    assert overview["media_inventory"]["stored_originals"]["state"] == "unavailable"
+    exact = commands.op_process_media(vault, operation="status", path=relative)
+    assert exact["stored_originals"] == [{"path": relative, "state": "stored", "original_state": "evicted",
+                                          "processing_state": "completed"}]
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache'").fetchone() is None
+    ledger.path.unlink()
+    lost = media_jobs.tool_status(vault, path=relative)
+    assert lost["stored_originals"] == exact["stored_originals"]
+    assert lost["media_inventory"]["offload_refusals"]["state"] == "unavailable"
+    assert not ledger.path.exists()
+
+
+def test_status_path_stays_inside_the_knowledge_base(vault: Path):
+    """The newly honored status selector must not read a path outside the vault."""
+    from exomem import commands
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError) as error:
+        commands.op_process_media(vault, operation="status", path="../outside.bin")
+    assert error.value.code == "MEDIA_PATH_OUTSIDE_KB"
+
+
+def test_withheld_candidates_do_not_change_status_coverage(vault: Path, selected_store):
+    """A raw inventory count or truncation flag must not reveal withheld originals."""
+    from test_governance_egress import _external, _reset_governance_caches, write_rule, write_scope
+
+    from exomem import commands, media_jobs, media_store, writer_lease
+    from exomem.governance.principal import request_scope
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    visible = _preserved(vault, category="aaa-visible")
+    _offload(vault, visible)
+    assert media_store.evict(vault, visible)
+    write_scope(vault, paths="Evidence/Test/zz-hidden/**")
+    write_rule(vault, ceiling=0)
+    _reset_governance_caches()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "process_media")
+    with request_scope(_external()):
+        before = writer_lease.invoke_command(command, vault, operation="status")
+    sidecar = visible.with_name(visible.name + ".md")
+    fields, body, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        # Copies model evicted duplicates that pin the same confirmed version.
+        for i in range(media_jobs.STATUS_JOB_LIMIT + 2):
+            relative = f"Knowledge Base/Evidence/Test/zz-hidden/{i:04}.txt"
+            target = vault / (relative + ".md")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copy = {**fields, "evidence_file": relative}
+            target.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
+            connection.execute("INSERT INTO media_cache VALUES (?, 'candidate', ?, 'evicted', 0)",
+                               (relative, fields["binary_sha256"]))
+    with request_scope(_external()):
+        after = writer_lease.invoke_command(command, vault, operation="status")
+    assert after["media_inventory"] == before["media_inventory"]
+    assert after["stored_originals"] == before["stored_originals"]
+    assert len(after["stored_originals"]) == 1
 
 
 def test_uncertain_publication_keeps_protection_until_confirmed(vault: Path, selected_store, monkeypatch):

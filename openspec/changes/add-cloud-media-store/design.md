@@ -83,6 +83,23 @@ A replaced file gets a new inode and change time, and restoring the modification
 
 Hydration concurrency and temporary space are bounded, so a bulk re-encode or an export cannot fill the volume.
 
+Pre-canary repairs keep the existing ledger and mutation boundaries.
+An exact-input verification refusal parks discovery until its digest changes or the owner explicitly retries it.
+The refusal records a nullable ciphertext size, because verification can fail before encryption.
+Size refusals compare their measured ciphertext with the current object bound.
+
+Status reads a bounded candidate prefix from the cache and refusal tables, then resolves canonical sidecars.
+Its overview always reports partial coverage and an unknown total; exact-path status does not require a candidate row.
+Missing custody reports unavailable without rebuilding it.
+Candidate failures remain path-bearing rows, and no sibling count or truncation flag reveals withheld candidates.
+Exhaustive browsing would need a separate interface decision.
+
+Ordinary pins insert without scanning existing pins.
+Hydration accounts only for indexed hydration reservations; eviction cleans only indexed pins for its target.
+Dead idle pins can remain until that path is considered, without spending hydration capacity.
+Page moves prepare the catalog and validate bindings before hydration, while retaining pins through rename, rollback and publication.
+Hydration classifies only backend open and read errors as transport failures; local staging errors retain their cause.
+
 ### D4. Encryption in the cell
 
 The cell encrypts each original with `age` to its own X25519 recipient before upload. `age` streams 64 KiB authenticated chunks, and the cell image already ships it for imports.
