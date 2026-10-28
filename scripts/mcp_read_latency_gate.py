@@ -596,6 +596,7 @@ async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
     started = time.monotonic()
     await arm.load_collections(fixture)
     loaded = time.monotonic()
+    progress(f"fixture-loaded arm={arm.name} load_s={loaded - started:.0f}")
     await arm.quiesce(limit=1800)
     # Fixture preparation is not part of the summary; one stderr line keeps its cost visible to the operator.
     progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}")
