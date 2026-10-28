@@ -329,6 +329,17 @@ spec:
               value: "true"
             {{- end }}
             {{- end }}
+            {{- if .Values.cloudGateway.uploadCellIds }}
+            # The gateway's EXOMEM_CLOUD_UPLOAD_CELL_IDS comes from this same list. The
+            # public key is the one Secret entry the broker verifies grants with.
+            - name: CELLCTL_UPLOAD_CELL_IDS
+              value: {{ .Values.cloudGateway.uploadCellIds | toJson | quote }}
+            - name: CELLCTL_UPLOAD_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifactBroker.publicKeySecretName }}
+                  key: {{ .Values.artifactBroker.publicKeySecretKey }}
+            {{- end }}
             {{- if .Values.cells.jobEgressExcept }}
             - name: CELLCTL_JOB_EGRESS_EXCEPT
               value: {{ join "," .Values.cells.jobEgressExcept | quote }}

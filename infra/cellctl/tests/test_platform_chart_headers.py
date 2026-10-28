@@ -1134,6 +1134,155 @@ def test_artifact_signer_key_belongs_only_to_gateway_and_issuance_requires_broke
     assert result.returncode != 0
 
 
+# --- Cloud upload handoff: one list selects the gateway's cells and the cells' public key ---
+
+UPLOAD_CELLS = ("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+UPLOAD_ARGS = (
+    "--set-json", f"cloudGateway.uploadCellIds={json.dumps(list(UPLOAD_CELLS))}",
+    "--set", "traefik.ports.websecure.transport.respondingTimeouts.readTimeout=900s",
+)
+
+
+def _container_env(documents: list[dict[str, Any]], name: str) -> dict[str, dict[str, Any]]:
+    deployment = _find(documents, "Deployment", name)
+    return {entry["name"]: entry for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_uploads_are_default_off_with_no_env_signing_key_route_or_timeout() -> None:
+    documents = _helm_template()
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        assert not any("UPLOAD" in key for key in _container_env(documents, name)), name
+    assert "EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY" not in _container_env(documents, "exomem-cloud-gateway")
+    routes = _find(documents, "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
+    assert not any("/upload" in route["match"] or "/download" in route["match"] for route in routes)
+    traefik_args = _find(documents, "Deployment", TRAEFIK)["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert not any("readTimeout" in arg for arg in traefik_args)
+    assert _helm_template("--set-json", "cloudGateway.uploadCellIds=[]") == documents
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_one_upload_list_feeds_the_gateway_and_cellctl_and_only_the_gateway_signs() -> None:
+    documents = _helm_template(*UPLOAD_ARGS)
+    gateway_env = _container_env(documents, "exomem-cloud-gateway")
+    cellctl_env = _container_env(documents, "cellctl")
+    # The gateway parses a JSON array of cell IDs; cellctl reads the very same text.
+    listed = '["aaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbb"]'
+    assert gateway_env["EXOMEM_CLOUD_UPLOAD_ENABLED"]["value"] == "true"
+    assert gateway_env["EXOMEM_CLOUD_UPLOAD_CELL_IDS"]["value"] == listed
+    assert cellctl_env["CELLCTL_UPLOAD_CELL_IDS"]["value"] == listed
+    # Uploads need no artifact transport, and add none.
+    assert "EXOMEM_CLOUD_ARTIFACT_TRANSPORT_ENABLED" not in gateway_env
+    assert gateway_env["EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-cloud-artifact-signing-key", "key": "signing-key"}
+    # Cells receive the public half the broker already verifies with, never the private one.
+    assert cellctl_env["CELLCTL_UPLOAD_PUBLIC_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-artifact-broker-public-key", "key": "public-key"}
+    for document in documents:
+        if document.get("kind") == "Deployment" and document["metadata"]["name"] != "exomem-cloud-gateway":
+            assert "exomem-cloud-artifact-signing-key" not in str(document), document["metadata"]["name"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_chart_env_keys_the_listed_cells_and_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Load the env the chart renders through cellctl's own settings loader, then render cells.
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from cellctl.main import build_cluster_config
+    from cellctl.manifests import CellManifestSpec, render_statefulset
+
+    public_key = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
+    env = _cellctl_env(_helm_template(*UPLOAD_ARGS))
+    monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
+    monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_UPLOAD_CELL_IDS", env["CELLCTL_UPLOAD_CELL_IDS"])
+    # Kubernetes resolves the secretKeyRef; the test stands in for it with a generated key.
+    monkeypatch.setenv("CELLCTL_UPLOAD_PUBLIC_KEY", public_key)
+    config = build_cluster_config()
+
+    keyed = {}
+    for cell_id in (*UPLOAD_CELLS, "cccccccccccccccc"):
+        spec = CellManifestSpec(cell_id=cell_id, image="registry.example/cell@sha256:" + "0" * 64,
+                                replicas=1, read_only=False,
+                                upload_public_key=config.upload_public_key_for_cell(cell_id))
+        pod = render_statefulset(spec)["spec"]["template"]["spec"]
+        keyed[cell_id] = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}.get(
+            "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
+    assert keyed == {"aaaaaaaaaaaaaaaa": public_key, "bbbbbbbbbbbbbbbb": public_key, "cccccccccccccccc": None}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_upload_route_posts_to_the_gateway_without_buffering_and_traefik_waits_for_the_body() -> None:
+    documents = _helm_template(*UPLOAD_ARGS)
+    routes = _find(documents, "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
+    (upload,) = [route for route in routes if "/upload" in route["match"]]
+    assert upload["match"] == "Host(`mcp.example.test`) && Path(`/upload`) && Method(`POST`)"
+    # The trusted-ingress header only: a buffering middleware would take the whole body
+    # onto the edge pod before the gateway checks the handoff.
+    assert upload["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
+    assert upload["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert not [doc for doc in documents if doc.get("kind") == "Middleware" and "buffering" in doc["spec"]]
+    traefik_args = _find(documents, "Deployment", TRAEFIK)["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=900s" in traefik_args
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_download_route_reaches_the_gateway_for_selected_cells() -> None:
+    routes = _find(_helm_template(*UPLOAD_ARGS), "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
+    (download,) = [route for route in routes if "/download" in route["match"]]
+    assert download["match"] == "Host(`mcp.example.test`) && Path(`/download`) && Method(`GET`)"
+    assert download["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
+    assert download["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_uploads_add_no_network_edge_and_leave_cellctl_admission_unchanged() -> None:
+    # Uploads ride the existing gateway-to-cell edge on 8765, so no policy may widen.
+    off, on = _helm_template(), _helm_template(*UPLOAD_ARGS)
+    for kind in ("NetworkPolicy", "ValidatingAdmissionPolicy"):
+        assert [d for d in on if d.get("kind") == kind] == [d for d in off if d.get("kind") == kind], kind
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("timeout", ["900", "900s", "15m", "1h"])
+def test_uploads_accept_a_traefik_read_timeout_that_covers_the_body(timeout: str) -> None:
+    _helm_template("--set-json", f"cloudGateway.uploadCellIds={json.dumps(list(UPLOAD_CELLS))}",
+                   "--set-string", f"traefik.ports.websecure.transport.respondingTimeouts.readTimeout={timeout}")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("timeout", [None, "60s", "899", "14m", "forever"])
+def test_uploads_refuse_a_traefik_read_timeout_that_would_cut_the_body(timeout: str | None) -> None:
+    # Traefik's default is 60s, so an unset value cuts every slow upload mid-body.
+    timeout_args = ("--set-string", f"traefik.ports.websecure.transport.respondingTimeouts.readTimeout={timeout}") if timeout else ()
+    result = _helm_template_result("--set-json", f"cloudGateway.uploadCellIds={json.dumps(list(UPLOAD_CELLS))}", *timeout_args)
+    assert result.returncode != 0, timeout
+    assert "respondingTimeouts.readTimeout of at least 900s" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize(("setting", "refused"), [
+    (("--set", "cloudGateway.enabled=false"), "cloudGateway.uploadCellIds requires cloudGateway.enabled"),
+    (("--set", "cellctl.enabled=false"), "cloudGateway.uploadCellIds requires cellctl.enabled"),
+])
+def test_uploads_refuse_to_select_cells_that_no_one_keys(setting: tuple[str, str], refused: str) -> None:
+    # A gateway that selects a cell the controller never keys offers a handoff that cannot work.
+    result = _helm_template_result(*UPLOAD_ARGS, *setting)
+    assert result.returncode != 0
+    assert refused in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("cell_ids", ['["bad"]', '["aaaaaaaaaaaaaaaa","aaaaaaaaaaaaaaaa"]', '"aaaaaaaaaaaaaaaa"'])
+def test_upload_list_refuses_what_the_gateway_would_fail_to_parse(cell_ids: str) -> None:
+    # The gateway reads its config on every request; one unparsable list fails them all.
+    result = _helm_template_result("--set-json", f"cloudGateway.uploadCellIds={cell_ids}", *UPLOAD_ARGS[2:])
+    assert result.returncode != 0, cell_ids
+    assert "/cloudGateway/uploadCellIds" in result.stderr, result.stderr
+
+
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_dedicated_selection_is_validated_and_delivered_to_cellctl() -> None:
     cell_id = "aaaaaaaaaaaaaaaa"

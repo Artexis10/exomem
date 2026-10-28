@@ -272,6 +272,8 @@ artifactBroker:
   endpoint: ""
   cellIds: []
   allCells: false
+  # The public half of the gateway's artifact signing pair. The broker verifies grants
+  # with it, and cellctl gives it to the cells cloudGateway.uploadCellIds selects.
   publicKeySecretName: exomem-artifact-broker-public-key
   publicKeySecretKey: public-key
   resources:
@@ -337,6 +339,16 @@ cloudGateway:
   artifactTransportEnabled: false
   artifactSigningKeySecretName: exomem-cloud-artifact-signing-key
   artifactSigningKeySecretKey: signing-key
+  # Cells that serve the exact-byte upload handoff (docs/runbooks/cloud-upload-handoff.md).
+  # This one list selects them for the gateway (EXOMEM_CLOUD_UPLOAD_CELL_IDS) and for
+  # cellctl, which gives exactly these cells the public half of the signing pair
+  # (artifactBroker.publicKeySecretName), so the two selections cannot differ. The
+  # gateway has no all-cells switch for uploads. Empty is off and renders as before.
+  # A non-empty list needs cloudGateway.enabled, cellctl.enabled, the signing key
+  # Secret above, and traefik.ports.websecure.transport.respondingTimeouts.readTimeout
+  # of at least 900s: Traefik reads a whole request body within that time, 60s by default.
+  # The chart checks the timeout only when cloudIngress.enabled; it never checks the Secrets.
+  uploadCellIds: []
   # Enable only after the matched web/gateway release, reviewer schema/grants,
   # and dedicated complimentary sample account are verified. Ordinary Cloud
   # accounts do not require this separate reviewer authority.

@@ -76,6 +76,7 @@ from .manifests import (
     ResourceSettings,
     check_artifact_broker_url,
     check_media_slot_url,
+    check_upload_public_key,
     dedicated_placement,
     hold_job_name,
     namespace_name,
@@ -464,6 +465,11 @@ class ClusterConfig:
     media_slot_url: str = ""
     media_slot_cell_ids: tuple[str, ...] = ()
     media_slot_all_cells: bool = False
+    # The cells that serve the upload handoff, and the PEM public key each receives.
+    # The chart's one list also feeds the gateway, so the two selections stay equal.
+    # The gateway has no all-cells switch for uploads, so there is none here.
+    upload_cell_ids: tuple[str, ...] = ()
+    upload_public_key: str = ""
     dedicated_cell_ids: tuple[str, ...] = ()
     # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
     # A selection, not a chart-wide value, so an engine can canary in one cell.
@@ -513,11 +519,21 @@ class ClusterConfig:
         if (
             not isinstance(cell_ids, tuple)
             or len(cell_ids) > 1024
-            or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
+            or any(not isinstance(cell_id, str) or not db.CELL_ID_RE.fullmatch(cell_id) for cell_id in cell_ids)
             or len(set(cell_ids)) != len(cell_ids)
             or ((cell_ids or self.media_slot_all_cells) and not self.media_slot_url)
         ):
             raise ValueError("media slot activation requires a literal endpoint and unique base32 cell IDs")
+        cell_ids = self.upload_cell_ids
+        if (
+            not isinstance(cell_ids, tuple)
+            or len(cell_ids) > 1024
+            or any(not isinstance(cell_id, str) or not db.CELL_ID_RE.fullmatch(cell_id) for cell_id in cell_ids)
+            or len(set(cell_ids)) != len(cell_ids)
+            or (cell_ids and not self.upload_public_key.strip())
+        ):
+            raise ValueError("upload activation requires a public key and at most 1024 unique base32 cell IDs")
+        check_upload_public_key(self.upload_public_key)
         for engine, cell_ids in self.media_engine_cell_ids.items():
             if (
                 not isinstance(engine, str)
@@ -563,6 +579,8 @@ class ClusterConfig:
     def media_slot_for_cell(self, cell_id: str) -> str:
         selected = self.media_slot_all_cells or cell_id in self.media_slot_cell_ids
         return self.media_slot_url if selected else ""
+    def upload_public_key_for_cell(self, cell_id: str) -> str:
+        return self.upload_public_key if cell_id in self.upload_cell_ids else ""
 
     def media_engines_for_cell(self, cell_id: str) -> str:
         """The value of the cell's media engine switch; "" when nothing selects an engine for it.
@@ -1013,6 +1031,10 @@ def _compute_render_digest(
     slot_url = cluster_config.media_slot_for_cell(row.cell_id)
     if slot_url:
         material["media_slot_url"] = slot_url
+    upload_key = cluster_config.upload_public_key_for_cell(row.cell_id)
+    if upload_key:
+        # Only a listed cell sees its digest move, and a changed signing pair restarts it.
+        material["upload_public_key"] = upload_key
     engines = cluster_config.media_engines_for_cell(row.cell_id)
     if engines:
         # Only a cell whose engine set changes sees its digest move: a canary restarts
@@ -2506,6 +2528,7 @@ async def _reconcile_row(
             job_egress_except=cluster_config.job_egress_except,
             artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
             media_slot_url=cluster_config.media_slot_for_cell(row.cell_id),
+            upload_public_key=cluster_config.upload_public_key_for_cell(row.cell_id),
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,

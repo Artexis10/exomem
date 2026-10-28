@@ -16,6 +16,9 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from .backup_source import VAULT_CHECK_COMMAND
 from .storage.topolvm import FamilyRequest
 from .storage_config import LEGACY_CLASS
@@ -135,6 +138,19 @@ def check_media_slot_url(endpoint: str) -> None:
     _check_literal_service_url(endpoint, MEDIA_SLOT_PORT, "media slot")
 
 
+def check_upload_public_key(pem: str) -> None:
+    """The cell refuses to start on a malformed upload key, so refuse it here first.
+    Like the cell, accept only an Ed25519 public key PEM, and never echo the value."""
+    if not pem:
+        return
+    try:
+        key = serialization.load_pem_public_key(pem.strip().encode("ascii"))
+    except (ValueError, TypeError, UnicodeError):
+        key = None
+    if not isinstance(key, Ed25519PublicKey):
+        raise ValueError("cell upload public key must be an Ed25519 public key PEM")
+
+
 @dataclass(frozen=True)
 class ResourceSettings:
     cpu_request: str = "125m"
@@ -233,6 +249,9 @@ class CellManifestSpec:
     artifact_broker_url: str = ""
     # cloud-multimodal-processing D10: the node media-slot lease a cell asks before a media child.
     media_slot_url: str = ""
+    # The PEM public half of the gateway's artifact signing pair, or "" for a cell
+    # that does not serve the upload handoff. Public material, so it renders as a value.
+    upload_public_key: str = ""
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
@@ -256,6 +275,7 @@ class CellManifestSpec:
         check_artifact_broker_url(self.artifact_broker_url)
         check_media_edge_url(self.media_edge_url)
         check_media_slot_url(self.media_slot_url)
+        check_upload_public_key(self.upload_public_key)
         if self.media_edge_url and not (
             self.media_edge_credential and self.media_age_identity and self.media_recipient
             and len(self.media_name_key) == 32 and self.media_key_version > 0 and self.media_max_object_bytes > 0
@@ -720,6 +740,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         ])
     if spec.media_slot_url:
         env.append({"name": "EXOMEM_CLOUD_MEDIA_SLOT_URL", "value": spec.media_slot_url})
+    if spec.upload_public_key:
+        env.append({"name": "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY", "value": spec.upload_public_key})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": CELL_VAULT_PATH},

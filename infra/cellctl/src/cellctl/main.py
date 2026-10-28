@@ -220,6 +220,9 @@ def build_cluster_config() -> ClusterConfig:
     media_slot_all_cells = json.loads(os.environ.get("CELLCTL_MEDIA_SLOT_ALL_CELLS", "false"))
     if not isinstance(media_slot_all_cells, bool):
         raise ValueError("media slot all-cells switch must be a JSON boolean")
+    upload_cell_ids = json.loads(os.environ.get("CELLCTL_UPLOAD_CELL_IDS", "[]"))
+    if not isinstance(upload_cell_ids, list):
+        raise ValueError("upload cell IDs must be a JSON array")
     dedicated_cell_ids = json.loads(os.environ.get("CELLCTL_DEDICATED_CELL_IDS", "[]"))
     if not isinstance(dedicated_cell_ids, list):
         raise ValueError("dedicated cell IDs must be a JSON array")
@@ -264,6 +267,8 @@ def build_cluster_config() -> ClusterConfig:
         media_slot_url=os.environ.get("CELLCTL_MEDIA_SLOT_URL", ""),
         media_slot_cell_ids=tuple(media_slot_cell_ids),
         media_slot_all_cells=media_slot_all_cells,
+        upload_cell_ids=tuple(upload_cell_ids),
+        upload_public_key=os.environ.get("CELLCTL_UPLOAD_PUBLIC_KEY", ""),
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
