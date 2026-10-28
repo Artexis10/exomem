@@ -16,14 +16,13 @@ from urllib.parse import quote
 import httpx2
 import pytest
 from test_cloud_upload_bridge import LOGIN_A, TOKEN, _mcp_origin, _run, _sign, _tool
+from test_cloud_upload_bridge import cell as cell
 from test_media_store import _offload, _preserved
+from test_media_store import selected_store as selected_store
 
 from exomem import cloud_download_client, media_store
 from exomem.cloud_download_client import CloudDownloadError
 from exomem.cloud_import_client import CloudImportClientConfig
-
-# The `cell` and `selected_store` fixtures: the cell's real app and a real age-encrypted store.
-pytest_plugins = ["test_cloud_upload_bridge", "test_media_store"]
 
 CONTENT = "Speaker A: an exact original, long enough to slice. " * 40
 
