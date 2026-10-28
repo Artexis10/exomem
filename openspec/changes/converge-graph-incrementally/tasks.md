@@ -625,7 +625,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   during sustained writes. Requeueing preserves that age; this task does not
   change the backstop. The final A/B on head `925de4750` recorded zero dispatch
   registrations, one age-backstop pass, an empty queue, no full marker, and zero
-  drift. The result and independent approval are recorded on PR #2150, merged as
+  drift. Rotation makes these A/B log counts lower bounds; the drift audit and
+  final queue state are complete. The result and approval are on PR #2150, merged as
   `11e431c83` and included in v0.148.0. A passive post-release observation on
   2026-10-28 found zero registrations and one persisted barrier-recovery
   publication across a complete hour of retained logs. A separate 20-second CPU
