@@ -17,6 +17,7 @@ The existing mutation replay protocol SHALL identify each Source session by immu
 A lost acknowledgement SHALL NOT allocate another Source pair.
 An unknown canonical outcome SHALL retain uploaded bytes under the existing expiration contract without claiming successful preservation.
 Source receipts SHALL distinguish preserved bytes from unassessed semantic compilation; the active agent remains responsible for compilation.
+Both resumable and multipart Source uploads SHALL return custody fields without corpus-derived warnings, structure suggestions, or vocabulary advisories.
 
 After an uncertain part response, an uploader SHALL read the accepted offset before repeating a write.
 It SHALL preserve accepted bytes and retain resumable state when connectivity prevents reconciliation.
@@ -59,6 +60,12 @@ Cloud gateway proxying and live acceptance remain separate rollout prerequisites
 - **WHEN** declared Source metadata fails the canonical Source schema or destination admission
 - **THEN** session creation refuses before receiving artifact bytes
 - **AND** the refusal creates no partial upload
+
+#### Scenario: A Source advisory refers to withheld content
+
+- **WHEN** the canonical Source writer finds a related private Source during either upload transport
+- **THEN** the upload receipt retains the new capture's identity, exact hash, and size
+- **AND** the receipt exposes no corpus advisory, related private path, or structure count
 
 #### Scenario: The active writer cannot accept Source originals
 

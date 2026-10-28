@@ -264,6 +264,72 @@ def test_a_source_session_refuses_invalid_source_metadata_before_receiving_bytes
     assert _parts(vault) == []
 
 
+@pytest.mark.parametrize("transport", ["resumable", "multipart"])
+def test_source_upload_receipts_do_not_disclose_corpus_advisories(vault, monkeypatch, transport) -> None:
+    """A private near-duplicate advisory must not escape through either byte transport."""
+    import json
+    import os
+    import uuid
+
+    from exomem import add, corpus_aware, upload_tokens
+    from exomem.governance import egress
+
+    client = _client(vault, monkeypatch)
+    private = "Knowledge Base/Sources/Sessions/__exomem_raw_v1__restricted.md"
+    existing = vault / private
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        "---\ntype: source\nsource_type: session\ntitle: Restricted original\n"
+        f"exomem_id: {uuid.uuid4()}\n---\n# Restricted original\nPrivate source body.\n"
+    )
+    who = principal_module.most_restrictive_principal(surface="transfer")
+    with principal_module.request_scope(who):
+        assert not egress.quick_page_visible(vault, private, principal=who)
+        assert corpus_aware._index_admitter(vault)(private)
+
+    class AdvisoryEnvironment:
+        def get(self, key, default=None):
+            return None if key == "EXOMEM_DISABLE_EMBEDDINGS" else os.environ.get(key, default)
+
+    class AdvisoryOS:
+        environ = AdvisoryEnvironment()
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    # Only the advisory matcher is enabled; its invented score needs no model or provider.
+    monkeypatch.setattr(add, "os", AdvisoryOS())
+    monkeypatch.setattr(corpus_aware, "os", AdvisoryOS())
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *args, **kwargs: {private: 0.99})
+    data = b"New original bytes."
+    token = upload_tokens.mint("sekret", scope=upload_tokens.upload_scope("source"))
+    values = {"filename": "material.bin", "sha256": hashlib.sha256(data).hexdigest(),
+              "source_kind": "session", "title": "New original"}
+    with principal_module.request_scope(who):
+        if transport == "multipart":
+            response = client.request("POST", "/upload", headers={"Authorization": "Bearer " + token},
+                                      files={"file": (values["filename"], data)}, data=values)
+            assert response.status_code == 201, response.text
+            receipt = response.json()
+        else:
+            created = client.request("POST", "/upload/sessions", headers={
+                **TUS, "Authorization": "Bearer " + token, "Upload-Length": str(len(data)),
+                "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}"
+                                            for key, value in values.items()),
+            })
+            assert created.status_code == 201, created.text
+            location, secret = created.headers["location"], created.headers["exomem-upload-secret"]
+            assert _patch(client, location, secret, 0, data).status_code == 204
+            receipt = _settled(client, location, secret)["receipt"]
+    assert private not in json.dumps(receipt)
+    assert "Restricted original" not in json.dumps(receipt)
+    assert "warnings" not in receipt and "structure_suggestion" not in receipt
+    assert receipt["hash"] == values["sha256"]
+    assert receipt["size"] == len(data)
+    assert receipt["semantic_compilation"]["state"] == "unassessed"
+    assert (vault / receipt["artifact_path"]).read_bytes() == data
+
+
 def test_an_incomplete_source_rollback_retains_the_upload_without_another_capture(vault, monkeypatch) -> None:
     """A rollback-incomplete failure must not clear the mutation identity and rerun the Source writer."""
     from exomem import add, server_transfer

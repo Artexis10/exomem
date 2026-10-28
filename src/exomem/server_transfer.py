@@ -200,11 +200,22 @@ def _source_session_destination(vault_root: Path, target: dict, *, size: int, sh
     return folder.relative_to(vault_root).as_posix()
 
 
+def _source_upload_receipt(vault_root: Path, result: dict) -> dict:
+    """Return custody without exposing the canonical writer's corpus advisories."""
+    from . import source_coverage
+
+    # These fields are the closed upload protocol; corpus advisories require governed command release.
+    receipt = {key: result[key] for key in ("path", "ref", "artifact_path", "hash", "hash_algorithm", "size")
+               if key in result}
+    receipt["semantic_compilation"] = source_coverage.compilation_guidance(vault_root, [result["path"]])
+    return receipt
+
+
 def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     """Publish one Source through the maintained mutation replay protocol."""
     from types import SimpleNamespace
 
-    from . import add, schema, source_coverage
+    from . import add, schema
     from .cli_ops import OpError
     from .vault import BatchWriteError
     from .writer_lease import _PostCommitOutcomeUncertain, get_manager
@@ -226,8 +237,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
                 # Canonical bytes may remain, so the replay store must never execute this leaf again.
                 raise _PostCommitOutcomeUncertain() from error
             raise
-        result["semantic_compilation"] = source_coverage.compilation_guidance(root, [result["path"]])
-        return result
+        return _source_upload_receipt(root, result)
 
     # A lane token carries no caller identity. Keep the same transfer floor across startup recovery.
     with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
@@ -243,12 +253,13 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             raise upload_sessions.CommitFailed(
                 error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
             ) from error
-    if not isinstance(result, dict) or not result.get("artifact_path") or not result.get("hash"):
-        # Signed receipt recovery can prove a commit without recovering its complete leaf result.
-        raise upload_sessions.CommitFailed(
-            "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
-        )
-    return result
+        if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
+            # Signed receipt recovery can prove a commit without recovering its complete leaf result.
+            raise upload_sessions.CommitFailed(
+                "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
+            )
+        # Also project older cached results before they leave the transfer principal's scope.
+        return _source_upload_receipt(vault_root, result)
 
 
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -999,7 +1010,10 @@ def register_transfer_routes(
                 result.path,
                 exc_info=True,
             )
-        return JSONResponse(result.as_dict(), status_code=201)
+        receipt = result.as_dict()
+        if lane == "source":
+            receipt = _source_upload_receipt(vault_root, receipt)
+        return JSONResponse(receipt, status_code=201)
 
     def _credential_binding(request: Request) -> str:
         """Which credential opened a session, for its per-binding quota; never the credential."""
