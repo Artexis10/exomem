@@ -2220,24 +2220,11 @@ def title_listing(
         units = bm25_module.token_units(turn, query=True)
         if len({unit for unit in units}) < 2:
             return TitleListing((), (), "available")
-        # Reuse request admission only after this snapshot proves its generation.
-        corpus = lexstore.carry_term_statistics(
-            vault_root,
-            [],
-            visible=query_context.visible,
-            status_basis=status_basis,
-            path_limit=lambda pages: 0,
-            freshness=freshness,
-            recall_checkpoint=recall_checkpoint,
-            query_context=query_context,
-        )
-        if not corpus.readiness.complete:
-            return TitleListing((), (), corpus.readiness.status)
-        _frequencies, corpus_pages, _paths, _admitted = corpus.value
         result = lexstore.search_bm25_result(
             vault_root,
             turn,
-            working_set.carry_fetch_size(corpus_pages),
+            # Sized on the pages the request admits, counted in the ranking's own snapshot.
+            working_set.carry_fetch_size,
             scope="kb",
             freshness=freshness,
             allow_delta=False,

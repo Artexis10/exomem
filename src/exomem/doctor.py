@@ -643,11 +643,11 @@ def _vector_stack_available(backend: str) -> bool:
 
 
 def _serves_reranker_and_clip(backend: str) -> bool:
-    """Whether this lane can load the reranker and CLIP at all.
+    """Whether this lane can load the reranker and the torch CLIP at all.
 
     Both are sentence-transformers models, so the ONNX lane withholds them by
     design. Listing them as cache misses there produces a WARN that no action
-    can ever clear.
+    can ever clear. The ONNX lane's own image tower is a separate artifact.
     """
     from . import embedding_backend
 
@@ -2458,10 +2458,11 @@ def _check_models_cache() -> DoctorCheck:
     backend = _resolved_embedding_backend()
 
     expected = [embeddings.MODEL_NAME]
-    # The reranker and CLIP are sentence-transformers models. On a lane that
-    # withholds torch they can never be cached, so listing them as misses is a
-    # WARN no action can clear — and `exomem warm`, the remediation, cannot
-    # fetch them either.
+    # The reranker and the torch CLIP are sentence-transformers models. On a lane
+    # that withholds torch they can never be cached, so listing them as misses is
+    # a WARN no action can clear — and `exomem warm`, the remediation, cannot
+    # fetch them either. The ONNX image tower is expected only where Pillow can
+    # decode images; warm skips it otherwise.
     if _serves_reranker_and_clip(backend):
         expected.extend([embeddings.RERANKER_NAME, embeddings.CLIP_MODEL_NAME])
 
@@ -2474,7 +2475,9 @@ def _check_models_cache() -> DoctorCheck:
     ]
     if embeddings.clip_enabled():
         # The ONNX lane serves the image tower as a media artifact, not from the hub.
-        kinds = ("image-query",) if _serves_reranker_and_clip(backend) else ("image-query", "image")
+        kinds = ("image-query",)
+        if not _serves_reranker_and_clip(backend) and _module_available("PIL"):
+            kinds += ("image",)
         missing.extend(
             media_models.model_spec(kind)["model"]
             for kind in kinds

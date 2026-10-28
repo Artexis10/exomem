@@ -247,6 +247,16 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
+        # Required admission is complete. Media and upload recovery own their
+        # guards and must not wait for optional graph recovery.
+        self._start_component("media", self._start_media_worker)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("upload sessions", self._resume_upload_sessions)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
@@ -269,8 +279,6 @@ class LocalRuntimeActivation:
             raise
         starters = (
             ("graph drain", self._start_graph_drain),
-            ("media", self._start_media_worker),
-            ("upload sessions", self._resume_upload_sessions),
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
             # Last: upkeep is the least important background work and must
