@@ -6,6 +6,7 @@ On a server that serves upload sessions, an upload handoff SHALL advertise resum
 The descriptor SHALL name the creation URL, protocol version, session-secret header, request and session byte bounds, required metadata, and a documented recipe.
 Evidence sessions SHALL retain their existing destination metadata and archive behavior.
 Source sessions SHALL require filename and SHA-256, validate Source metadata before receiving bytes, and publish through the canonical Source writer.
+Session creation SHALL refuse missing advertised metadata with `INVALID_UPLOAD`, name every missing key, and open no session.
 Advertisement and creation SHALL share the active writer's format admission and byte bound.
 An unsupported or unavailable write format SHALL have no usable Source resumable advertisement and SHALL refuse creation before receiving bytes.
 This compatibility check SHALL NOT request authority or change its mode.
@@ -22,6 +23,23 @@ It SHALL preserve accepted bytes and retain resumable state when connectivity pr
 Session creation SHALL NOT be repeated automatically after an unknown creation outcome.
 An expired creation capability SHALL NOT invalidate the independent secret of a session that already exists.
 Cloud gateway proxying and live acceptance remain separate rollout prerequisites.
+
+#### Scenario: An agent with a shell uploads a file larger than the proxy edge cap
+
+- **WHEN** an agent creates an Evidence session from its advertised handoff, sends parts, and loses the connection once
+- **THEN** it continues from the offset that the server reports
+- **AND** the receipt names the SHA-256 of the whole file
+
+#### Scenario: Creation lacks a required metadata key
+
+- **WHEN** a client creates a session without one of the advertised `Upload-Metadata` keys
+- **THEN** creation refuses with `INVALID_UPLOAD`, names every missing key, and opens no session
+
+#### Scenario: A Sources-lane handoff
+
+- **WHEN** an agent mints a Source upload capability on a server whose active writer supports its original
+- **THEN** the handoff advertises Source resumable transport with filename and SHA-256 metadata
+- **AND** an unsupported or unavailable active write format omits that descriptor and reports why
 
 #### Scenario: Raw material exceeds the single-request bound
 
