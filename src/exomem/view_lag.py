@@ -198,6 +198,8 @@ def recall_withheld_lag(
     scope: str,
     built: freshness.RecallFreshnessCheckpoint | None,
     visible: Callable[[str], bool],
+    *,
+    withheld_before: Callable[[frozenset[str]], frozenset[str]] | None = None,
 ) -> frozenset[str] | None:
     """`recall_lag_only_withheld`, with the deleted paths a verdict proved withheld (`withheld_lag`)."""
     current = freshness.live_recall_checkpoint(vault_root, scope)
@@ -213,7 +215,8 @@ def recall_withheld_lag(
         vault_root,
         freshness.recall_delta_since(vault_root, scope, built),
         visible,
-        withheld_before=_held_withheld(vault_root, scope, built, visible),
+        withheld_before=(withheld_before if withheld_before is not None
+                         else _held_withheld(vault_root, scope, built, visible)),
     )
 
 
