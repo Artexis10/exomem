@@ -690,7 +690,10 @@ def _write_correction(
     """
     if destination == rel:
         batch_atomic_write(
-            [PlannedWrite(path=absolute, content=transform(text), guard=source_guard), *extra_writes],
+            [
+                PlannedWrite(path=absolute, content=transform(text), guard=source_guard),
+                *extra_writes,
+            ],
             vault_root=vault_root,
             _validate_prepared_bindings=_validate_prepared_bindings,
         )

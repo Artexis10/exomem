@@ -956,7 +956,9 @@ def test_a_legacy_reason_is_retained_without_attributing_it_to_an_undo_entry(vau
         vault, path=source, source_kind="research-report", reason="a published survey",
         today=TODAY,
     )
-    reverted = rc.revert(vault, path=first.new_path, reason="the attribution was wrong", today=TODAY)
+    reverted = rc.revert(
+        vault, path=first.new_path, reason="the attribution was wrong", today=TODAY
+    )
 
     record = _front(vault, reverted.new_path)["classification_history"]
     assert record["legacy"] == known
