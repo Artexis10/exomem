@@ -100,8 +100,7 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
     schema = tools["edit_note"]["inputSchema"]
     description = tools["edit_note"]["description"]
 
-    assert "relation_review_hash=<returned relation_review_hash>" in description
-    assert "transition_token=<returned transition_token>" in description
+    assert "returned guards" in description
     assert "- supports [[Knowledge Base/Notes/Research/example-target]]" in description
     assert "supports:: [[...]]" in description
     assert "not supported relation syntax" in description

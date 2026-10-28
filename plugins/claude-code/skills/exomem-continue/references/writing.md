@@ -8,16 +8,16 @@ a new entity after resolve-before-create follows `proactive_capture`.
 ## Entity resolution
 
 Resolve entity candidates against the active entity registry and selected knowledge packs.
-  Call `connect_memory(operation="resolve-entity", name=...)` first. If one active page
+  Call `read_connections(operation={'kind': 'resolve-entity', 'name': ...})` first. If one active page
   matches, use `edit_note` for a small stable-fact correction or the canonical
   relation workflow for a new connection. If none matches, use
-  `connect_memory(operation="create-entity")` only when the identity is stable,
+  `change_connections(operation={'kind': 'create-entity'})` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
   Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
   `connections` always writes the generic `relates_to`.
   An unregistered-type finding supplies `proposal` and `expected_hash`; save
   those exact values through the governed
-  `schema_memory(operation="save-entity-types")` leaf with `why`, never by
+  `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
   editing frontmatter around the registry rule.
   A single incidental mention, unresolved identity, or transient participant
   stays in source/note context.
@@ -30,7 +30,7 @@ title. So when you write an entity's name in a script other than the one the
 user used for it (a Latin title for a name they wrote in Japanese, or the
 reverse), add a native-script alias: the user's own spelling.
 
-- At capture: `connect_memory(operation="create-entity", aliases=[...])`.
+- At capture: `change_connections(operation={'kind': 'create-entity', 'aliases': [...]})`.
 - On an existing page: `edit_note` with `{"kind": "patch_frontmatter",
   "field": "aliases", "value": [...current, "<the user's spelling>"],
   "expected_hash": ...}` and a `why`; the list replaces the field, so keep the
@@ -49,7 +49,7 @@ truthful outcomes when no useful distinction is supported; there is no quota for
 types or edges. A resolver returns definitions and evidence; its null selection
 or proposal fields leave the judgment to the active agent. When a useful recurring
 identity has no fitting type, author its definition and rationale, preserve the
-existing extension definitions, and use `schema_memory(operation="save-entity-types")`
+existing extension definitions, and use `change_schema(operation={'kind': 'save-entity-types'})`
 with the reviewed registry document and current extension hash. An empty match
 does not require squeezing the identity into a core type or abandoning the type
 proposal. Record the reviewed fingerprint, family, registry hashes, target
@@ -78,9 +78,9 @@ Use this loop whenever a durable conclusion should enter Exomem:
    claim explicitly; never recreate an "original" from the derivative. If the
    conclusion came from live work with nothing external captured, `sources: []`
    is honest and valid.
-4. Draft the typed page at the right layer: `capture_source` for raw source, `create_note` for a compiled conclusion, `connect_memory` for entity/link work, `observe_memory` or `edit_note` for guarded corrections, `supersede_note` for supersession.
+4. Draft the typed page at the right layer: `capture_source` for raw source, `create_note` for a compiled conclusion, `read_connections/change_connections` for entity/link work, `prepare_note/change_observations` or `edit_note` for guarded corrections, `supersede_note` for supersession.
 5. Reuse meaningful links established by the current search/read context. When
-   connections remain unknown, use `connect_memory(operation="suggest-links")`
+   connections remain unknown, use `read_connections(operation={'kind': 'suggest-links'})`
    on the draft; use `suggest-relations` when direction remains unresolved. Accept only links
    that genuinely clarify provenance or context, and write accepted note-level
    edges under `## Relations` as `- relation_type [[Target]]`. Carry accepted
@@ -104,7 +104,7 @@ Use this loop whenever a durable conclusion should enter Exomem:
 Group work by dependencies, not by one tool call per reasoning turn. Read
 independent known pages together when the client supports parallel calls. Preserve
 several artifacts with one `preserve_artifacts` call, then use the discovered
-`process_media(paths=[...])` selector when available. Its ordered item results
+`change_media(operation={'kind': 'process', 'paths': [...]})` selector when available. Its ordered item results
 acknowledge durable work; extraction finishes asynchronously. Do not claim to have
 read extracted content before public status/read proves it exists.
 
@@ -264,7 +264,7 @@ For **patterns** that apply across multiple projects, use `projects:` (plural
 list) instead of `project:` (singular), e.g. `projects: [project-alpha, project-beta]`.
 
 **Auto-registration of new project keys.** The `create_note`, `supersede_note`,
-`edit_note` (frontmatter-patch), and `connect_memory` (decision-entity)
+`edit_note` (frontmatter-patch), and `read_connections/change_connections` (decision-entity)
 writers auto-append unknown
 slug-shaped project keys to `_Schema/project-keys.yaml` and create the matching
 `Notes/Research/<Folder>/` directory on first use — no manual YAML edit needed.
@@ -377,10 +377,10 @@ the label stays visible as review debt instead of being silently downgraded to a
 generic link.
 
 So the vocabulary is extensible, not fixed. Resolve before authoring with
-`connect_memory(operation="resolve-relation")`, and reuse a specific truthful
+`read_connections(operation={'kind': 'resolve-relation'})`, and reuse a specific truthful
 registered relation when one fits. `relates_to` is honest only for a real generic
 connection; no edge is better than invented meaning. For a durable recurring
-distinction, use `schema_memory(subject="relations", operation="propose-relation")`,
+distinction, use `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})`,
 review the complete delta and duplicate evidence, then persist that exact delta
 with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
 immutable: corrections create a new canonical key and deprecate the old one.
@@ -394,8 +394,8 @@ paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.
 
 If a wikilink target doesn't exist yet, prefer creating the entity stub via
-**connect_memory** rather than leaving a dangling link. Dangling links accumulate
-and surface in **review_memory(mode="audit")** as `broken_wikilink`.
+**read_connections/change_connections** rather than leaving a dangling link. Dangling links accumulate
+and surface in **read_review/triage_memory(mode="audit")** as `broken_wikilink`.
 
 When creating an entity that points at a **currently-evolving external artifact**
 (a live spec, a code library, a service config), use **pointer-style** — summary
@@ -442,7 +442,7 @@ Read-only recall and review follow the live retrieval policy.
 - **Edits.** A source-changing `edit_note` validates the complete final
   `sources` list and updates back-references atomically. An unrelated edit may
   leave a legacy unresolved citation; list that debt with
-  `review_memory(mode="audit", categories=["unresolved_source_citation"])`.
+  `read_review(operation={'kind': 'audit', 'categories': ['unresolved_source_citation']})`.
 - **Frontmatterless pages.** Body and section edits work on ordinary Markdown
   without synthesizing YAML. Frontmatter and take-row operations still require
   frontmatter.
@@ -477,7 +477,7 @@ Contradiction and refutation do not imply supersession.
 Use replacement only when another page should become the current answer, under the active engagement policy.
 
 The semantic writer keeps prior Markdown in the correction's atomic transition.
-`read_memory(include_history=true)` returns `revision_history` separately from the existing page operation log.
+`read_memory(operation={'kind': 'page', 'include_history': true})` returns `revision_history` separately from the existing page operation log.
 Add `unit_ref` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
 A result with `lookup: stale` could not check linked names yet; repeat the same call shortly, not the continuation, before you treat history as absent.
 Entity and legacy corrections use their existing authorized edit owner.
@@ -486,7 +486,7 @@ For observed-state corrections, follow the independent Records discovery route i
 `references/planning-records.md`; Note recall alone does not search structured items.
 A surface without the required edit owner reports that limit; it does not invent another home.
 
-### Updating one unit with `observe_memory`
+### Updating one unit with `prepare_note/change_observations`
 
 An update rebuilds the whole unit. `verdict`, `check_by` and `id` are
 preserve-on-omit (pass an empty string to clear `verdict` or `check_by`), and

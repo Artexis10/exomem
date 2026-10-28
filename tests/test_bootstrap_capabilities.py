@@ -239,11 +239,11 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
     mcp = server_module.build_server(require_auth=False)
     live_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     # A command with renderings is listed by them; its grouped name is a hidden spelling.
-    product_tuple = tuple(
+    product_tuple = tuple(dict.fromkeys(
         name
         for command in commands.product_commands_for("mcp", expose_tier2=tier2_enabled)
         for name in listed_names(command, DEFAULT_TOOL_SHAPE)
-    )
+    ))
     aliases = live_names - set(product_tuple)
 
     for profile in PROFILES:
@@ -265,7 +265,8 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
         if not legacy:
             assert {"note", "find", "get", "transfer_token"}.isdisjoint(refs)
         if not tier2_enabled:
-            assert TIER2_PRODUCT_TOOLS.isdisjoint(
+            # A shared name can remain through a tier-one contributor (media status).
+            assert (TIER2_PRODUCT_TOOLS - live_names).isdisjoint(
                 _extract_advertised_tool_refs(
                     payload,
                     product_names=set(commands.PRODUCT_PUBLIC_NAMES),

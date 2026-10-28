@@ -1318,7 +1318,7 @@ def test_run_manifest_body_carries_counts_and_the_run_reference_only(
     assert "Applied: 1" in body
     assert "Not applied: 1" in body
     assert "Verified unchanged: 1 of 2" in body
-    assert 'adoption_studio(action="status"' in body
+    assert "adoption_studio(action='status'" in body
 
     leaked = [
         token

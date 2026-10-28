@@ -93,12 +93,12 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `read_plans` or `change_plans` for intended future state in a configured Planning collection |
 | `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `read_records` or `change_records` for observed state in a configured Record collection |
-| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
-| `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
-| `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
-| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `maintain_memory(mode="audit")` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`reconcile` writes remain host-operator work via `exomem maintain --fix` / `--reconcile` |
-| `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
+| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `read_review/triage_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
+| `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `read_review(operation={'kind': 'relation-queue'})` for the batched read; accept one reviewed candidate via `change_connections(operation={'kind': 'accept-relation'})` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
+| `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `read_connections/change_connections`; use `operation="context"` for bounded graph, provenance, evidence, and history |
+| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `check_memory(operation={'kind': 'audit'})` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`reconcile` writes remain host-operator work via `exomem maintain --fix` / `--reconcile` |
+| `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `read_schema/change_schema`; infer before saving, and keep governance optional |
 
 Records routing is semantic: use it for durable observed events or current state
 without waiting for a magic verb. When exactly one compatible existing collection
@@ -168,7 +168,7 @@ horizon, and other mutable state in frontmatter so ordinary updates do not cause
 renames. Treat every managed body block as derived: never edit it as data or read
 values back from it. A guarded item update can refresh one block. For an existing
 UUID-named collection, call
-`maintain_memory(mode="structured-files", collection=...)` to preview every
+`check_memory(operation={'kind': 'structured-files', 'collection': ...})` to preview every
 rename, body change, collision, and inbound-link blocker; apply only with the
 returned `plan_id`, `source_snapshot`, and reason. Query a declared Records child
 table with `expand_child`; use `expand_children=true` only when the collection
@@ -208,5 +208,5 @@ Examples:
 
 ## Tool parameter notes
 
-- `read_plans` and `change_plans`: `inspect`, `validate` and `query` are read-only (`read_plans`); `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes (`change_plans`). A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `maintain_memory(mode="structured-files")` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
+- `read_plans` and `change_plans`: `inspect`, `validate` and `query` are read-only (`read_plans`); `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes (`change_plans`). A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `check_memory(operation={'kind': 'structured-files'})` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
 - `read_records` and `change_records`: `item_key` is the item's internal UUID (required for update; on append identity derives from the collection's declared natural key). `expected_container_hash` guards append, update, revise and rebaseline; `expected_manifest_hash` guards revise and rebaseline; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.

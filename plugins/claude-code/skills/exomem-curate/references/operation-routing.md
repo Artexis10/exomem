@@ -22,12 +22,12 @@ and index updates are determined by the operation, not the caller.
 |---|---|---|
 | **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<Kind>/[<Domain>/]` |
-| **episode_memory** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later revisions, which retire the previous one. `action="inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
+| **record_episode/read_episode** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later revisions, which retire the previous one. `action="inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |
 | **edit** | In-place edit through one `edit_note` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `operations.md` for fields. Bumps `updated:` | the page |
-| **observe_memory** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
+| **prepare_note/change_observations** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **graph_context** | Return a bounded typed graph neighborhood for a page or query from the derived graph sidecar. Read-only | — |
@@ -115,10 +115,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   - **No path for the bytes:** tell the user the original was not preserved and
     offer the browser upload form. Custody is proven only by a returned
     `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
-- **Media processing is automatic and actionable — `process_media`.** Supported
+- **Media processing is automatic and actionable — `read_media/change_media`.** Supported
   audio and video preserved through Exomem or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.
-  Call `process_media(path=..., operation="process")` for immediate targeted
+  Call `change_media(operation={'kind': 'process', 'path': ...})` for immediate targeted
   reconciliation, `operation="status"` for bounded per-artifact state and next
   actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
   These actions enqueue or inspect work; they do not wait for model completion or
@@ -143,7 +143,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `"14:32"`), the timestamp of the matching keyframe.
 - **View a video's frames on demand — `read_media`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
-  `read_media(path, max_frames=8, start_sec=?, end_sec=?)` — it returns
+  `read_media(operation={"kind": "video", "path": ..., "max_frames": 8})` — it returns
   sampled keyframes INLINE as JPEG image blocks (no download round-trip needed),
   preceded by per-frame timestamps. The comprehension companion to visual search:
   `search_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
@@ -190,7 +190,7 @@ reference for the canonical operation leaves that product commands route to.
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
-- "which relations recur," "review unknown relation labels" → **schema_memory** (`subject="relations"`; proposal-first)
+- "which relations recur," "review unknown relation labels" → **read_schema/change_schema** (`subject="relations"`; proposal-first)
 - "use an epistemic / provenance / causal lens" → **graph_context** (`traversal_profile=...`)
 - "what should I compile next," "drain the source backlog" → **propose_compilation**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
@@ -218,13 +218,16 @@ When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable
 conclusion.
 
-## schema_memory operation matrix
+## read_schema/change_schema operation matrix
 
 Read-only unless the operation says save. Saves need `why`, plus `expected_hash` when updating an existing registry or contract.
+
+For a registry change, inspect the live registry, then use `read_schema` with `operation.kind="preview"`, its `subject`, and `proposal={"upsert":{"<key>":{"description":"..."}}}`. The preview merges the delta with existing custom entries and checks collisions and the registry cap without saving. Use a keyed object for `upsert`. `validate-document` checks a complete registry document; it does not preview a delta against the live overlay. The grouped compatibility route remains `schema_memory(operation="propose", subject=..., proposal=...)`.
 
 - **relations**: `propose-relation` returns a reviewed delta without writing (`proposal` needs `requested_label` (the name portion), `parent` (one core relation key), `description`, `direction` (directed or symmetric); `namespace` supplies the prefix and defaults to `vault`; optional `aliases`, `inverse`, `origins`, `source_kinds`, `target_kinds`, `projects`, `page_types`, `query`; pass the mapping directly, no `extensions` wrapper). `save-relations` commits the returned delta with `expected_hash` and `why`. `census` returns counts-only relation quality from the published graph (optional `detail`: `counts` or `keys`, `date_from`, `date_to`) and never writes.
 - **topic-carriers**: `inspect` (the carriers and the hand-written project-key topics; considerations come from vocabulary review), `propose`, `save` (with `why` and `expected_hash`), `history` and `restore`. An `upsert` entry carries `attributes` of `kind`, `match`, `topics`, `origin` and `rejected`; a save writes no page.
 - **entity-types**: `resolve-entity-type` reads matching definitions using `query` and optional `requested_type`; `save-entity-types` saves a reviewed proposal with `why` (and `expected_hash` when updating). The current registry is included in bootstrap.
 - **workflow-contracts** (exactly one of): `inventory` (no workflow fields); `inspect` (name); `validate` (exactly one of name or proposal); `resolve` (`context` plus at most one of name or proposal; `context` keys are only project, domain, activity, omit for unknown or null for known absent; `@standalone` is a valid name); `preview` (proposal, optional name); `save` (proposal and why, optional name plus expected_hash for updates); `refresh` (name, expected_hash, why). The legacy `save` flag is ignored when false and refused when true for workflow contracts; workflow writes use `operation=save`.
 - **context-roles**, **activation-conventions**: `validate` returns a proposal's findings plus the current registry `content_hash`; `diff` compares a proposal against the effective registry; `save-roles` / `save-conventions` (matched to the subject) commit a reviewed proposal with `why` and `expected_hash` (`roles_hash` / `conventions_hash`), refusing a proposal with any finding; `history` lists kept versions (newest first: time, why, before and after hash); `restore` reinstates one `version` with `why` and `expected_hash`, validated like a save; `infer` is refused because the server does not propose conventions or roles. `proposal` here is a complete override document in the vault file's shape.
-- **contract**, **categories**, **traversal-profiles**: infer, validate, diff (`compare_to` for a saved contract), `strict` for a failing CI outcome.
+- **contract**, **traversal-profiles**: infer, validate, diff (`compare_to` for a saved contract), `strict` for a failing CI outcome.
+- **categories**: infer, validate-document, diff; use preview for a delta against the live overlay.

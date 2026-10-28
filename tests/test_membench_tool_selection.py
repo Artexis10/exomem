@@ -25,7 +25,7 @@ from membench.utility.switch_eval.session import (
     classify,
     run_session,
 )
-from membench.utility.switch_eval.state import Layout, StateError
+from membench.utility.switch_eval.state import Layout, Slot, StateError
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 from membench.utility.tool_selection import cases as case_module
 from membench.utility.tool_selection import executor as ex
@@ -269,15 +269,19 @@ def test_the_seeding_child_process_builds_a_vault_the_end_state_reader_can_read(
     ("reply", "answer"),
     [
         ('{"answer": 8}', 8),
-        ('The total is 8.\n\n{"answer": 8}', 8),
+        ('The total is 8.\n\n{"answer": 8}', None),
         ('```json\n{"answer": ["a", "b"]}\n```', ["a", "b"]),
-        ('{"answer": 3} then, correcting myself, {"answer": 4}', 4),
+        ('{"answer": 3} then, correcting myself, {"answer": 4}', None),
+        ('The delta is not valid, so I am not returning `{"answer":"valid"}`. I saved nothing.', None),
+        ('> ```json\n> {"answer": 8}\n> ```', None),
+        ('[{"answer": 8}]', None),
+        ('```text\n{"answer": 8}\n```', None),
         ('{"result": 8}', None),
         ("no object here", None),
         (None, None),
     ],
 )
-def test_the_answer_is_the_last_answer_member_of_a_json_object_in_the_reply(reply, answer) -> None:
+def test_answer_decoding_requires_whole_json_or_one_whole_json_fence(reply, answer) -> None:
     assert parse_answer(reply) == answer
 
 
@@ -366,7 +370,7 @@ def test_a_write_task_succeeds_only_when_the_vault_ends_as_the_key_says() -> Non
     assert not run(ended_with([*_rows_of(case), entry], other_rows=[])).success
 
 
-def test_a_read_task_is_scored_on_its_answer_and_a_wrapper_around_it_does_not_matter() -> None:
+def test_read_answer_credit_requires_the_declared_whole_reply_format() -> None:
     case = build_case("records-range-total", 101)
     state = _records_state(case, _rows_of(case))
     total = case.key.answer
@@ -374,7 +378,9 @@ def test_a_read_task_is_scored_on_its_answer_and_a_wrapper_around_it_does_not_ma
     def run(reply: str) -> CaseResult:
         return _score(case, _session(case, answer=reply, before=state, after=state))
 
-    assert run(f'It adds up.\n{{"answer": {total}}}').success
+    assert run(f'{{"answer": {total}}}').success
+    assert run(f'```json\n{{"answer": {total}}}\n```').success
+    assert not run(f'It adds up.\n{{"answer": {total}}}').success
     assert not run(f'{{"answer": {total + 1}}}').success
     assert not run("It adds up to a few.").success
 
@@ -479,7 +485,11 @@ def test_the_product_resolver_reads_a_nested_call_as_its_server_does() -> None:
 
     assert (nested_query.command, nested_query.action, nested_query.read_only) == ("record_memory", "query", True)
     assert (nested_append.command, nested_append.action, nested_append.read_only) == ("record_memory", "append", False)
+    # The execution boundary keeps the selected command even when business fields refuse.
+    assert write_sent_to_read_tool.command == "record_memory"
+    assert write_sent_to_read_tool.action == "append"
     assert not write_sent_to_read_tool.resolved
+    assert grouped_form_under_nested.command is None
     assert not grouped_form_under_nested.resolved
 
 
@@ -669,9 +679,9 @@ def test_a_tool_selection_session_executes_from_its_seed_and_records_end_states(
     case = _dev_case("records-range-total")
     layout = Layout(tmp_path / "run")
     seeded = layout.run / "seeded" / case.case_id / "vault"
-    seed_vault(seeded, case.seed_steps())
-    before = read_end_state(seeded)
     spec = ex.arm_spec("grouped", ())
+    ex.seed_case(layout.run, case, parent_env={"PATH": os.defpath}, spec=spec)
+    before = json.loads((seeded.parent / "admitted-state.json").read_text())
     init = {"type": "system", "subtype": "init", "apiKeySource": "none",
             "model": "m", "claude_code_version": "v", "tools": [],
             "mcp_servers": [{"name": "exomem", "status": "connected"}]}
@@ -684,7 +694,8 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "received"})
     inputs = SessionInputs(
         planned=PlannedSession("session-1", case.case_id, "grouped", 1, 0),
         tree=ex.SURFACE_TREE, argv=(sys.executable, "-c", client, json.dumps(init)),
-        env={"PATH": os.defpath}, cwd=layout.slot / "cwd", turns=(case.prompt,), scored_turn=0,
+        env=ex.seeding_env({"PATH": os.defpath}, Slot(layout.slot), spec),
+        cwd=layout.slot / "cwd", turns=(case.prompt,), scored_turn=0,
         files={"instructions.md": ex.client_instructions()}, state_digests={},
     )
     monkeypatch.setattr(session, "_USER_STATE_ROOT", tmp_path / "user-state")
@@ -694,7 +705,13 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "received"})
     result = executor(inputs, tmp_path / "attempt")
 
     assert result.outcome == "ok" and result.answer == "received"
-    assert result.facts["end_state_before"] == result.facts["end_state_after"] == before
+    actual_before = result.facts["end_state_before"]
+    assert actual_before == result.facts["end_state_after"]
+    # Opening the copied graph cache can recover a SQLite journal; canonical state and seed files stay exact.
+    assert {key: value for key, value in actual_before.items() if key != "evidence"} == {
+        key: value for key, value in before.items() if key != "evidence"
+    }
+    assert actual_before["evidence"]["files"] == before["evidence"]["files"]
     assert not layout.slot.exists()
 
 
@@ -786,12 +803,12 @@ def _calibration_file(tmp_path: Path) -> Path:
 def test_the_plan_stage_prints_session_counts_and_token_estimates_for_each_round(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["plan", "--calibration", str(_calibration_file(tmp_path))]) == 0
+    assert main(["plan", "--calibration", str(_calibration_file(tmp_path)), "--heldout-count", "64"]) == 0
 
     out = capsys.readouterr().out
     assert "round dev: 20 cases x 2 arms x 2 repeats = 80 sessions" in out
-    assert "round heldout-90: 90 cases x 2 arms x 2 repeats = 360 sessions" in out
-    assert "round heldout-120: 120 cases x 2 arms x 2 repeats = 480 sessions" in out
+    assert "round heldout-64: 64 cases x 2 arms x 2 repeats = 256 sessions" in out
+    assert "round heldout-90" not in out
     assert f"{80 * 200_000:,} input tokens" in out
     assert f"{80 * 400:,} output tokens" in out
 
@@ -952,7 +969,7 @@ def test_a_recorded_write_session_scores_from_its_end_state_and_a_refusal_it_met
     assert (result.schema_bytes or 0) > 50_000
 
 
-def test_a_recorded_read_session_scores_from_its_answer_and_wrote_nothing(tmp_path: Path) -> None:
+def test_a_recorded_read_with_prose_wrapped_json_fails_r2s1_without_a_wrong_write(tmp_path: Path) -> None:
     name = "records-range-total-s101"
     layout = Layout(tmp_path / "run")
     session = _play(layout, name, "grouped")
@@ -960,7 +977,8 @@ def test_a_recorded_read_session_scores_from_its_answer_and_wrote_nothing(tmp_pa
 
     result = score_session(case, session, session["facts"]["calls"], grouped_resolver())
 
-    assert result.success, result.reasons
+    assert result.scored and not result.success
+    assert result.reasons == ["answer does not match the seeded facts"]
     assert not result.wrong_write
     assert result.write_calls_served == 0
     assert result.first_correct_ordinal is not None
@@ -996,7 +1014,7 @@ def test_an_arm_comparison_runs_from_recorded_sessions_and_reads_a_lost_case_as_
     assert nested["paired_cases"] == 2
     assert nested["comparison"]["mean_difference"] == pytest.approx(-0.5)
     assert nested["verdict"] == ro.INCONCLUSIVE
-    assert report["arms"]["grouped"]["secondary"]["success_rate"] == 1.0
+    assert report["arms"]["grouped"]["secondary"]["success_rate"] == 0.5
 
 
 def test_the_readout_stage_reads_a_run_directory_it_did_not_write_itself(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1008,7 +1026,7 @@ def test_the_readout_stage_reads_a_run_directory_it_did_not_write_itself(tmp_pat
 
     assert main(["readout", "--run", str(run), "--resolver", "grouped"]) == 0
 
-    assert "grouped: 2/2 sessions scored, success 1.0" in capsys.readouterr().out
+    assert "grouped: 2/2 sessions scored, success 0.5" in capsys.readouterr().out
     assert json.loads((run / "readout.json").read_text(encoding="utf-8"))["baseline"] == "grouped"
 
 

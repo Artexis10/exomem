@@ -156,7 +156,8 @@ def test_compact_bootstrap_does_not_inline_unbounded_extension_definitions(
     # Raised deliberately from 63,300 for the compact original-recovery tool default,
     # then for the evaluated correction rule in the semantic-authoring reference, then for
     # the backlog batch-loop sentence and the homes placement rule (about 500 bytes).
-    assert len(encoded) <= 64_200
+    # The typed routes and keyed registry-delta grammar add bounded routing guidance.
+    assert len(encoded) <= 65_000
     assert "Synthetic reviewed meaning 199" not in encoded.decode("utf-8")
 
 
