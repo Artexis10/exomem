@@ -91,18 +91,11 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
         assert annotations["destructiveHint"] is False
         assert annotations["openWorldHint"] is False
 
-    ask_schema = tools["search_memory"]["outputSchema"]
-    assert ask_schema["type"] == "object"
-    assert ask_schema["required"] == ["result"]
-    assert ask_schema["properties"]["result"]["anyOf"][0]["type"] == "array"
-    assert ask_schema["properties"]["result"]["anyOf"][1]["type"] == "object"
-
-    read_schema = tools["read_memory"]["outputSchema"]
-    assert read_schema["type"] == "object"
-    assert read_schema["additionalProperties"] is True
-
     ask_inputs = tools["search_memory"]["inputSchema"]["properties"]
-    read_inputs = tools["read_memory"]["inputSchema"]["properties"]
+    read_operation = tools["read_memory"]["inputSchema"]["properties"]["operation"]
+    assert read_operation["discriminator"]["propertyName"] == "kind"
+    page = next(branch for branch in read_operation["oneOf"] if branch["properties"]["kind"]["const"] == "page")
+    read_inputs = {**page["properties"], **read_operation.get("properties", {})}
     assert {"query", "detail", "deep", "include_timings", "explain"} <= set(
         ask_inputs
     )
@@ -110,3 +103,16 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     assert {"path", "frontmatter_only", "include_raw", "links", "unit_ref"} <= set(
         read_inputs
     )
+    assert {"kind", "path"} <= set(page["required"])
+
+    mcp = _build_server(monkeypatch, vault)
+    search = asyncio.run(mcp.call_tool(
+        "search_memory", {"query": "jitter", "mode": "keyword"}, run_middleware=True
+    )).structured_content["result"]
+    assert search["hits"]
+    path = search["hits"][0]["path"]
+    read = asyncio.run(mcp.call_tool(
+        "read_memory", {"operation": {"kind": "page", "path": path}}, run_middleware=True
+    )).structured_content
+    expected = commands.op_read_memory(vault, path=path)
+    assert read == json.loads(json.dumps(expected, default=str))

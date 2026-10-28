@@ -271,13 +271,16 @@ index 8116e87..d203c14 100644
  	if err != nil {
  		_, ok := status.FromError(err)
  		if !ok {
-@@ -375,7 +382,12 @@ func (s controllerServerNoLocked) CreateSnapshot(ctx context.Context, req *csi.C
+@@ -375,7 +382,15 @@ func (s controllerServerNoLocked) CreateSnapshot(ctx context.Context, req *csi.C
  	deviceClass := sourceVol.Spec.DeviceClass
  	sourceVolName := sourceVol.Spec.Name
  	currentSize := sourceVol.Status.CurrentSize
 -	snapshot, err := s.lvService.CreateSnapshot(ctx, node, deviceClass, sourceVolName, name, accessType, *currentSize)
 +	// Secret data belongs to this immutable snapshot request, not the serving LV.
 +	binding := k8s.FamilyBinding{Token: req.GetSecrets()["backup-family-token"], ImmediateSourceUUID: req.GetSecrets()["immediate-source-uuid"]}
++	if len(req.GetSecrets()) != 0 && binding.Token == "" {
++		return nil, status.Error(codes.InvalidArgument, "snapshot Secret data requires a backup family token")
++	}
 +	if binding.Token != "" && binding.ImmediateSourceUUID == "" {
 +		return nil, status.Error(codes.InvalidArgument, "family snapshot requires its submitted immediate source UUID")
 +	}

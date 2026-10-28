@@ -17,7 +17,10 @@ from . import (
     structured_collections,
 )
 from .cli_ops import OpError, action_argument_contract
+from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError
+
+_QueryFilters = public_filter_annotation()
 
 # The operation entries are the one table of what each action accepts and requires.
 ACTIONS = operation_entries.RECORDS.actions()
@@ -63,7 +66,7 @@ def record_memory(
     why: str | None = None,
     scaffold: bool | None = None,
     view: str | None = None,
-    filters: list[dict[str, Any]] | None = None,
+    filters: _QueryFilters = None,
     columns: list[str] | None = None,
     sort_by: str | None = None,
     descending: bool | None = None,
@@ -104,7 +107,8 @@ def record_memory(
     Args:
         action: describe, validate, inspect, create, query, append, bulk_upsert, update,
             revise, rebaseline, or discard.
-        collection: Optional for inventory inspect; required for targeted reads/writes.
+        collection: Vault-relative manifest path, collection UUID or memory reference.
+            Omit for inventory inspect; required for targeted reads and writes.
         manifest_path: Proposed manifest path for validate or create.
         manifest_text: Complete proposed manifest text for validate or create.
         why: Concise audit reason for create, append, update, or discard.

@@ -739,7 +739,7 @@ def test_simple_action_catalog_reaches_every_product_command() -> None:
         )
         reachable.update(entry["advanced"])
 
-    unreachable = {command.public_name for command in commands.PRODUCT_COMMANDS} - reachable
+    unreachable = {command.public_name for command in commands.PRODUCT_COMMANDS if not set(command.callable_names) & reachable}
     assert unreachable == {"bootstrap"}, (
         "every product command must be reachable from some action; unreachable: "
         f"{sorted(unreachable - {'bootstrap'})}"
@@ -781,7 +781,7 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "args": {"action": "inspect"},
     }
 
-    known = {command.public_name for command in commands.PRODUCT_COMMANDS} | {"doctor"}
+    known = {name for command in commands.PRODUCT_COMMANDS for name in command.callable_names} | {"doctor"}
     for action, item in catalog.items():
         routes = [item["route"]]
         routes.extend(
@@ -824,7 +824,7 @@ def test_bootstrap_is_registry_generated_on_public_surfaces(
     mcp = server.build_server(require_auth=False)
     names = _tool_names(mcp)
     assert "bootstrap" in names
-    assert "adopt_vault" in names
+    assert {"read_import", "import_memory"} <= names
     assert "adopt" not in names
 
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")

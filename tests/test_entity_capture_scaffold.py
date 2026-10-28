@@ -14,9 +14,9 @@ def test_capture_workflow_checks_existing_entity_before_create() -> None:
 
     assert "active entity registry" in text
     assert "selected knowledge packs" in text
-    assert 'connect_memory(operation="resolve-entity"' in text
+    assert "read_connections(operation={'kind': 'resolve-entity'" in text
     assert "edit_note" in text
-    assert 'connect_memory(operation="create-entity")' in text
+    assert "change_connections(operation={'kind': 'create-entity'})" in text
     assert "single incidental mention" in text
 
 
@@ -25,13 +25,13 @@ def test_main_scaffold_treats_entities_as_stepping_stones_without_frozen_list() 
     assert "references/engagement.md" in entrypoint
     text = (SCHEMA / "references" / "engagement.md").read_text(encoding="utf-8")
     writing = (SCHEMA / "references" / "writing.md").read_text(encoding="utf-8")
-    assert 'connect_memory(operation="resolve-entity"' in writing
+    assert "read_connections(operation={'kind': 'resolve-entity'" in writing
 
     assert "durable recurring entity" in text
     assert "active entity registry" in text
     assert "selected knowledge packs" in text
-    assert 'connect_memory(operation="resolve-entity"' in text
-    assert 'connect_memory(operation="create-entity")' in text
+    assert "read_connections(operation={'kind': 'resolve-entity'" in text
+    assert "change_connections(operation={'kind': 'create-entity'})" in text
     assert "single incidental mention" in text
     assert "person, organization, concept, library, decision" not in text
 
@@ -61,7 +61,7 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
         assert "aliases" in text
         assert "native-script alias" in text
     section = writing.split("## Entity resolution", 1)[1].split("\n## ", 1)[0]
-    assert 'connect_memory(operation="create-entity", aliases=' in section
+    assert "change_connections(operation={'kind': 'create-entity', 'aliases':" in section
     assert '"field": "aliases"' in section or "field: aliases" in section
 
 

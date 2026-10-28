@@ -72,7 +72,7 @@ with the vault's known kinds. Two values record that nobody chose a kind:
 the hosted capture box, the upload form, a legacy-vault import), and the
 retired `other` on legacy `Sources/Other/` pages. Neither is ever chosen for a
 new capture. Both stay readable and filterable (`source_kinds=["other"]`), and
-are classified with `manage_memory_file(operation="reclassify")`, which moves
+are classified with `change_files(operation={'kind': 'reclassify'})`, which moves
 the page to its kind's folder and rewrites every link to it.
 
 ### research-note

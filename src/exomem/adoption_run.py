@@ -36,6 +36,7 @@ from urllib.parse import urlencode
 from . import adopt as adopt_module
 from . import (
     adoption_plan,
+    capabilities,
     context_refs,
     due_state,
     held_fs,
@@ -756,6 +757,8 @@ def _present(root: Path, run: dict, **extra) -> dict:
     if verify:
         out["verified_unchanged"] = verify.get("verified_unchanged")
         out["verified_total"] = verify.get("verified_total")
+    if isinstance(out.get("finish"), dict):
+        out["finish"] = {**out["finish"], "handoff": _handoff(run)}
     out.update(extra)
     return out
 
@@ -810,11 +813,13 @@ def _next_actions(run: dict) -> list[dict]:
 def _handoff(run: dict) -> dict:
     run_id = run["run_id"]
     run_ref = run["run_ref"]
+    work_item = capabilities.active_call_text("adoption_studio", {"action": "work-item", "run_id": run_id})
+    propose = capabilities.active_call_text("adoption_studio", {"action": "propose", "run_id": run_id})
     prompt_text = (
         f"Continue my Exomem adoption run {run_id}. "
-        f'Call adoption_studio(action="work-item", run_id="{run_id}") to load the bounded, '
+        f"Call {work_item} to load the bounded, "
         "read-only context, then submit structured proposals via "
-        f'adoption_studio(action="propose", run_id="{run_id}"). Run ref: {run_ref}.'
+        f"{propose}. Run ref: {run_ref}."
     )
     return {
         "prompt_text": prompt_text,

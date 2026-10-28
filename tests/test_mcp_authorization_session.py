@@ -47,7 +47,7 @@ def test_generated_mcp_schema_keeps_authorization_carriers_out_of_task_inputs(
         for tool in asyncio.run(_server(vault, monkeypatch).list_tools())
     }
 
-    for name in ("search_memory", "govern_memory"):
+    for name in ("search_memory", "manage_authorization_session"):
         schema = tools[name]["inputSchema"]
         assert "authorization_session_credential" not in schema["properties"]
         assert "principal" not in schema["properties"]

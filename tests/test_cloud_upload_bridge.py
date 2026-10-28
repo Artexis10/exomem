@@ -18,6 +18,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from jsonschema import Draft202012Validator
 
 from exomem import cloud_origin, server
 from exomem.__main__ import _attach_main
@@ -168,8 +169,11 @@ def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cel
                              "authorization": f"Bearer {TOKEN}", "mcp-protocol-version": "2025-11-25"},
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
         )
-        names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-        assert "transfer_artifact" in names and "read_media" not in names
+        tools = {tool["name"]: tool for tool in listed.json()["result"]["tools"]}
+        assert "transfer_artifact" in tools
+        media = Draft202012Validator(tools["read_media"]["inputSchema"])
+        assert media.is_valid({"operation": {"kind": "status"}})
+        assert not media.is_valid({"operation": {"kind": "video", "path": "sample.mp4"}})
         return await _tool(client, "transfer_artifact", _prepare_arguments(), _mcp_origin(key, LOGIN_A))
 
     # The descriptor the agent saves has passed the cell's real output filter.

@@ -33,7 +33,7 @@ from .shell import run, wait_for
 
 K3S_POD_CIDR = "10.42.0.0/16"
 K3S_SERVICE_CIDR = "10.43.0.0/16"
-S3_PORT = 443  # restic reaches the double over plain HTTP on 443, as the cellctl 3.10 suite does
+S3_PORT = 443  # The double serves HTTP or HTTPS on this port, selected by serve_tls.
 BACKUP_BUCKET = "exomem-cloud-backups"
 PG_ROLES = ("substrate_owner", "substrate_app", "exomem_gateway", "exomem_cellctl")
 PG_DATABASE = "substrate"

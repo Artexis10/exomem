@@ -17,7 +17,7 @@ and the selector name that carries the action, so neither is restated here.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 Resolver = Callable[[str, Mapping[str, Any], str], "tuple[Any, dict[str, Any]]"]
@@ -26,31 +26,35 @@ Resolver = Callable[[str, Mapping[str, Any], str], "tuple[Any, dict[str, Any]]"]
 class UnresolvedTool(LookupError):
     """The name or the arguments mean no product operation (the server refuses them too)."""
 
+    def __init__(self, name: str, command: Any = None, arguments: Mapping | None = None):
+        super().__init__(name)
+        self.command = command
+        self.arguments = arguments
+
 
 def product_resolver() -> Resolver:
     """Read a call's operation as a server of the arm's shape names it; imported at run time."""
 
-    from exomem import operation_entries
-    from exomem.command_surface import resolve_command
+    from exomem.cli_ops import OpError
+    from exomem.command_surface import find_rendering, resolve_invocation
     from exomem.commands import product_commands_for
 
     commands = product_commands_for("mcp")
-    by_name = {command.name: command for command in commands}
 
     def resolve(name: str, arguments: Mapping[str, Any], shape: str):
-        rendered = operation_entries.unspell_call(name, arguments, shape)
-        if rendered is not None:
-            return by_name[rendered[0]], rendered[1]
-        command = resolve_command(name, commands)
-        if command is None:
-            raise UnresolvedTool(name)
-        if not command.renderings:
-            return command, dict(arguments)
-        # A grouped name stays callable on every shape; its operation must exist all the same.
-        grouped = operation_entries.unspell_call(command.name, arguments, "grouped")
-        if grouped is None:
-            raise UnresolvedTool(name)
-        return command, grouped[1]
+        try:
+            return resolve_invocation(name, arguments, commands, shape=shape)
+        except OpError as error:
+            # The execution boundary retains its selected identity before business-field refusal.
+            command = getattr(error, "command", None)
+            flat = getattr(error, "arguments", None)
+            if command is not None and isinstance(flat, Mapping):
+                operation = arguments.get("operation")
+                kind = operation.get("kind") if isinstance(operation, Mapping) else None
+                if not isinstance(kind, str) or find_rendering(name, commands, shape=shape, kind=kind) is None:
+                    raise UnresolvedTool(name, command, flat) from error
+                return command, dict(flat)
+            raise UnresolvedTool(name) from error
 
     return resolve
 
@@ -78,6 +82,7 @@ class ResolvedCall:
     mode: str | None = None
     #: ``None`` when the product could not classify the call (it is refused, not run).
     read_only: bool | None = None
+    arguments: Mapping[str, Any] = field(default_factory=dict)
 
 
 def resolve_call(
@@ -89,6 +94,11 @@ def resolve_call(
 
     try:
         command, flat = resolver(name, arguments or {}, shape)
+        resolved = True
+    except UnresolvedTool as error:
+        if error.command is None or error.arguments is None:
+            return ResolvedCall(False)
+        command, flat, resolved = error.command, error.arguments, False
     except (LookupError, OpError, ValueError, TypeError):
         # LookupError covers UnresolvedTool and the product's UnresolvedInvocation;
         # OpError is the command's own argument refusal, which the server returns too.
@@ -103,9 +113,10 @@ def resolve_call(
     except Exception:  # noqa: BLE001 - an unclassifiable call is a reported state, never a guess
         read_only = None
     return ResolvedCall(
-        True,
+        resolved,
         command.name,
         action if isinstance(action, str) else None,
         mode if isinstance(mode, str) else None,
         read_only,
+        flat,
     )

@@ -1219,8 +1219,9 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
         problems.append(f"the backups measured {measured}, not a growth and then a larger filesystem at the cap")
     if growth["filesystem_after"]["total_bytes"] <= growth["filled"]["total_bytes"]:
         problems.append("the filesystem inside the cell did not grow")
-    # A guarded clone requests its family's exact byte size, not a GiB quantity.
-    if (at_cap["backup"].get("clone") or {}).get("size") != str(grown * drill_cluster.GIB):
+    # Guarded clones use the family's exact bytes; legacy clones use a GiB quantity.
+    clone_size = str(grown * drill_cluster.GIB) if drill.provider_tag else f"{grown}Gi"
+    if (at_cap["backup"].get("clone") or {}).get("size") != clone_size:
         problems.append(f"the next backup's clone is {(at_cap['backup'].get('clone') or {}).get('size')}")
     if slots_after != await d6_slots(grown):
         problems.append(f"the published slots read {slots_after} after the growth, not D6's {await d6_slots(grown)}")
@@ -1616,6 +1617,7 @@ async def run_drill(args: argparse.Namespace) -> int:
             # Import Jobs accept only HTTPS transfer URLs, so storage serves TLS from the run CA, as in production.
             stack.object_store = infra._start_object_store(stack, serve_tls=True)
             cell_tag = build.trust_rehearsal_ca(cell_tag, stack.object_store.ca_path, workdir, run_id=run_id)
+            report.overlays.append("the cell image trusts the run CA for the HTTPS storage double")
             cluster = drill_cluster.start_server(stack)
             cluster.agent_image = agent_image
             cellctl_image = build.load_into_k3s(stack.k3s.container, cellctl_tag)

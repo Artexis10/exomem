@@ -1467,6 +1467,6 @@ def test_the_scaffold_skill_routes_conversation_recaps_to_the_tool() -> None:
     routing = (scaffold / "references" / "operation-routing.md").read_text(encoding="utf-8")
     engagement = (scaffold / "references" / "engagement.md").read_text(encoding="utf-8")
 
-    assert "`episode_memory`" in skill
-    assert "**episode_memory**" in routing
-    assert "episode_memory" in engagement and "episode_due" in engagement
+    assert "`record_episode/read_episode`" in skill
+    assert "**record_episode/read_episode**" in routing
+    assert "record_episode" in engagement and "episode_due" in engagement
