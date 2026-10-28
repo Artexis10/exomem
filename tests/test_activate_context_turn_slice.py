@@ -16,6 +16,7 @@ from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
 from exomem import (
+    bm25,
     commands,
     context_views,
     lexstore,
@@ -181,6 +182,38 @@ def test_the_leads_only_compile_gives_the_full_compiles_slice_on_the_lexical_twi
                 if turn == SLED_TURN:
                     # The control: the turn resolves an anchor, whose lanes only the full compile runs.
                     assert full["state"] == "ready" and runs[0] < runs[1], (root.name, runs, full)
+
+
+def full_admitted_rankings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rank every admitted query from each candidate's own text, the full ranking that kept postings must equal."""
+    monkeypatch.setattr(bm25.CorpusPostings, "kept", lambda self, words: {})
+    monkeypatch.setattr(bm25.CorpusPostings, "counted", lambda self, *args: None)
+
+
+def postings_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """A list that grows by one each time an admitted ranking scores from postings."""
+    reads: list[int] = []
+    documents = bm25.CorpusPostings.documents
+    monkeypatch.setattr(bm25.CorpusPostings, "documents", lambda self, *args: reads.append(1) or documents(self, *args))
+    return reads
+
+
+def test_kept_postings_give_a_restricted_caller_the_full_rankings_slice_on_the_lexical_twins(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restricted caller's slice ranks the turn's words from kept postings. Its leads, their match and evidence,
+    and its state are the ones that ranking each candidate's text gives, on both twins and for every turn."""
+    reads = postings_reads(monkeypatch)
+    for root in _hauling_twins(vault, tmp_path):
+        for turn in (SLED_TURN, LONG_TURN, IRRELEVANT_TURN):
+            _cold()
+            pruned = _activate(root, _external(), turn=turn)["turn_slice"]
+            with monkeypatch.context() as scope:
+                full_admitted_rankings(scope)
+                _cold()
+                full = _activate(root, _external(), turn=turn)["turn_slice"]
+            assert pruned == full, (root.name, turn)
+    assert reads  # the control: the pruned slices were ranked from postings
 
 
 def _guarded_world(vault: Path) -> None:

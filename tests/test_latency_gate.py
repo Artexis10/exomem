@@ -1087,12 +1087,8 @@ def test_the_turn_slice_adds_a_bounded_paired_cost_to_a_maps_activation(
                 },
             }
     print("turn slice paired latency " + json.dumps(report, sort_keys=True))
-    # A restricted caller's slice lists titles over every admitted page for the turn's words, about +160 ms on an
-    # abstaining turn, until the admitted BM25 ranking prunes to its top k (operator ruling: ship, fix guests next).
-    # Until then a restricted caller's slice is held to the whole-call ceiling, not to the owner's added cost.
-    ceilings = {key: SLICE_ADDED_MS_CEILING if key.startswith("owner_") else CEIL_WORKING_SET_MS for key in report}
-    over = {key: row for key, row in report.items() if row["ci95_added_ms"][1] > ceilings[key]}
-    assert not over, {"ceilings_ms": ceilings, "over": over, "report": report}
+    over = {key: row for key, row in report.items() if row["ci95_added_ms"][1] > SLICE_ADDED_MS_CEILING}
+    assert not over, {"ceiling_ms": SLICE_ADDED_MS_CEILING, "over": over, "report": report}
 
 
 @pytest.mark.timeout(900)
