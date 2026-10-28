@@ -12,9 +12,9 @@ A private replay of twelve field reports measured the gap on one live vault. Its
 - Keep one searchable **context catalogue** of described entries (topics, anchors, notes, threads, collections) with membership, source refs and generations. It is distinct from the existing anchor catalogue. The **map** and the **domain maps** are bounded projections of it, and the map says it is an index of what exists, not material relevant to the turn.
 - Serve **anchor profiles** and **topic profiles** by ref, compiled on demand through the existing role lanes and current-state authority, cached where useful.
 - Define **topic membership** from registry domains, project keys and explicit page declarations, with direction rules, so that ordinary notes are reachable through their topic and not only through anchors.
-- Keep descriptions current on write with generation-bound invalidation, and backfill descriptions for existing entries before evaluation.
+- Keep descriptions current on write with generation-bound invalidation. Backfill existing descriptions only if development evidence shows that ledes lose against authored descriptions.
 - Filter by the caller's view **before** any synthesis, selection, ranking or budget.
-- Probe a **turn slice** (profiles selected by meaning from the turn) on development cases only; it ships only through its own frozen evaluation. Test a pull-instructions arm with no map, so the context catalogue must earn its cost, and sample ordinary turns beside known misses, so the switch cannot win only on cases the current packet failed.
+- Add a **turn slice** of guarded leads beside the map, on by default through amendment 13. Label leads as not checked for relevance. Measure the slice on development cases. Keep the pull-instructions arm and ordinary turns in the evaluation; results do not change the default automatically.
 - Tell clients to read the map, pull profiles, pages and units by ref or by their own `ask_memory` queries, and cite refs.
 - Serve the `maps` packet by default, by operator ruling (design amendment 12). Keep the anchor-first packet as the one-line rollback. Keep measuring with a frozen, paired evaluation of first answers, which no longer gates the default.
 - Build shared index inputs inside the existing internal-producer scope. Keep caller authorization and disclosure at every external read.
@@ -33,6 +33,6 @@ None.
 
 ## Impact
 
-The change adds a context catalogue and its derived projections, a profile read contract, a `maps` packet mode that a setting selects, description upkeep on writes, a one-time description backfill, and new client instructions in the server instructions, tool description, skill scaffold and retrieve hook. It reuses the role lanes, the Records-first current-state resolver, the caller's-view rules (`audience_view`, `anchor_visible`) and the egress guard. Profiles and maps are built from units and index rows, never by parsing page text, so they carry over to a SQLite store. The `anchors` mode, its resolver and its audit stay in force as the rollback.
+The change adds a context catalogue and its derived projections, a profile read contract, a `maps` packet mode that a setting selects, description upkeep on writes, a conditional description backfill, and new client instructions in the server instructions, tool description, skill scaffold and retrieve hook. It reuses the role lanes, the Records-first current-state resolver, the caller's-view rules (`audience_view`, `anchor_visible`) and the egress guard. Profiles and maps are built from units and index rows, never by parsing page text, so they carry over to a SQLite store. The `anchors` mode, its resolver and its audit stay in force as the rollback.
 
 This change carries the ordinary-use acceptance that `close-memory-loop` task 6.32 requires for context delivery.

@@ -28,14 +28,14 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NotRequired
+from typing import Annotated, Any, Literal, NamedTuple, NotRequired
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -94,6 +94,7 @@ from . import (
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
+from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
 from . import link_summary as link_summary_module
 from . import list_directory as list_directory_module
@@ -6893,6 +6894,284 @@ def _attach_episode_advice(vault_root: Path, packet: dict[str, Any]) -> None:
         packet["episode_due"] = episode_due
 
 
+class _ThreadRead(NamedTuple):
+    """The caller's thread, read between the release plane and `serve`: what the anchors packet mints its token from."""
+
+    identity: str
+    thread: str
+    thread_ns: int | None
+    state: str
+    salt: str
+    caller_thread: str | None
+    attribution: Any
+
+
+class _CompiledActivation(NamedTuple):
+    """One compile's outcome. `served` is False when `packet` is the abstention `abstain` built, to return as it is."""
+
+    packet: dict
+    served: bool
+    thread: _ThreadRead | None = None
+
+
+@dataclass(frozen=True)
+class _ActivationEvidence:
+    """What an activation request's readiness stage settled, for the compile that follows it."""
+
+    freshness_key: Any
+    snapshot: Any
+    lexical_freshness: Any
+    anchor_rows: Any
+    evidence_token: tuple[int, int, int] | None
+    evidence_stamp: str | None
+
+
+def _compile_guarded_activation(
+    vault_root: Path,
+    *,
+    turn: str,
+    budget: int,
+    purpose: str | None,
+    timings: find_types.FindTimings | None,
+    evidence: _ActivationEvidence,
+    abstain: Callable[..., dict],
+    continuity: str | None = None,
+    anchor: str | None = None,
+    trigger: str = "user_turn",
+    conversation: working_set_conversation_module.Conversation | None = None,
+    intent_resolution: dict[str, Any] | None = None,
+    read_thread: Callable[[], _ThreadRead] | None = None,
+    caller: context_views_module.CallerView | None = None,
+) -> _CompiledActivation:
+    """Lexical evidence, release plane, `serve`, then the terminal guard: the
+    one compile both packet shapes read their anchors from.
+
+    `abstain` builds the packet to return for a stage that cannot run, and takes
+    the arguments of the body's own `_abstain`. `read_thread` is the anchors
+    packet's hook for the caller's thread: it runs after the exits that must
+    leave without one, and its result is handed back for the token. A caller
+    that has no thread (the turn slice of a maps packet) passes none and gets
+    an anchor-free compile of the turn's own words.
+
+    `caller` is the turn slice's caller view, the map's. The compile then
+    decides pages through its release filter, so a verdict the map reached is
+    reused, and builds one reader view after the checkpoint pin for the rest
+    of the compile. A restricted reader's lexical pass, dependence check and
+    carry share one admission over that view, so a withheld page moves no term
+    choice or rank. The compile then also serves leads only
+    (`working_set.compile_packet`). The anchors packet passes none: it builds
+    its views itself, ranks its lexical pass on the catalogue's statistics, as
+    the owner does in both, and compiles in full."""
+
+    def stopped(*args: Any, **kwargs: Any) -> _CompiledActivation:
+        return _CompiledActivation(abstain(*args, **kwargs), False)
+
+    if working_set_module.budget_exhausted("working_set.lexical"):
+        return stopped(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+    # Activation's search domain is its small anchor catalogue.
+    # Ordinary hybrid recall loads note-chunk and media matrices even for a
+    # small result limit; none belongs on this bounded request path. The release
+    # object is still mandatory: the final guard independently decides every
+    # packet reference under the current audience and purpose.
+    lexical_seconds = 0.0
+    try:
+        _policy, release_active = egress_module.gate_state(vault_root)
+        # Measured unconditionally, not read back off `timings`: the shipped
+        # hook calls this door WITHOUT `include_timings`, so there is no
+        # collector on the very path the carry's budget gate exists to
+        # protect. The carry runs the same query shape against the same
+        # catalogue, so what this pass cost is the best estimate of what the
+        # second one will, and the gate asks the budget for room in
+        # proportion to it.
+        lexical_started = time.monotonic()
+        # How many of the turn's units the bounded stage kept and dropped;
+        # counts only, so the diagnostic never carries the turn's words.
+        lexical_selection: dict[str, int] = {}
+        with find_types.timing_span(timings, "working_set.lexical"):
+            # `None` for the owner, whose lexical state stays vault-wide.
+            if caller is None:
+                reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
+            else:
+                reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
+            # The one checkpoint every lexical read of this request uses: the lexical
+            # lane, the dependence check and the role lanes (through the snapshot).
+            lexical_checkpoint = (
+                working_set_runtime_module.pin_lexical_checkpoint(vault_root, evidence.snapshot, reader_view)
+                if evidence.snapshot
+                else None
+            )
+            # Built after the pin, so the pages the pin proved withheld are rejected too.
+            slice_reader = lexical_admission = status_basis = None
+            if caller is not None and caller.visible is not None:
+                slice_reader = egress_module.reader_view(vault_root, purpose=purpose, keep=caller.visible)
+                status_basis = lifecycle_statuses_module.Basis(vault_root)
+                lexical_admission = working_set_runtime_module.request_admission(vault_root, slice_reader, status_basis)
+            if anchor and trigger == "user_turn":
+                hits, lexical_state = [], "agent_choice"
+            else:
+                hits, lexical_state = working_set_runtime_module.lexical_evidence(
+                    vault_root,
+                    turn,
+                    evidence.anchor_rows,
+                    limit=(
+                        egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
+                        if release_active or reader_view is not None
+                        else ACTIVATE_RETRIEVAL_LIMIT
+                    ),
+                    freshness=evidence.lexical_freshness,
+                    recall_checkpoint=lexical_checkpoint,
+                    selection=lexical_selection,
+                    query_context=lexical_admission,
+                )
+        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
+        if timings is not None and lexical_selection:
+            timings.profile["working_set.lexical"] = dict(lexical_selection)
+        if working_set_module.budget_exhausted("working_set.release"):
+            return stopped(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+        with find_types.timing_span(timings, "working_set.release"):
+            release = egress_module.annotate_hits(
+                vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
+            )
+    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
+        log.warning("activation release plane unavailable; abstaining", exc_info=True)
+        return stopped(activation_result_module.UNAVAILABLE)
+    # An `anchor` naming no row of THIS index but an eligible agent-picked
+    # page (design close-memory-loop, U7) is decided on the release plane
+    # HERE, before the compile that page would otherwise buy nothing for: a
+    # withheld page refuses identically whether or not it was ever compiled,
+    # and running the compile first is the entire cost difference measured
+    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
+    # no eligible page is refused at the same point, so every refused class
+    # leaves in one place. An `anchor` that DOES match a row of the index is
+    # untouched — that path's own timing is not this fix's scope — and any
+    # failure here only skips the early exit: the unmodified
+    # compile-then-guard sequence below still decides every ref exactly as
+    # it always has.
+    if anchor:
+        try:
+            named_rows = {
+                spelling
+                for row in evidence.anchor_rows
+                for spelling in (
+                    str(getattr(row, "ref", None) or ""),
+                    str(getattr(row, "path", "") or ""),
+                    str(getattr(row, "anchor_id", "") or ""),
+                )
+                if spelling
+            }
+            if anchor not in named_rows:
+                # Every refused class leaves HERE, at one point: a ref naming
+                # no eligible page (unknown, raw material, navigation, retired,
+                # non-canonical) exactly as a withheld one. Refused after the
+                # compile instead, the unknown classes took about 3 ms longer
+                # than a withheld page, which is its own answer.
+                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is None or not egress_module.quick_page_visible(
+                    vault_root, agent_page, purpose=purpose
+                ):
+                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
+            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's own thread, when it has one, is read here: after the early
+    # exits above, so an abstention before this point carries no token.
+    thread = read_thread() if read_thread is not None else None
+    packet = working_set_runtime_module.serve(
+        vault_root,
+        turn=turn,
+        max_chars=budget,
+        purpose=purpose,
+        timings=timings,
+        freshness_key=evidence.freshness_key,
+        continuity=continuity,
+        anchor=anchor,
+        retrieval_paths=frozenset(hit.path for hit in release.hits),
+        lexical_state=lexical_state,
+        evidence_token=evidence.evidence_token,
+        evidence_stamp=evidence.evidence_stamp,
+        freshness_snapshot=evidence.snapshot,
+        lexical_seconds=lexical_seconds,
+        attribution=thread.attribution if thread is not None else None,
+        conversation=conversation,
+        trigger=trigger,
+        intent_resolution=intent_resolution,
+        lexical_admission=lexical_admission,
+        reader=slice_reader,
+        status_basis=status_basis,
+        leads_only=caller is not None,
+    )
+    # An override that resolved nothing named no anchor of this index. Refused
+    # here, before the guard, with the same words a withheld ref gets below —
+    # and deliberately NOT for the server's own abstentions (`index_warming`,
+    # `disabled`, `unavailable`), which say something about this server rather
+    # than about the ref the caller passed.
+    if anchor and _abstention_reason(packet) == activation_result_module.UNRESOLVED:
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    # Only gated when `packet` actually carries content: an already-abstained
+    # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
+    # has nothing for the guard to spend time on, so checking again here
+    # would just record a second, redundant `note_skipped` for a stage that
+    # was never really at risk — `note_skipped` should name the ONE stage
+    # that first ran out of room, not every boundary crossed afterward while
+    # carrying nothing.
+    if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        return stopped(
+            working_set_runtime_module.UNAVAILABLE,
+            generation=packet.get("generation") or None,
+            budget_caused=True,
+        )
+    # Unconditional: every served packet crosses the guard. A guard that only ran
+    # when the retrieval lane happened to succeed is not a guard.
+    try:
+        with find_types.timing_span(timings, "working_set.guard"):
+            guard_arguments: dict[str, Any] = {"purpose": purpose}
+            if intent_resolution is not None:
+                guard_arguments["intent_resolution"] = intent_resolution
+            guarded = egress_module.guard_working_set(
+                vault_root, packet, release, **guard_arguments
+            )
+    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        log.warning("activation egress guard failed; abstaining", exc_info=True)
+        return stopped(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or None)
+    # The release plane's own decision, reused rather than re-derived: the
+    # override anchor was the packet's ONLY anchor, so the guard emptying the
+    # packet IS the answer to "may this audience see that ref".
+    #
+    # What is equal between an unknown ref and a withheld one is the RESPONSE —
+    # same code, same words, neither naming the ref. The work is not: a withheld
+    # ref has been compiled and guarded by the time it is refused, an unknown one
+    # abstains before the guard, and the two are separable by latency (measured
+    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
+    # padded, because equalising it would mean either doing the withheld ref's
+    # work for every unknown one or timing the response, and neither buys
+    # anything: the same audience asking the same vault an ORDINARY turn already
+    # learns as much from `missing[].reason = "withheld"`, which is the honest
+    # marker saying a section lost something. A timing side channel that discloses
+    # strictly less than a documented field is not the thing to spend a request
+    # budget closing.
+    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
+    # `withheld`; either way the override's one anchor is gone.
+    if anchor and (
+        guarded is None or _abstention_reason(guarded) in {activation_result_module.WITHHELD, activation_result_module.UNRESOLVED}
+    ):
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    if guarded is None:
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        return stopped(
+            activation_result_module.WITHHELD,
+            generation=packet.get("generation") or None,
+            carry_thread=False,
+        )
+    return _CompiledActivation(guarded, True, thread)
+
+
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -7157,6 +7436,42 @@ def _op_activate_context_body(
     if packet_mode == "maps":
         if working_set_module.budget_exhausted("working_set.catalogue"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
+            """What the turn's own words reached: the guarded anchors compile, run for the user turn alone,
+            over the map's caller view.
+
+            It carries no thread and no `anchor`, and mints, learns and records nothing: the map's
+            continuity token encodes no anchor. A stage it cannot run is a state of the slice.
+            """
+            if not turn.strip():
+                return context_views_module.TurnLeads(context_views_module.SLICE_EMPTY)
+            # The resolver weighs a name against every anchor it is given, so a restricted caller is given
+            # only the anchors it may see: a withheld namesake must not turn a visible anchor into a question.
+            reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
+            visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
+            # Cooperative stage checks leave time for the map's mandatory guard; a synchronous stage can overrun.
+            with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
+                compiled = _compile_guarded_activation(
+                    vault_root,
+                    turn=turn,
+                    budget=budget,
+                    purpose=purpose,
+                    timings=timings,
+                    evidence=_ActivationEvidence(
+                        freshness_key=freshness_key,
+                        snapshot=snapshot,
+                        lexical_freshness=lexical_freshness,
+                        anchor_rows=visible_rows,
+                        evidence_token=evidence_token,
+                        evidence_stamp=evidence_stamp,
+                    ),
+                    abstain=_abstain,
+                    caller=caller,
+                )
+            # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
+            return context_views_module.turn_leads(compiled.packet)
+
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
@@ -7167,9 +7482,9 @@ def _op_activate_context_body(
                         "freshness_key": working_set_runtime_module._key_text(freshness_key),
                         "index_generation": evidence_token[1] if evidence_token else 0,
                     },
+                    turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                 )
-                if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
-                    return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+                # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
                     guarded = egress_module.guard_working_set(
                         vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose
@@ -7196,224 +7511,67 @@ def _op_activate_context_body(
             packet["timings"] = timings.as_dict()
         return packet
 
-    if working_set_module.budget_exhausted("working_set.lexical"):
-        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
-
-    # Activation's search domain is its small anchor catalogue.
-    # Ordinary hybrid recall loads note-chunk and media matrices even for a
-    # small result limit; none belongs on this bounded request path. The release
-    # object is still mandatory: the final guard independently decides every
-    # packet reference under the current audience and purpose.
-    lexical_seconds = 0.0
-    try:
-        _policy, release_active = egress_module.gate_state(vault_root)
-        # Measured unconditionally, not read back off `timings`: the shipped
-        # hook calls this door WITHOUT `include_timings`, so there is no
-        # collector on the very path the carry's budget gate exists to
-        # protect. The carry runs the same query shape against the same
-        # catalogue, so what this pass cost is the best estimate of what the
-        # second one will, and the gate asks the budget for room in
-        # proportion to it.
-        lexical_started = time.monotonic()
-        # How many of the turn's units the bounded stage kept and dropped;
-        # counts only, so the diagnostic never carries the turn's words.
-        lexical_selection: dict[str, int] = {}
-        with find_types.timing_span(timings, "working_set.lexical"):
-            # `None` for the owner, whose lexical state stays vault-wide.
-            reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
-            # The one checkpoint every lexical read of this request uses: the lexical
-            # lane, the dependence check and the role lanes (through the snapshot).
-            lexical_checkpoint = (
-                working_set_runtime_module.pin_lexical_checkpoint(vault_root, snapshot, reader_view)
-                if snapshot
-                else None
-            )
-            if anchor and trigger == "user_turn":
-                hits, lexical_state = [], "agent_choice"
-            else:
-                hits, lexical_state = working_set_runtime_module.lexical_evidence(
-                    vault_root,
-                    turn,
-                    anchor_rows,
-                    limit=(
-                        egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
-                        if release_active or reader_view is not None
-                        else ACTIVATE_RETRIEVAL_LIMIT
-                    ),
-                    freshness=lexical_freshness,
-                    recall_checkpoint=lexical_checkpoint,
-                    selection=lexical_selection,
-                )
-        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
-        if timings is not None and lexical_selection:
-            timings.profile["working_set.lexical"] = dict(lexical_selection)
-        if working_set_module.budget_exhausted("working_set.release"):
-            return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
-        with find_types.timing_span(timings, "working_set.release"):
-            release = egress_module.annotate_hits(
-                vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
-            )
-    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
-        log.warning("activation release plane unavailable; abstaining", exc_info=True)
-        return _abstain(activation_result_module.UNAVAILABLE)
-    # An `anchor` naming no row of THIS index but an eligible agent-picked
-    # page (design close-memory-loop, U7) is decided on the release plane
-    # HERE, before the compile that page would otherwise buy nothing for: a
-    # withheld page refuses identically whether or not it was ever compiled,
-    # and running the compile first is the entire cost difference measured
-    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
-    # no eligible page is refused at the same point, so every refused class
-    # leaves in one place. An `anchor` that DOES match a row of the index is
-    # untouched — that path's own timing is not this fix's scope — and any
-    # failure here only skips the early exit: the unmodified
-    # compile-then-guard sequence below still decides every ref exactly as
-    # it always has.
-    if anchor:
-        try:
-            named_rows = {
-                spelling
-                for row in anchor_rows
-                for spelling in (
-                    str(getattr(row, "ref", None) or ""),
-                    str(getattr(row, "path", "") or ""),
-                    str(getattr(row, "anchor_id", "") or ""),
-                )
-                if spelling
-            }
-            if anchor not in named_rows:
-                # Every refused class leaves HERE, at one point: a ref naming
-                # no eligible page (unknown, raw material, navigation, retired,
-                # non-canonical) exactly as a withheld one. Refused after the
-                # compile instead, the unknown classes took about 3 ms longer
-                # than a withheld page, which is its own answer.
-                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
-                if agent_page is None or not egress_module.quick_page_visible(
-                    vault_root, agent_page, purpose=purpose
-                ):
-                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
-        except ValueError:
-            raise
-        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
-            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
-    # The caller's conversation (the token's thread): a valid one is this
-    # caller's session tier when it supplied no session key of its own. An
-    # invalid or lapsed one is reported and served as keyless, never refused,
-    # and every packet below carries a thread forward, a fresh one if need be.
-    identity = working_set_runtime_module.identity_for(vault_root)
-    # The key the thread's times are signed with: they are the caller's
-    # claim until the server's MAC over them verifies.
-    salt = working_set_heat_module.load(vault_root).salt
-    thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
-        continuity, identity=identity, salt=salt
-    )
-    if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
-        thread, thread_ns = working_set_runtime_module.new_thread()
-        caller_thread = None
-    else:
-        caller_thread = thread
-    thread_carry = (identity, thread, thread_ns, thread_state, salt)
-    # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
-    # attribution and the session's last served thread all use the same one.
-    attribution = (
-        working_set_heat_module.attribution_for(
-            vault_root,
-            client=client,
-            session=session,
-            workspace=workspace,
-            salt=salt or None,
-            thread=caller_thread,
+    def read_caller_thread() -> _ThreadRead:
+        nonlocal thread_carry
+        # The caller's conversation (the token's thread): a valid one is this
+        # caller's session tier when it supplied no session key of its own. An
+        # invalid or lapsed one is reported and served as keyless, never refused,
+        # and every packet below carries a thread forward, a fresh one if need be.
+        identity = working_set_runtime_module.identity_for(vault_root)
+        # The key the thread's times are signed with: they are the caller's
+        # claim until the server's MAC over them verifies.
+        salt = working_set_heat_module.load(vault_root).salt
+        thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
+            continuity, identity=identity, salt=salt
         )
-        if client or session or workspace or caller_thread
-        else None
-    )
-    packet = working_set_runtime_module.serve(
+        if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
+            thread, thread_ns = working_set_runtime_module.new_thread()
+            caller_thread = None
+        else:
+            caller_thread = thread
+        thread_carry = (identity, thread, thread_ns, thread_state, salt)
+        # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
+        # attribution and the session's last served thread all use the same one.
+        attribution = (
+            working_set_heat_module.attribution_for(
+                vault_root,
+                client=client,
+                session=session,
+                workspace=workspace,
+                salt=salt or None,
+                thread=caller_thread,
+            )
+            if client or session or workspace or caller_thread
+            else None
+        )
+        return _ThreadRead(identity, thread, thread_ns, thread_state, salt, caller_thread, attribution)
+
+    compiled = _compile_guarded_activation(
         vault_root,
         turn=turn,
-        max_chars=budget,
+        budget=budget,
         purpose=purpose,
         timings=timings,
-        freshness_key=freshness_key,
+        evidence=_ActivationEvidence(
+            freshness_key=freshness_key,
+            snapshot=snapshot,
+            lexical_freshness=lexical_freshness,
+            anchor_rows=anchor_rows,
+            evidence_token=evidence_token,
+            evidence_stamp=evidence_stamp,
+        ),
+        abstain=_abstain,
         continuity=continuity,
         anchor=anchor,
-        retrieval_paths=frozenset(hit.path for hit in release.hits),
-        lexical_state=lexical_state,
-        evidence_token=evidence_token,
-        evidence_stamp=evidence_stamp,
-        freshness_snapshot=snapshot,
-        lexical_seconds=lexical_seconds,
-        attribution=attribution,
-        conversation=conversation,
         trigger=trigger,
+        conversation=conversation,
         intent_resolution=intent_resolution,
+        read_thread=read_caller_thread,
     )
-    # An override that resolved nothing named no anchor of this index. Refused
-    # here, before the guard, with the same words a withheld ref gets below —
-    # and deliberately NOT for the server's own abstentions (`index_warming`,
-    # `disabled`, `unavailable`), which say something about this server rather
-    # than about the ref the caller passed.
-    if anchor and _abstention_reason(packet) == activation_result_module.UNRESOLVED:
-        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
-    # Only gated when `packet` actually carries content: an already-abstained
-    # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
-    # has nothing for the guard to spend time on, so checking again here
-    # would just record a second, redundant `note_skipped` for a stage that
-    # was never really at risk — `note_skipped` should name the ONE stage
-    # that first ran out of room, not every boundary crossed afterward while
-    # carrying nothing.
-    if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        return _abstain(
-            working_set_runtime_module.UNAVAILABLE,
-            generation=packet.get("generation") or generation_stub,
-            budget_caused=True,
-        )
-    # Unconditional: every served packet crosses the guard. A guard that only ran
-    # when the retrieval lane happened to succeed is not a guard.
-    try:
-        with find_types.timing_span(timings, "working_set.guard"):
-            guard_arguments: dict[str, Any] = {"purpose": purpose}
-            if intent_resolution is not None:
-                guard_arguments["intent_resolution"] = intent_resolution
-            guarded = egress_module.guard_working_set(
-                vault_root, packet, release, **guard_arguments
-            )
-    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        log.warning("activation egress guard failed; abstaining", exc_info=True)
-        return _abstain(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or generation_stub)
-    # The release plane's own decision, reused rather than re-derived: the
-    # override anchor was the packet's ONLY anchor, so the guard emptying the
-    # packet IS the answer to "may this audience see that ref".
-    #
-    # What is equal between an unknown ref and a withheld one is the RESPONSE —
-    # same code, same words, neither naming the ref. The work is not: a withheld
-    # ref has been compiled and guarded by the time it is refused, an unknown one
-    # abstains before the guard, and the two are separable by latency (measured
-    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
-    # padded, because equalising it would mean either doing the withheld ref's
-    # work for every unknown one or timing the response, and neither buys
-    # anything: the same audience asking the same vault an ORDINARY turn already
-    # learns as much from `missing[].reason = "withheld"`, which is the honest
-    # marker saying a section lost something. A timing side channel that discloses
-    # strictly less than a documented field is not the thing to spend a request
-    # budget closing.
-    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
-    # `withheld`; either way the override's one anchor is gone.
-    if anchor and (
-        guarded is None or _abstention_reason(guarded) in {activation_result_module.WITHHELD, activation_result_module.UNRESOLVED}
-    ):
-        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
-    if guarded is None:
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        return _abstain(
-            activation_result_module.WITHHELD,
-            generation=packet.get("generation") or generation_stub,
-            carry_thread=False,
-        )
-    packet = guarded
+    if not compiled.served:
+        return compiled.packet
+    packet = compiled.packet
+    identity, thread, thread_ns, thread_state, salt, caller_thread, attribution = compiled.thread
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet)
     token = working_set_runtime_module.mint_continuity(

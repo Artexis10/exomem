@@ -201,7 +201,7 @@ def _fake_claims(monkeypatch: pytest.MonkeyPatch, *, completed: list[str]) -> No
         "claim_ready_components",
         lambda *_a, **_k: batches.pop() if batches else (),
     )
-    monkeypatch.setattr(derived_drain, "_dispatch_claims", lambda *_a, **_k: list(completed))
+    monkeypatch.setattr(derived_drain, "_dispatch_claims", lambda *_a, **_k: (list(completed), len(completed)))
 
 
 def test_a_drain_pass_that_completes_a_batch_trims_once(

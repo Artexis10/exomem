@@ -1329,7 +1329,7 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
         "pages": 1, "chunks": 1, "units": 0, "unit_pages": 0,
         "vector_units": 0, "median_page_bytes": (tmp_path / rel).stat().st_size, "spot_checks": 1,
         "vocabulary_terms": 1, "wikilinks_min": 0, "wikilinks_max": 0,
-        "transcript_pages": 0,
+        "transcript_pages": 0, "content_digest": "0" * 64,
     }
     monkeypatch.setattr(gate, "_stored_corpus", lambda *_args: census)
     if not persisted:
@@ -1535,6 +1535,284 @@ def test_a_paired_series_the_case_file_lacks_refuses_before_any_runtime(tmp_path
                         cases=[{"id": "hybrid-00", "series": "hybrid"}], series="hybird")
 
 
+@pytest.fixture
+def paired_fragments(tmp_path, monkeypatch):
+    """Tiny workers exercise the real sampling loop without constructing the reference vault."""
+    import hashlib
+
+    pytest.importorskip("scipy")  # Full discovery installs this optional statistics dependency.
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    cases, digest = gate.reference_cases(profile)
+    selected = [case for case in cases if case["series"] == "hybrid"]
+    # Odd slice starts expose accidental re-enumeration; production keeps its original 40 cases.
+    selected += [{**case, "id": f"hybrid-extra-{index}"} for index, case in enumerate(selected[:3])]
+    base = tmp_path / "base"
+    base.mkdir()
+    lock = b"original base lock\n"
+    (base / "uv.lock").write_bytes(lock)
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setattr(gate, "_git_bytes", lambda *args: lock if args[0] == "show" else
+                        b"b" * 40 if args[-1].startswith("refs/tags/") else b"a" * 40)
+    monkeypatch.setattr(gate, "reference_cases", lambda _profile: (selected, digest))
+    monkeypatch.setattr(gate, "_prepare_tag_runtime", lambda *_args: tmp_path / "runtime/bin/python")
+    monkeypatch.setattr(gate.os, "sched_getaffinity", lambda _pid: {0, 1}, raising=False)
+    monkeypatch.setattr(gate, "one_minute_load", lambda: 0.25)
+    calls = []
+    workers = []
+
+    class Worker:
+        def __init__(self, source, *_args, **_kwargs):
+            self.arm = "base" if source == base else "head"
+            self.calls = []
+            self.environment = {
+                "corpus": {"pages": 6500, "chunks": 45000, "units": 9500, "unit_pages": 3250,
+                           "vector_units": 9500, "spot_checks": 6, "median_page_bytes": 2500,
+                           "vocabulary_terms": 6000, "wikilinks_min": 5, "wikilinks_max": 25,
+                           "transcript_pages": 325, "content_digest": "c" * 64},
+                "encoder_digest": "d" * 16, "encoder_identity": "reference-encoder",
+                "sqlite_version": profile["sqlite_versions"][0], "python_version": "3.12.3",
+                "cpus": [len(workers) // 2 * 2, len(workers) // 2 * 2 + 1],
+                "runtime_lock_digest": (hashlib.sha256(lock).hexdigest() if self.arm == "base"
+                                        else gate._runtime_lock_digest(gate.ROOT)),
+                "runtime_policy": "frozen-tag-runtime" if self.arm == "base" else "parent-benchmark",
+            }
+            workers.append(self)
+
+        def exchange(self, request):
+            self.calls.append(request["id"])
+            calls.append((self.arm, request["id"], request["principal"]))
+            return {"state": "ok", "elapsed_ms": 100.0, "cpu_ms": 90.0,
+                    "cpu_source": "process_time_ns", "runqueue_ms": 0.0,
+                    "unattributed_ms": 0.0, "overlap_cpu_ms": 0.0, "unattributed_cpu_ms": 0.0,
+                    "unbudgeted": [], "critical_path": None, "stages": {}}
+
+        def pause(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gate, "_Worker", Worker)
+    return profile, selected, base, calls, workers
+
+
+@pytest.mark.parametrize("sample_state", ["ok", "warming", "unknown"])
+def test_raw_case_shards_preserve_unsharded_order_warmup_and_one_comparison(
+    tmp_path, monkeypatch, paired_fragments, sample_state
+):
+    profile, cases, base, calls, workers = paired_fragments
+    exchange = gate._Worker.exchange
+    def observe(self, request):
+        result = exchange(self, request)
+        if self.arm == "head" and request["id"] == cases[5]["id"] and self.calls.count(request["id"]) == 1:
+            result.update(state=sample_state, elapsed_ms=100.0 if sample_state == "ok" else None)
+        return result
+    monkeypatch.setattr(gate._Worker, "exchange", observe)
+    unsharded = gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path,
+                               profile=profile, cases=cases, series="hybrid")
+    original_compare = gate.compare_pairs
+    original_accept = gate.read_accept
+    monkeypatch.setattr(gate, "compare_pairs", lambda *_args, **_kwargs: pytest.fail("shard made a verdict"))
+    monkeypatch.setattr(gate, "read_accept", lambda *_args, **_kwargs: pytest.fail("shard applied acceptance"))
+    fragments = []
+    for shard in range(1, 5):
+        calls.clear()
+        fragment = gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path,
+                                  profile=profile, cases=cases, series="hybrid", shard=shard,
+                                  shards=4, base_commit="b" * 40)
+        assert fragment["state"] == "collected"
+        assert [worker.calls[0] for worker in workers[-2:]] == [cases[0]["id"]] * 2
+        start = fragment["case_indices"][0]
+        assert calls[2][0] == ("base" if start % 2 == 0 else "head")
+        fragments.append(fragment)
+    fragments[0]["run_attempt"] = "1"  # A successful earlier shard can survive a same-run retry.
+    comparisons = []
+    def compare(samples, **kwargs):
+        comparisons.append(samples)
+        return original_compare(samples, **kwargs)
+    monkeypatch.setattr(gate, "compare_pairs", compare)
+    monkeypatch.setattr(gate, "read_accept", original_accept)
+    aggregate = gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
+    assert len(comparisons) == 1
+    assert aggregate["samples"] == unsharded["samples"]
+    assert aggregate["series"] == unsharded["series"]
+    assert aggregate["state"] == unsharded["state"]
+    assert aggregate["raw_fragments"] == fragments
+    gate.validate_document(aggregate, "summary.schema.json")
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads((gate.BENCHMARK / "summary.schema.json").read_text())
+    Draft202012Validator(schema).validate(aggregate)
+    Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/paired_fragment"}).validate(fragments[0])
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_aggregate_cli_keeps_missing_or_corrupt_fragments_a_visible_refusal(tmp_path, corrupt):
+    if corrupt:
+        (tmp_path / "recall-latency-fragment-hybrid-1.json").write_text("{")
+    output = tmp_path / "final.json"
+    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success") == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["samples"] == []
+    assert report["phase"] == "paired-aggregation"
+    gate.validate_document(report, "summary.schema.json")
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_pinned_shard_cli_archives_the_discovered_commit_without_looking_up_latest(
+    tmp_path, monkeypatch, paired_fragments, failed
+):
+    import subprocess
+
+    profile, cases, base, _calls, _workers = paired_fragments
+    fragment = gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile=profile,
+                               cases=cases, series="hybrid", shard=1, shards=4, base_commit="b" * 40)
+    commands = []
+    monkeypatch.setattr(gate, "_git_bytes", lambda *args: b"b" * 40)
+    def sample(**kwargs):
+        if failed:
+            raise gate.MeasurementRefused("tag-runtime-install-failed", phase="tag-runtime-preparation")
+        return fragment
+    monkeypatch.setattr(gate, "paired_run", sample)
+    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **_kwargs: pytest.fail("looked up latest again"))
+    def archive(arguments, **kwargs):
+        commands.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0)
+    monkeypatch.setattr(subprocess, "run", archive)
+    output = tmp_path / "fragment.json"
+    assert gate.paired_cli(output, series="hybrid", base_tag="v1.0.0", base_commit="b" * 40,
+                           shard=1, shards=4) == int(failed)
+    assert commands[0] == ["git", "archive", "b" * 40]
+    report = json.loads(output.read_text())
+    assert report["state"] == ("refused" if failed else "collected")
+    assert (report["run_id"], report["run_attempt"], report["shard"], report["shards"]) == ("123", "2", 1, 4)
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "head", "base", "case_digest", "corpus", "lock", "sample", "foreign", "assignment", "refused"])
+def test_aggregation_refuses_incomplete_or_mixed_raw_evidence(tmp_path, paired_fragments, damage):
+    profile, cases, base, _calls, _workers = paired_fragments
+    fragments = [gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path,
+                                profile=profile, cases=cases, series="hybrid", shard=shard,
+                                shards=4, base_commit="b" * 40) for shard in range(1, 5)]
+    if damage == "missing":
+        fragments.pop()
+    elif damage == "duplicate":
+        fragments.append(dict(fragments[0]))
+    elif damage in ("head", "base", "case_digest"):
+        fragments[0][{"head": "head_commit", "base": "base_commit", "case_digest": "cases_digest"}[damage]] = "e" * (64 if damage == "case_digest" else 40)
+    elif damage == "corpus":
+        fragments[0]["environment"]["head"]["corpus"]["content_digest"] = "e" * 64
+    elif damage == "lock":
+        fragments[0]["environment"]["base"]["runtime_lock_digest"] = "e" * 64
+    elif damage == "sample":
+        fragments[0]["samples"].append(dict(fragments[0]["samples"][0]))
+    elif damage == "foreign":
+        fragments[0]["samples"][0]["case"] = "foreign-case"
+    elif damage == "assignment":
+        fragments[0]["case_indices"] = fragments[1]["case_indices"]
+    elif damage == "refused":
+        fragments[0]["state"] = "refused"
+    with pytest.raises(gate.MeasurementRefused):
+        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
+
+
+@pytest.mark.parametrize("retry", ["replacement", "latest_refused", "same_attempt_duplicate", "future", "foreign_run"])
+def test_failed_shard_replacement_keeps_inherited_success_and_latest_producer(
+    tmp_path, monkeypatch, paired_fragments, retry
+):
+    profile, cases, base, _calls, _workers = paired_fragments
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    fragments = [gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile=profile,
+                                cases=cases, series="hybrid", shard=shard, shards=4,
+                                base_commit="b" * 40) for shard in range(1, 5)]
+    refused = {"schema_version": 1, "mode": "paired_fragment", "state": "refused",
+               "contract_revision": gate.CONTRACT.revision, "series": "hybrid", "shard": 1,
+               "shards": 4, "run_id": "123", "run_attempt": "1", "samples": []}
+    replacement = {**fragments[0], "run_attempt": "2"}
+    inputs = [refused, replacement, *fragments[1:]]
+    if retry == "latest_refused":
+        replacement.update(state="refused", samples=[])
+    elif retry == "same_attempt_duplicate":
+        inputs.append(dict(replacement))
+    elif retry == "future":
+        replacement["run_attempt"] = "3"
+    elif retry == "foreign_run":
+        replacement["run_id"] = "456"
+    for index, fragment in enumerate(inputs):
+        directory = tmp_path / f"artifact-{index}"
+        directory.mkdir()
+        (directory / "recall-latency-fragment-hybrid.json").write_text(json.dumps(fragment))
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    output = tmp_path / "aggregate.json"
+    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success") == (0 if retry == "replacement" else 1)
+    report = json.loads(output.read_text())
+    if retry == "replacement":
+        assert {row["shard"]: row["run_attempt"] for row in report["raw_fragments"]} == {1: "2", 2: "1", 3: "1", 4: "1"}
+    else:
+        assert report["state"] == "refused" and report["samples"] == []
+    assert len(list(tmp_path.rglob("recall-latency-fragment-*.json"))) == len(inputs)
+
+
+def test_pinned_label_must_match_its_commit_before_sampling_or_comparison(
+    tmp_path, monkeypatch, paired_fragments
+):
+    profile, cases, base, _calls, _workers = paired_fragments
+    fragments = [gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile=profile,
+                                cases=cases, series="hybrid", shard=shard, shards=4,
+                                base_commit="b" * 40) for shard in range(1, 5)]
+    monkeypatch.setattr(gate, "_git_bytes", lambda *args: b"c" * 40)
+    monkeypatch.setattr(gate, "paired_run", lambda **kwargs: pytest.fail("sampled an unverified label"))
+    output = tmp_path / "refused.json"
+    assert gate.paired_cli(output, series="hybrid", base_tag="v1.0.0", base_commit="b" * 40,
+                           shard=1, shards=4) == 1
+    assert json.loads(output.read_text())["reason"] == "pinned-release-tag-mismatch"
+    with pytest.raises(gate.MeasurementRefused, match="pinned-release-tag-mismatch"):
+        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
+
+
+@pytest.mark.parametrize("producer_outcome", ["failure", None])
+def test_elapsed_only_retry_cannot_pass_from_inherited_old_fragments(
+    tmp_path, monkeypatch, paired_fragments, producer_outcome
+):
+    profile, cases, base, _calls, _workers = paired_fragments
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    for shard in range(1, 5):
+        fragment = gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile=profile,
+                                   cases=cases, series="hybrid", shard=shard, shards=4,
+                                   base_commit="b" * 40)
+        directory = tmp_path / f"original-{shard}"
+        directory.mkdir()
+        (directory / "recall-latency-fragment-hybrid.json").write_text(json.dumps(fragment))
+    retry = tmp_path / "latest-attempt-2"
+    retry.mkdir()
+    (retry / "recall-latency-job-elapsed.json").write_text('{"elapsed_seconds":2400}')
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setattr(gate, "compare_pairs", lambda *_args, **_kwargs: pytest.fail("compared a failed producer matrix"))
+    output = tmp_path / "aggregate.json"
+    assert gate.aggregate_paired_cli(tmp_path, output, series="hybrid", tag="v1.0.0", base_commit="b" * 40,
+                                    producer_outcome=producer_outcome) == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["samples"] == []
+    assert report["reason"] == ("paired-producer-result-unavailable" if producer_outcome is None else "paired-producer-result-not-success")
+    assert len(list(tmp_path.rglob("recall-latency-fragment-*.json"))) == 4
+
+
+def test_invalid_shard_cli_retains_a_schema_valid_refusal(tmp_path, monkeypatch, paired_fragments):
+    import subprocess
+
+    _profile, _cases, _base, _calls, workers = paired_fragments
+    monkeypatch.setattr(subprocess, "run", lambda arguments, **kwargs: subprocess.CompletedProcess(arguments, 0))
+    output = tmp_path / "refused.json"
+    assert gate.main(["--paired", "--series", "hybrid", "--base-tag", "v1.0.0", "--base-commit", "b" * 40,
+                      "--shard", "-1", "--shards", "4", "--output", str(output)]) == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["shard"] == -1
+    assert report["reason"] == "paired-shard-outside-case-range"
+    assert workers == []
+    gate.validate_document(report, "summary.schema.json", definition="paired_fragment")
+
+
 @pytest.mark.parametrize("changed_lock, reason", [
     (False, "tag-runtime-install-failed"), (True, "tag-runtime-lock-changed"),
 ])
@@ -1560,7 +1838,8 @@ def test_tag_runtime_failure_writes_a_refusal_without_head_fallback(tmp_path: Pa
         raise refused.value
     monkeypatch.setattr(gate, "paired_run", incomplete_run)
     monkeypatch.setattr(gate, "reference_cases", lambda profile: ([], "0" * 64))
-    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "v1.0.0")
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs:
+                        "v1.0.0" if kwargs.get("text") else b"b" * 40)
     output = tmp_path / "summary.json"
     assert gate.paired_cli(output) == 1
     report = json.loads(output.read_text())

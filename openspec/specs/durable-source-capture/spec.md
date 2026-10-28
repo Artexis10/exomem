@@ -49,7 +49,10 @@ Identity lookup and creation SHALL share the existing mutation guard.
 Canonical Source and Evidence pages SHALL be the authoritative lookup, regardless of search, graph or sidecar state.
 Unreadable or malformed candidate pages MUST return `SOURCE_IDENTITY_UNAVAILABLE`, because an incomplete scan cannot prove absence.
 Canonical receipts MUST be validated regardless of Markdown filename, including `index.md` and the root Sources catalog path.
-Only the frontmatter-free root Sources catalog with both maintained section headers MAY be excluded after bound originals are classified.
+After bound originals are classified, readable frontmatter-free legacy pages outside the reserved root Sources catalog SHALL be excluded from receipt candidates.
+Capture SHALL report each excluded legacy page for curation through its warnings, including when it reuses an existing capture.
+The maintained root Sources catalog SHALL remain excluded without a curation warning.
+If that reserved path lacks either maintained section header, lookup MUST return `SOURCE_IDENTITY_UNAVAILABLE` before capture can rewrite it.
 Stale catalog rows MUST NOT determine identity uniqueness or absence.
 Catalog recognition does not establish ownership or distinguish a former receipt whose metadata and bytes were replaced with a valid catalog.
 Legacy Sources MUST NOT be backfilled or deduplicated implicitly.
@@ -75,6 +78,11 @@ Legacy Sources MUST NOT be backfilled or deduplicated implicitly.
 - **WHEN** a bound Markdown original contains capture identity or a declaration that targets another canonical page
 - **THEN** its metadata cannot provide receipt truth or suppress that canonical page
 - **AND** lookup gives the same result in either enumeration order
+
+#### Scenario: Legacy originals coexist with durable receipts
+- **WHEN** one readable frontmatter-free legacy page exists beside valid receipt pages
+- **THEN** identity-enabled capture creates or reuses its correct Source and reports the legacy page for curation
+- **AND** the legacy page remains unchanged
 
 ### Requirement: Identity lookup requires whole-namespace content authority
 

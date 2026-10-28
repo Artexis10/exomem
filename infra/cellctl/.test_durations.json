@@ -1,0 +1,21 @@
+{
+  "tests/test_k3s_integration.py::test_artifact_broker_admission_for_an_unlisted_cell_follows_the_fleet_switch[False]": 3.202,
+  "tests/test_k3s_integration.py::test_artifact_broker_admission_for_an_unlisted_cell_follows_the_fleet_switch[True]": 4.3,
+  "tests/test_k3s_integration.py::test_artifact_broker_selected_cell_edge_and_admission": 21.096,
+  "tests/test_k3s_integration.py::test_cell_connect_admission_is_enforced_for_every_identity_but_break_glass": 4.102,
+  "tests/test_k3s_integration.py::test_cellctl_against_a_real_k3s_cluster": 567.498,
+  "tests/test_k3s_integration.py::test_dedicated_cell_admission_allows_only_own_exact_pair[all-shared]": 3.966,
+  "tests/test_k3s_integration.py::test_dedicated_cell_admission_allows_only_own_exact_pair[dedicated]": 5.331,
+  "tests/test_k3s_integration.py::test_dedicated_cell_admission_allows_only_own_exact_pair[selected]": 5.17,
+  "tests/test_k3s_integration.py::test_local_storage_admission_confines_backup_clones_and_retains_before_a_claim_delete": 6.302,
+  "tests/test_k3s_integration.py::test_only_the_edge_namespace_may_name_the_cloud_cluster_issuer": 1.028,
+  "tests/test_k3s_integration.py::test_owner_export_packs_the_real_volume_and_serves_one_verified_archive[running]": 104.393,
+  "tests/test_k3s_integration.py::test_owner_export_packs_the_real_volume_and_serves_one_verified_archive[stopped]": 94.759,
+  "tests/test_k3s_integration.py::test_protected_import_waits_for_real_cleanup_pod_gc[accepted]": 181.684,
+  "tests/test_k3s_integration.py::test_protected_import_waits_for_real_cleanup_pod_gc[substituted-ciphertext]": 152.345,
+  "tests/test_k3s_integration.py::test_protected_import_waits_for_real_cleanup_pod_gc[unsafe-member-after-valid]": 153.034,
+  "tests/test_k3s_integration.py::test_protected_import_waits_for_real_cleanup_pod_gc[wrong-age-recipient]": 182.843,
+  "tests/test_k3s_integration.py::test_the_edge_reads_no_key_and_still_reaches_the_gateway": 44.529,
+  "tests/test_k3s_integration.py::test_the_operator_access_runbook_on_real_k3s": 10.589,
+  "tests/test_k3s_integration.py::test_topolvm_node_agent_writes_only_its_own_node_and_volumes": 8.559
+}

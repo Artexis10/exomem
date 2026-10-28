@@ -2886,10 +2886,13 @@ def relevant_material(packet: Mapping[str, Any]) -> dict[str, str]:
 
     if packet.get("abstained"):
         return {}
+    # A maps packet's turn slice lists what the turn resolved beside its map: a `resolved` match is a resolved anchor.
+    slice_block = packet.get("turn_slice")
+    slice_items = slice_block.get("items") if isinstance(slice_block, Mapping) else None
     material = {
         str(anchor["path"]): str(anchor["ref"])
-        for anchor in packet.get("anchors") or ()
-        if isinstance(anchor, Mapping) and anchor.get("status") == "resolved"
+        for anchor in (*(packet.get("anchors") or ()), *(slice_items or ()))
+        if isinstance(anchor, Mapping) and "resolved" in (anchor.get("status"), anchor.get("match"))
         and anchor.get("path") and anchor.get("ref")
     }
     if not material:

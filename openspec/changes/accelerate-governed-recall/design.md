@@ -317,6 +317,20 @@ a new connection per request, on SQLite 3.45.1 and 3.46.1, over the whole query
 mix, the 15-40 word band included. Until then a gate reports them against
 8 ms and does not apply the twice-budget rule to them.
 
+The maintained bound-command runner owns this replay. Its lexical preparation
+builds the catalogue, reference index and advisory state without an encoder.
+Each case keeps its query and filters, and runs as hybrid/page and keyword/page
+for the owner and admitted principal. These declared projections cover the SQL
+rows across every query band; they do not certify the original request series.
+The observer checks real selection handles, query ownership and closure across
+requests. A hybrid miss can use two successive selections. Keyword resolution
+and hit construction stay inside the observed keyword interval.
+Reports retain source, input and corpus digests, actual runtime versions,
+per-case states, row times and result digests. Missing rows stay unmeasured.
+Bands below the contract's sample minimum stay insufficient. Both reference
+engines need complete coverage and matching results before the budgets gain
+support. Resolve a mismatch against source truth; never use one arm as the key.
+
 In keyword recall the `keyword` span wraps `_find_keyword` (`find.py:1838`),
 which builds the hits itself: it reads each matched page, makes its excerpt and
 builds the hit, for every page that `_keyword_match_paths` returns, before the
