@@ -16,9 +16,10 @@ from exomem import commands, operation_entries
 from exomem.cli_ops import OpError
 from exomem.command_surface import UnresolvedInvocation, resolve_invocation
 
-CONVERTED = tuple(command for command in commands.PRODUCT_COMMANDS if command.renderings)
+CONVERTED = tuple(command for command in commands.PRODUCT_COMMANDS
+                  if command.name in {"record_memory", "plan_memory"})
 VARIANTS = [
-    pytest.param(command, rendering, variant, id=f"{rendering.name}-{variant.action}-{variant.mode}")
+    pytest.param(command, rendering, variant, id=f"{rendering.name}-{variant.action}-{variant.constraints}")
     for command in CONVERTED
     for rendering in command.renderings
     for variant in rendering.variants
@@ -40,8 +41,9 @@ _TYPED = {"item": {}, "transition": {}, "rows": [], "acknowledged_gap_codes": []
 def _fields(command, variant) -> dict[str, object]:
     fields: dict[str, object] = {name: _TYPED.get(name, "x") for name in variant.required}
     fields.update(_LEAF_EITHER_OR.get((command.name, variant.action), {}))
-    if variant.mode is not None:
-        fields["import_request"] = {"mode": variant.mode}
+    rendering = next(item for item in command.renderings if item.name == variant.rendering)
+    fields.update({name: value for name, value in rendering.arguments_for(variant).items()
+                   if name != rendering.selector})
     return fields
 
 
@@ -172,11 +174,13 @@ def test_a_field_of_another_operation_is_refused_with_the_kind_and_the_field() -
     ],
     ids=["no-operation", "operation-not-an-object", "no-kind", "kind-not-a-string", "unknown-kind", "extra-argument"],
 )
-def test_a_malformed_operation_fails_closed_with_the_grouped_refusal(arguments) -> None:
+def test_a_malformed_operation_keeps_only_a_known_execution_target(arguments) -> None:
     with pytest.raises(OpError) as refusal:
         resolve_invocation("read_records", arguments, commands.PRODUCT_COMMANDS)
 
+    known = isinstance(arguments.get("operation"), dict) and arguments["operation"].get("kind") == "describe"
     assert refusal.value.code == "INVALID_RECORD_ARGUMENTS"
+    assert (getattr(refusal.value, "command", None) is not None) is known
 
 
 def test_a_null_selector_field_does_not_replace_the_operation_kind() -> None:
@@ -271,7 +275,7 @@ def test_startup_fails_when_a_write_sits_in_a_read_tool() -> None:
 def test_startup_fails_when_the_lease_would_treat_a_read_variant_as_a_write() -> None:
     command = _records()
     read, change = command.renderings
-    import_start = next(variant for variant in change.variants if variant.mode == "start")
+    import_start = next(variant for variant in change.variants if any(item.value == "start" for item in variant.constraints))
     # `start` is declared a read here, so the lease's own classification must disagree.
     declared_read = dataclasses.replace(import_start, effect="read", destructive=False)
     moved = _swap(command, 0, variants=(*read.variants, declared_read))

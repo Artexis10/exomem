@@ -107,6 +107,26 @@ Encoder length-band profiling and fresh-connection SQL replay remain unmeasured.
 BM25 and keyword rows show their canonical budgets without applying the twice-budget rule.
 Encode also remains a diagnostic target. Eligible reference series record an observed encode p95 above its budget as the measured floor.
 
+`--sql-calibration` records lexical rows without loading an encoder. It prepares
+the real catalogue, reference index and advisory state before managed startup.
+Each reference case runs as hybrid/page and keyword/page for both principals.
+The projections preserve query bytes and filters, limit 15 and disabled reranking.
+They establish no original-series, encoder or installed acceptance.
+The observer retains real connection identities and checks query ownership and closure.
+It checks that keyword page resolution and hit construction stay inside the keyword row.
+An absent row stays unmeasured. A population band below the contract's sample
+minimum stays insufficient; the report also combines each band across populations.
+
+The default worker uses the parent interpreter. An external worker requires
+both `--sql-worker-python` and its `--sql-worker-prefix`. The launcher must use
+the frozen dependencies and expose the same source, vault and state paths.
+The source controller records the commit and input digests; the worker reports
+its actual Python, SQLite, compile-options digest and stored rows.
+Compare both required SQLite artifacts by case, principal and projection.
+Check common input and corpus digests, then BM25, keyword and final-hit digests.
+Resolve a mismatch against generated source truth. Host and container timing
+differences do not establish a product gain. Both rows remain diagnostic targets.
+
 `--reference` records an absolute workstation run. Unsupported SQLite versions
 receive no ceiling verdict. `--served-url` with `--live-cases` records a live run.
 Live queries stay in a private file, and a disclosed trailing whitespace nonce
