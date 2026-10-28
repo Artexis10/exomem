@@ -271,7 +271,7 @@ def _skewed_sizes(spec: dict, rng: random.Random) -> list[int]:
     return sizes
 
 
-def _manifest_text(profile_name: str, identity: str, title: str, fields: dict, key: str, source: str) -> str:
+def _manifest_source(profile_name: str, identity: str, title: str, fields: dict, key: str, source: str) -> dict:
     import yaml
 
     frontmatter = {
@@ -281,7 +281,9 @@ def _manifest_text(profile_name: str, identity: str, title: str, fields: dict, k
         "storage": {"strategy": "markdown-items", "source": source, "format_version": 1},
         "item_schema": {"natural_key": [key], "fields": fields},
     }
-    return "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + title + ".\n"
+    description = title + "."
+    return {"manifest_text": "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + description + "\n",
+            "description": description}
 
 
 def _record_item(fields: list[dict], rng: random.Random, ordinal: str) -> dict:
@@ -396,7 +398,7 @@ def gen_collection_fixture(profile: dict) -> dict:
                   for field in records_spec["fields"]}
         records.append({
             "id": identity, "title": title, "manifest_path": f"Knowledge Base/Records/{title}/_collection.md",
-            "manifest_text": _manifest_text("records", identity, title, fields, key, "Entries"),
+            **_manifest_source("records", identity, title, fields, key, "Entries"),
             "items": [_record_item(records_spec["fields"], rng, f"{index:02d}-{row:04d}") for row in range(size)],
         })
     governed = planning_spec["governed_fields"]
@@ -417,7 +419,7 @@ def gen_collection_fixture(profile: dict) -> dict:
         shape = _planning_hierarchy(size, layers, parents, planning_spec["fanout"], rng)
         planning.append({
             "id": identity, "title": title, "manifest_path": f"Knowledge Base/Planning/{title}/_collection.md",
-            "manifest_text": _manifest_text("planning", identity, title, fields, "title", "Items"),
+            **_manifest_source("planning", identity, title, fields, "title", "Items"),
             "items": [_planning_item(f"{title} item {row:04d}", kind, governed, values, rng)
                       for row, (kind, _parent) in enumerate(shape)],
             # Index of each item's parent among `items` (None for a root); the loader turns it into a plan
@@ -516,7 +518,7 @@ def gen_note_cases(root: Path, rels: list[str], profile: dict, fixture: dict) ->
     material = [{"type": "object", "required": ["path", "title", "description"],
                  "properties": {"path": {"const": collection["manifest_path"]},
                                 "title": {"const": collection["title"]},
-                                "description": {"const": collection["title"] + "."}}}
+                                "description": {"const": collection["description"]}}}
                 for collection in collections]
     recall_schema = {
         "type": "object", "required": ["abstained", "map"],
