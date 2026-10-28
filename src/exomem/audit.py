@@ -184,6 +184,7 @@ OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "semantic_category_governance",
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
+    "path_variants",
 )
 TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
     "semantic_malformed_unit",
@@ -655,6 +656,8 @@ def audit(
         findings.extend(_check_duplicated_sidecars(vault_root))
     if "semantic_recall_isolation" in selected:
         findings.extend(_check_semantic_recall_isolation(vault_root))
+    if "path_variants" in selected:
+        findings.extend(_check_path_variants(vault_root))
     if "collection_view_corrections" in selected:
         correction_findings, correction_coverage = _check_collection_view_corrections(vault_root)
         findings.extend(correction_findings)
@@ -754,6 +757,71 @@ def _check_bridge_review(
             str((finding.meta or {}).get("review_partition") or ""),
         ),
     )
+
+
+def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
+    """Report sibling names that one portable filesystem would hold as a single entry.
+
+    Names with one `vault_name_key` (NFC, then casefold) are defects: the vault
+    cannot be exported or opened on Windows or default macOS. Names that match
+    only after NFKC folding and dropping separators are candidates for a human
+    to judge. Read-only: nothing is merged.
+    """
+    findings: list[AuditFinding] = []
+    for directory, subdirs, files in os.walk(vault_root):
+        subdirs[:] = sorted(
+            name for name in subdirs
+            if not name.startswith(".") and name not in VAULT_WALK_SKIP_DIRS
+        )
+        names = sorted([*subdirs, *(name for name in files if not name.startswith("."))])
+        parent = Path(directory).relative_to(vault_root).as_posix()
+        prefix = "" if parent == "." else f"{parent}/"
+        defects: dict[str, list[str]] = {}
+        for name in names:
+            defects.setdefault(vault_module.vault_name_key(name), []).append(name)
+        loose: dict[str, list[str]] = {}
+        for name in names:
+            # Letters and digits only: separators and punctuation are not identity.
+            loose_key = "".join(
+                char for char in vault_module.vault_name_key(name, form="NFKC") if char.isalnum()
+            )
+            loose.setdefault(loose_key, []).append(name)
+        in_defect = {name for group in defects.values() if len(group) > 1 for name in group}
+        for group in defects.values():
+            if len(group) > 1:
+                findings.append(
+                    AuditFinding(
+                        category="path_variants",
+                        severity="error",
+                        path=f"{prefix}{group[0]}",
+                        detail=(
+                            f"{len(group)} sibling names collide after NFC and casefold: "
+                            + ", ".join(repr(name) for name in group)
+                        ),
+                        proposed_fix=(
+                            "merge by hand with manage_memory_file; nothing is merged automatically"
+                        ),
+                        paths=[f"{prefix}{name}" for name in group],
+                        meta={"class": "defect"},
+                    )
+                )
+        for key, group in loose.items():
+            if key and len(group) > 1 and not set(group) <= in_defect:
+                findings.append(
+                    AuditFinding(
+                        category="path_variants",
+                        severity="info",
+                        path=f"{prefix}{group[0]}",
+                        detail=(
+                            f"{len(group)} sibling names differ only by compatibility form "
+                            "or separators: " + ", ".join(repr(name) for name in group)
+                        ),
+                        proposed_fix="judge by hand whether these are one name; nothing is merged",
+                        paths=[f"{prefix}{name}" for name in group],
+                        meta={"class": "candidate"},
+                    )
+                )
+    return findings
 
 
 def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:

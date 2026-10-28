@@ -20,7 +20,6 @@ import pytest
 
 from exomem import project_keys, vault
 
-
 # ------------------------------------------------------- the pure sanitizer
 
 
@@ -338,19 +337,18 @@ def test_two_titles_differing_only_by_case_do_not_collide(tmp_path: Path) -> Non
     assert (tmp_path / "Budget Review.md").read_text(encoding="utf-8") == "first"
 
 
-def test_collision_detection_does_not_depend_on_the_platform() -> None:
-    """`Path.exists()` is case-sensitive on Linux and not elsewhere.
+def test_a_title_in_another_unicode_form_does_not_collide(tmp_path: Path) -> None:
+    """A name written on macOS can arrive decomposed (NFD).
 
-    Using it made the contents of a vault depend on which machine wrote the
-    note, with the damage only visible after a sync. Asserted against the
-    implementation because CI cannot run the same test on a case-sensitive and a
-    case-insensitive filesystem in one job.
+    Linux holds `Café.md` in both forms as two files, and macOS treats them as
+    one name, so the vault loses a note when it syncs there.
     """
-    import inspect
+    composed = unicodedata.normalize("NFC", "Café")
+    (tmp_path / f"{unicodedata.normalize('NFD', 'Café')}.md").write_text("first", encoding="utf-8")
 
-    source = inspect.getsource(vault.unique_path)
-    assert "casefold()" in source
-    assert "iterdir()" in source
+    resolved = vault.unique_path(tmp_path, composed)
+
+    assert resolved.name == f"{composed}-2.md"
 
 
 def test_changing_the_style_renames_nothing(

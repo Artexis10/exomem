@@ -44,6 +44,7 @@ from . import (
     stack_sites,
     view_lag,
 )
+from .held_fs import vault_name_key
 from .kbdir import kb_dirname, kb_prefix
 from .log_events import log_event
 
@@ -667,7 +668,7 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 
         connector_boundary.require_create(vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix())
     try:
-        taken = {entry.name.casefold() for entry in directory.iterdir()}
+        taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
     except OSError:
         # Unlistable, most often because it does not exist yet. `exists()` is
         # the weaker test -- case-sensitive on Linux -- but it is the only one
@@ -682,7 +683,7 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         return candidate
     candidate = f"{stem}{suffix}"
     i = 2
-    while candidate.casefold() in taken:
+    while vault_name_key(candidate) in taken:
         candidate = f"{stem}-{i}{suffix}"
         i += 1
     return directory / candidate
@@ -1995,6 +1996,7 @@ class _BatchWorkspace:
                     create=True,
                     exclusive=True,
                     access="read",
+                    scratch=True,
                 )
                 if created.ok:
                     held_directory = created.require()
@@ -4480,6 +4482,19 @@ class _CreatedDirectory:
         return self.vault_root / self.relative_path
 
 
+def _refused_parent(
+    error: held_fs.HeldFsError | None, changed: set[str], detail: str
+) -> PathGuardError:
+    """The guard error for a refused folder creation; a name variant keeps its own code."""
+    if error is not None and error.code == "PATH_VARIANT_EXISTS":
+        return PathGuardError(
+            "PATH_VARIANT_EXISTS",
+            f"folder already exists as '{error.existing_leaf}'; use that spelling",
+        )
+    code = "PATH_GUARD_CHANGED" if error is not None and error.code in changed else "PATH_GUARD_UNSAFE"
+    return PathGuardError(code, detail)
+
+
 def _create_missing_guard_parents(
     vault_root: Path,
     missing_parents: Iterable[str],
@@ -4530,13 +4545,11 @@ def _create_missing_guard_parents(
                 access="mutate",
             )
             if not created.ok:
-                code = (
-                    "PATH_GUARD_CHANGED"
-                    if created.error is not None
-                    and created.error.code in {"DESTINATION_EXISTS", "MISSING"}
-                    else "PATH_GUARD_UNSAFE"
+                raise _refused_parent(
+                    created.error,
+                    {"DESTINATION_EXISTS", "MISSING"},
+                    "guard ancestor creation was refused",
                 )
-                raise PathGuardError(code, "guard ancestor creation was refused")
             with created.require() as directory:
                 expected_by_path[relative] = PathIdentity(
                     relative,
@@ -4757,6 +4770,40 @@ def _create_parent_dirs(parent: Path, created_dirs: list[Path | _CreatedDirector
         created_dirs.append(directory)
 
 
+def sibling_name_variants(parent: Path, name: str) -> list[str]:
+    """Names in `parent` that share `name`'s `vault_name_key` but not its spelling.
+
+    Sorted, empty when `parent` is unreadable or absent.
+    """
+    try:
+        with os.scandir(parent) as entries:
+            return held_fs.name_variants((entry.name for entry in entries), name)
+    except OSError:
+        return []
+
+
+def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
+    """One warning per folder on the way to `directory` that already has a variant sibling.
+
+    An old split never blocks a write; it is named so the owner can merge it.
+    """
+    try:
+        relative = Path(os.path.abspath(directory)).relative_to(os.path.abspath(vault_root))
+    except ValueError:
+        return []
+    warnings: list[str] = []
+    current = Path(vault_root)
+    for part in relative.parts:
+        variants = sibling_name_variants(current, part)
+        if variants and (current / part).is_dir():
+            warnings.append(
+                f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
+                "run maintain_memory(mode='audit', categories=['path_variants']) to see the split"
+            )
+        current = current / part
+    return warnings
+
+
 def _create_parent_dirs_held(
     vault_root: Path,
     parent: Path,
@@ -4800,13 +4847,9 @@ def _create_parent_dirs_held(
                 access="mutate",
             )
             if not created.ok:
-                code = (
-                    "PATH_GUARD_CHANGED"
-                    if created.error is not None
-                    and created.error.code == "DESTINATION_EXISTS"
-                    else "PATH_GUARD_UNSAFE"
+                raise _refused_parent(
+                    created.error, {"DESTINATION_EXISTS"}, "batch directory creation was refused"
                 )
-                raise PathGuardError(code, "batch directory creation was refused")
             with created.require() as directory:
                 created_dirs.append(
                     _CreatedDirectory(root, relative, directory.identity)
@@ -5131,7 +5174,7 @@ def _batch_atomic_write_locked(
     for write in writes:
         destination = os.path.abspath(write.path)
         portable_destination = "/".join(
-            unicodedata.normalize("NFC", part).casefold() for part in Path(destination).parts
+            vault_name_key(part) for part in Path(destination).parts
         )
         if portable_destination in destinations:
             raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
@@ -6126,6 +6169,55 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     if not is_casing_only_rewrite(canonical, cleaned):
         return rel
     return canonical
+
+
+def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None) -> str:
+    """The spelling under which a path that a writer is about to create joins the vault.
+
+    A component that does not exist as spelled, but matches an existing sibling
+    by `vault_name_key`, takes that sibling's spelling: `Notes/garden/x.md`
+    lands in an existing `Notes/Garden/`. An exact component always wins, and
+    the first component that matches nothing ends the walk, because the rest is
+    new. Only destinations come here. A recorded identity (a read, a delete, an
+    index key) keeps the host's spelling, so a split that already exists on a
+    case-sensitive volume keeps two identities.
+
+    `replacing` is the path that a move vacates. It is not a sibling to land
+    on, so a move that changes only the case or Unicode form of a name still
+    renames it. Each component costs one `lstat`; a folder is listed only when
+    the component is missing. Fails open to `rel` when a component cannot be
+    read.
+    """
+    parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
+    current = Path(vault_root)
+    spelled: list[str] = []
+    for index, part in enumerate(parts):
+        try:
+            os.lstat(current / part)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return rel
+        else:
+            spelled.append(part)
+            current = current / part
+            continue
+        try:
+            names = os.listdir(current)
+        except OSError:
+            names = []
+        prefix = "/".join(spelled)
+        variants = [
+            name
+            for name in held_fs.name_variants(names, part)
+            if (f"{prefix}/{name}" if prefix else name) != replacing
+        ]
+        if not variants:
+            spelled.extend(parts[index:])
+            break
+        spelled.append(variants[0])
+        current = current / variants[0]
+    return "/".join(spelled)
 
 
 # Probing the filesystem costs a couple of syscalls; the answer is a property

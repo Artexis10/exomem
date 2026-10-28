@@ -28,6 +28,7 @@ from typing import Any, BinaryIO
 from . import __version__, reserved_paths, restore_journal, state_migration, state_paths
 from .governance import connector_boundary
 from .governance.principal import effective_principal
+from .held_fs import vault_name_key
 from .kbdir import kb_dirname
 
 MANIFEST_NAME = "exomem-manifest.json"
@@ -762,14 +763,14 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
     folded: set[str] = set()
     directory_spellings: dict[str, str] = {}
     for snapshot in snapshots:
-        collision_key = unicodedata.normalize("NFC", snapshot.path).casefold()
+        collision_key = vault_name_key(snapshot.path)
         if collision_key in folded:
             _fail("CASE_COLLISION", "vault paths collide on a case-insensitive filesystem")
         folded.add(collision_key)
         parts = PurePosixPath(snapshot.path).parts
         for index in range(1, len(parts)):
             spelling = "/".join(parts[:index])
-            directory_key = unicodedata.normalize("NFC", spelling).casefold()
+            directory_key = vault_name_key(spelling)
             prior = directory_spellings.setdefault(directory_key, spelling)
             if prior != spelling:
                 _fail("CASE_COLLISION", "vault directories collide by case")
@@ -1109,7 +1110,7 @@ def _preflight_entries(
             _fail("UNSAFE_ARCHIVE_PATH", "archive entries must use normalized paths")
         if normalized in by_path:
             _fail("DUPLICATE_ARCHIVE_PATH", "archive contains a duplicate path")
-        collision_key = unicodedata.normalize("NFC", normalized).casefold()
+        collision_key = vault_name_key(normalized)
         parent_parts = PurePosixPath(collision_key).parts
         parent_keys = {"/".join(parent_parts[:index]) for index in range(1, len(parent_parts))}
         if parent_keys & folded or any(
@@ -1121,7 +1122,7 @@ def _preflight_entries(
         parts = PurePosixPath(normalized).parts
         for index in range(1, len(parts)):
             spelling = "/".join(parts[:index])
-            directory_key = unicodedata.normalize("NFC", spelling).casefold()
+            directory_key = vault_name_key(spelling)
             prior = directory_spellings.setdefault(directory_key, spelling)
             if prior != spelling:
                 _fail("CASE_COLLISION", "archive directories collide by case")
@@ -1269,7 +1270,7 @@ def _validate_manifest_records(
             _fail("UNSAFE_ARCHIVE_PATH", "manifest contains an unsafe file path")
         if path in seen:
             _fail("DUPLICATE_ARCHIVE_PATH", "manifest contains a duplicate file path")
-        collision_key = unicodedata.normalize("NFC", path).casefold()
+        collision_key = vault_name_key(path)
         if collision_key in folded:
             _fail("CASE_COLLISION", "manifest paths collide on a case-insensitive filesystem")
         seen.add(path)

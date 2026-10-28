@@ -99,7 +99,7 @@ the page to its kind's folder and rewrites every link to it.
 
 | Field | Required | Notes |
 |---|---|---|
-| `domain` | yes | `workflow`, `research`, `ops`, etc. — matches the subfolder under `Notes/Experiments/` |
+| `domain` | yes | lowercase key (`workflow`, `research`, `ops`, etc.) — names the subfolder under `Notes/Experiments/`, whose on-disk spelling is title case (`Workflow/`) or whatever already exists |
 | `started` | yes | ISO date the experiment actually began (may differ from `created` if planning preceded execution) |
 | `duration` | yes | freeform string: `"30 days"`, `"2 weeks"`, `"ongoing"` |
 | `concluded` | optional | ISO date the experiment ended; absent while ongoing |

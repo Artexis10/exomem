@@ -42,6 +42,7 @@ from .vault import (
     VaultPathError,
     batch_atomic_write,
     first_excluded_field,
+    folder_split_warnings,
     governed_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
@@ -50,6 +51,7 @@ from .vault import (
     plan_log_writes,
     read_guarded_text,
     resolve_under_vault,
+    respell_new_path,
     serialize_frontmatter,
 )
 
@@ -119,6 +121,9 @@ def create_file(
         )
     except VaultPathError as e:
         raise CreateFileError(code=e.code, reason=e.reason) from e
+    respelled = respell_new_path(vault_root, rel_path)
+    if respelled != rel_path:
+        abs_path, rel_path = vault_root / respelled, respelled
 
     from .governance import connector_boundary
 
@@ -239,7 +244,7 @@ def create_file(
     # For markdown files, normalize wikilinks in the body to canonical form.
     # Skip non-md files (skill manifests, JSON, scratch) — their `[[...]]`
     # patterns may not be Obsidian wikilinks.
-    warnings: list[str] = []
+    warnings: list[str] = folder_split_warnings(vault_root, abs_path.parent)
     if is_markdown:
         from . import find as find_module
         resolver = find_module.writer_resolver_snapshot(vault_root)
@@ -457,6 +462,8 @@ def create_file(
             try:
                 batch_atomic_write(writes, vault_root=vault_root)
             except vault_module.PathGuardError as e:
+                if e.code == "PATH_VARIANT_EXISTS":
+                    raise CreateFileError(code=e.code, reason=e.reason) from e
                 raise CreateFileError(
                     code="STALE_WRITE",
                     reason=(

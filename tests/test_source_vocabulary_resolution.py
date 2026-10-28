@@ -338,7 +338,7 @@ def test_reclassify_into_a_domain_reuses_its_legacy_spelling(
     assert _children(vault / SOURCES / "Reports") == ["health"]
 
 
-def test_evidence_scope_never_inherits_domain_aliases_or_slug_folding(
+def test_evidence_scope_never_inherits_domain_aliases_but_reuses_a_case_variant(
     vault: Path,
 ) -> None:
     _registry(vault, "domains:\n  health:\n    aliases: [inc-42, ops]\n")
@@ -351,7 +351,9 @@ def test_evidence_scope_never_inherits_domain_aliases_or_slug_folding(
     )
 
     assert upper["path"].startswith("Knowledge Base/Evidence/INC-42/Ops/")
-    assert lower["path"].startswith("Knowledge Base/Evidence/inc-42/ops/")
+    # The vault owns path identity: a case variant reuses the existing folder.
+    assert lower["path"].startswith("Knowledge Base/Evidence/INC-42/Ops/")
+    assert not (vault / "Knowledge Base" / "Evidence" / "inc-42").exists()
     assert not (vault / "Knowledge Base" / "Evidence" / "Health").exists()
     assert not (vault / "Knowledge Base" / "Evidence" / "health").exists()
     assert "vocabulary_resolution" not in upper

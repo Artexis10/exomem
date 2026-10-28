@@ -83,12 +83,12 @@ KIND_MAPPING_EVIDENCE: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:108",),
         "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:202",),
         "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:155",),
-        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:252",),
-        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:370",),
-        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:467",),
+        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:254",),
+        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:372",),
+        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:469",),
         "entity:decision": (
-            "src/exomem/_scaffold/_Schema/references/page-types.md:565",
-            "src/exomem/_scaffold/_Schema/references/page-types.md:566",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:567",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:568",
         ),
         "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:20",),
     }

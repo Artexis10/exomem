@@ -515,8 +515,8 @@ preservation.
 
 ### Inputs to gather
 - The artifact (text to inline, or a binary delivered out-of-band — see below)
-- Scope — the top-level subfolder under `Evidence/` (e.g., a contract name, an incident name)
-- Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit.
+- Scope — the top-level subfolder under `Evidence/` (e.g., a contract name, an incident name). Reuse the spelling of an existing folder; `food` and `Food` are one folder, and the vault re-spells to the existing one.
+- Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit, spelled as they exist.
 - Optional: a descriptive filename if the original is generic.
 
 ### Delivering the bytes — direct handles first, never inline through the model
@@ -572,7 +572,7 @@ cannot be undone.
   `Authorization: Bearer <returned short-lived token>` (the token is **always** required).
   Lands straight in `Evidence/<scope>/<category>/`, zero token cost.
 - **Claude Code / desk-side:** the file is already on local disk — write it
-  straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync).
+  straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync). Copy the spelling of the folders already there.
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
 

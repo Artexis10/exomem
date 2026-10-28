@@ -17,8 +17,10 @@ from pathlib import Path
 from . import access, held_fs, reserved_paths
 from .vault import (
     VaultPathError,
+    folder_split_warnings,
     in_curated_tree,
     resolve_under_vault,
+    respell_new_path,
     write_log_entry,
 )
 
@@ -64,6 +66,7 @@ def create_directory(
         _abs_path, rel_path = resolve_under_vault(vault_root, path)
     except VaultPathError as e:
         raise CreateDirectoryError(code=e.code, reason=e.reason) from e
+    rel_path = respell_new_path(vault_root, rel_path)
 
     # Read-only protection: a subtree marked `readonly`/`excluded` in
     # _access.yaml is a hard refusal (no override). create_directory does a
@@ -147,6 +150,14 @@ def create_directory(
                         access="mutate" if final else "read",
                     )
                     if not created.ok:
+                        if created.error is not None and created.error.code == "PATH_VARIANT_EXISTS":
+                            raise CreateDirectoryError(
+                                code="PATH_VARIANT_EXISTS",
+                                reason=(
+                                    f"folder already exists as '{created.error.existing_leaf}'; "
+                                    "use that spelling"
+                                ),
+                            )
                         raise CreateDirectoryError(
                             code=(
                                 "MISSING_PARENT"
@@ -160,7 +171,7 @@ def create_directory(
 
         # The log.md entry is governed shared state — written under the same
         # boundary hold as the mkdir it records.
-        warnings: list[str] = []
+        warnings: list[str] = folder_split_warnings(vault_root, Path(vault_root) / rel_path)
         if not already_existed:
             today = today or dt.date.today()
             date_iso = today.isoformat()
