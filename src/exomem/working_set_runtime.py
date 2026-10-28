@@ -78,6 +78,7 @@ log = logging.getLogger(__name__)
 CACHE_SIZE = 16
 
 _PACKET_WARNING_EMITTED = False
+_SLICE_WARNING_EMITTED = False
 
 
 def activation_packet_mode() -> str:
@@ -92,6 +93,23 @@ def activation_packet_mode() -> str:
             log.warning("invalid EXOMEM_ACTIVATION_PACKET; using maps")
             _PACKET_WARNING_EMITTED = True
     return "maps"
+
+
+def activation_turn_slice() -> bool:
+    """Whether the maps packet carries a turn slice; `on` is the default, `off` the rollback.
+
+    The slice lists what the turn's own words reached next to the map. Any value but `off` serves it.
+    """
+    global _SLICE_WARNING_EMITTED
+    value = os.environ.get("EXOMEM_ACTIVATION_TURN_SLICE", "on")
+    # nosemgrep: ep-word-set -- The activation specification fixes both values of the setting.
+    if value in ("on", "off"):
+        return value == "on"
+    with _CACHE_LOCK:
+        if not _SLICE_WARNING_EMITTED:
+            log.warning("invalid EXOMEM_ACTIVATION_TURN_SLICE; using on")
+            _SLICE_WARNING_EMITTED = True
+    return True
 
 
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
@@ -1165,6 +1183,7 @@ def lexical_evidence(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
+    query_context=None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
@@ -1181,6 +1200,10 @@ def lexical_evidence(
     `lexical_term_budget`); ranking and corroboration then read every row
     they match. `selection`, when given, receives how many units were kept
     and dropped — counts only, never the turn's words.
+
+    `query_context` (`request_admission`), when given, chooses the units and
+    ranks on the pages it admits, so a page it withholds moves no statistic.
+    Without it the catalogue's own statistics apply.
     """
     from . import find_types
 
@@ -1198,6 +1221,7 @@ def lexical_evidence(
                 freshness=freshness,
                 recall_checkpoint=recall_checkpoint,
                 selection=selection,
+                query_context=query_context,
             )
         if not result.readiness.complete:
             return [], result.readiness.status
@@ -1230,10 +1254,12 @@ def _lexical_query(
     recall_checkpoint=None,
     selection: dict | None = None,
     excluded_corroboration_stems: frozenset[str] | None = None,
+    query_context=None,
 ):
     """The activation lexical query: `paths` ranked by the content words of
     `words`, each hit matching at least two distinct content units.
-    Units containing `excluded_corroboration_stems` cannot corroborate."""
+    Units containing `excluded_corroboration_stems` cannot corroborate.
+    `query_context` admits and ranks as in `lexical_evidence`."""
     from . import lexstore
 
     # A full-page match on the same single name word is not a second fact.
@@ -1252,6 +1278,7 @@ def _lexical_query(
         term_budget=lexical_term_budget(),
         term_selection=selection,
         excluded_corroboration_stems=excluded_corroboration_stems,
+        query_context=query_context,
     )
 
 
@@ -1263,10 +1290,12 @@ def lexical_hits_without(
     *,
     freshness=None,
     recall_checkpoint=None,
+    query_context=None,
 ) -> frozenset[str]:
     """Which of `pages` the activation lexical query still reaches for `turn`
     when the stems of the `left_out` words are not counted
     (`working_set_resolve.candidates_for`'s dependence check).
+    `query_context` is the first pass's (`lexical_evidence`).
 
     Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
     bring "hedge" back unless its stem is what is left out. The query keeps
@@ -1291,6 +1320,7 @@ def lexical_hits_without(
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
             excluded_corroboration_stems=dropped,
+            query_context=query_context,
         )
     except Exception:  # noqa: BLE001 - one optional evidence lane
         log.debug("activation lexical dependence check unavailable", exc_info=True)
@@ -2190,24 +2220,11 @@ def title_listing(
         units = bm25_module.token_units(turn, query=True)
         if len({unit for unit in units}) < 2:
             return TitleListing((), (), "available")
-        # Reuse request admission only after this snapshot proves its generation.
-        corpus = lexstore.carry_term_statistics(
-            vault_root,
-            [],
-            visible=query_context.visible,
-            status_basis=status_basis,
-            path_limit=lambda pages: 0,
-            freshness=freshness,
-            recall_checkpoint=recall_checkpoint,
-            query_context=query_context,
-        )
-        if not corpus.readiness.complete:
-            return TitleListing((), (), corpus.readiness.status)
-        _frequencies, corpus_pages, _paths, _admitted = corpus.value
         result = lexstore.search_bm25_result(
             vault_root,
             turn,
-            working_set.carry_fetch_size(corpus_pages),
+            # Sized on the pages the request admits, counted in the ranking's own snapshot.
+            working_set.carry_fetch_size,
             scope="kb",
             freshness=freshness,
             allow_delta=False,
@@ -2436,6 +2453,9 @@ def serve(
     status_basis: lifecycle_statuses.Basis | None = None,
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
+    lexical_admission=None,
+    reader=None,
+    leads_only: bool = False,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -2454,6 +2474,13 @@ def serve(
     profile is handed to the compile, so a packet is always compiled against
     the profile it was keyed on. `attribution` is the caller's derived keys
     (ruling S5-1).
+
+    `lexical_admission` is the request's lexical pass's `query_context`
+    (`lexical_evidence`), handed to the compile's dependence check and carry.
+    `reader` is a restricted caller's `egress.ReaderView` that the request
+    already built after its checkpoint pin; without it the reader's view is
+    built here. `leads_only` compiles a turn slice's packet
+    (`working_set.compile_packet`), which is cached apart from a full one.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
@@ -2465,7 +2492,7 @@ def serve(
 
     # `None` for the owner, whose flags stay vault-wide; a restricted reader's
     # flags count only the lag in pages it may see (`view_lag`).
-    view = egress.visible_page_filter(root, purpose=purpose)
+    view = reader if reader is not None else egress.visible_page_filter(root, purpose=purpose)
     with working_set._span(timings, "working_set.index"):
         state, index, stale = ensure_index(
             root,
@@ -2624,6 +2651,7 @@ def serve(
         lexical_state,
         index.token(),
         working_set.band_audience_allowed(root),
+        leads_only,
     )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
@@ -2683,6 +2711,9 @@ def serve(
             status_basis=status_basis,
             trigger=trigger,
             _intent_resolution=intent_resolution,
+            lexical_admission=lexical_admission,
+            reader=reader,
+            leads_only=leads_only,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

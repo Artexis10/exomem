@@ -376,6 +376,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      producer_attempt: ${{ steps.producer.outputs.attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -478,6 +480,10 @@ jobs:
           set -euo pipefail
           python3 .release-tools/infra/scripts/release_recovery.py upload --tag "$TAG"
 
+      - name: Record the original Python producer attempt
+        id: producer
+        run: echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
   # A dry run skips this job, because entering the pypi environment records a deployment.
   publish-pypi:
     needs: [plan, build-artifacts]
@@ -519,6 +525,48 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/missing
+
+  # Qualify Python while independent image jobs continue. A skipped PyPI job
+  # qualifies only when the plan found existing complete published distributions.
+  qualify-python:
+    needs: [plan, build-artifacts, publish-pypi]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-artifacts.result == 'success' && needs.plan.outputs.dry_run != 'true' && (needs.publish-pypi.result == 'success' || (needs.publish-pypi.result == 'skipped' && needs.plan.outputs.pypi_present == 'true')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+      - name: Check out qualification tools from the workflow revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: infra/scripts
+      - name: Install distribution filename parser
+        run: python3 -m pip install packaging
+      - name: Qualify official Python bytes from this exact producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+          PRODUCER_ATTEMPT: ${{ needs.build-artifacts.outputs.producer_attempt }}
+        run: >-
+          python3 .release-tools/infra/scripts/release_recovery.py qualify-python
+          --tag "$TAG" --source "$SOURCE_COMMIT"
+          --run-id "$GITHUB_RUN_ID" --attempt "$PRODUCER_ATTEMPT"
+          --verification-attempt "$GITHUB_RUN_ATTEMPT"
+          --directory "$RUNNER_TEMP/python-qualification"
+      - name: Retain the scoped Python qualification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/python-qualification/python-qualification.json
+          if-no-files-found: error
+          retention-days: 90
 
   # Lists the server in the official MCP Registry, which is where MCP-aware
   # clients and directories discover servers. Runs after PyPI because the
@@ -871,7 +919,7 @@ jobs:
           provenance: mode=min,version=v0.2
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
-          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_CUDA) || '' }}
+          # Cache export added 27 minutes after the build and push took five minutes.
 
       - name: Attest the exact cuda image
         id: cuda-attestation

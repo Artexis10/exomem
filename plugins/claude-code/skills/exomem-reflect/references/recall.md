@@ -46,7 +46,7 @@ Empty queries degrade to filtered-most-recent regardless of mode.
 When recall returns a `referents` block, name only its `resolved` entities.
 For `partial`, say how many people remain unresolved; for `ambiguous`, ask the
 user to disambiguate; for `unresolved`, never guess. When the user supplies a
-missing identity, run `connect_memory(operation="resolve-entity")` first, then
+missing identity, run `read_connections(operation={'kind': 'resolve-entity'})` first, then
 create the durable entity or use `edit_note` to add a reviewed alias.
 
 Additional knobs exposed through `search_memory`/`find`: `graph=true` (default; expands
@@ -112,7 +112,7 @@ Do not repeat an unchanged search or treat delivered text as proof of answer use
 `- [category] content #tags (context) ^anchor`; its governed kind is always
 `observation`, while category remains open vocabulary. Rich `## Kind` blocks use
 a governed non-observation kind and may carry typed relation metadata. Use
-`observe_memory(operation="add"|"update"|"remove"|"validate")` for one unit
+`change_observations with `operation.kind="add"`, `"update"` or `"remove"`, and `prepare_note` with `operation.kind="observation"` for validation` for one unit
 instead of brittle whole-page string surgery. Update/remove must echo the parent
 `content_hash` and current unit fingerprint. Compact units cannot carry typed unit
 relations: select rich form or author one reviewed note-level relation under
@@ -136,7 +136,7 @@ nonparticipating lanes must never be invented as zero-valued hit evidence.
 
 Unit recall returns an exact `unit_ref` for `read_memory`. For authored graph
 context, pass that reference or category/kind filters to
-`connect_memory(operation="graph-context")`. Compact categories do not imply
+`read_connections(operation={'kind': 'graph-context'})`. Compact categories do not imply
 typed edges: traversal follows authored relations only.
 
 ## Context activation packets (`recall_context`)
@@ -234,7 +234,7 @@ remain agent guidance; these hooks do not create a Stop continuation gate.
 
 An optional `relevant_due_refs` candidate names due work on released current material.
 Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
-Use `review_item_context(ref, expected_fingerprint)` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
+Use `read_review(operation={'kind': 'item-context', 'ref': ...})` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
 
 Only if needed to resolve the turn, pass relevant `conversation`: up to six
 recent excerpts and 2,400 characters total, `focus` up to 240 characters and
@@ -254,7 +254,7 @@ and the page's own `status` or `summary` line when present. It is chosen by
 recency, not by the turn, so it never queries a Records collection the turn did
 not name; `current_state[]` carries governed state for resolved anchors. A recap
 entry (`why: "episode"`) is the newest revision of one conversation's
-`episode_memory` record and carries its `episode` key; follow it with
+`record_episode/read_episode` record and carries its `episode` key; follow it with
 `read_memory`. With `session` or `workspace`, that conversation's pages come first.
 
 **Abstention.** `abstained: true` with a reason: `unresolved` (nothing resolved),
@@ -309,7 +309,7 @@ refused) or `absent`. Neither field alone proves that the subject resolved.
 `partial`, `seeded`, `behind`, `empty`) and `session_start`. Only salted hashes of
 `session`/`workspace` are stored, locally.
 
-**`episode_due`** (MCP door): after several activations with no `episode_memory`
+**`episode_due`** (MCP door): after several activations with no `record_episode/read_episode`
 record from this caller, asks for one at the next decision or stopping point.
 Advice, at most once per half hour, absent when proactive capture is off.
 
@@ -321,7 +321,7 @@ its own rules, or dispose of it.
 
 **`learning`** may ride on an `anchor` call whose turn never named the chosen
 page: an advisory naming the writer that would teach the vault the user's words
-(`edit_note` adding to `learned_aliases`, or `schema_memory save-conventions`
+(`edit_note` adding to `learned_aliases`, or `read_schema/change_schema save-conventions`
 adding a referential cue) with the `expected_hash` it needs, plus `turn_terms`.
 It writes nothing; act only if those words should reach that page, else dismiss
 its `review` ref with `triage_memory`.

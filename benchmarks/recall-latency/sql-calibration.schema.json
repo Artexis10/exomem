@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/report",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "measurement": {"type": ["number", "null"], "minimum": 0},
+    "count": {"type": "integer", "minimum": 0},
+    "proof": {"type": ["boolean", "null"]},
+    "report": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "schema_version": {"const": 1},
+        "mode": {"const": "sql-calibration"},
+        "state": {"enum": ["not measured", "refused", "failed", "measured"]},
+        "contract_revision": {"type": "string", "pattern": "^request-latency-v[0-9]+$"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "source_clean": {"type": "boolean"},
+        "profile_digest": {"$ref": "#/$defs/digest"},
+        "cases_digest": {"$ref": "#/$defs/digest"},
+        "prose_digest": {"$ref": "#/$defs/digest"},
+        "reason": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$", "maxLength": 160},
+        "phase": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$", "maxLength": 100},
+        "expected_samples": {"$ref": "#/$defs/count"},
+        "completed_samples": {"$ref": "#/$defs/count"},
+        "coverage_complete": {"type": "boolean"},
+        "load": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "first": {"type": "number", "minimum": 0},
+            "final": {"type": "number", "minimum": 0},
+            "waited_seconds": {"type": "number", "minimum": 0}
+          },
+          "required": ["first", "final", "waited_seconds"]
+        },
+        "environment": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/environment"}]},
+        "samples": {"type": "array", "items": {"$ref": "#/$defs/sample"}},
+        "rows": {"type": "array", "items": {"$ref": "#/$defs/row"}},
+        "unmeasured": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["encoder", "original-series-acceptance", "installed-acceptance"]}
+        }
+      },
+      "required": ["schema_version", "mode", "state", "contract_revision", "source_commit",
+                   "source_clean", "profile_digest", "cases_digest", "prose_digest",
+                   "environment", "samples", "rows", "unmeasured", "expected_samples",
+                   "completed_samples", "coverage_complete"]
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "corpus": {"$ref": "#/$defs/corpus"},
+        "encoder_digest": {"type": "null"},
+        "encoder_identity": {"type": "null"},
+        "sqlite_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "python_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "sqlite_compile_options_digest": {"$ref": "#/$defs/digest"},
+        "cpus": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/count"}},
+        "runtime_lock_digest": {"$ref": "#/$defs/digest"},
+        "runtime_policy": {"enum": ["parent-benchmark", "external-calibration-worker"]}
+      },
+      "required": ["corpus", "encoder_digest", "encoder_identity", "sqlite_version",
+                   "python_version", "sqlite_compile_options_digest", "cpus",
+                   "runtime_lock_digest", "runtime_policy"]
+    },
+    "corpus": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "pages": {"$ref": "#/$defs/count"}, "chunks": {"type": "null"},
+        "units": {"$ref": "#/$defs/count"}, "unit_pages": {"$ref": "#/$defs/count"},
+        "vector_units": {"type": "null"},
+        "median_page_bytes": {"type": "number", "minimum": 0},
+        "spot_checks": {"$ref": "#/$defs/count"},
+        "vocabulary_terms": {"$ref": "#/$defs/count"},
+        "wikilinks_min": {"$ref": "#/$defs/count"}, "wikilinks_max": {"$ref": "#/$defs/count"},
+        "transcript_pages": {"$ref": "#/$defs/count"},
+        "content_digest": {"$ref": "#/$defs/digest"},
+        "lexical_rows": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"fts": {"$ref": "#/$defs/count"}, "tri": {"$ref": "#/$defs/count"},
+                         "unit_fts": {"$ref": "#/$defs/count"}},
+          "required": ["fts", "tri", "unit_fts"]
+        }
+      },
+      "required": ["pages", "chunks", "units", "unit_pages", "vector_units", "median_page_bytes",
+                   "spot_checks", "vocabulary_terms", "wikilinks_min", "wikilinks_max",
+                   "transcript_pages", "content_digest", "lexical_rows"]
+    },
+    "sql": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "connections": {"$ref": "#/$defs/count"}, "query_connections": {"$ref": "#/$defs/count"},
+        "fresh": {"$ref": "#/$defs/proof"}, "closed": {"$ref": "#/$defs/proof"},
+        "queries_bound": {"$ref": "#/$defs/proof"},
+        "keyword_page_resolutions": {"$ref": "#/$defs/count"},
+        "keyword_hit_builds": {"$ref": "#/$defs/count"},
+        "keyword_work_inside_row": {"$ref": "#/$defs/proof"},
+        "bm25_digest": {"$ref": "#/$defs/digest"}, "keyword_digest": {"$ref": "#/$defs/digest"},
+        "hits_digest": {"$ref": "#/$defs/digest"}
+      },
+      "required": ["connections", "query_connections", "fresh", "closed", "queries_bound",
+                   "keyword_page_resolutions", "keyword_hit_builds", "keyword_work_inside_row",
+                   "bm25_digest", "keyword_digest", "hits_digest"]
+    },
+    "sample": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "case": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$", "maxLength": 100},
+        "series": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 40},
+        "principal": {"enum": ["owner", "admitted"]},
+        "projection": {"enum": ["hybrid", "keyword"]},
+        "band": {"type": "string", "pattern": "^[0-9]{1,2}-[0-9]{1,2}$"},
+        "arguments_digest": {"$ref": "#/$defs/digest"},
+        "state": {"enum": ["ok", "empty", "warming", "unknown"]},
+        "load": {"type": "number", "minimum": 0},
+        "elapsed_ms": {"$ref": "#/$defs/measurement"}, "setup_ms": {"$ref": "#/$defs/measurement"},
+        "rows": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"governed-stage-bm25": {"$ref": "#/$defs/measurement"},
+                         "governed-stage-keyword": {"$ref": "#/$defs/measurement"}},
+          "required": ["governed-stage-bm25", "governed-stage-keyword"]
+        },
+        "sql": {"$ref": "#/$defs/sql"}
+      },
+      "required": ["case", "series", "principal", "projection", "band", "arguments_digest",
+                   "state", "load", "elapsed_ms", "setup_ms", "rows", "sql"]
+    },
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "principal": {"enum": ["owner", "admitted"]}, "projection": {"enum": ["hybrid", "keyword"]},
+        "series": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 40},
+        "band": {"type": "string", "pattern": "^[0-9]{1,2}-[0-9]{1,2}$"},
+        "row": {"enum": ["governed-stage-bm25", "governed-stage-keyword"]},
+        "samples": {"$ref": "#/$defs/count"}, "state": {"enum": ["measured", "insufficient"]},
+        "observations": {"$ref": "#/$defs/count"}, "empty": {"$ref": "#/$defs/count"},
+        "warming": {"$ref": "#/$defs/count"}, "unknown": {"$ref": "#/$defs/count"},
+        "p50_ms": {"$ref": "#/$defs/measurement"}, "p95_ms": {"$ref": "#/$defs/measurement"},
+        "budget_ms": {"type": "number", "minimum": 0}, "twice_budget_applied": {"const": false}
+      },
+      "required": ["principal", "projection", "series", "band", "row", "samples", "state",
+                   "p50_ms", "p95_ms", "budget_ms", "twice_budget_applied",
+                   "observations", "empty", "warming", "unknown"]
+    }
+  }
+}

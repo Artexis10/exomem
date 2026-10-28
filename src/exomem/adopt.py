@@ -20,6 +20,7 @@ from typing import Any
 
 from . import (
     adoption_plan,
+    capabilities,
     context_refs,
     held_fs,
     indexes,
@@ -978,7 +979,7 @@ def _render_run_manifest(*, run_id: str, summary: dict, today: dt.date, rel_path
         "",
         "# Adoption Run Manifest",
         "",
-        f"Saved at `{rel_path}` by `adoption_studio(action=\"finish\")`. Originals remain untouched.",
+        f"Saved at `{rel_path}` by `{capabilities.active_call_text('adoption_studio', {'action': 'finish', 'run_id': run_id})}`. Originals remain untouched.",
         "",
         "## Run",
         "",
@@ -990,7 +991,7 @@ def _render_run_manifest(*, run_id: str, summary: dict, today: dt.date, rel_path
         *_run_manifest_counts(summary),
         "",
         "Per-item detail (sources, targets, hashes) stays in the run object. Read it with",
-        f"`adoption_studio(action=\"status\", run_id=\"{run_id}\")`.",
+        f"`{capabilities.active_call_text('adoption_studio', {'action': 'status', 'run_id': run_id})}`.",
         "",
     ]
     return "\n".join(lines)

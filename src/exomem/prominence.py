@@ -829,7 +829,12 @@ def configuration_route() -> str:
     is reachable. The full contract — levels, expected_revision, the context
     argument — is the tool description's job, not this route hint's.
     """
-    return "configure_memory: inspect first; set/clear only on an explicit user request."
+    from . import capabilities
+
+    return (
+        f"{capabilities.active_tools_text('configure_memory', 'write')}: "
+        "inspect settings first; set/clear only on an explicit user request."
+    )
 
 
 def custom_instructions_route() -> str:

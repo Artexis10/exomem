@@ -27,14 +27,15 @@ import mimetypes
 import os
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NotRequired
+from typing import Annotated, Any, Literal, NamedTuple, NotRequired
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -93,6 +94,7 @@ from . import (
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
+from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
 from . import link_summary as link_summary_module
 from . import list_directory as list_directory_module
@@ -179,6 +181,7 @@ from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
+from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
     resolve_under_vault,
@@ -190,6 +193,8 @@ log = logging.getLogger(__name__)
 _legacy_selected_relation = ContextVar("legacy_selected_relation", default=False)
 
 _link_summary = link_summary_module.link_summary
+_QueryFilters = _public_filter_annotation()
+
 _CONNECT_MEMORY_DEFAULT_OPERATION = "suggest-links"
 _ADOPT_VAULT_DEFAULT_MODE = "scan-only"
 _AuditSampleLimit = Annotated[
@@ -923,9 +928,10 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     tool_shape = active_descriptor.tool_shape
 
-    def listed(command: str) -> bool:
-        """Whether the surface lists a command under any of its spellings."""
-        return any(name in active_product_names for name in operation_entries.spellings(command))
+    def listed(command: str, effect: operation_entries.Effect | None = None) -> bool:
+        """Whether the surface lists the command's required side in its active shape."""
+        return any(name in active_product_names
+                   for name in operation_entries.listed_tools(command, tool_shape, effect))
 
     def tools_text(command: str, effect: operation_entries.Effect | None = None) -> str:
         return operation_entries.tools_text(command, tool_shape, effect)
@@ -950,7 +956,7 @@ def op_bootstrap(
     # connector-only user has no machine to type on.
     engagement_policy["change_with"] = (
         prominence_module.configuration_route()
-        if "configure_memory" in active_product_names
+        if listed("configure_memory", "write")
         else prominence_module.custom_instructions_route()
     )
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
@@ -978,7 +984,7 @@ def op_bootstrap(
         "subject": "workflow-contracts",
         "operation": "resolve",
     }
-    workflow_callable = "schema_memory" in active_product_names
+    workflow_callable = listed("schema_memory")
     if workflow_callable:
         if workflow_status is not None:
             workflow_public_status = workflow_status
@@ -1058,7 +1064,7 @@ def op_bootstrap(
     entity_type_registry = entity_types_module.load_entity_types(
         None if entity_registry_refusal else vault_root
     )
-    entity_recurrence_available = "review_memory" in active_product_names
+    entity_recurrence_available = listed("review_memory")
     if entity_recurrence_available:
         ordinary_mode = (
             "once"
@@ -1152,7 +1158,7 @@ def op_bootstrap(
                 "available": False,
                 "unavailable_reason": "This operation is not exported by the active surface.",
             }
-        return {"available": True, "route": {"tool": tool, "args": args}}
+        return {"available": True, "route": capabilities_module.active_call_route(tool, args)}
 
     relation_vocabulary_projection = relation_registry_refusal or {
         "contract_version": "2026-09-01.1",
@@ -1180,7 +1186,7 @@ def op_bootstrap(
     vocabulary_projection = vocabulary_bootstrap_module.block(
         vault_root,
         # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
-        inspect_route="schema_memory(operation=inspect, subject=<registry>)",
+        inspect_route=f"{tools_text('schema_memory', 'read')} with operation.kind=inspect and the registry subject",
     )
     workflow_families = ("entity-instance/v1", "entity-type/v1", "relation-type/v1", "topic-carrier/v1")
     vocabulary_workflow_projection = {
@@ -1298,7 +1304,7 @@ def op_bootstrap(
             "scoped_delegation": False,
         },
     }
-    if "schema_memory" in active_product_names:
+    if listed("schema_memory"):
         vocabulary_workflow_projection["page_status"] = vocabulary_operation(
             "schema_memory", {"subject": "statuses", "operation": "inspect"}
         )
@@ -1727,7 +1733,7 @@ def op_bootstrap(
                 else "After durable work, run one bounded exact-match-first entity pass. "
                 "Create only stable, recurring identities; update an existing entity only "
                 "with new durable facts or relations; skip incidental mentions. Unknown "
-                "types are registered through schema_memory(operation='save-entity-types') "
+                f"types are registered through {call_text('schema_memory', {'operation': 'save-entity-types'})} "
                 "with a why, never by editing frontmatter around the registry rule."
             ),
             "candidate_route": vocabulary_operation("connect_memory", {"operation": "resolve-entity"}),
@@ -1738,7 +1744,7 @@ def op_bootstrap(
             "requested": requested_workflow,
             "loop": [
                 "reuse bootstrap policy; load only if missing or stale",
-                "adopt_vault or browse_memory when first seeing an existing vault",
+                f"{tools_text('adopt_vault', 'read')} or browse_memory when first seeing an existing vault",
                 *([
                     "when recall is needed and context is not injected, "
                     "recall_context with the user's turn before extra recall"
@@ -1800,13 +1806,13 @@ def op_bootstrap(
                 semantic_authoring_module.AUTHORING_CONTRACT.routes["destination_fitness"],
                 "draft the smallest durable compiled conclusion",
                 "identify supporting Sources/ or Evidence/ pages for `sources:`; each receives an `ingested_into:` back-reference",
-                "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
+                f"run {call_text('connect_memory', {'operation': 'suggest-links'})} and, when directional meaning matters, suggest-relations on the draft",
                 (
                     "write accepted note-level edges under `## Relations`, for example "
                     "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
-                "write with create_note, observe_memory, edit_note, supersede_note, capture_source, preserve_evidence, or connect_memory as appropriate",
+                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')} as appropriate",
                 (
                     "inspect write warnings; response_detail='full' reveals write_feedback; "
                     "create_note(suggestions=true) also reveals suggestions"
@@ -1820,12 +1826,12 @@ def op_bootstrap(
                 "new_durable_conclusion": "create_note",
                 "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance; one live citing derivative clears the citation backlog, not semantic compilation",
                 "small_correction": "edit_note",
-                "semantic_unit_mutation": "observe_memory",
+                "semantic_unit_mutation": tools_text("observe_memory", "write"),
                 "substantial_rewrite": "supersede_note",
-                "stable_named_entity": "connect_memory(operation='create-entity')",
+                "stable_named_entity": call_text("connect_memory", {"operation": "create-entity"}),
             },
             "preflight": {
-                "connect_memory": "standard read-only suggest-links/suggest-relations check before a compiled note write",
+                tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class",
             },
             "post_write": {
@@ -1836,7 +1842,7 @@ def op_bootstrap(
                     if profile == "compact"
                     else "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
-                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
+                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then " + call_text("manage_memory_file", {"operation": "reclassify", "reason": "..."}) + ".",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
                     "a committed note or Evidence write may name one Records collection whose "
@@ -1885,15 +1891,15 @@ def op_bootstrap(
                     "A dismissal is not completion: it lowers the visible count only."
                 ),
                 "relevant_due_handling": (
-                    "Read review_item_context(ref, expected_fingerprint); refresh on REVIEW_ITEM_CHANGED. "
+                    f"Read {tools_text('review_item_context')} with ref and expected_fingerprint; refresh on REVIEW_ITEM_CHANGED. "
                     "Audit wider if needed. Resolve with unit fingerprint and parent hash, "
                     "not due fingerprint; no extra triage. triage_memory only dismisses advice. "
                     "Keep write authority."
                     if profile == "compact"
                     else
-                    "For relevant_due_refs, read review_item_context(ref, expected_fingerprint); bounded context may need a wider audit. "
-                    "review_memory has no expected_fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
-                    "One applicable writer, such as observe_memory(operation='update'), resolves with the real unit "
+                    f"For relevant_due_refs, read {tools_text('review_item_context')} with ref and expected_fingerprint; bounded context may need a wider audit. "
+                    f"{tools_text('review_memory', 'read')} has no expected_fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
+                    f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, resolves with the real unit "
                     "fingerprint and parent hash. Its delta clears the finding without extra triage; "
                     "a due fingerprint is not a unit fingerprint. One triage_memory(ref, action='dismiss', "
                     "expected_fingerprint, why) records presentation disposition, not authored resolution. "
@@ -1928,9 +1934,9 @@ def op_bootstrap(
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": (
-                    "A quiet family stays reviewable and audited; omission never proves nothing is due. review_memory(mode='dispositions') lists registered families, quiet state, reasons and the delegation envelope."
+                    f"A quiet family stays reviewable and audited; omission never proves nothing is due. {call_text('review_memory', {'mode': 'dispositions'})} lists registered families, quiet state, reasons and the delegation envelope."
                     if profile == "compact"
-                    else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
+                    else f"A quiet family stays reviewable. {call_text('review_memory', {'mode': 'dispositions'})} lists registered families, quiet state, reasons and the delegation envelope. Omission never proves nothing is due."
                 ),
                 "destination_choice": (
                     "Link homes before writing; structural advisories are only a safety net."
@@ -2006,7 +2012,7 @@ def op_bootstrap(
                     "never fabricate a none decision or infer review from missing relations"
                 ),
                 "adoption_handoff": (
-                    "adopt_vault(mode='compile-selected') returns a proposal only; review "
+                    f"{call_text('adopt_vault', {'mode': 'compile-selected'})} returns a proposal only; review "
                     "it, then call create_note() so normal semantic precommit still applies"
                 ),
             },
@@ -2181,7 +2187,7 @@ def op_bootstrap(
                 },
             },
             "retry_examples": [
-                "use adopt_vault(mode='scan-only') before proposing migration/copy actions",
+                f"use {call_text('adopt_vault', {'mode': 'scan-only'})} before proposing migration/copy actions",
             ],
         },
         "product_commands": product_tool_catalog(
@@ -2200,23 +2206,17 @@ def op_bootstrap(
             if profile != "compact"
             else {}
         ),
-        "common_tools": [
-            "adopt_vault",
-            "search_memory",
-            "read_memory",
-            "create_note",
-            "edit_note",
-            "observe_memory",
-            "supersede_note",
-            "connect_memory",
-        ],
+        "common_tools": list(dict.fromkeys(name for command in (
+            "adopt_vault", "search_memory", "read_memory", "create_note", "edit_note",
+            "observe_memory", "supersede_note", "connect_memory",
+        ) for name in operation_entries.listed_tools(command, tool_shape))),
     }
 
     if profile in ("full", "diagnostics"):
         payload["examples"] = [
             {
                 "goal": "safe existing-vault adoption",
-                "call": "adopt_vault(mode='scan-only')",
+                "call": call_text("adopt_vault", {"mode": "scan-only"}),
             },
             {
                 "goal": "cheap proactive recall",
@@ -2306,6 +2306,7 @@ def op_bootstrap(
             payload["due_state"] = due_block
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
+    payload = capabilities_module.project_call_routes(payload)
     compact_payload = _filter_bootstrap_payload(payload, active_descriptor)
     # Behavioral instructions must survive ordinary head/tail tool-output
     # truncation. Catalogs remain available, after the operating contract.
@@ -5574,7 +5575,7 @@ def op_query_data(
     vault_root: Path,
     path: str,
     record_path: str | None = None,
-    filters: list[dict] | None = None,
+    filters: _QueryFilters = None,
     columns: list[str] | None = None,
     sort_by: str | None = None,
     descending: bool = False,
@@ -6890,6 +6891,284 @@ def _attach_episode_advice(vault_root: Path, packet: dict[str, Any]) -> None:
         packet["episode_due"] = episode_due
 
 
+class _ThreadRead(NamedTuple):
+    """The caller's thread, read between the release plane and `serve`: what the anchors packet mints its token from."""
+
+    identity: str
+    thread: str
+    thread_ns: int | None
+    state: str
+    salt: str
+    caller_thread: str | None
+    attribution: Any
+
+
+class _CompiledActivation(NamedTuple):
+    """One compile's outcome. `served` is False when `packet` is the abstention `abstain` built, to return as it is."""
+
+    packet: dict
+    served: bool
+    thread: _ThreadRead | None = None
+
+
+@dataclass(frozen=True)
+class _ActivationEvidence:
+    """What an activation request's readiness stage settled, for the compile that follows it."""
+
+    freshness_key: Any
+    snapshot: Any
+    lexical_freshness: Any
+    anchor_rows: Any
+    evidence_token: tuple[int, int, int] | None
+    evidence_stamp: str | None
+
+
+def _compile_guarded_activation(
+    vault_root: Path,
+    *,
+    turn: str,
+    budget: int,
+    purpose: str | None,
+    timings: find_types.FindTimings | None,
+    evidence: _ActivationEvidence,
+    abstain: Callable[..., dict],
+    continuity: str | None = None,
+    anchor: str | None = None,
+    trigger: str = "user_turn",
+    conversation: working_set_conversation_module.Conversation | None = None,
+    intent_resolution: dict[str, Any] | None = None,
+    read_thread: Callable[[], _ThreadRead] | None = None,
+    caller: context_views_module.CallerView | None = None,
+) -> _CompiledActivation:
+    """Lexical evidence, release plane, `serve`, then the terminal guard: the
+    one compile both packet shapes read their anchors from.
+
+    `abstain` builds the packet to return for a stage that cannot run, and takes
+    the arguments of the body's own `_abstain`. `read_thread` is the anchors
+    packet's hook for the caller's thread: it runs after the exits that must
+    leave without one, and its result is handed back for the token. A caller
+    that has no thread (the turn slice of a maps packet) passes none and gets
+    an anchor-free compile of the turn's own words.
+
+    `caller` is the turn slice's caller view, the map's. The compile then
+    decides pages through its release filter, so a verdict the map reached is
+    reused, and builds one reader view after the checkpoint pin for the rest
+    of the compile. A restricted reader's lexical pass, dependence check and
+    carry share one admission over that view, so a withheld page moves no term
+    choice or rank. The compile then also serves leads only
+    (`working_set.compile_packet`). The anchors packet passes none: it builds
+    its views itself, ranks its lexical pass on the catalogue's statistics, as
+    the owner does in both, and compiles in full."""
+
+    def stopped(*args: Any, **kwargs: Any) -> _CompiledActivation:
+        return _CompiledActivation(abstain(*args, **kwargs), False)
+
+    if working_set_module.budget_exhausted("working_set.lexical"):
+        return stopped(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+    # Activation's search domain is its small anchor catalogue.
+    # Ordinary hybrid recall loads note-chunk and media matrices even for a
+    # small result limit; none belongs on this bounded request path. The release
+    # object is still mandatory: the final guard independently decides every
+    # packet reference under the current audience and purpose.
+    lexical_seconds = 0.0
+    try:
+        _policy, release_active = egress_module.gate_state(vault_root)
+        # Measured unconditionally, not read back off `timings`: the shipped
+        # hook calls this door WITHOUT `include_timings`, so there is no
+        # collector on the very path the carry's budget gate exists to
+        # protect. The carry runs the same query shape against the same
+        # catalogue, so what this pass cost is the best estimate of what the
+        # second one will, and the gate asks the budget for room in
+        # proportion to it.
+        lexical_started = time.monotonic()
+        # How many of the turn's units the bounded stage kept and dropped;
+        # counts only, so the diagnostic never carries the turn's words.
+        lexical_selection: dict[str, int] = {}
+        with find_types.timing_span(timings, "working_set.lexical"):
+            # `None` for the owner, whose lexical state stays vault-wide.
+            if caller is None:
+                reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
+            else:
+                reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
+            # The one checkpoint every lexical read of this request uses: the lexical
+            # lane, the dependence check and the role lanes (through the snapshot).
+            lexical_checkpoint = (
+                working_set_runtime_module.pin_lexical_checkpoint(vault_root, evidence.snapshot, reader_view)
+                if evidence.snapshot
+                else None
+            )
+            # Built after the pin, so the pages the pin proved withheld are rejected too.
+            slice_reader = lexical_admission = status_basis = None
+            if caller is not None and caller.visible is not None:
+                slice_reader = egress_module.reader_view(vault_root, purpose=purpose, keep=caller.visible)
+                status_basis = lifecycle_statuses_module.Basis(vault_root)
+                lexical_admission = working_set_runtime_module.request_admission(vault_root, slice_reader, status_basis)
+            if anchor and trigger == "user_turn":
+                hits, lexical_state = [], "agent_choice"
+            else:
+                hits, lexical_state = working_set_runtime_module.lexical_evidence(
+                    vault_root,
+                    turn,
+                    evidence.anchor_rows,
+                    limit=(
+                        egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
+                        if release_active or reader_view is not None
+                        else ACTIVATE_RETRIEVAL_LIMIT
+                    ),
+                    freshness=evidence.lexical_freshness,
+                    recall_checkpoint=lexical_checkpoint,
+                    selection=lexical_selection,
+                    query_context=lexical_admission,
+                )
+        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
+        if timings is not None and lexical_selection:
+            timings.profile["working_set.lexical"] = dict(lexical_selection)
+        if working_set_module.budget_exhausted("working_set.release"):
+            return stopped(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+        with find_types.timing_span(timings, "working_set.release"):
+            release = egress_module.annotate_hits(
+                vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
+            )
+    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
+        log.warning("activation release plane unavailable; abstaining", exc_info=True)
+        return stopped(activation_result_module.UNAVAILABLE)
+    # An `anchor` naming no row of THIS index but an eligible agent-picked
+    # page (design close-memory-loop, U7) is decided on the release plane
+    # HERE, before the compile that page would otherwise buy nothing for: a
+    # withheld page refuses identically whether or not it was ever compiled,
+    # and running the compile first is the entire cost difference measured
+    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
+    # no eligible page is refused at the same point, so every refused class
+    # leaves in one place. An `anchor` that DOES match a row of the index is
+    # untouched — that path's own timing is not this fix's scope — and any
+    # failure here only skips the early exit: the unmodified
+    # compile-then-guard sequence below still decides every ref exactly as
+    # it always has.
+    if anchor:
+        try:
+            named_rows = {
+                spelling
+                for row in evidence.anchor_rows
+                for spelling in (
+                    str(getattr(row, "ref", None) or ""),
+                    str(getattr(row, "path", "") or ""),
+                    str(getattr(row, "anchor_id", "") or ""),
+                )
+                if spelling
+            }
+            if anchor not in named_rows:
+                # Every refused class leaves HERE, at one point: a ref naming
+                # no eligible page (unknown, raw material, navigation, retired,
+                # non-canonical) exactly as a withheld one. Refused after the
+                # compile instead, the unknown classes took about 3 ms longer
+                # than a withheld page, which is its own answer.
+                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is None or not egress_module.quick_page_visible(
+                    vault_root, agent_page, purpose=purpose
+                ):
+                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
+            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's own thread, when it has one, is read here: after the early
+    # exits above, so an abstention before this point carries no token.
+    thread = read_thread() if read_thread is not None else None
+    packet = working_set_runtime_module.serve(
+        vault_root,
+        turn=turn,
+        max_chars=budget,
+        purpose=purpose,
+        timings=timings,
+        freshness_key=evidence.freshness_key,
+        continuity=continuity,
+        anchor=anchor,
+        retrieval_paths=frozenset(hit.path for hit in release.hits),
+        lexical_state=lexical_state,
+        evidence_token=evidence.evidence_token,
+        evidence_stamp=evidence.evidence_stamp,
+        freshness_snapshot=evidence.snapshot,
+        lexical_seconds=lexical_seconds,
+        attribution=thread.attribution if thread is not None else None,
+        conversation=conversation,
+        trigger=trigger,
+        intent_resolution=intent_resolution,
+        lexical_admission=lexical_admission,
+        reader=slice_reader,
+        status_basis=status_basis,
+        leads_only=caller is not None,
+    )
+    # An override that resolved nothing named no anchor of this index. Refused
+    # here, before the guard, with the same words a withheld ref gets below —
+    # and deliberately NOT for the server's own abstentions (`index_warming`,
+    # `disabled`, `unavailable`), which say something about this server rather
+    # than about the ref the caller passed.
+    if anchor and _abstention_reason(packet) == activation_result_module.UNRESOLVED:
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    # Only gated when `packet` actually carries content: an already-abstained
+    # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
+    # has nothing for the guard to spend time on, so checking again here
+    # would just record a second, redundant `note_skipped` for a stage that
+    # was never really at risk — `note_skipped` should name the ONE stage
+    # that first ran out of room, not every boundary crossed afterward while
+    # carrying nothing.
+    if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        return stopped(
+            working_set_runtime_module.UNAVAILABLE,
+            generation=packet.get("generation") or None,
+            budget_caused=True,
+        )
+    # Unconditional: every served packet crosses the guard. A guard that only ran
+    # when the retrieval lane happened to succeed is not a guard.
+    try:
+        with find_types.timing_span(timings, "working_set.guard"):
+            guard_arguments: dict[str, Any] = {"purpose": purpose}
+            if intent_resolution is not None:
+                guard_arguments["intent_resolution"] = intent_resolution
+            guarded = egress_module.guard_working_set(
+                vault_root, packet, release, **guard_arguments
+            )
+    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        log.warning("activation egress guard failed; abstaining", exc_info=True)
+        return stopped(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or None)
+    # The release plane's own decision, reused rather than re-derived: the
+    # override anchor was the packet's ONLY anchor, so the guard emptying the
+    # packet IS the answer to "may this audience see that ref".
+    #
+    # What is equal between an unknown ref and a withheld one is the RESPONSE —
+    # same code, same words, neither naming the ref. The work is not: a withheld
+    # ref has been compiled and guarded by the time it is refused, an unknown one
+    # abstains before the guard, and the two are separable by latency (measured
+    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
+    # padded, because equalising it would mean either doing the withheld ref's
+    # work for every unknown one or timing the response, and neither buys
+    # anything: the same audience asking the same vault an ORDINARY turn already
+    # learns as much from `missing[].reason = "withheld"`, which is the honest
+    # marker saying a section lost something. A timing side channel that discloses
+    # strictly less than a documented field is not the thing to spend a request
+    # budget closing.
+    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
+    # `withheld`; either way the override's one anchor is gone.
+    if anchor and (
+        guarded is None or _abstention_reason(guarded) in {activation_result_module.WITHHELD, activation_result_module.UNRESOLVED}
+    ):
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    if guarded is None:
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        return stopped(
+            activation_result_module.WITHHELD,
+            generation=packet.get("generation") or None,
+            carry_thread=False,
+        )
+    return _CompiledActivation(guarded, True, thread)
+
+
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -7154,6 +7433,42 @@ def _op_activate_context_body(
     if packet_mode == "maps":
         if working_set_module.budget_exhausted("working_set.catalogue"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
+            """What the turn's own words reached: the guarded anchors compile, run for the user turn alone,
+            over the map's caller view.
+
+            It carries no thread and no `anchor`, and mints, learns and records nothing: the map's
+            continuity token encodes no anchor. A stage it cannot run is a state of the slice.
+            """
+            if not turn.strip():
+                return context_views_module.TurnLeads(context_views_module.SLICE_EMPTY)
+            # The resolver weighs a name against every anchor it is given, so a restricted caller is given
+            # only the anchors it may see: a withheld namesake must not turn a visible anchor into a question.
+            reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
+            visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
+            # Cooperative stage checks leave time for the map's mandatory guard; a synchronous stage can overrun.
+            with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
+                compiled = _compile_guarded_activation(
+                    vault_root,
+                    turn=turn,
+                    budget=budget,
+                    purpose=purpose,
+                    timings=timings,
+                    evidence=_ActivationEvidence(
+                        freshness_key=freshness_key,
+                        snapshot=snapshot,
+                        lexical_freshness=lexical_freshness,
+                        anchor_rows=visible_rows,
+                        evidence_token=evidence_token,
+                        evidence_stamp=evidence_stamp,
+                    ),
+                    abstain=_abstain,
+                    caller=caller,
+                )
+            # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
+            return context_views_module.turn_leads(compiled.packet)
+
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
@@ -7164,9 +7479,9 @@ def _op_activate_context_body(
                         "freshness_key": working_set_runtime_module._key_text(freshness_key),
                         "index_generation": evidence_token[1] if evidence_token else 0,
                     },
+                    turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                 )
-                if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
-                    return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+                # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
                     guarded = egress_module.guard_working_set(
                         vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose
@@ -7193,224 +7508,67 @@ def _op_activate_context_body(
             packet["timings"] = timings.as_dict()
         return packet
 
-    if working_set_module.budget_exhausted("working_set.lexical"):
-        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
-
-    # Activation's search domain is its small anchor catalogue.
-    # Ordinary hybrid recall loads note-chunk and media matrices even for a
-    # small result limit; none belongs on this bounded request path. The release
-    # object is still mandatory: the final guard independently decides every
-    # packet reference under the current audience and purpose.
-    lexical_seconds = 0.0
-    try:
-        _policy, release_active = egress_module.gate_state(vault_root)
-        # Measured unconditionally, not read back off `timings`: the shipped
-        # hook calls this door WITHOUT `include_timings`, so there is no
-        # collector on the very path the carry's budget gate exists to
-        # protect. The carry runs the same query shape against the same
-        # catalogue, so what this pass cost is the best estimate of what the
-        # second one will, and the gate asks the budget for room in
-        # proportion to it.
-        lexical_started = time.monotonic()
-        # How many of the turn's units the bounded stage kept and dropped;
-        # counts only, so the diagnostic never carries the turn's words.
-        lexical_selection: dict[str, int] = {}
-        with find_types.timing_span(timings, "working_set.lexical"):
-            # `None` for the owner, whose lexical state stays vault-wide.
-            reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
-            # The one checkpoint every lexical read of this request uses: the lexical
-            # lane, the dependence check and the role lanes (through the snapshot).
-            lexical_checkpoint = (
-                working_set_runtime_module.pin_lexical_checkpoint(vault_root, snapshot, reader_view)
-                if snapshot
-                else None
-            )
-            if anchor and trigger == "user_turn":
-                hits, lexical_state = [], "agent_choice"
-            else:
-                hits, lexical_state = working_set_runtime_module.lexical_evidence(
-                    vault_root,
-                    turn,
-                    anchor_rows,
-                    limit=(
-                        egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
-                        if release_active or reader_view is not None
-                        else ACTIVATE_RETRIEVAL_LIMIT
-                    ),
-                    freshness=lexical_freshness,
-                    recall_checkpoint=lexical_checkpoint,
-                    selection=lexical_selection,
-                )
-        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
-        if timings is not None and lexical_selection:
-            timings.profile["working_set.lexical"] = dict(lexical_selection)
-        if working_set_module.budget_exhausted("working_set.release"):
-            return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
-        with find_types.timing_span(timings, "working_set.release"):
-            release = egress_module.annotate_hits(
-                vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
-            )
-    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
-        log.warning("activation release plane unavailable; abstaining", exc_info=True)
-        return _abstain(activation_result_module.UNAVAILABLE)
-    # An `anchor` naming no row of THIS index but an eligible agent-picked
-    # page (design close-memory-loop, U7) is decided on the release plane
-    # HERE, before the compile that page would otherwise buy nothing for: a
-    # withheld page refuses identically whether or not it was ever compiled,
-    # and running the compile first is the entire cost difference measured
-    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
-    # no eligible page is refused at the same point, so every refused class
-    # leaves in one place. An `anchor` that DOES match a row of the index is
-    # untouched — that path's own timing is not this fix's scope — and any
-    # failure here only skips the early exit: the unmodified
-    # compile-then-guard sequence below still decides every ref exactly as
-    # it always has.
-    if anchor:
-        try:
-            named_rows = {
-                spelling
-                for row in anchor_rows
-                for spelling in (
-                    str(getattr(row, "ref", None) or ""),
-                    str(getattr(row, "path", "") or ""),
-                    str(getattr(row, "anchor_id", "") or ""),
-                )
-                if spelling
-            }
-            if anchor not in named_rows:
-                # Every refused class leaves HERE, at one point: a ref naming
-                # no eligible page (unknown, raw material, navigation, retired,
-                # non-canonical) exactly as a withheld one. Refused after the
-                # compile instead, the unknown classes took about 3 ms longer
-                # than a withheld page, which is its own answer.
-                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
-                if agent_page is None or not egress_module.quick_page_visible(
-                    vault_root, agent_page, purpose=purpose
-                ):
-                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
-        except ValueError:
-            raise
-        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
-            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
-    # The caller's conversation (the token's thread): a valid one is this
-    # caller's session tier when it supplied no session key of its own. An
-    # invalid or lapsed one is reported and served as keyless, never refused,
-    # and every packet below carries a thread forward, a fresh one if need be.
-    identity = working_set_runtime_module.identity_for(vault_root)
-    # The key the thread's times are signed with: they are the caller's
-    # claim until the server's MAC over them verifies.
-    salt = working_set_heat_module.load(vault_root).salt
-    thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
-        continuity, identity=identity, salt=salt
-    )
-    if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
-        thread, thread_ns = working_set_runtime_module.new_thread()
-        caller_thread = None
-    else:
-        caller_thread = thread
-    thread_carry = (identity, thread, thread_ns, thread_state, salt)
-    # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
-    # attribution and the session's last served thread all use the same one.
-    attribution = (
-        working_set_heat_module.attribution_for(
-            vault_root,
-            client=client,
-            session=session,
-            workspace=workspace,
-            salt=salt or None,
-            thread=caller_thread,
+    def read_caller_thread() -> _ThreadRead:
+        nonlocal thread_carry
+        # The caller's conversation (the token's thread): a valid one is this
+        # caller's session tier when it supplied no session key of its own. An
+        # invalid or lapsed one is reported and served as keyless, never refused,
+        # and every packet below carries a thread forward, a fresh one if need be.
+        identity = working_set_runtime_module.identity_for(vault_root)
+        # The key the thread's times are signed with: they are the caller's
+        # claim until the server's MAC over them verifies.
+        salt = working_set_heat_module.load(vault_root).salt
+        thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
+            continuity, identity=identity, salt=salt
         )
-        if client or session or workspace or caller_thread
-        else None
-    )
-    packet = working_set_runtime_module.serve(
+        if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
+            thread, thread_ns = working_set_runtime_module.new_thread()
+            caller_thread = None
+        else:
+            caller_thread = thread
+        thread_carry = (identity, thread, thread_ns, thread_state, salt)
+        # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
+        # attribution and the session's last served thread all use the same one.
+        attribution = (
+            working_set_heat_module.attribution_for(
+                vault_root,
+                client=client,
+                session=session,
+                workspace=workspace,
+                salt=salt or None,
+                thread=caller_thread,
+            )
+            if client or session or workspace or caller_thread
+            else None
+        )
+        return _ThreadRead(identity, thread, thread_ns, thread_state, salt, caller_thread, attribution)
+
+    compiled = _compile_guarded_activation(
         vault_root,
         turn=turn,
-        max_chars=budget,
+        budget=budget,
         purpose=purpose,
         timings=timings,
-        freshness_key=freshness_key,
+        evidence=_ActivationEvidence(
+            freshness_key=freshness_key,
+            snapshot=snapshot,
+            lexical_freshness=lexical_freshness,
+            anchor_rows=anchor_rows,
+            evidence_token=evidence_token,
+            evidence_stamp=evidence_stamp,
+        ),
+        abstain=_abstain,
         continuity=continuity,
         anchor=anchor,
-        retrieval_paths=frozenset(hit.path for hit in release.hits),
-        lexical_state=lexical_state,
-        evidence_token=evidence_token,
-        evidence_stamp=evidence_stamp,
-        freshness_snapshot=snapshot,
-        lexical_seconds=lexical_seconds,
-        attribution=attribution,
-        conversation=conversation,
         trigger=trigger,
+        conversation=conversation,
         intent_resolution=intent_resolution,
+        read_thread=read_caller_thread,
     )
-    # An override that resolved nothing named no anchor of this index. Refused
-    # here, before the guard, with the same words a withheld ref gets below —
-    # and deliberately NOT for the server's own abstentions (`index_warming`,
-    # `disabled`, `unavailable`), which say something about this server rather
-    # than about the ref the caller passed.
-    if anchor and _abstention_reason(packet) == activation_result_module.UNRESOLVED:
-        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
-    # Only gated when `packet` actually carries content: an already-abstained
-    # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
-    # has nothing for the guard to spend time on, so checking again here
-    # would just record a second, redundant `note_skipped` for a stage that
-    # was never really at risk — `note_skipped` should name the ONE stage
-    # that first ran out of room, not every boundary crossed afterward while
-    # carrying nothing.
-    if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        return _abstain(
-            working_set_runtime_module.UNAVAILABLE,
-            generation=packet.get("generation") or generation_stub,
-            budget_caused=True,
-        )
-    # Unconditional: every served packet crosses the guard. A guard that only ran
-    # when the retrieval lane happened to succeed is not a guard.
-    try:
-        with find_types.timing_span(timings, "working_set.guard"):
-            guard_arguments: dict[str, Any] = {"purpose": purpose}
-            if intent_resolution is not None:
-                guard_arguments["intent_resolution"] = intent_resolution
-            guarded = egress_module.guard_working_set(
-                vault_root, packet, release, **guard_arguments
-            )
-    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        log.warning("activation egress guard failed; abstaining", exc_info=True)
-        return _abstain(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or generation_stub)
-    # The release plane's own decision, reused rather than re-derived: the
-    # override anchor was the packet's ONLY anchor, so the guard emptying the
-    # packet IS the answer to "may this audience see that ref".
-    #
-    # What is equal between an unknown ref and a withheld one is the RESPONSE —
-    # same code, same words, neither naming the ref. The work is not: a withheld
-    # ref has been compiled and guarded by the time it is refused, an unknown one
-    # abstains before the guard, and the two are separable by latency (measured
-    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
-    # padded, because equalising it would mean either doing the withheld ref's
-    # work for every unknown one or timing the response, and neither buys
-    # anything: the same audience asking the same vault an ORDINARY turn already
-    # learns as much from `missing[].reason = "withheld"`, which is the honest
-    # marker saying a section lost something. A timing side channel that discloses
-    # strictly less than a documented field is not the thing to spend a request
-    # budget closing.
-    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
-    # `withheld`; either way the override's one anchor is gone.
-    if anchor and (
-        guarded is None or _abstention_reason(guarded) in {activation_result_module.WITHHELD, activation_result_module.UNRESOLVED}
-    ):
-        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
-    if guarded is None:
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        return _abstain(
-            activation_result_module.WITHHELD,
-            generation=packet.get("generation") or generation_stub,
-            carry_thread=False,
-        )
-    packet = guarded
+    if not compiled.served:
+        return compiled.packet
+    packet = compiled.packet
+    identity, thread, thread_ns, thread_state, salt, caller_thread, attribution = compiled.thread
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet)
     token = working_set_runtime_module.mint_continuity(
@@ -7891,13 +8049,8 @@ def op_edit_memory(
     Source edits validate the final sources against authorized Source/Evidence;
     unrelated edits leave legacy citations alone.
 
-    `RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with
-    `validate_only=true`, then commit unchanged with
-    `transition_token=<returned transition_token>`,
-    `relation_disposition="reviewed_none"`,
-    `relation_review_hash=<returned relation_review_hash>` (not the page
-    content hash) and a `relation_review_reason`. Or author a relation in the body:
-    `## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;
+    Author typed relations under `## Relations`, for example
+    `- supports [[Knowledge Base/Notes/Research/example-target]]`.
     Dataview `supports:: [[...]]` is not supported relation syntax.
     See references/writing.md.
 
@@ -7987,9 +8140,6 @@ def op_observe_memory(
     Default: compact observation; other governed kinds use rich form and typed
     relations. Validate first when semantic review is required.
 
-    Updates rebuild the unit: omitted verdict/check_by/id persist;
-    tags/context/relations clear unless resent. Help: references/writing.md.
-
     Args:
         path: Parent page path or memory reference.
         operation: add, update, remove, or validate.
@@ -8001,8 +8151,10 @@ def op_observe_memory(
             refuted. Empty string clears it on update.
         check_by: Rich-only ISO revisit date. Empty string clears it on update.
         id: Unique anchor within the parent; derived on add if omitted.
-        unit_ref: Exact unit reference for update/remove.
+        unit_ref: Exact unit reference for update/remove or previewing an existing unit.
+            Without it, validate previews an addition.
         expected_fingerprint: Current unit fingerprint; required for update/remove.
+            Echo it when previewing an existing unit.
         expected_hash: Current parent-page content hash; required for update/remove.
         transition_token: From validate.
         relation_disposition: Semantic review disposition (existing page).
@@ -10533,8 +10685,8 @@ def op_observe_transfer(
        attachments: chat or phone attachments go through preserve_artifacts or
        capture_source, within their per-call bounds.
     2. status: the latest import (or import_id) and the export; poll it while an import runs.
-    3. When status shows an adopt import `done`, run adoption_studio start on the `next`
-       path (`_Imports/<id>`), then adoption_studio finish.
+    3. When status shows an adopt import `done`, use the listed adoption tools to start
+       a collection on the `next` path (`_Imports/<id>`), then finish the run.
     When an export is ready, status gives a Home link and a CLI command to download it.
 
     Args:
@@ -12587,7 +12739,7 @@ def op_record_memory(
     why: str | None = None,
     scaffold: bool | None = None,
     view: str | None = None,
-    filters: list[dict[str, Any]] | None = None,
+    filters: _QueryFilters = None,
     columns: list[str] | None = None,
     sort_by: str | None = None,
     descending: bool | None = None,
@@ -12625,7 +12777,8 @@ def op_record_memory(
     Propose before create. Others write or hold candidates.
 
     Args:
-        collection: Omit for inventory or new-manifest validate/create.
+        collection: Vault-relative manifest path, collection UUID or memory reference.
+            Omit for inventory or new-manifest validate/create.
         manifest_text: Manifest for validate/create/revise.
         expand_child: Exact declared child container.
         refresh_presentation: Rebuild managed Markdown with guards.
@@ -12691,7 +12844,7 @@ def op_query_dataset(
     vault_root: Path,
     path: str,
     record_path: str | None = None,
-    filters: list[dict] | None = None,
+    filters: _QueryFilters = None,
     columns: list[str] | None = None,
     sort_by: str | None = None,
     descending: bool = False,
@@ -13563,7 +13716,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("adopt",),
-        {"public_title": "Review and import existing material", "surface": "primary", "actions": ("adopt", "review", "save"), "first_run_safe": True},
+        {"public_title": "Review and import existing material", "preferred_name": "import_memory", "surface": "primary", "actions": ("adopt", "review", "save"), "first_run_safe": True},
     ),
     (
         "maintain_memory",
@@ -13728,6 +13881,23 @@ def _renderings_for(name: str) -> tuple[operation_entries.Rendering, ...]:
     return () if operations is None else operations.renderings_with_entries()
 
 
+def _refuse_rendered_arguments(name: str, detail: str):
+    from .cli_ops import INVALID_OPERATION_ARGUMENTS, OpError
+
+    raise OpError(INVALID_OPERATION_ARGUMENTS, detail)
+
+
+def _validate_rendered_arguments(name: str, action: object, arguments: Mapping[str, Any]):
+    operations = operation_entries.OPERATIONS[name]
+    matching = [entry for entry in operations.entries if entry.matches(action, arguments)]
+    if not matching:
+        _refuse_rendered_arguments(name, "the selected operation has invalid discriminants")
+    if not any(set(arguments) <= entry.fields and all(arguments.get(key) is not None
+                                                      for key in entry.required)
+               for entry in matching):
+        _refuse_rendered_arguments(name, "the selected operation has invalid fields")
+
+
 def validate_operation_entries(commands: Iterable[Command] | None = None) -> None:
     """Fail startup unless every operation of a converted command has exactly one variant.
 
@@ -13742,7 +13912,8 @@ def validate_operation_entries(commands: Iterable[Command] | None = None) -> Non
         if not command.renderings:
             continue
         selector = command.renderings[0].selector
-        if selector != egress_module.selector_for_command(command.name):
+        registered_selector = egress_module.selector_for_command(command.name)
+        if registered_selector is not None and selector != registered_selector:
             raise RuntimeError(f"rendering selector is not the lease selector: {command.name}")
         params = {param.name for param in command.params}
         for rendering in command.renderings:
@@ -13750,13 +13921,22 @@ def validate_operation_entries(commands: Iterable[Command] | None = None) -> Non
                 raise RuntimeError(
                     f"{rendering.name} names tool arguments {command.name} lacks: {sorted(missing)}"
                 )
+            for variant in rendering.variants:
+                if missing := variant.fields - params:
+                    raise RuntimeError(
+                        f"{rendering.name}.{variant.kind} names fields {command.name} lacks: {sorted(missing)}"
+                    )
         operation_entries.assert_coverage(
             command.name,
             command.renderings,
-            actions=egress_module.selector_registry()[(command.name, selector)],
+            actions=(egress_module.selector_registry()[(command.name, selector)]
+                     if registered_selector is not None else
+                     governance_operations.OPERATION_SPECS if command.name == "govern_memory"
+                     else operation_entries.OPERATIONS[command.name].actions()),
             modes=modes.get(command.name, {}),
             is_read_only=lambda rendering, variant, command=command: invocation_is_read_only(
-                command, rendering.arguments_for(variant)
+                command, {**{name: "coverage" for name in variant.required},
+                          **rendering.arguments_for(variant)}
             ),
         )
 
@@ -13876,11 +14056,18 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
+        operation_entries.register_operations(name, params)
+        argument_rules = _ARGUMENT_RULES.get(name)
+        if argument_rules is None and name in operation_entries.OPERATIONS:
+            argument_rules = ArgumentRules(
+                partial(_validate_rendered_arguments, name),
+                partial(_refuse_rendered_arguments, name),
+            )
         cmds.append(
             Command(
                 name=name,
                 renderings=_renderings_for(name),
-                argument_rules=_ARGUMENT_RULES.get(name),
+                argument_rules=argument_rules,
                 preferred_name=meta.get("preferred_name"),
                 public_title=meta.get("public_title"),
                 leaf=leaf,
@@ -13984,7 +14171,7 @@ def product_commands_for(
         {exclusion.command for exclusion in cloud_surface_exclusions(upload_bridge=upload_bridge)}
         if cloud else set()
     )
-    return tuple(
+    selected = tuple(
         c
         for c in PRODUCT_COMMANDS
         if surface in c.surfaces
@@ -13992,6 +14179,17 @@ def product_commands_for(
         and (cloud or not c.cloud_only)
         and c.name not in excluded
     )
+    if surface not in {"mcp", "rest"}:
+        return selected
+    # Remote repair admission already allows only these two maintenance modes.
+    return tuple(replace(command, renderings=tuple(
+        replace(rendering, variants=tuple(variant for variant in rendering.variants
+                                          if variant.effect == "read"
+                                          or variant.action in {"structured-files", "tag-variants"}))
+        for rendering in command.renderings
+        if any(variant.effect == "read" or variant.action in {"structured-files", "tag-variants"}
+               for variant in rendering.variants)
+    )) if command.name == "maintain_memory" else command for command in selected)
 
 
 def validate_product_registry() -> dict:
@@ -13999,10 +14197,17 @@ def validate_product_registry() -> dict:
     callable_names = [
         name
         for command in PRODUCT_COMMANDS
-        for name in (*command.callable_names, *(rendering.name for rendering in command.renderings))
+        for name in command.callable_names
     ]
     if len(callable_names) != len(set(callable_names)):
         raise RuntimeError("product command spellings collide")
+    public_routes = {}
+    for command in PRODUCT_COMMANDS:
+        for rendering in command.renderings:
+            for kind in rendering.kinds:
+                previous = public_routes.setdefault((rendering.name, kind), command.name)
+                if previous != command.name:
+                    raise RuntimeError(f"public operation routes collide: {rendering.name}.{kind}")
     canonical = {c.name for c in COMMANDS}
     route_refs = {route for cmd in PRODUCT_COMMANDS for route in cmd.routes}
     unknown = route_refs - canonical - PRODUCT_ROUTE_HELPERS
@@ -14058,7 +14263,11 @@ def _listed_commands(
 ) -> tuple[tuple[Command, tuple[str, ...]], ...]:
     """Each product command the surface lists, with the tool names it lists it under."""
     listed = []
-    for command in PRODUCT_COMMANDS:
+    descriptor = capabilities_module.current_active_surface()
+    contributing = (descriptor.contributing_commands if descriptor is not None
+                    and descriptor.tool_shape == tool_shape and descriptor.contributing_commands
+                    else PRODUCT_COMMANDS)
+    for command in contributing:
         names = tuple(
             name
             for name in listed_names(command, tool_shape)
@@ -14088,11 +14297,12 @@ def product_tool_catalog(
                 operation_entries.listed_tools(resolved.public_name if resolved else route, tool_shape)
             )
         for name in names:
-            routes[name] = reachable
+            routes.setdefault(name, []).extend(reachable)
+    routes = {name: list(dict.fromkeys(targets)) for name, targets in routes.items()}
     return {
-        "primary": [n for c, names in selected if c.product_surface == "primary" for n in names],
-        "advanced": [n for c, names in selected if c.product_surface != "primary" for n in names],
-        "first_run_safe": [n for c, names in selected if c.first_run_safe for n in names],
+        "primary": list(dict.fromkeys(n for c, names in selected if c.product_surface == "primary" for n in names)),
+        "advanced": list(dict.fromkeys(n for c, names in selected if c.product_surface != "primary" for n in names)),
+        "first_run_safe": list(dict.fromkeys(n for c, names in selected if c.first_run_safe for n in names)),
         "routes": routes,
     }
 
@@ -14247,7 +14457,9 @@ def simple_action_catalog(
     A route is stored as the grouped command call and spelled for `tool_shape` here, so
     the table names the tools the surface lists and keeps one definition of each call.
     """
-    known_commands = {command.public_name for command in PRODUCT_COMMANDS} | {"doctor"}
+    known_commands = {
+        name for command in PRODUCT_COMMANDS for name in (command.name, command.public_name)
+    } | {"doctor"}
     out: dict[str, dict] = {}
     for action in _SIMPLE_ACTIONS:
         definition = _SIMPLE_ACTION_DEFS[action]
@@ -14339,6 +14551,9 @@ def product_front_door_catalog(
     )
     out["update"]["contract"] = "edit or supersede with an explicit reason; keep history"
     out["connect"]["contract"] = "link entities and related notes so the graph compounds"
+    for entry in out.values():
+        for bucket in ("primary_tools", "advanced_tools"):
+            entry[bucket] = list(dict.fromkeys(entry[bucket]))
 
     packs = (selected_packs or {}).get("packs") or []
     if packs:

@@ -470,15 +470,22 @@ hash that supplies their disclosed excerpt or frame annotation.
 
 ### Requirement: Search Latency Is Gated Before Release
 
-In the scheduled and dispatched full CI, the `recall-latency-paired` jobs SHALL
-gate warm search latency with the served query encoder, one job per series of
-the reference case file. The paired comparison SHALL sample only the principals
+In Full CI, including ready pull requests, the `recall-latency-paired` jobs SHALL
+gate warm search latency with the served query encoder, one complete comparison
+per series of the reference case file. Sampling MAY use disjoint case shards.
+Aggregation SHALL verify exact case, principal, arm, and repeat coverage and
+common source, runtime, encoder, and corpus identities before comparing a series.
+Each case SHALL retain both arms and every repeat on one runner, its original
+arm order, and the same full-series warmup. Raw fragments SHALL carry no
+statistical verdict. Aggregation SHALL NOT average shard confidence intervals.
+The paired comparison SHALL sample only the principals
 whose series gate; until admission no longer sizes the candidate pool, that is
 the owner. It SHALL compare head
 with the pairing base: the most recent release tag. That base is code only. It
 moves when a release is tagged, and no vault data, live-cell result or box load
-moves it. Both arms run in a process restricted to two CPUs, on the same
-runner, the same reference corpus and the same cases, back to back.
+moves it. CI SHALL pin that tag and its source commit before sampling starts.
+Both arms for each case run in a process restricted to two CPUs, on the same
+runner, the same reference corpus and the same case, back to back.
 
 Each arm SHALL load runtime dependencies from its own source lock. The harness
 SHALL install the tag runtime in an isolated environment without resolving or

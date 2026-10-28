@@ -41,7 +41,7 @@ The strongest result is an agent that sees what exists and pulls. A server-side 
    - A **topic profile** compiles the same lanes over a topic's members: the topic's standing stances, preferences, constraints and conventions, the anchors active now, open loops and recent changes.
    Profiles are compiled per request over the caller's candidate entries; no profile is cached.
 5. **First-answer workflow.** The agent reads the map, opens the domain maps and profiles that the turn needs, searches with its own words when the map does not cover the need, then answers and cites refs.
-6. **Turn slice (a later question, not a contract).** Profiles selected by meaning from the turn and attached to the map. It may be probed on development cases, but it is not an arm of the switch evaluation. It ships only through a frozen evaluation of its own that shows it beats the map alone.
+6. **Turn slice.** The leads that this turn's own words reached, labelled with their evidence and attached to the map. D13 fixes it. It is on by default, by operator ruling, with a setting as the rollback, and it is not an arm of the switch evaluation.
 
 ## Decisions
 
@@ -106,6 +106,20 @@ The process setting `EXOMEM_ACTIVATION_PACKET` selects `maps` (default) or `anch
 ### D12. Shared index collection is an internal producer
 
 The shared working-set index collects owner-derived inputs inside the existing `owner_local_producer` scope, limited to collection in its write path. This prevents maintenance from owning a caller disclosure collector and appending governance events during an otherwise read-only startup. The scope restores the principal and collector on success and failure. It does not replace an active operation's authorization or broaden an external caller's authority. Catalogue publication and every external serve retain their existing boundaries. Caller-view filtering, withheld counts and historical admission remain authoritative.
+
+### D13. The turn slice reuses the anchors compile and leaves the map alone
+
+The `maps` packet is one index on every turn, so in a vault with no topic domains it is the same recency list for every turn. The turn slice adds what this turn's words reached. It is not a second resolver.
+
+- **Source.** One helper holds the guarded anchors compile: lexical evidence, release, `serve` and the guard. The `anchors` branch calls it and keeps token minting, learning and heat recording to itself. The `maps` branch calls it with no continuity, no `anchor` and no attribution, on the user turn alone, and reads what the guarded compile selected. That compile serves leads only: once resolution has decided every anchor, it skips the resolved anchors' current state and lanes, whose material the slice never serves. It still builds every carried packet, because the band yields to a carried page only when that packet builds, and it still reads the material of the pages named beside a resolved anchor, because whether such a page is kept depends on what is read. A test over the audit fixtures, the lexical twins and the multilingual cases holds each slice equal to the one that the full compile gives.
+- **Leads.** Resolved and partial anchors, the senses of an ambiguous turn, pages that the turn names by title, related pages and the carried page. `recent_context` is not a lead. The slice has no item without a lead that the guard admitted, so a turn that reaches nothing gets `state: empty`.
+- **Packet field.** `turn_slice` carries `state` (`ready`, `empty`, `skipped` for the budget, or `unavailable`), a generation that serves only as the guard's record key, one fixed description, the items and an overflow count. An item carries its entry's kind, title, description and description origin, its ref, the profile ref and state line for anchors and collections, `match` (`resolved`, `partial`, `ambiguous`, `named`, `related` or `carried`) and `evidence`, the categorical evidence kinds without scores. Display text comes only from catalogue entries that the caller may see. A lead with no such entry is dropped.
+- **Map first.** The map compiles first, over the caller's view, at the packet limit less the slice's reserve. The map is therefore the same on every turn while the slice is on. A slice that fails, or finds no room, sets its own `state` and never removes or changes the map. `map_generation` and the continuity token encode no anchor.
+- **Budget.** The reserve is one named constant, `TURN_SLICE_SHARE`, next to the map's kind shares, with its reason. Where that share cannot hold the description and the shortest line that any slice can have, the reserve is 0 and the slice is `skipped` without a compile. The slice uses a cooperative deadline one activation stage reserve before the request deadline. A synchronous stage can overrun it. The final disclosure guard still checks the built map, even after the slice spends the request budget. The owner's map cache is keyed on the characters the map compiles at. Slice lines are whole lines; those that do not fit become the overflow count. The packet limit stays the record's limit, and the budget report charges the map and the slice together.
+- **Safety.** The guard serves a slice item only from a record that this invocation pinned for this caller and this packet limit. A forged item, or a slice built for a larger packet, is replaced by an `unavailable` slice, and a slice beside no map is dropped. The slice's paths are collected with the map's. A withheld anchor or page changes no byte of what a restricted caller receives: the slice's lexical pass and its dependence check choose terms and rank on the pages that the caller admits. The anchors packet still uses the catalogue's statistics there.
+- **Due advice.** `relevant_due_refs` reads resolved slice items as it reads resolved anchors, so a `maps` user with the slice on gets that advice again.
+- **Latency.** The slice is a second guarded compile beside the map, so it has a cost of its own. The latency gate measures it as a paired difference: the same turn and caller with the slice on, minus the slice off, in one process. It holds the upper bound of that difference's 95% interval at 100 ms, for a turn that reaches an anchor and for one that reaches nothing, for the owner's rebuilt map and for a restricted caller. 50 ms is the target; it is reported and never asserted. A restricted caller's admitted ranking reads kept word postings, so a turn whose words every admitted page holds reads no page text, and its scores, order and tie-breaks equal those of ranking each candidate's text. No absolute p95 gates the slice, because a shared runner is too noisy for one.
+- **Setting.** `EXOMEM_ACTIVATION_TURN_SLICE` is `on` or `off`. The slice is on by default, by operator ruling, and `off` is the one-line rollback: any other value is `on`, as an invalid `EXOMEM_ACTIVATION_PACKET` serves its default. With the setting off, the packet is the one that the packet mode alone gives. The setting has no effect in `anchors` mode.
 
 ## Evaluation
 
@@ -319,16 +333,21 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - The held-out split stays sealed and unread. It is available for one later unbiased measure. That measure is not a switch gate, and no result of it changes the default by itself.
    - The default changes by operator decision, not by a measured gain. No release note or document may present it as one.
    - The default flip keeps two behaviours of the `anchors` path that a `maps` packet would otherwise lose without notice: the `episode_due` advisory rides on a `maps` packet, and the call ledger records a `maps` packet's released-item count as unknown, never zero.
-   - One capability stays `anchors` only: `relevant_due_refs` associates a due item with a resolved anchor, a served unit parent or a current-state source, and a map carries none of these. A `maps` packet therefore omits that advice, as "Activation associates one relevant due candidate with current material" already requires for an empty association. This loss is a known gap of `maps` mode. A later round designs turn-relevant content for the `maps` packet, which covers this advice.
-   - A default user also loses these `anchors`-only capabilities, listed as known gaps for the next rounds:
+   - One capability stays `anchors` only: `relevant_due_refs` associates a due item with a resolved anchor, a served unit parent or a current-state source, and a map carries none of these. A `maps` packet therefore omits that advice, as "Activation associates one relevant due candidate with current material" already requires for an empty association. This loss is a known gap of `maps` mode. A later round designs turn-relevant content for the `maps` packet, which covers this advice. Amendment 13 builds that content as the turn slice, on by default with a rollback setting; while the slice is on, a resolved lead covers this advice.
+   - A default user also loses these `anchors`-only capabilities, listed as known gaps for the next rounds. Amendment 13's turn slice covers four of them while the slice is on: the relevant-due refs above, partial-name and band anchors, semantic evidence and `agent_pick`. These stay gaps:
      - continuity carry across turns;
      - learning and learned aliases;
      - `recent_context`;
-     - partial-name and band anchors;
-     - `agent_pick`;
-     - units and semantic evidence;
+     - pushed units;
      - the `anchor` argument.
    - This changes the default and the role of the evaluation only. It does not change the cases, groups, keys, arms, scoring rule, tolerances, the freeze requirement before the held-out run, the governance and egress behaviour of either mode, or the `anchors` packet.
+
+13. **Amendment 13 (2026-10-27, before any held-out generation).** A turn slice is built next to the map, on by default, with a rollback setting:
+   - `EXOMEM_ACTIVATION_TURN_SLICE` selects `on` or `off`. The slice is on by default, by operator ruling, so that a default user's `maps` packet reaches pages that its map does not list, in any language that the retrieval lanes serve. `off` is the one-line rollback, and any other value is `on`. With the setting off, the `maps` packet is the same as before this amendment.
+   - D13 fixes the slice. It lists what the turn's words reached through the guarded anchors compile, with each lead's match and evidence kinds, and it states that it is not checked for relevance. Shape 6 now points at D13.
+   - It narrows the gaps that amendment 12 lists, for a user who has not turned the slice off. It does not close them: continuity carry, learning, `recent_context`, pushed units and the `anchor` argument stay `anchors`-only.
+   - The default is on by operator decision, not by a measured gain, and no release note or document may present it as one. Whether the slice adds value over the map alone stays an open question below. The slice is not an arm of the switch evaluation, and the cases, groups, keys, arms, scoring rule, tolerances and decision rule do not change.
+   - This changes the `maps` packet unless the setting is `off`. It does not change the governance and egress behaviour of either mode, or the `anchors` packet.
 
 ### Ready before held-out generation
 

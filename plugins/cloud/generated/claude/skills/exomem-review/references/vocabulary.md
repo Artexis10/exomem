@@ -8,21 +8,21 @@ that every caller can save.
 ## Discover the current contract
 
 Inspect the exposed bootstrap schema. When it supports `section`, obtain
-`bootstrap(profile="compact", section="vocabulary")`. Otherwise use
-`bootstrap(profile="full")`; released profiles reject section arguments.
+`bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'vocabulary'})`. Otherwise use
+`bootstrap(operation={'kind': 'instructions', 'profile': 'full'})`; released profiles reject section arguments.
 Follow the returned routes and use only operations exposed by the active surface.
 If the registry contract is unavailable, report that limitation instead of
 treating the registry as empty.
 
-The `subject` argument of `schema_memory` names the current registry subjects.
-They are `schema_memory` subjects, not a list of allowed vocabulary entries. Compiled applicability comes from
+The `subject` argument of `read_schema/change_schema` names the current registry subjects.
+They are `read_schema/change_schema` subjects, not a list of allowed vocabulary entries. Compiled applicability comes from
 `semantic_authoring.minimum_semantic_unit` in the authoring bootstrap section,
 or the full-profile fallback. A page type is compiled when its `note-types` entry
 has note-type role `compiled`.
 
 ## Reuse before promotion
 
-1. Call `schema_memory(operation="inspect", subject=<subject>)` to obtain entries, `content_hash`, and the `save` contract.
+1. Call `read_schema(operation={'kind': 'inspect', 'subject': ...})` to obtain entries, `content_hash`, and the `save` contract.
 2. Follow each returned `continuation` with the same subject until it is null, so the inventory is complete.
 3. Read `save.fields`, `save.attributes`, `save.fixed_once_saved`, and `save.promotion` to establish the permitted delta.
 4. Reuse a truthful existing key, or add an alias when only the spelling differs, so meaning stays stable.
@@ -45,9 +45,9 @@ registry; use paginated inspection before concluding that a key is absent.
 
 ## Propose and save
 
-1. Pass the delta as `proposal` to `schema_memory(operation="propose", subject=<subject>, proposal=<delta>)` to inspect validation and collisions.
+1. Pass the delta as `proposal` to `read_schema(operation={'kind': 'preview', 'subject': ..., 'proposal': ...})` to inspect validation and collisions.
 2. Review `valid`, findings, collisions, inherited attributes, and near-duplicates to choose a supported delta.
-3. Call `schema_memory(operation="save", subject=<subject>, proposal=<delta>, expected_hash=<current_hash>, why=<reason>)` to request the governed save.
+3. Call `change_schema(operation={'kind': 'save', 'subject': ..., 'proposal': ..., 'expected_hash': ..., 'why': ...})` to request the governed save.
 4. Inspect `saved`, `state`, and `vocabulary_receipt` to report the actual result and its revert route.
 
 A delta uses the returned verbs: `upsert` maps a key to its supported entry fields;
@@ -66,9 +66,9 @@ A `topic-carriers` entry files the pages of one project key, folder or tag under
 the domains it names; the map uses a save at once and no page changes. Declare them
 from evidence, never from a list of your own.
 
-1. Read the owner's considerations from `review_memory(mode="vocabulary")`, following `continuation` until it is empty. Each names one carrier, and `review_item_context` returns its counts and a bounded sample of titles.
-2. Infer a topic from that evidence: reuse a domain key from `schema_memory(subject="domains", operation="inspect")` only when it names the subject the pages share; a neighbouring or broader domain is not a fit. When none fits, register one with `schema_memory(subject="domains", operation="save")` first; that is part of this workflow and needs no separate approval. A refused or pending save stands: report it and do not declare the topic. Skip a carrier whose pages share no subject, such as a status tag or a folder that mixes topics.
-3. Save the carrier with `schema_memory(subject="topic-carriers", operation="save")`: `proposal.upsert` maps a key to `attributes` of `kind` (`project`, `folder` or `tag`), `match`, `topics` and `origin` (`inferred` for each topic). Add `expected_hash` and `why`.
+1. Read the owner's considerations from `read_review(operation={'kind': 'vocabulary'})`, following `continuation` until it is empty. Each names one carrier, and `read_review(operation={'kind': 'item-context'})` returns its counts and a bounded sample of titles.
+2. Infer a topic from that evidence: reuse a domain key from `read_schema(operation={'kind': 'inspect', 'subject': 'domains'})` only when it names the subject the pages share; a neighbouring or broader domain is not a fit. When none fits, register one with `change_schema(operation={'kind': 'save', 'subject': 'domains'})` first; that is part of this workflow and needs no separate approval. A refused or pending save stands: report it and do not declare the topic. Skip a carrier whose pages share no subject, such as a status tag or a folder that mixes topics.
+3. Save the carrier with `change_schema(operation={'kind': 'save', 'subject': 'topic-carriers'})`: `proposal.upsert` maps a key to `attributes` of `kind` (`project`, `folder` or `tag`), `match`, `topics` and `origin` (`inferred` for each topic). Add `expected_hash` and `why`.
 4. Show the person one review list. Each row names the carrier, its topic, the origin and a few entry titles, and the list names every domain you registered. They can accept all, change a row, or skip.
 
 Accepting saves the same carrier with origin `reviewed`. Changing a row saves new `topics`
@@ -82,8 +82,8 @@ A page that no carrier reaches joins a topic through its own `topics` field. A p
 
 ## Revert without rewriting pages
 
-1. Call `schema_memory(operation="history", subject=<subject>)` to obtain kept versions and the current `content_hash`.
-2. Select the intended version, then call `schema_memory(operation="restore", subject=<subject>, version=<version>, expected_hash=<current_hash>, why=<reason>)` to request its restoration.
+1. Call `read_schema(operation={'kind': 'history', 'subject': ...})` to obtain kept versions and the current `content_hash`.
+2. Select the intended version, then call `change_schema(operation={'kind': 'restore', 'subject': ..., 'version': ..., 'expected_hash': ..., 'why': ...})` to request its restoration.
 3. Inspect the restore result and removed keys to report what changed and any remaining unregistered usage.
 
 Restore uses the current registry hash, not the historical hash of the chosen
@@ -94,7 +94,7 @@ revert changes on both axes; inspect the reported removed keys.
 
 ## Page statuses
 
-Inspect `schema_memory(subject="statuses", operation="inspect")` when that route is exposed.
+Inspect `read_schema(operation={'kind': 'inspect', 'subject': 'statuses'})` when that route is exposed.
 Read each entry's `attributes.class`; the class controls current service without rewriting pages.
 Canonical shipped labels keep their meanings. Statusless pages stay live without private definitions.
 An admitted unknown label is live with review debt; withheld classification leaves dependent operations unavailable.

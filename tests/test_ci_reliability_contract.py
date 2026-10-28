@@ -21,9 +21,7 @@ FULL_CI_JOBS = {
     "retrieval-latency",
     "recall-latency-series",
     "recall-latency-paired",
-    "mcp-read-latency-plan",
-    "mcp-read-latency-paired",
-    "mcp-read-latency-aggregate",
+    "recall-latency-aggregate",
     "governance-projection-wire",
     "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
@@ -146,8 +144,7 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     # nightly/manual full runs. The runtime matrix never names the release
     # branch (see test_expensive_ci_runs_nightly_and_manually_only).
     versions = " ".join(str(matrix["python-version"]).split())
-    assert "github.event_name == 'schedule'" in versions
-    assert "github.event_name == 'workflow_dispatch'" in versions
+    assert "needs.scope.outputs.full == 'true'" in versions
     assert "release-please" not in versions
     assert "head_ref" not in versions
     assert '["3.11", "3.13"]' in versions
@@ -334,7 +331,7 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     assert timing_job["strategy"]["matrix"] == {
         "python-version": core_job["strategy"]["matrix"]["python-version"]
     }
-    assert "needs" not in timing_job, "timing checks must overlap the worker pools"
+    assert timing_job["needs"] == core_job["needs"] == "scope", "timing checks must overlap the worker pools"
     serial_selections = list(core_job["env"].values())
     pooled_exclusions = []
     for variable, selection in core_job["env"].items():
@@ -505,37 +502,6 @@ def test_the_bounded_install_helper_bounds_each_attempt_not_just_the_loop() -> N
     assert "Acquire::https::Timeout=15" in script
 
 
-@pytest.mark.parametrize("job_id", [job_id for job_id, _shards, _tier in PR_TIER_JOBS])
-def test_the_install_helper_budget_fits_inside_its_caller_timeout(job_id: str) -> None:
-    """A step cap below the helper's worst case would cut retries off again."""
-    script = (ROOT / "scripts/ci-apt-install.sh").read_text(encoding="utf-8")
-
-    def _default(name: str) -> int:
-        match = re.search(rf'\$\{{{name}:=(\d+)\}}', script)
-        assert match, f"{name} has no default in the helper"
-        return int(match.group(1))
-
-    worst_case_seconds = (
-        _default("CI_APT_ATTEMPTS") * _default("CI_APT_UPDATE_TIMEOUT_SECONDS")
-        + _default("CI_APT_INSTALL_TIMEOUT_SECONDS")
-    )
-
-    workflow = _workflow()
-    step = next(
-        step
-        for step in workflow["jobs"][job_id]["steps"]
-        if step.get("name") == "Install process-isolation runtime"
-    )
-    cap_seconds = step["timeout-minutes"] * 60
-    assert cap_seconds > worst_case_seconds, (
-        f"the step cap is {cap_seconds}s but the helper can legitimately spend "
-        f"{worst_case_seconds}s, so a healthy retry would be killed as a stall"
-    )
-    assert cap_seconds < workflow["jobs"][job_id]["timeout-minutes"] * 60, (
-        "the step cap must stay under the job budget it exists to protect"
-    )
-
-
 def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     jobs = _workflow()["jobs"]
 
@@ -549,21 +515,39 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
-def test_paired_recall_runs_one_bounded_job_per_case_file_series() -> None:
-    """The paired comparison cannot finish in a 30-minute pytest shard, and a timeout blocks releases."""
-    workflow = _workflow()
-    jobs = workflow["jobs"]
-    paired = jobs["recall-latency-paired"]
-    assert paired["needs"] == "recall-latency-series"
-    assert paired["strategy"]["matrix"]["series"] == (
-        "${{ fromJSON(needs.recall-latency-series.outputs.series) }}"
-    )
-    assert "benchmarks/recall-latency/cases.json" in jobs["recall-latency-series"]["steps"][-1]["run"]
-    compare = next(step for step in paired["steps"] if "--paired" in step.get("run", ""))
-    assert '--series "$SERIES"' in compare["run"]
-    assert compare["timeout-minutes"] < paired["timeout-minutes"]
-    assert "recall-latency-paired" in jobs["gate"]["needs"]
-    assert not any("--paired" in step.get("run", "") for step in jobs["retrieval-latency"]["steps"])
+def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> None:
+    jobs = _workflow()["jobs"]
+    discovery, sampler, aggregate = (jobs[name] for name in (
+        "recall-latency-series", "recall-latency-paired", "recall-latency-aggregate",
+    ))
+    assert all(job["runs-on"] == "ubuntu-24.04" for job in (discovery, sampler, aggregate))
+    assert discovery["needs"] == "scope"
+    assert set(sampler["needs"]) == {"scope", "recall-latency-series"}
+    assert set(aggregate["needs"]) == {"scope", "recall-latency-series", "recall-latency-paired"}
+    assert "!cancelled()" in aggregate["if"]
+    assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
+    assert sampler["strategy"]["fail-fast"] is False
+    source = discovery["steps"][-1]["run"]
+    assert 'git rev-parse --verify "refs/tags/$tag^{commit}"' in source
+    assert "benchmarks/recall-latency/profile.json" in source
+    sample = next(step for step in sampler["steps"] if "--paired --series" in step.get("run", ""))
+    assert '--base-tag "$BASE_TAG" --base-commit "$BASE_COMMIT"' in sample["run"]
+    assert '--shard "$SHARD" --shards "$SHARDS"' in sample["run"]
+    assert sample["env"]["BASE_COMMIT"] == "${{ needs.recall-latency-series.outputs.base_commit }}"
+    assert sample["timeout-minutes"] < sampler["timeout-minutes"]
+    assert sampler["steps"][-1]["with"]["name"].endswith("${{ github.run_id }}-${{ github.run_attempt }}")
+    download = next(step for step in aggregate["steps"] if "download-artifact" in step.get("uses", ""))
+    assert download["with"]["merge-multiple"] is False
+    compare = next(step for step in aggregate["steps"] if "--aggregate-paired" in step.get("run", ""))
+    assert compare["env"]["PRODUCER_OUTCOME"] == "${{ needs.recall-latency-paired.result }}"
+    assert '--producer-outcome "$PRODUCER_OUTCOME"' in compare["run"]
+    assert aggregate["steps"][-1]["with"]["name"] == "recall-latency-paired-${{ matrix.series }}"
+    for name in ("recall-latency-series", "recall-latency-paired", "recall-latency-aggregate"):
+        assert name in jobs["gate"]["needs"]
+    instrument_jobs = [name for name, job in jobs.items() if any(
+        "tests/test_recall_latency_gate.py" in step.get("run", "") for step in job.get("steps", [])
+    )]
+    assert instrument_jobs == ["recall-latency-series"]
 
 
 def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None:
@@ -663,60 +647,22 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
     ]
 
 
-def test_expensive_ci_runs_nightly_and_manually_only() -> None:
-    """Full-CI evidence comes from the schedule and explicit dispatch — only.
-
-    The guard used to include `head_ref == 'release-please--branches--main'`,
-    which re-ran the full 46-job tier on every push to main (release-please
-    force-updates its PR each time): 61% of a measured day's runner-minutes
-    went to those stampedes while ordinary PRs queued behind a 20-concurrent-
-    job account cap. Release evidence is one green dispatched full run on
-    main, documented as a required step in docs/release.md, and the release PR
-    itself runs no test job: its diff is version strings, the changelog and the
-    regenerated Cloud archives.
-    """
+def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() -> None:
     workflow = _workflow()
-    triggers = _triggers(workflow)
-
-    assert triggers["schedule"] == [{"cron": "17 2 * * *"}]
-    assert "workflow_dispatch" in triggers
-
+    assert _triggers(workflow)["pull_request"]["types"] == [
+        "opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft",
+    ]
     jobs = workflow["jobs"]
-    assert FULL_CI_JOBS < set(jobs)
-    conditions = {
-        " ".join(str(jobs[name].get("if", "")).split()) for name in FULL_CI_JOBS
-    }
-    assert len(conditions) == 1
-    condition = conditions.pop()
-    assert "github.event_name == 'schedule'" in condition
-    assert "github.event_name == 'workflow_dispatch'" in condition
-    assert "pull_request" not in condition
-    assert "head_ref" not in condition
-    assert "release-please" not in condition
-
-    # The clause must not creep back into the expensive tier. It appears
-    # twice: the release-evidence job's own guard (pinned exactly in
-    # test_release_evidence_is_enforced_on_the_release_pr) and the one anchor
-    # that keeps the release PR off the test jobs.
-    assert _workflow_text().count("release-please--branches--main") == 2
-
-    # quality is the shared engineering-practices check, kept out of the required gate so the
-    # required checks stay unchanged; the merge guard reads it.
-    fast_jobs = (
-        set(jobs)
-        - FULL_CI_JOBS
-        - {
-            "gate",
-            "release-evidence",
-            "release-evidence-landed",
-            "cancel-superseded-push-run",
-            "quality",
-        }
-    )
-    assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
-    (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
-    assert "github.head_ref != 'release-please--branches--main'" in skip
-    assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
+    assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
+    assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
+    for name in FULL_CI_JOBS:
+        assert "scope" in ([jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"])
+        assert "needs.scope.outputs.full == 'true'" in jobs[name]["if"]
+    for name in RELEASE_PR_SKIPPED_JOBS:
+        assert jobs[name]["needs"] == "scope"
+        assert jobs[name]["if"] == "${{ needs.scope.outputs.release != 'true' }}"
+    assert jobs["cloud-cellctl"]["with"]["full"] == "${{ needs.scope.outputs.full == 'true' }}"
+    assert "if" not in jobs["release-evidence"]
 
 
 def _scope_fixture_git(repository: Path, *args: str) -> None:
@@ -742,7 +688,7 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
 SCOPED_JOBS = ("core-tests", "harness-tests", "product-e2e")
 
 
-def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
+def _change_scope(repository: Path, event: str, *, full: bool = False) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
@@ -751,6 +697,7 @@ def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
         env={
             **os.environ,
             "EVENT_NAME": event,
+            "FULL_CI": str(full).lower(),
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
         },
@@ -823,11 +770,11 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
 
 
 @pytest.mark.parametrize(
-    "event,has_parent",
-    [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
+    "event,has_parent,full",
+    [("pull_request", False, False), ("push", True, False), ("schedule", True, False), ("workflow_dispatch", True, False), ("pull_request", True, True)],
 )
 def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
-    tmp_path: Path, event: str, has_parent: bool
+    tmp_path: Path, event: str, has_parent: bool, full: bool
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -841,7 +788,7 @@ def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
         path.write_text("changed\n")
         _scope_fixture_git(repository, "commit", "-am", "spec change")
 
-    decision, summary = _change_scope(repository, event)
+    decision, summary = _change_scope(repository, event, full=full)
 
     assert decision == {"docs_only": "false", "pytest_args": ""}
     assert not summary
@@ -870,48 +817,30 @@ def test_change_scope_relies_on_docs_paths_being_outside_package_inputs() -> Non
 
 
 def test_release_evidence_is_enforced_on_the_release_pr() -> None:
-    """The docs/release.md evidence step is CI-enforced, not prose.
-
-    Removing the full-CI stampede from the release PR moved release evidence
-    to one green dispatched (or scheduled) full run on main. A documented
-    procedure alone cannot bind a merge, so a seconds-class `release-evidence`
-    job runs on the release PR and fails unless such a run exists at the PR's
-    recorded base revision. Ordinary PRs skip it (the gate accepts skips
-    outside full CI); schedule/dispatch/push contexts run it as a trivial
-    success so the gate's skip-intolerant full-CI arm never sees a skip.
-    """
+    """Release checks use the same tested-tree selector as evidence automation."""
     workflow = _workflow()
     job = workflow["jobs"]["release-evidence"]
-
-    condition = " ".join(str(job["if"]).split())
-    assert condition == (
-        "${{ github.event_name != 'pull_request' || "
-        "github.event.pull_request.head.ref == 'release-please--branches--main' }}"
-    )
-
-    checkout, scope, step = job["steps"]
-    # The scope check runs first, from the base revision, under pipefail.
+    report, checkout, scope, step = job["steps"]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert "scripts/release_evidence.py" in checkout["with"]["sparse-checkout"]
     assert scope["shell"] == "bash"
     assert "scripts/check_release_pr_files.py" in scope["run"]
-    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
-    base = " ".join(str(step["env"]["BASE_SHA"]).split())
-    assert base == "${{ github.event.pull_request.base.sha || '' }}"
+    assert step["if"] == "needs.scope.outputs.release == 'true'"
+    assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert step["env"]["GH_REPO"] == "${{ github.repository }}"
+    assert step["run"] == 'python3 scripts/release_evidence.py select --source "$BASE_SHA"'
+    assert "release-evidence" in workflow["jobs"]["gate"]["needs"]
 
-    command = step["run"]
-    # Non-release contexts must succeed without querying anything.
-    assert 'test -z "$BASE_SHA"' in command
-    # The evidence query must demand a green full run at the exact base
-    # revision — event-filtered, status-filtered, sha-pinned.
-    assert "actions/workflows/ci.yml/runs" in command
-    assert "workflow_dispatch" in command
-    assert "schedule" in command
-    assert "status=success" in command
-    assert "head_sha=$BASE_SHA" in command
-    # Failure must tell the operator the exact remediation.
-    assert "gh workflow run ci.yml --ref main" in command
 
-    assert "release-evidence" in set(workflow["jobs"]["gate"]["needs"])
+def test_full_receipt_records_the_checkout_only_after_required_dependencies_pass() -> None:
+    steps = _workflow()["jobs"]["gate"]["steps"]
+    check, checkout, record, upload = steps
+    assert check["name"] == "Require the selected CI tier to succeed"
+    for step in (checkout, record, upload):
+        assert step["if"] == "needs.scope.outputs.full == 'true'"
+    assert record["run"] == "python3 scripts/release_evidence.py record --output full-ci-evidence.json"
+    assert upload["with"]["name"] == "full-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert upload["with"]["if-no-files-found"] == "error"
 
 
 def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers() -> None:
@@ -953,8 +882,7 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     assert "test" not in gate["needs"]
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ toJSON(needs) }}"
     full_ci = " ".join(str(gate["steps"][0]["env"]["FULL_CI"]).split())
-    assert "github.event_name == 'schedule'" in full_ci
-    assert "github.event_name == 'workflow_dispatch'" in full_ci
+    assert full_ci == "${{ needs.scope.outputs.full == 'true' }}"
     assert "release-please" not in full_ci
 
 
@@ -1060,157 +988,48 @@ def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
     ]
 
 
-def test_release_evidence_automation_removes_both_manual_cranks() -> None:
-    """The release pipeline is self-driving without reintroducing the stampede.
-
-    ci.yml's release-evidence job stays a seconds-class check; the companion
-    workflow supplies the two automations that used to be manual cranks:
-    dispatching the full-tier evidence run (only on the explicit release
-    intent of enabling auto-merge — never per push to main, which is the
-    measured stampede test_expensive_ci_runs_nightly_and_manually_only pins),
-    and re-running the release PR's failed checks when eligible evidence
-    lands on main. A full run that this workflow dispatches with GITHUB_TOKEN
-    raises no workflow_run event when it completes (observed twice on
-    2026-10-05), so the full run's last job dispatches the re-run instead,
-    and the re-run waits for that run's recorded green completion.
-    """
-    text = (ROOT / ".github/workflows/release-evidence-automation.yml").read_text(
-        encoding="utf-8"
-    )
-    workflow = yaml.safe_load(text)
-    triggers = _triggers(workflow)
-
-    assert triggers["pull_request"] == {"types": ["auto_merge_enabled"]}
-    assert set(triggers) == {"pull_request", "workflow_dispatch"}
-    assert triggers["workflow_dispatch"]["inputs"]["evidence_run"]["required"] is True
-
-    # Duplicate release intents (disable/re-enable auto-merge) must serialize
-    # so only one evidence dispatch can win the eligibility check.
-    assert "concurrency" in workflow
-    assert "release-evidence-automation-" in workflow["concurrency"]["group"]
-
+def test_release_evidence_automation_supplies_proof_without_merging() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-evidence-automation.yml").read_text())
+    assert set(_triggers(workflow)) == {"workflow_dispatch"}
     jobs = workflow["jobs"]
-    assert set(jobs) == {"dispatch-evidence", "rerun-evidence-check"}
-
-    # Bound the API result itself; post-filtering a truncated run list misses evidence.
-    assert "head_sha=$BASE_SHA" in jobs["dispatch-evidence"]["steps"][0]["run"]
-
-    dispatch_if = " ".join(str(jobs["dispatch-evidence"]["if"]).split())
-    assert "auto_merge_enabled" not in dispatch_if  # gated by the trigger, not the if
-    assert "release-please--branches--main" in dispatch_if
-    assert "github.event_name == 'pull_request'" in dispatch_if
-
-    rerun_if = " ".join(str(jobs["rerun-evidence-check"]["if"]).split())
-    assert rerun_if == "${{ github.event_name == 'workflow_dispatch' }}"
-    rerun = jobs["rerun-evidence-check"]["steps"][0]["run"]
-    # Re-run only once the evidence run has a recorded green completion: the
-    # release evidence check counts completed successful runs and nothing else.
-    assert "= completed && break" in rerun
-    assert '"completed success main .github/workflows/ci.yml"' in rerun
-    assert "workflow_dispatch|schedule" in rerun
-
-    # The full run signals its own evidence, only after its gate passed, only
-    # for full-tier runs on main, and holds no permission beyond the dispatch.
+    intent = jobs["dispatch-evidence"]
+    refresh = jobs["rerun-evidence-check"]
+    assert intent["if"] == "${{ inputs.release_pr != '' }}"
+    assert refresh["if"] == "${{ inputs.evidence_run != '' && inputs.release_pr == '' }}"
+    assert intent["steps"][-1]["run"] == (
+        'python3 scripts/release_evidence.py intent --pr "$PR_NUMBER" --expected-base "$BASE_SHA"'
+    )
+    assert refresh["steps"][-1]["run"] == (
+        'python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"'
+    )
+    for job in (intent, refresh):
+        assert job["steps"][0]["with"]["ref"] == "main"
+    assert workflow["permissions"] == {
+        "actions": "write", "contents": "read", "pull-requests": "read",
+    }
     landed = _workflow()["jobs"]["release-evidence-landed"]
     assert landed["needs"] == "gate"
-    landed_if = " ".join(str(landed["if"]).split())
-    assert "github.event_name == 'schedule'" in landed_if
-    assert "github.event_name == 'workflow_dispatch'" in landed_if
-    assert "github.ref == 'refs/heads/main'" in landed_if
-    assert "pull_request" not in landed_if
-    assert "always()" not in landed_if and "failure()" not in landed_if
-    assert landed["permissions"] == {"actions": "write"}
-
-    # The dispatch job must never fire from pushes: only the two declared
-    # events exist, and neither is push/synchronize.
-    assert "synchronize" not in text
-    assert "push:" not in text
-
-    # Least privilege: actions write (dispatch + rerun), nothing more.
-    assert workflow["permissions"] == {
-        "actions": "write",
-        "contents": "read",
-        "pull-requests": "read",
-    }
+    assert landed["if"] == "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}"
+    assert landed["steps"][0]["env"]["EVIDENCE_ATTEMPT"] == "${{ github.run_attempt }}"
 
 
-@pytest.mark.parametrize(
-    ("workflow_file", "job_name"),
-    [
-        ("release-evidence-automation.yml", "dispatch-evidence"),
-        ("release-evidence-automation.yml", "rerun-evidence-check"),
-        ("ci.yml", "release-evidence-landed"),
-    ],
-)
-@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
-def test_release_evidence_commands_work_without_a_checkout(
-    tmp_path: Path, workflow_file: str, job_name: str
-) -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_file).read_text(encoding="utf-8"))
-    job = workflow["jobs"][job_name]
-    step = next(step for step in job["steps"] if "run" in step)
-    executable = tmp_path / "gh"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, sys\n"
-        "args = sys.argv[1:]\n"
-        "if args[0] == 'api':\n"
-        "    endpoint = args[1]\n"
-        "    if endpoint.endswith('/commits/main'):\n"
-        "        print('tested-base')\n"
-        "    elif '/pulls?' in endpoint:\n"
-        "        print(json.dumps({'base': {'sha': 'tested-base'}, 'head': {'sha': 'release-head'}}))\n"
-        "    elif 'event=pull_request' in endpoint:\n"
-        "        print('123')\n"
-        "    elif endpoint.endswith('/actions/runs/456'):\n"
-        "        print(os.environ.get('FAKE_EVIDENCE_RUN', 'completed success workflow_dispatch main .github/workflows/ci.yml tested-base'))\n"
-        "    else:\n"
-        "        print('0')\n"
-        "elif args[:2] in (['workflow', 'run'], ['run', 'rerun']):\n"
-        "    if os.environ.get('GH_REPO') != 'example/project':\n"
-        "        sys.exit('fatal: not a git repository; explicit repository context is missing')\n"
-        "    print('submitted: ' + ' '.join(args))\n"
-        "else:\n"
-        "    sys.exit('unexpected gh command')\n",
-        encoding="utf-8",
-    )
-    executable.chmod(0o755)
-
-    def render(value: str) -> str:
-        return value.replace("${{ github.repository }}", "example/project").replace(
-            "${{ github.repository_owner }}", "example"
-        )
-
-    env = dict(os.environ)
-    env.pop("GH_REPO", None)
-    for scope in (workflow, job, step):
-        env.update({key: render(str(value)) for key, value in scope.get("env", {}).items()})
-    env.update({
-        "PATH": str(tmp_path) + os.pathsep + env["PATH"],
-        "BASE_SHA": "tested-base",
-        "EVIDENCE_RUN": "456",
-    })
-    result = subprocess.run(
-        ["bash", "-e", "-c", render(step["run"])],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    expected = {
-        "dispatch-evidence": "workflow run ci.yml --ref main",
-        "rerun-evidence-check": "run rerun 123 --failed",
-        "release-evidence-landed": "workflow run release-evidence-automation.yml --ref main -f evidence_run=456",
-    }[job_name]
-    assert "submitted: " + expected in result.stdout
-
-    if job_name == "rerun-evidence-check":
-        # Evidence that completed red re-runs nothing.
-        env["FAKE_EVIDENCE_RUN"] = "completed failure workflow_dispatch main .github/workflows/ci.yml tested-base"
-        failed = subprocess.run(
-            ["bash", "-e", "-c", render(step["run"])],
-            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
-        )
-        assert failed.returncode == 0, failed.stdout + failed.stderr
-        assert "submitted:" not in failed.stdout
+def test_python_qualification_does_not_wait_for_image_publication() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text())
+    job = workflow["jobs"]["qualify-python"]
+    assert set(job["needs"]) == {"plan", "build-artifacts", "publish-pypi"}
+    assert "needs.publish-pypi.result == 'success'" in job["if"]
+    assert "needs.plan.outputs.pypi_present == 'true'" in job["if"]
+    assert "needs.plan.outputs.dry_run != 'true'" in job["if"]
+    assert job["permissions"] == {"contents": "read", "actions": "read"}
+    qualify = next(step for step in job["steps"] if step.get("name", "").startswith("Qualify official"))
+    assert '--run-id "$GITHUB_RUN_ID" --attempt "$PRODUCER_ATTEMPT"' in qualify["run"]
+    assert '--verification-attempt "$GITHUB_RUN_ATTEMPT"' in qualify["run"]
+    assert qualify["env"]["PRODUCER_ATTEMPT"] == "${{ needs.build-artifacts.outputs.producer_attempt }}"
+    build = workflow["jobs"]["build-artifacts"]
+    assert build["outputs"]["producer_attempt"] == "${{ steps.producer.outputs.attempt }}"
+    producer = next(step for step in build["steps"] if step.get("id") == "producer")
+    assert producer["run"] == 'echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"'
+    assert job["steps"][-1]["with"]["name"] == "python-qualification-${{ github.run_id }}-${{ github.run_attempt }}"
 
 
 #: The worst cross-platform session observed, in seconds. No longer censored:

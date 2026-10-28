@@ -20,6 +20,8 @@ promoted is asserted.
 from __future__ import annotations
 
 import dataclasses
+import json
+import statistics
 import time
 from pathlib import Path
 from typing import Any
@@ -41,11 +43,20 @@ from membench.utility.context_activation_multilingual import (  # noqa: E402
     multilingual_report,
     score_multilingual_case,
 )
+from test_activate_context_turn_slice import full_compile_slices  # noqa: E402
+from test_latency_gate import (  # noqa: E402
+    SLICE_ADDED_MS_CEILING,
+    SLICE_ADDED_MS_TARGET,
+    _compiler_ms,
+    _paired_median_interval,
+)
 
 from exomem import (  # noqa: E402
     commands,
+    context_catalogue,
     embedding_backend,
     embeddings,
+    epistemic_graph,
     lexstore,
     ranking_config,
     readiness,
@@ -53,6 +64,7 @@ from exomem import (  # noqa: E402
     working_set_index,
     working_set_runtime,
 )
+from exomem.governance import principal  # noqa: E402
 
 # This gate measures anchor resolution's semantic stage, which only the anchors compile runs.
 pytestmark = [pytest.mark.embeddings, pytest.mark.timeout(3600), pytest.mark.usefixtures("anchors_packet")]
@@ -113,6 +125,12 @@ class Measured:
     dim: int
     incidental: dict[str, dict[str, dict]]
     incidental_carry: dict[str, tuple[str, ...]]
+    #: Each case's `turn_slice` from the maps packet, semantic evidence on.
+    slices: dict[str, dict]
+    #: The same slices from the full anchors compile, which the shipped leads-only compile must equal.
+    full_slices: dict[str, dict]
+    #: The maps packet's time with the slice on minus off, one value per pair (`_slice_added_ms`).
+    slice_added_ms: list[float]
 
 
 _MEASURED: dict[str, Measured] = {}
@@ -147,6 +165,54 @@ def _compile_arms(root: Path, turns: list[tuple[str, str, str]], monkeypatch) ->
             )
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     return packets
+
+
+def _turn_slices(
+    root: Path, turns: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Each turn's `turn_slice` from the maps packet with the slice on, the
+    encoder loaded, and the catalogue the maps packet reads published first:
+    as shipped, and from the full anchors compile."""
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    context_catalogue.ContextCatalogue(root).rebuild()
+    slices: dict[str, dict] = {}
+    full_slices: dict[str, dict] = {}
+    with monkeypatch.context() as scope:
+        scope.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+        scope.delenv("EXOMEM_ACTIVATION_TURN_SLICE", raising=False)
+        scope.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        for case_id, turn in turns:
+            working_set_runtime.reset_caches_for_tests()
+            slices[case_id] = commands.op_activate_context(root, turn=turn)["turn_slice"]
+        full_compile_slices(scope)
+        for case_id, turn in turns:
+            working_set_runtime.reset_caches_for_tests()
+            full_slices[case_id] = commands.op_activate_context(root, turn=turn)["turn_slice"]
+    return slices, full_slices
+
+
+def _slice_added_ms(root: Path, turns: list[str], monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The latency gate's paired measurement with the encoder loaded, where the slice's compile also
+    encodes the turn: for the owner, each turn's maps packet with the slice off and on, each from a cold
+    packet cache, in an order that alternates by pass so drift cancels. `LATENCY_PASSES` pairs per turn."""
+    differences: list[float] = []
+    with monkeypatch.context() as scope, principal.request_scope(principal.owner_principal(surface="library")):
+        scope.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+        scope.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        for setting in ("off", "on"):
+            scope.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+            commands.op_activate_context(root, turn=turns[0])  # warm each path once
+        for index in range(LATENCY_PASSES):
+            for turn in turns:
+                total: dict[str, float] = {}
+                for setting in ("off", "on") if index % 2 == 0 else ("on", "off"):
+                    scope.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+                    working_set_runtime.reset_caches_for_tests(packets_only=True)
+                    packet = commands.op_activate_context(root, turn=turn, include_timings=True)
+                    assert ("turn_slice" in packet) == (setting == "on"), packet.get("abstention")
+                    total[setting] = _compiler_ms(packet["timings"])
+                differences.append(total["on"] - total["off"])
+    return differences
 
 
 def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
@@ -190,6 +256,9 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             working_set_runtime.reset_caches_for_tests()
             packet = commands.op_activate_context(root, turn=case.turn, include_timings=True)
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
+
+    slices, full_slices = _turn_slices(root, [(case.case_id, case.turn) for case in CASES], monkeypatch)
+    slice_added_ms = _slice_added_ms(root, [case.turn for case in CASES], monkeypatch)
 
     # The same vault with an ordinary note beside each named gold that shares
     # a phrase with its turn, so the retrieval carry names that note instead.
@@ -259,6 +328,9 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
         dim,
         incidental,
         incidental_carry,
+        slices,
+        full_slices,
+        slice_added_ms,
     )
 
 
@@ -408,6 +480,23 @@ def test_the_semantic_stage_meets_its_latency_bar(measured: Measured) -> None:
     assert p95 <= SEMANTIC_STAGE_P95_MS, (p95, ordered[-5:])
 
 
+def test_the_turn_slice_adds_a_bounded_paired_cost_with_the_encoder_loaded(measured: Measured) -> None:
+    """The latency gate's bound on what the slice adds, on these turns with the real encoder loaded: the
+    upper end of the median paired difference's 95% interval is at most `SLICE_ADDED_MS_CEILING`. The
+    target is reported, never asserted."""
+    differences = measured.slice_added_ms
+    low, high = _paired_median_interval(differences)
+    report = {
+        "pairs": len(differences),
+        "median_added_ms": round(statistics.median(differences), 1),
+        "ci95_added_ms": [round(low, 1), round(high, 1)],
+        "target_ms": SLICE_ADDED_MS_TARGET,
+        "within_target": high <= SLICE_ADDED_MS_TARGET,
+    }
+    print("turn slice paired latency, encoder loaded " + json.dumps(report, sort_keys=True))
+    assert high <= SLICE_ADDED_MS_CEILING, report
+
+
 def test_the_english_set_keeps_its_v1_verdicts_with_semantic_evidence_on(measured: Measured) -> None:
     """The E-arm: the 18 English fixtures, semantic on against semantic off,
     with the band actually running. No case's v1 verdict moves, no gold is
@@ -464,3 +553,54 @@ def test_a_bare_shared_first_name_is_ambiguous_with_and_without_the_band(measure
         ref_to_path = {item["ref"]: item["path"] for item in packet["anchors"]}
         senses = {ref_to_path.get(item["ref"], item["ref"]) for item in packet["ambiguity"]}
         assert senses == gold, (senses, gold)
+
+
+#: How a lead was reached, from the packet's own closed set, for the leads that
+#: the harness counts as the turn activating a page (`_surfaced`): a resolved
+#: anchor or an ambiguity sense. The slice also lists weaker leads (`partial`,
+#: `named`, `related`), which it labels as not checked for relevance.
+_ACTIVATING_MATCHES = frozenset({"resolved", "ambiguous"})
+
+
+def _slice_leads(measured: Measured, case_id: str) -> dict[str, dict]:
+    block = measured.slices[case_id]
+    assert block["state"] in ("ready", "empty"), (case_id, block)
+    return {item["ref"]: item for item in block["items"]}
+
+
+def test_every_named_positive_gold_is_a_resolved_turn_slice_lead(measured: Measured) -> None:
+    """The maps packet's slice lists what the anchors packet resolves: the rare
+    name plus the band reaches the gold, so the gold leads its slice."""
+    for case in CASES:
+        if case.case_id not in NAMED_GOLDS:
+            continue
+        (gold,) = (measured.manifest.key_to_path[key] for key in case.gold)
+        lead = _slice_leads(measured, case.case_id).get(gold)
+        assert lead is not None and lead["match"] == "resolved", (case.case_id, measured.slices[case.case_id])
+
+
+def test_no_twin_or_guarded_page_is_an_unsound_turn_slice_lead(measured: Measured) -> None:
+    """A twin activates nothing beyond its own gold, and a page the case guards
+    (poison, or never resolved) is never a resolved, ambiguous or carried lead
+    nor reached by the band. A guarded page that the turn names by its title may
+    still appear as a `named` lead: that lead is labelled as unchecked, and the
+    anchors packet serves the same page the same way."""
+    for case in CASES:
+        leads = _slice_leads(measured, case.case_id)
+        own_gold = {measured.manifest.key_to_path[key] for key in case.gold}
+        guarded = {measured.manifest.key_to_path[key] for key in (*case.poison, *case.never_resolved)}
+        if case.kind in TWIN_OF:
+            activated = {ref for ref, item in leads.items() if item["match"] in _ACTIVATING_MATCHES}
+            assert activated <= own_gold, (case.case_id, activated - own_gold)
+        for ref in guarded & set(leads):
+            item = leads[ref]
+            assert item["match"] not in (*_ACTIVATING_MATCHES, "carried"), (case.case_id, item)
+            assert "vector_band" not in item["evidence"], (case.case_id, item)
+
+
+def test_every_case_gets_the_full_compiles_slice_from_the_leads_only_compile(measured: Measured) -> None:
+    """The slice skips the lanes whose material it never serves: each planted case's leads, their match and
+    evidence, and the slice's state are the ones the full anchors compile gives with the encoder loaded."""
+    assert set(measured.full_slices) == set(measured.slices)
+    for case_id, block in measured.slices.items():
+        assert block == measured.full_slices[case_id], case_id

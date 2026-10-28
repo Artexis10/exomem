@@ -17,10 +17,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -189,6 +191,201 @@ def merge_evidence(source: Path, destination: Path) -> None:
             shutil.copyfile(path, target)
 
 
+def download_artifact(artifact: dict, repository: str, directory: Path) -> None:
+    """Download an immutable artifact ID, never a name shared by run attempts."""
+    with tempfile.TemporaryDirectory() as temporary:
+        archive = Path(temporary) / "artifact.zip"
+        with archive.open("wb") as output:
+            subprocess.run(
+                ["gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],
+                stdout=output,
+                check=True,
+            )
+        if artifact.get("digest") and artifact["digest"] != "sha256:" + sha256(archive):
+            raise ValueError("immutable producer artifact digest differs")
+        shutil.unpack_archive(archive, directory, format="zip")
+
+
+def qualify_python(
+    tag: str,
+    source: str,
+    run_id: str,
+    attempt: str,
+    directory: Path,
+    *,
+    verification_attempt: str | None = None,
+) -> dict:
+    """Qualify official Python bytes without waiting for unrelated image jobs."""
+    run_id = _run_number(run_id, label="producer run")
+    attempt = _run_number(attempt, label="producer attempt")
+    verification_attempt = _run_number(verification_attempt or attempt, label="verification attempt")
+    repository = os.environ["GITHUB_REPOSITORY"]
+    if run("git", "rev-parse", f"{tag}^{{commit}}") != source:
+        raise ValueError("tag source differs from the requested source")
+    package = project(tag)
+    if Version(package["version"]) != Version(tag.removeprefix("v")):
+        raise ValueError("package version differs from release tag")
+    identities = {}
+    jobs = {}
+    for selected_attempt in dict.fromkeys((attempt, verification_attempt)):
+        identity = json.loads(
+            run("gh", "api", f"repos/{repository}/actions/runs/{run_id}/attempts/{selected_attempt}")
+        )
+        # These fields bind the fixed publisher workflow and tag invocation protocol.
+        expected = {
+            "id": int(run_id),
+            "run_attempt": int(selected_attempt),
+            "head_sha": source,
+            "head_branch": tag,
+            "event": "workflow_dispatch",
+            "path": ".github/workflows/release-please.yml",
+        }
+        if (
+            any(identity.get(key) != value for key, value in expected.items())
+            or identity.get("repository", {}).get("full_name") != repository
+            or identity.get("head_repository", {}).get("full_name") != repository
+        ):
+            raise ValueError("publisher producer identity differs from the requested release")
+        identities[selected_attempt] = identity
+        jobs[selected_attempt] = [
+            job
+            for page in json.loads(
+                run(
+                    "gh",
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{repository}/actions/runs/{run_id}/attempts/{selected_attempt}/jobs?per_page=30",
+                )
+            )
+            for job in page["jobs"]
+        ]
+    # These are the two Python producer jobs in the publisher's closed job protocol.
+    builds = [
+        job
+        for job in jobs[attempt]
+        if job["name"] == "build-artifacts" and job["conclusion"] == "success"
+    ]
+    publications = [job for job in jobs[verification_attempt] if job["name"] == "publish-pypi"]
+    if (
+        len(builds) != 1
+        or len(publications) != 1
+        or publications[0]["conclusion"] not in ("success", "skipped")
+    ):
+        raise ValueError("Python producer jobs did not complete successfully")
+    build = builds[0]
+    # GitHub copies successful jobs into retries while retaining their original execution times.
+    if datetime.fromisoformat(build["started_at"]) < datetime.fromisoformat(
+        identities[attempt]["run_started_at"]
+    ):
+        raise ValueError(
+            "Python build predates the requested producer attempt; pass its original attempt"
+        )
+    # This successful upload step excludes dry runs, including historical artifact names.
+    if not any(
+        step["name"] == "Upload missing artifacts to the GitHub release"
+        and step["conclusion"] == "success"
+        for step in build["steps"]
+    ):
+        raise ValueError("producer did not upload official release artifacts")
+    artifacts = [
+        artifact
+        for page in json.loads(
+            run(
+                "gh",
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100",
+            )
+        )
+        for artifact in page["artifacts"]
+        if artifact["name"] == "python-distributions"
+        and not artifact["expired"]
+        and artifact.get("workflow_run", {}).get("id") == int(run_id)
+        and artifact.get("workflow_run", {}).get("head_sha") == source
+        and build["started_at"] <= artifact["created_at"] <= build["completed_at"]
+    ]
+    if len(artifacts) != 1:
+        raise ValueError("exact Python producer artifact is unavailable or ambiguous")
+    artifact = artifacts[0]
+    with tempfile.TemporaryDirectory(prefix="qualify-python-", dir=directory) as temporary:
+        root = Path(temporary)
+        original = root / "producer"
+        download_artifact(artifact, repository, original)
+        files = [
+            path
+            for path in original.iterdir()
+            if distribution_kind(path.name, package["name"], package["version"])
+        ]
+        names = {path.name for path in files}
+        official_names = {
+            asset["name"]
+            for asset in release_assets(tag)
+            if distribution_kind(asset["name"], package["name"], package["version"])
+        }
+        if (
+            not distributions_complete(names, package["name"], package["version"])
+            or official_names != names
+        ):
+            raise ValueError("official GitHub distributions differ from the complete producer set")
+        official = root / "github"
+        download_release(tag, sorted(names), official)
+        if any(sha256(path) != sha256(official / path.name) for path in files):
+            raise ValueError("immutable distribution differs between producer and GitHub")
+        for observation in range(6):
+            urls = [
+                row
+                for row in pypi_files(package["name"], package["version"])
+                if distribution_kind(row["filename"], package["name"], package["version"])
+            ]
+            missing = missing_distributions(files, urls)
+            if not missing:
+                break
+            if observation == 5:
+                raise ValueError(
+                    "official PyPI distributions remain missing after bounded observation"
+                )
+            time.sleep(10)
+        if {row["filename"] for row in urls} != names:
+            raise ValueError("official PyPI filenames differ from the producer set")
+        for row in urls:
+            target = root / row["filename"]
+            with (
+                urllib.request.urlopen(row["url"], timeout=30) as response,
+                target.open("wb") as output,
+            ):
+                shutil.copyfileobj(response, output)
+            if sha256(target) != row["digests"]["sha256"]:
+                raise ValueError(f"immutable distribution differs: {target.name}")
+        return {
+            "tag": tag,
+            "source_commit": source,
+            "producer": {
+                "repository": repository,
+                "run_id": run_id,
+                "run_attempt": attempt,
+                "artifact_id": artifact["id"],
+            },
+            "verification": {
+                "repository": repository,
+                "run_id": run_id,
+                "run_attempt": verification_attempt,
+            },
+            "distributions": [
+                {"filename": path.name, "sha256": sha256(path)} for path in sorted(files)
+            ],
+            "python": {
+                "state": "qualified",
+                "observed_at": datetime.now(UTC).isoformat(),
+                "source": "exact producer artifact and official GitHub/PyPI bytes",
+            },
+            "source_readiness": {"state": "unverified", "observed_at": None},
+            "images": {"state": "unqualified", "reason": "independent image publication"},
+            "consumer_verification": {"state": "unverified", "observed_at": None},
+        }
+
+
 def producer_artifacts(
     tag: str,
     commit: str,
@@ -257,20 +454,8 @@ def producer_artifacts(
                         if not publication:
                             continue
                     with tempfile.TemporaryDirectory() as temporary:
-                        archive = Path(temporary) / "artifact.zip"
                         source = Path(temporary) / "files"
-                        # Download the selected immutable artifact ID; a rerun may reuse its name.
-                        with archive.open("wb") as output:
-                            subprocess.run(
-                                [
-                                    "gh",
-                                    "api",
-                                    f"repos/{repository}/actions/artifacts/{artifact['id']}/zip",
-                                ],
-                                stdout=output,
-                                check=True,
-                            )
-                        shutil.unpack_archive(archive, source, format="zip")
+                        download_artifact(artifact, repository, source)
                         if package is not None:
                             files = [
                                 p
@@ -742,6 +927,7 @@ def main() -> None:
             "cloud",
             "upload",
             "pypi",
+            "qualify-python",
             "images",
             "finish-images",
             "join-image",
@@ -751,9 +937,29 @@ def main() -> None:
     parser.add_argument("--directory", type=Path, default=Path("dist"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--image", help="Image role from the publication plan to join")
+    parser.add_argument("--source", help="Exact release source commit for Python qualification")
+    parser.add_argument("--run-id", help="Exact publisher run for Python qualification")
+    parser.add_argument("--attempt", help="Original Python build attempt in the publisher run")
+    parser.add_argument(
+        "--verification-attempt",
+        help="Publisher attempt checking Python publication; defaults to the original attempt",
+    )
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
-    if args.command == "assets":
+    if args.command == "qualify-python":
+        if args.dry_run or not all((args.source, args.run_id, args.attempt)):
+            parser.error("qualify-python requires --source, --run-id and --attempt, without --dry-run")
+        receipt = qualify_python(
+            args.tag, args.source, args.run_id, args.attempt, args.directory,
+            verification_attempt=args.verification_attempt,
+        )
+        path = args.directory / "python-qualification.json"
+        path.write_text(json.dumps(receipt, indent=2) + "\n")
+        print(json.dumps(receipt))
+        if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(summary, "a") as output:
+                output.write("### Python qualification\n\n```json\n" + json.dumps(receipt, indent=2) + "\n```\n")
+    elif args.command == "assets":
         print(
             json.dumps(
                 {"assets": "dry run", "pypi": "dry run"} if args.dry_run else asset_status(args.tag)

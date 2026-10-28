@@ -20,15 +20,16 @@ Every document carries `governance_version: 1` and an immutable `id`
 error — the last known-good policy stays in effect until it's fixed. An
 unrecognized file under this folder is ignored with a warning, not an error.
 
-Use `govern_memory` to inspect, propose, review, commit, suspend, resume, or undo
-policy. On an enrolled vault these YAML files are pending source until a reviewed
+Use `read_governance` to inspect policy and `change_governance` to propose,
+review, commit, suspend, resume, or undo policy. REST and CLI retain the grouped
+`govern_memory` command. On an enrolled vault these YAML files are pending source until a reviewed
 commit activates one immutable policy/projector/catalog tuple; a direct edit does
 not silently replace the active tuple.
 
 This tree and Exomem's internal governance state, including
 `Knowledge Base/.governance.sqlite` and its transactional siblings, are reserved.
 Generic file, dataset, media, transfer, and download commands intentionally hide
-or refuse them. A `RESERVED_PATH` response means to use `govern_memory`, not to
+or refuse them. A `RESERVED_PATH` response means to use the governance tools, not to
 retry through an alias, link, alternate spelling, or direct file operation.
 
 Before first enrollment, an absent folder or empty document set means governance

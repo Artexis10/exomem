@@ -12,10 +12,10 @@ the server rather than fixed in a table.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,7 +53,6 @@ from membench.utility.switch_eval.state import (
 
 from .cases import Case
 from .score import compact_calls
-from .vault import read_end_state
 
 #: The tool shapes the server still serves (design, D8); ``grouped`` is the baseline.
 SHAPES: tuple[str, ...] = ("grouped", "nested")
@@ -116,6 +115,8 @@ def arm_files(layout: Layout, spec: ArmSpec, *, budget: int = CALL_BUDGET) -> Ar
         budget=budget,
     )
     entry["env"] = {**entry["env"], **shape_env(spec.arm_id)}
+    # The adapter adds canonical snapshots to the existing tap; its transport stays shared.
+    entry["args"] = ["-m", "membench.utility.tool_selection.recorder", *entry["args"][1:]]
     return ArmFiles(
         mcp_config=base / "mcp.json",
         instructions=base / "instructions.md",
@@ -132,6 +133,7 @@ def probe_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec, tool_search:
 
     env = session_env(parent, slot, spec)
     env["ENABLE_TOOL_SEARCH"] = tool_search
+    env["PYTHONPATH"] = os.pathsep.join((str(REPO_ROOT / "src"), str(REPO_ROOT / "benchmarks")))
     return env
 
 
@@ -177,7 +179,7 @@ def seeding_env(parent: Mapping[str, str], scratch: Slot, spec: ArmSpec) -> dict
     """The environment of a seeding child: every product location pinned in scratch."""
 
     env = session_env(parent, scratch, spec)
-    env["PYTHONPATH"] = str(REPO_ROOT / "benchmarks")
+    env["PYTHONPATH"] = os.pathsep.join((str(REPO_ROOT / "src"), str(REPO_ROOT / "benchmarks")))
     return env
 
 
@@ -191,12 +193,17 @@ def seed_case(run: Path, case: Case, *, parent_env: Mapping[str, str], spec: Arm
     record = run / "seeded" / f"{case.case_id}.json"
     if record.exists():
         known = json.loads(record.read_text(encoding="utf-8"))
+        if known.get("source_digest") != sha256_text(canonical_json(case.as_dict())):
+            raise StateError(f"the source facts of {case.case_id} changed since seeding")
         if tree_digest(target / "vault") != known["digest"]:
             raise StateError(f"the seeded vault of {case.case_id} changed since it was seeded")
+        if tree_digest(target / "state") != known.get("state_digest", tree_digest(target / "state")):
+            raise StateError(f"the seeded machine state of {case.case_id} changed since it was seeded")
         return known
     target.mkdir(parents=True, exist_ok=False)
-    with tempfile.TemporaryDirectory(prefix="tool-selection-seed-", dir=run) as scratch_name:
-        scratch = Slot(Path(scratch_name))
+    scratch = Slot(run / "slot")
+    scratch.wipe()
+    try:
         for path in (scratch.runtime, scratch.cwd, scratch.hook_home, scratch.state):
             path.mkdir(parents=True)
         completed = subprocess.run(  # noqa: S603 - the harness's own interpreter and module
@@ -208,7 +215,8 @@ def seed_case(run: Path, case: Case, *, parent_env: Mapping[str, str], spec: Arm
                 "--case-json",
                 json.dumps(case.as_dict()),
                 "--out",
-                str(target / "vault"),
+                str(scratch.vault),
+                "--snapshot-out", str(target / "admitted-state.json"),
             ],
             env=seeding_env(parent_env, scratch, spec),
             capture_output=True,
@@ -216,9 +224,21 @@ def seed_case(run: Path, case: Case, *, parent_env: Mapping[str, str], spec: Arm
             check=False,
             timeout=600,
         )
+        (target / "seed.stdout").write_text(completed.stdout, encoding="utf-8")
+        (target / "seed.stderr").write_text(completed.stderr, encoding="utf-8")
+        if completed.returncode == 0:
+            shutil.copytree(scratch.vault, target / "vault", symlinks=True)
+            shutil.copytree(scratch.state, target / "state", symlinks=True)
+    finally:
+        scratch.wipe()
     if completed.returncode != 0:
         raise StateError(f"seeding {case.case_id} failed: {completed.stderr.strip()[-600:]}")
-    seeded = {"case_id": case.case_id, "digest": tree_digest(target / "vault")}
+    from exomem.governance.principal import OWNER_AUDIENCE
+
+    seeded = {"case_id": case.case_id, "digest": tree_digest(target / "vault"),
+              "state_digest": tree_digest(target / "state"),
+              "source_digest": sha256_text(canonical_json(case.as_dict())),
+              "principal": OWNER_AUDIENCE, "stable_vault_path": str(run / "slot" / "vault")}
     record.write_text(json.dumps(seeded, indent=2, sort_keys=True), encoding="utf-8")
     return seeded
 
@@ -355,15 +375,22 @@ class ToolSelectionExecutor(ClaudeSessionExecutor):
         slot = Slot(self.layout.slot)
         try:
             self._prepare_slot(slot, case)
-            before = read_end_state(slot.vault)
+            before = snapshot_slot(slot, inputs.env, attempt_dir / "before-readiness.json")
             try:
                 result = self.execute_prepared(inputs, attempt_dir, slot)
             finally:
                 _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
-            after = read_end_state(slot.vault)
+            after = snapshot_slot(slot, inputs.env, attempt_dir / "after-stop.json")
+            events = _read_jsonl(attempt_dir / "runtime" / "tap.jsonl")
+            ready = next((event.get("canonical_state") for event in events
+                          if event.get("event") == "ready_finished"), None)
+            if ready is not None:
+                before = ready
+            elif case.template_id == "source-derived":
+                before.setdefault("unknown", []).append({"stage": "post-readiness baseline missing"})
             session_facts(
                 result=result,
-                tap_events=_read_jsonl(attempt_dir / "runtime" / "tap.jsonl"),
+                tap_events=events,
                 before=before,
                 after=after,
                 tool_search=self.tool_search,
@@ -381,4 +408,20 @@ class ToolSelectionExecutor(ClaudeSessionExecutor):
             path.mkdir(parents=True)
         seeded = self.layout.run / "seeded" / case.case_id / "vault"
         shutil.copytree(seeded, slot.vault, symlinks=True)
+        state = seeded.parent / "state"
+        if state.exists():
+            shutil.copytree(state, slot.state, symlinks=True, dirs_exist_ok=True)
+
+
+def snapshot_slot(slot: Slot, env: Mapping[str, str], out: Path) -> dict:
+    """Read canonical state under the exact slot environment after the owned server stops."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [sys.executable, "-m", "membench.utility.tool_selection", "snapshot-vault",
+         "--vault", str(slot.vault), "--out", str(out)],
+        env=dict(env), capture_output=True, text=True, check=False, timeout=60,
+    )
+    if completed.returncode:
+        raise StateError(f"canonical snapshot failed: {completed.stderr[-600:]}")
+    return json.loads(out.read_text(encoding="utf-8"))
 

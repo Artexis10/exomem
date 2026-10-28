@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import capabilities
 from exomem.governance import authorization_sessions, egress, scrubber
 
 
@@ -1089,6 +1090,9 @@ def test_alias_boot_assertion_runs_at_commands_import() -> None:
 
 ADOPTION_RUN_ID = "20260101-governed-vault-aaaaaaaa"
 ADOPTION_WITHHELD = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+ADOPTION_SURFACE = capabilities.ActiveSurfaceDescriptor(
+    surface="mcp", profile="product", tier2_enabled=False, product_commands=(),
+)
 
 
 def _govern_patterns_shut(vault: Path) -> None:
@@ -1147,7 +1151,7 @@ def _seed_adoption_run(vault: Path, *, run_ref: str) -> None:
     )
 
 
-def _read_adoption_resource(vault: Path, uri: str) -> str:
+def _read_import_resource(vault: Path, uri: str) -> str:
     """Drive the REAL registered handler through FastMCP's resource reader."""
     import asyncio
 
@@ -1156,7 +1160,7 @@ def _read_adoption_resource(vault: Path, uri: str) -> str:
     from exomem import server as server_module
 
     mcp = FastMCP("test-adoption")
-    server_module.register_adoption_mcp(mcp, vault_root=vault)
+    server_module.register_adoption_mcp(mcp, vault_root=vault, surface_descriptor=ADOPTION_SURFACE)
     result = asyncio.run(mcp.read_resource(uri))
     blocks = [
         getattr(block, "content", None) or getattr(block, "text", "")
@@ -1201,7 +1205,7 @@ def test_adoption_run_resource_withholds_a_governed_path(
     _as_external_connector_client(monkeypatch)
     _govern_patterns_shut(vault)
     _seed_adoption_run(vault, run_ref="exomem://adoption/run/x")
-    payload = _read_adoption_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
+    payload = _read_import_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
     assert ADOPTION_WITHHELD not in payload
 
 
@@ -1210,7 +1214,7 @@ def test_adoption_run_resource_still_serves_the_owner(vault: Path) -> None:
     resolves to the owner and still sees its own run."""
     _govern_patterns_shut(vault)
     _seed_adoption_run(vault, run_ref="exomem://adoption/run/x")
-    payload = _read_adoption_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
+    payload = _read_import_resource(vault, f"exomem://adoption/run/{ADOPTION_RUN_ID}")
     assert ADOPTION_WITHHELD in payload
 
 
@@ -1220,7 +1224,7 @@ def test_adoption_runs_collection_resource_is_gated(
     """The collection resource is scrubbed too — same handler class."""
     _as_external_connector_client(monkeypatch)
     _seed_adoption_run(vault, run_ref=f"ref {AWS_KEY}")
-    payload = _read_adoption_resource(vault, "exomem://adoption/runs")
+    payload = _read_import_resource(vault, "exomem://adoption/runs")
     assert AWS_KEY not in payload
     assert scrubber.NOTICE in payload
 
@@ -1239,7 +1243,7 @@ def test_continue_adoption_prompt_is_gated(
     _as_external_connector_client(monkeypatch)
     _seed_adoption_run(vault, run_ref=f"ref {AWS_KEY}")
     mcp = FastMCP("test-adoption-prompt")
-    server_module.register_adoption_mcp(mcp, vault_root=vault)
+    server_module.register_adoption_mcp(mcp, vault_root=vault, surface_descriptor=ADOPTION_SURFACE)
     rendered = asyncio.run(mcp.render_prompt("continue_adoption"))
     text = json.dumps(
         [getattr(m.content, "text", "") for m in rendered.messages], default=str
@@ -1380,7 +1384,7 @@ def test_continue_adoption_prompt_redacts_a_withheld_reference(
         run_ref=f"{ADOPTION_WITHHELD} and [[kill-switch-for-risky-releases]]",
     )
     mcp = FastMCP("test-adoption-n3")
-    server_module.register_adoption_mcp(mcp, vault_root=vault)
+    server_module.register_adoption_mcp(mcp, vault_root=vault, surface_descriptor=ADOPTION_SURFACE)
     rendered = asyncio.run(mcp.render_prompt("continue_adoption"))
     text = json.dumps(
         [getattr(m.content, "text", "") for m in rendered.messages], default=str
@@ -1406,7 +1410,7 @@ def test_continue_adoption_prompt_keeps_permitted_references(
     _govern_patterns_shut(vault)
     _seed_adoption_run(vault, run_ref=permitted)
     mcp = FastMCP("test-adoption-n3-keep")
-    server_module.register_adoption_mcp(mcp, vault_root=vault)
+    server_module.register_adoption_mcp(mcp, vault_root=vault, surface_descriptor=ADOPTION_SURFACE)
     rendered = asyncio.run(mcp.render_prompt("continue_adoption"))
     text = json.dumps(
         [getattr(m.content, "text", "") for m in rendered.messages], default=str

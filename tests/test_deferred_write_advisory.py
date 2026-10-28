@@ -9,14 +9,15 @@ terminal handoff is faked, and it is faked through Lane 1's own committed
 from __future__ import annotations
 
 import hashlib
-from types import SimpleNamespace
 import importlib
 import importlib.util
 import inspect
 import json
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -869,12 +870,19 @@ def test_write_advisory_result_mode_has_mcp_rest_cli_surface_parity(vault: Path)
             encoding="utf-8"
         )
     )
-    assert "write-advisory-result" in schemas["review_memory"]["inputSchema"]["properties"]["mode"][
-        "description"
-    ]
-    assert "write-advisory-result" in schemas["review_memory"]["inputSchema"]["properties"]["ref"][
-        "description"
-    ]
+    from jsonschema import ValidationError, validate
+
+    from exomem.operation_entries import spell_call
+
+    name, arguments = spell_call(
+        "review_memory", {"mode": "write-advisory-result", "ref": "advisory-ref"}, "nested"
+    )
+    assert name == "read_review"
+    assert arguments == {"operation": {"kind": "write-advisory-result", "ref": "advisory-ref"}}
+    schema = schemas[name]["inputSchema"]
+    validate(arguments, schema)
+    with pytest.raises(ValidationError):
+        validate({"operation": {"kind": "write-advisory-result"}}, schema)
 
 
 # ---------------------------------------------------------------------------
@@ -1528,3 +1536,57 @@ def test_restarted_advisory_rejects_token_truncated_published_generation(vault, 
     execution = _run(vault)[0]
     assert execution.completed and execution.state == "failed"
     assert execution.failure_code == "embedding_unavailable"
+
+
+def _drain_with_dispatcher(vault: Path, *, now: float) -> int:
+    from exomem import derived_drain
+
+    return derived_drain.drain_once(
+        vault,
+        dispatch=derived_drain.component_dispatcher(),
+        observe_current_generation=_observer("generation-1"),
+        visibility_publisher=lambda _root, _receipt: True,
+        limit=8,
+        now=now,
+    )
+
+
+def test_drain_settles_an_advisory_whose_result_outlived_its_window(
+    vault: Path, encoder: _DeterministicEncoder
+) -> None:
+    target = _seed_page(vault, "lapsed-target", "Advisory that nothing ran in time.")
+    receipt, _fingerprint = _prepare_custody(
+        vault,
+        batch_id="b-lapsed",
+        target_rel=target,
+        terminal_replay_until=100.0,
+        advisory_retention_until=100.0,
+    )
+
+    assert _drain_with_dispatcher(vault, now=5_000.0) >= 1
+
+    status = derived_receipts.component_status(
+        vault, receipt, derived_receipts.DerivedComponent.WRITE_ADVISORY
+    )
+    assert (status.state, status.attempt_count) == ("not_required", 0)
+    assert derived_receipts._load_receipt(vault, receipt.batch_id).state == "completed"
+    assert encoder.calls == []
+
+
+def test_drain_still_publishes_an_advisory_inside_its_window(
+    vault: Path, encoder: _DeterministicEncoder
+) -> None:
+    target = _seed_page(vault, "live-target", "Advisory that runs in time.")
+    receipt, _fingerprint = _prepare_custody(vault, batch_id="b-live", target_rel=target)
+
+    # Publication reads the wall clock, so the claim lease must be on it too.
+    assert _drain_with_dispatcher(vault, now=time.time()) >= 1
+
+    status = derived_receipts.component_status(
+        vault, receipt, derived_receipts.DerivedComponent.WRITE_ADVISORY
+    )
+    assert status.state == "completed"
+    result = derived_receipts.read_advisory_result(
+        vault, derived_receipts.advisory_result_ref(vault, receipt), now=30.0
+    )
+    assert result is not None and result.state in {"ready", "failed"}

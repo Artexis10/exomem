@@ -6,7 +6,7 @@ routine work.
 
 When a configured confidential scope or a reserved withhold notice applies, the
 assistant interprets the user's natural-language request and proposes the matching
-`govern_memory` operation. Exomem deterministically validates the principal,
+`governance tools` operation. Exomem deterministically validates the principal,
 session, scope, token, and policy before changing or releasing anything.
 
 ## Lifecycle
@@ -26,8 +26,7 @@ policy allows.
 
 An authorization session is an opaque, policy-bound capability for one verified
 principal. It is separate from a connector login or transport session. Create it
-with `govern_memory(operation="session", session_action="open",
-ttl_seconds=...)` only when no authorization-session credential is already
+with `manage_authorization_session(operation={'kind': 'open', 'session_action': 'open', 'ttl_seconds': ...})` only when no authorization-session credential is already
 present. A successful open returns `issued_credential.bearer` exactly once.
 Keep that bearer in protected client memory; never save it in the vault, a note,
 a prompt, logs, shell history, or an environment variable.
@@ -57,7 +56,7 @@ a handle cannot restore it.
 `_Governance/**` and Exomem's internal state files, including
 `Knowledge Base/.governance.sqlite` and its transactional siblings, are reserved
 administration state. Generic browse, read, move, delete, transfer, dataset, and
-media commands intentionally hide or refuse them. Use `govern_memory` for policy
+media commands intentionally hide or refuse them. Use `governance tools` for policy
 inspection and lifecycle changes; do not retry a reserved-path refusal with a
 different spelling, alias, link, or filesystem command.
 
@@ -83,29 +82,29 @@ lowercase slug), and `bridge_review` (an ISO review date). Exomem normalizes the
 dependencies to stable refs and binds the fields into the reviewed draft.
 
 The draft is not authorization. Releasing it to an audience requires a separate
-owner-reviewed `govern_memory` proposal and commit whose release grant binds the
+owner-reviewed `governance tools` proposal and commit whose release grant binds the
 exact bridge bytes, audience, source snapshots, relevant restrictions, and
 provenance-strip targets. Editing the bridge or a dependency makes that approval
 stale until a fresh exact approval is reviewed. A due review appears in the
 ordinary review queue; dismissing or snoozing that item never renews approval.
 
-## review_memory mode notes
+## read_review/triage_memory mode notes
 
-Read-only. Repairs belong to `maintain_memory`.
+Read-only. Repairs belong to `check_memory/repair_memory`.
 
 - **write-advisory-result**: resolves exactly one opaque `exomem://write-advisory-result/<id>` (from a committed write; `ref` required) and reports only that job's state: `pending`, `ready`, `failed` or `superseded`. There is no list, browse, search, rank, count, continuation or implicit-current form; a malformed, unknown, unauthorized or expired reference returns the shared not-found outcome.
 - **item**: `ref` is a stable `exomem://review/<id>`; an `exomem://review/upkeep/<id>` ref revalidates that one upkeep item.
 - **plan-progress**: for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; derived, read-only, scores nothing.
 - **dispositions**: every signal family set to `quiet` or `off` through `triage_memory`, with reason code, why, timestamp, origin and per-family manual dismissal count. A quiet family is silent on the carriers, not clean.
-- **relation-queue**: batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters). Accept via `connect_memory(operation="accept-relation")`, reject via `triage_memory`. Link items carry a relation-queue ref and source path.
-- **adoption**: Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints). Approve via `adoption_studio(action="apply-proposal")`, dismiss via `triage_memory`.
+- **relation-queue**: batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters). Accept via `change_connections(operation={'kind': 'accept-relation'})`, reject via `triage_memory`. Link items carry a relation-queue ref and source path.
+- **adoption**: Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints). Approve via `import_memory(operation={"kind": "apply-proposal", "ref": ..., "expected_fingerprint": ..., "why": ...})`, dismiss via `triage_memory`.
 - **upkeep**: the background worker's bounded proposals (default 10), each with evidence, the governed route that would act on it, and triage verbs; a proposal authorizes nothing. `categories` filters by upkeep family.
 - **evolution**: without `path`, `query` selects the topic route and returns `{query, timelines, truncation}`; `limit` caps timelines. With `path`, one chain is returned as `{target_path, timelines, truncation}` and `limit` is unused. `chain_id` is always the active head; `topic_anchor` is the retrieval hit (topic route) or the requested page (path route).
 - **vocabulary**: `state` is `open` for actionable work or `all` for decision history; each response is a non-exhaustive bounded pass (default four items). A meaning question needs `path` (a source page for a new meaning, the existing entity page for reuse or enrichment), `query` and `family`, and creates only a review consideration with no mutation authority. A relation-candidate question uses the candidate's `source_path` with its `ref`; an edge requires `family="relation-type/v1"` and the relation-queue candidate `ref` so the decision covers both endpoints. Read its context, record the typed decision, then use the returned `application_route` with that choice.
 - **attention / activation**: `state` is open (default), all, snoozed or dismissed.
 - **audit**: `detail` is actionable or full; `legacy_sample_limit` 0 to 50.
 
-## govern_memory notes
+## governance tools notes
 
 `operation` is one of the schema enum values; `session` needs `session_action`. `ttl_seconds`, `target_ceiling` and `duration` shape a proposal (lifetime, disclosure ceiling, duration label); `grant_id`, `scope_ids` and `ceiling` describe a standing grant (`scope="standing"` only for a durable policy grant); `duration_seconds` is a session grant or purpose-declaration lifetime. After a refused write, `vocabulary-request` inspects a pending additive request by `vocabulary_request_id` and `vocabulary-status` inspects activation; approval belongs to the separate authenticated user control surface.
 

@@ -17,6 +17,7 @@ tests/test_context_activation_multilingual_product.py
 tests/test_context_activation_product_corpus.py
 tests/test_context_activation_real_compiler.py
 tests/test_context_activation_resolver_soundness.py
+tests/test_context_activation_turn_slice.py
 tests/test_continuation_checkpoint.py
 tests/test_database_bootstrap_rotation_gate.py
 tests/test_dataset_identity_case_count.py
@@ -116,6 +117,8 @@ tests/test_membench_subday.py
 tests/test_membench_switch_eval.py
 tests/test_membench_template_suite.py
 tests/test_membench_tool_selection.py
+tests/test_membench_tool_selection_canonical.py
+tests/test_membench_tool_selection_readout_completion.py
 tests/test_membench_trackc.py
 tests/test_membench_trackc_join.py
 tests/test_membench_trackd.py

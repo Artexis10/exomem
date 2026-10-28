@@ -2650,6 +2650,8 @@ class _AdmittedStatisticsEntry:
     statistics: Any
     representatives: Mapping[int, str] | None = None
     occurrences: Mapping[str, tuple[tuple[int, str, str], ...]] | None = None
+    #: Page lengths and word postings over the same rows as `statistics`; page corpora only.
+    postings: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2887,7 +2889,7 @@ def last_bm25_error_class() -> str | None:
 def search_bm25_result(
     vault_root: Path,
     query: str,
-    k: int,
+    k: int | Callable[[int], int],
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
@@ -2930,6 +2932,10 @@ def search_bm25_result(
     the scope's own document frequencies, before the MATCH is built.
     `term_selection`, when given, receives `terms_kept` and `terms_dropped`
     — counts only, never a term.
+
+    `k` may be a function of the number of pages the request admits, with a
+    `query_context`: it is applied to the count read in the ranking's own
+    snapshot, so a caller needs no second catalogue read to size the window.
     """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -8131,7 +8137,7 @@ class LexicalStore:
     def search_bm25_result(
         self,
         stemmed_tokens: list[str],
-        k: int,
+        k: int | Callable[[int], int],
         scope: str,
         freshness: tuple | None,
         allowed_paths: set[str] | None = None,
@@ -8459,8 +8465,9 @@ class LexicalStore:
 
     def _admitted_corpus_statistics(
         self, conn: sqlite3.Connection, scope: str, admitted_paths: set[str]
-    ) -> Any:
-        """Okapi figures reused only for the same snapshot or complete SQL inputs."""
+    ) -> tuple[_AdmittedStatisticsEntry, tuple]:
+        """Okapi figures reused only for the same snapshot or complete SQL inputs,
+        with the snapshot generation they were read at."""
         from . import bm25 as bm25_module
 
         owns_snapshot = not conn.in_transaction
@@ -8471,11 +8478,12 @@ class LexicalStore:
                 "\0".join(sorted(admitted_paths)).encode("utf-8", "surrogatepass"),
                 digest_size=16,
             ).hexdigest()
-            key = (scope, *self._snapshot_generation(conn), digest)
+            generation = self._snapshot_generation(conn)
+            key = (scope, *generation, digest)
             with self._term_frequency_cache_lock:
                 cached = self._admitted_statistics.get(key)
             if cached is not None:
-                return cached.statistics
+                return cached, generation
             col = "in_vault" if scope == "vault" else "in_kb"
             rows = dict(conn.execute(
                 f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
@@ -8499,16 +8507,20 @@ class LexicalStore:
                 )
 
             with self._term_frequency_cache_lock:
-                statistics = next((
-                    entry.statistics
+                retained = next((
+                    entry
                     for retained_key, entry in self._admitted_statistics.items()
                     if same_inputs(retained_key, entry)
                 ), None)
-            if statistics is None:
+            if retained is not None:
+                statistics, postings = retained.statistics, retained.postings
+            else:
                 call_spans.measure(call_spans.STATS_REBUILT)
-                statistics = bm25_module.CorpusStatistics.of({
-                    path: stemmed.split() for path, stemmed in rows.items()
-                })
+                documents = {path: stemmed.split() for path, stemmed in rows.items()}
+                statistics = bm25_module.CorpusStatistics.of(documents)
+                postings = bm25_module.CorpusPostings(
+                    {path: len(document) for path, document in documents.items()}
+                )
             with self._term_frequency_cache_lock:
                 # Equivalent snapshot aliases must not evict another admitted corpus.
                 # Recheck here because another reader can install during aggregation.
@@ -8517,10 +8529,10 @@ class LexicalStore:
                         del self._admitted_statistics[retained_key]
                 if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
                     self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
-                self._admitted_statistics[key] = _AdmittedStatisticsEntry(
-                    current_fingerprint, statistics
+                entry = self._admitted_statistics[key] = _AdmittedStatisticsEntry(
+                    current_fingerprint, statistics, postings=postings
                 )
-            return statistics
+            return entry, generation
         finally:
             if owns_snapshot:
                 conn.rollback()
@@ -8565,6 +8577,44 @@ class LexicalStore:
                 log.warning("carry ranking %s", CATALOGUE_RANKING_CONTRACT_VIOLATION)
             context.generation = generation
         return context.admitted_paths
+
+    @staticmethod
+    def _admitted_postings(
+        conn: sqlite3.Connection, entry: _AdmittedStatisticsEntry, col: str,
+        admitted_paths: set[str], words: Set[str],
+    ) -> dict[str, Mapping[str, int]] | None:
+        """The postings of `words` in the admitted corpus, counting the ones not yet
+        kept, or None when the index cannot vouch for one of them.
+
+        A page that holds a word by `str.split` holds the index tokens of that
+        word side by side, so the word's quoted MATCH returns it, unless the
+        index reads none of its characters as a token. `CorpusPostings.counted`
+        checks each count against the corpus figures, which catches that case.
+        The caller pinned the snapshot that the figures were read at.
+        """
+        postings = entry.postings
+        document_frequency = entry.statistics.document_frequency
+        # The corpus's own count answers a word no admitted page holds, so it is neither queried nor kept:
+        # kept, it would cost no slot and escape the bound.
+        held: dict[str, Mapping[str, int]] = {word: MappingProxyType({}) for word in words if not document_frequency.get(word, 0)}
+        held.update(postings.kept(words - held.keys()))
+        missing = sorted(words - held.keys())
+        if missing:
+            rows = conn.execute(
+                f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
+                "AND p.path IN (SELECT value FROM json_each(?))",
+                (
+                    " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
+                    json.dumps(sorted(admitted_paths), ensure_ascii=False),
+                ),
+            )
+            counted = postings.counted(
+                ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
+            )
+            if counted is None:
+                return None
+            held.update(counted)
+        return held
 
     def _admitted_unit_statistics(
         self, conn: sqlite3.Connection, scope: str, parents: set[str], view: _SelectedUnits,
@@ -8627,7 +8677,7 @@ class LexicalStore:
         self,
         conn: sqlite3.Connection,
         tokens: list[str],
-        k: int,
+        k: int | Callable[[int], int],
         scope: str,
         allowed_paths: set[str] | None = None,
         *,
@@ -8651,11 +8701,16 @@ class LexicalStore:
             # row nor moves a score.
             current_paths = self._request_admitted_paths(conn, query_context, scope)
             admitted_paths = None if query_context.complete else current_paths
-        admitted = (
+            if callable(k):
+                k = k(len(current_paths))
+        if callable(k):
+            raise ValueError("a row limit sized on admitted pages needs the request's query context")
+        admitted_entry, admitted_generation = (
             self._admitted_corpus_statistics(conn, scope, admitted_paths)
             if admitted_paths is not None
-            else None
+            else (None, None)
         )
+        admitted = admitted_entry.statistics if admitted_entry is not None else None
         counted = query_units
         if term_budget is not None and query_units is not None:
             from . import bm25 as bm25_module
@@ -8796,19 +8851,44 @@ class LexicalStore:
                 params[0], *params[1:corroboration_at],
                 json.dumps(sorted(admitted_paths), ensure_ascii=False), *excluded_params,
             ]
-            candidates = {
-                path: stemmed.split() for path, stemmed in conn.execute(
-                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
-                    f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause,
-                    ranking_params,
-                )
+            filters = {
+                "min_matched_terms": min_matched_terms, "term_units": term_units,
+                "corroboration_tokens": corroboration_tokens, "corroboration_groups": groups,
             }
-            call_spans.measure(call_spans.CANDIDATES, len(candidates))
-            return admitted.score(
-                candidates, tokens, k, min_matched_terms=min_matched_terms,
-                term_units=term_units, corroboration_tokens=corroboration_tokens,
-                corroboration_groups=groups,
-            )
+            ranked_rows = f"FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause
+            from .bm25 import query_words as bm25_words
+            owns_snapshot = not conn.in_transaction
+            if owns_snapshot:
+                conn.execute("BEGIN")
+            try:
+                postings = (
+                    None
+                    if admitted_entry.postings is None or self._snapshot_generation(conn) != admitted_generation
+                    else self._admitted_postings(
+                        conn, admitted_entry, col, admitted_paths,
+                        bm25_words(
+                            tokens, term_units=term_units,
+                            corroboration_tokens=corroboration_tokens, corroboration_groups=groups,
+                        ),
+                    )
+                )
+                if postings is None:
+                    # Rows newer than the corpus figures, or a word the index cannot
+                    # vouch for: score each candidate's own text.
+                    candidates = {
+                        path: stemmed.split()
+                        for path, stemmed in conn.execute("SELECT p.path, fts.stemmed " + ranked_rows, ranking_params)
+                    }
+                    call_spans.measure(call_spans.CANDIDATES, len(candidates))
+                    return admitted.score(candidates, tokens, k, **filters)
+                paths = [path for (path,) in conn.execute("SELECT p.path " + ranked_rows, ranking_params)]
+                call_spans.measure(call_spans.CANDIDATES, len(paths))
+                return admitted.score_counts(
+                    admitted_entry.postings.documents(paths, postings), tokens, k, **filters,
+                )
+            finally:
+                if owns_snapshot:
+                    conn.rollback()
         if corroborated:
             # Filtered before LIMIT so one-unit hits cannot crowd out valid
             # pages: rank every row the MATCH admits that passes the scope,
