@@ -31,7 +31,14 @@ from test_graph_handoff_convergence import (
     _titled,
 )
 
-from exomem import deferred_index, derived_receipts, epistemic_graph, freshness, index_sync
+from exomem import (
+    deferred_index,
+    derived_receipts,
+    epistemic_graph,
+    freshness,
+    graph_sync,
+    index_sync,
+)
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 REPLAYED = f"{GENERATED}/generated-note-0003.md"
@@ -292,6 +299,35 @@ def test_a_replayed_page_the_registry_does_not_vouch_for_still_rebuilds(
 
     assert "reason=caller_path_outside_delta" in caplog.text
     assert len(whole_vault_passes) == 1
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_background_replay_of_a_page_edited_since_its_drain_stops_at_queued(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The periodic reconcile's replay is background work: it queues, it does not rebuild.
+
+    The same page as above, replayed inside the join waiver the receipt-owned
+    fan-out and the watcher hold. Nobody waits on that caller for a converged
+    graph, yet it paid the whole-vault pass a library caller pays. The queued
+    receipt converges the page once the registry records its bytes.
+    """
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    (root / RETITLED).write_text(_titled("Newer Title", "moved again"), encoding="utf-8")
+
+    with graph_sync.standalone_join_waived():
+        _replay(root, [root / RETITLED])
+
+    assert whole_vault_passes == [], "a background replay rebuilt the vault"
+    assert RETITLED in deferred_index.list_graph_paths(root)
+
+    freshness.on_files_changed(root, changed=[root / RETITLED])
+    index_sync.drain_graph_work(root)
+
+    assert whole_vault_passes == []
+    assert deferred_index.list_graph_paths(root) == []
+    assert EpistemicGraphIndex(root).available() is True
     _assert_matches_a_fresh_rebuild(root)
 
 

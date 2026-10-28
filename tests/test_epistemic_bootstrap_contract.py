@@ -114,6 +114,7 @@ def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: P
         "entity-instance/v1",
         "entity-type/v1",
         "relation-type/v1",
+        "topic-carrier/v1",
     ]
     assert workflow["review_route"]["default_limit"] == 4
     assert workflow["review_route"]["route"] == {

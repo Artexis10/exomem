@@ -265,6 +265,19 @@ An activated server read request does no work whose cost grows with the vault. I
 
 A flag that reports a lag is relative to the caller's view. A vault-wide flag such as `index_stale`, `inbound: null` or an incomplete neighbourhood flips on any write, including a write to a page the caller may not see. That gives a restricted caller a one-bit write signal, which the context-activation rule withholding `freshness_key` and `index_generation` exists to prevent. Removing the flags would instead present a partial result as complete. For a restricted caller, a lag counts only when a changed path since the published generation is one the caller may see. A lag made only of withheld paths cannot change what that caller receives, so its response is complete and stays the same. The check costs the freshness delta and one release decision per changed path. A bound on the decided paths keeps that cost fixed: a longer or unbridgeable lag reports the lag undecided. A burst of withheld writes therefore still flips the flag until the structure is published. Publishers usually keep the lag far below the bound, so the remaining signal is coarse.
 
+Catalogue coverage uses the checkpoint of its retained SQL selection, including when another request publishes a newer catalogue.
+Both initial admission and finalization apply the existing caller-relative lag proof.
+The owner keeps the vault-wide flag, and invalid selected evidence always reports incomplete coverage.
+
+For deleted pages, the selection retains references to existing verdict maps that match its exact SQL generation and admission identity.
+The maps remain immutable, so another request can replace the shared cache entry without changing this selection's proof.
+Finalization builds the current release predicate outside the cached policy snapshot and checks its identity before using those retained verdicts.
+
+For a deleted path, missing verdicts, changed authority or unbridgeable history leave the lag visible.
+A failed optional metadata read discards that retention attempt; selected rows still serve.
+The selection creates no historical verdict and copies no corpus map.
+These catalogue proofs do not attest the resolver or graph, whose publication gaps remain separate work.
+
 The census overlay only adds names. With leftmost-longest matching, deleting a longer alias could expose a shorter withheld name inside it, so removals wait for a base rebuild that proves them.
 
 Published admitted sets for structured eligibility and the activation carry are a separate slice. They share one new mechanism, and a stale set could leak through ranking or rarity. The slice publishes per-caller page verdicts beside the admitted recall path set. A verdict is stored only when it depends on nothing but the page, the policy and the caller. A page in a collection placement layer is decided on every request, because a store can take over a file page there without a byte change. A page served from a published verdict records no disclosure outcome of its own. A decision made only to admit a page to the carry's rarity counts or to the structured filter's candidates is not a disclosure. When the vault has a governance policy or a collection store, the release layer records an outcome for every page that a response returns; without either, an ordinary page records none, as the `disclosure-evidence` spec requires. Serving from several processes and free-threaded CPython stay out of scope: each extra reader process duplicates the in-process caches and adds an estimated 1.3 to 2.5 GB. The per-request CPU work in `accelerate-governed-recall` section 6 continues.

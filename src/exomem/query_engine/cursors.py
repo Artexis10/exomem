@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from ..collection_store import native_identity, query_freshness
 from ..collection_store.native_projections import NativeProjectionPlan
 from ..issued_cursor import issued_cursor
+from ..structured_collections import _MAX_ITEM_KEY_BYTES
 from . import ir, typed_sql
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
@@ -36,9 +37,13 @@ class CursorCodec:
     def __init__(self, key):
         self._cipher = Fernet(key)
 
-    def mint(self, binding, *, as_of, boundary):
+    def mint(self, binding, *, as_of, boundary, pad_boundary=False):
         payload = {"v": 1, **binding, "as_of": as_of, "boundary": boundary}
-        token = self._cipher.encrypt(_json(payload).encode()).decode("ascii")
+        plain = _json(payload).encode()
+        if pad_boundary:
+            # An ordered key's length is part of its natural key; JSON ignores the trailing spaces.
+            plain += b" " * (_MAX_ITEM_KEY_BYTES - len(boundary.encode()))
+        token = self._cipher.encrypt(plain).decode("ascii")
         if len(token) > _MAX_TOKEN_BYTES:
             raise QueryError("QUERY_RESULT_TOO_LARGE")
         return issued_cursor(token)
@@ -49,7 +54,7 @@ class CursorCodec:
                 raise ValueError
             payload = json.loads(self._cipher.decrypt(token.encode("ascii")))
             if (not isinstance(payload, dict) or set(payload) != _TOKEN_KEYS or type(payload["v"]) is not int or payload["v"] != 1
-                    or not isinstance(payload["boundary"], str) or not 0 < len(payload["boundary"]) <= 128
+                    or not isinstance(payload["boundary"], str) or not 0 < len(payload["boundary"]) <= _MAX_ITEM_KEY_BYTES
                     or any(not isinstance(payload[name], str) or len(payload[name]) != 64
                            for name in ("query", "principal", "schema", "authorization", "visible", "lineage"))):
                 raise ValueError
@@ -215,8 +220,12 @@ def execute_page(session, query, *, as_of=None):
         admitted = _resume(admitted, payload)
     page = execute_rows(admitted)
     boundary_position = next(n for n, (column, _) in enumerate(admitted.compiled.order_terms) if column == "p.item_key")
+    # Only a native projection has an identity codec; typed-v1 and json-v1 layouts have none.
+    ordered = (isinstance(admitted.projection, NativeProjectionPlan)
+               and admitted.projection.layout.identity == native_identity.ORDERED)
     token = codec.mint(binding, as_of=admitted.compiled.as_of,
-                       boundary=logical_item_key(admitted, page.last_order_key[boundary_position])) if page.has_more else None
+                       boundary=logical_item_key(admitted, page.last_order_key[boundary_position]),
+                       pad_boundary=ordered) if page.has_more else None
     result = {"rows": page.rows, "returned": len(page.rows), "has_more": page.has_more,
               "next_cursor": token, "total": page.total, "as_of": admitted.compiled.as_of,
               "source": asdict(query.source), "query_version": query.version,

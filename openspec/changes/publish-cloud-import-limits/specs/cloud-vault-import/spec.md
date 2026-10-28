@@ -2,9 +2,9 @@
 
 ### Requirement: cellctl publishes the import limits it enforces
 
-cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. It SHALL publish an object for attachable storage and NULL for local storage. The object SHALL hold the keys that the C5 contract names, and each key SHALL come from one source: the value cellctl passes to the import Job, a cellctl setting, or the cell's size cap. cellctl SHALL write the column only when the object or NULL differs from the stored value, and a write SHALL NOT change the cell's generation.
+cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. It SHALL publish an object for attachable storage. Guarded local storage SHALL publish an object only with a fresh provider budget and a bound physical volume identity. Other local cells SHALL publish NULL. The object SHALL hold the keys that the C5 contract names, and each key SHALL come from one source: the value cellctl passes to the import Job, a cellctl setting, or the cell's size cap. cellctl SHALL write the column only when the object or NULL differs from the stored value, and a write SHALL NOT change the cell's generation.
 
-`max_storage_gib` SHALL be at least the cell's current size, `max(storage_gib, grown_storage_gib)`. On a cell on attachable storage, it SHALL be the larger of the configured cap and the current size. Local import growth remains unfinished. Cellctl SHALL classify storage from the actual PVC class, then the PV class, then the configured domain. It SHALL actively clear an earlier limits object on a local cell. Local cells SHALL keep legacy admission, which does not raise `storage_gib` or `grown_storage_gib`.
+`max_storage_gib` SHALL be at least the cell's current size, `max(storage_gib, grown_storage_gib)`. On a cell on attachable storage, it SHALL be the larger of the configured cap and the current size. Cellctl SHALL classify storage from the actual PVC class, then the PV class, then the configured domain. A local cell without qualified reservation mode, a fresh provider frame or its matching bound physical identity SHALL actively clear an earlier limits object. Such cells SHALL keep legacy admission, which does not raise `storage_gib` or `grown_storage_gib`. Guarded publication SHALL use the same configured cap.
 
 #### Scenario: The operator changes the cap
 
@@ -24,7 +24,7 @@ cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. It SH
 
 #### Scenario: A local cell has an earlier limits object
 
-- **WHEN** cellctl reads a local claim with an earlier published limits object
+- **WHEN** cellctl reads an unguarded local claim with an earlier published limits object
 - **THEN** it writes NULL and changes no generation
 - **AND** import admission keeps both storage sizes unchanged
 
@@ -37,6 +37,12 @@ cellctl SHALL write `exomem_cloud_cells.import_limits` for each live cell. It SH
 
 - **WHEN** no PVC or PV supplies a class and the configured domain is local
 - **THEN** cellctl publishes NULL
+
+#### Scenario: Qualified local publication loses its physical proof
+
+- **WHEN** a guarded local cell has published limits and its provider frame expires or its bound physical identity changes
+- **THEN** cellctl clears the limits to NULL instead of publishing a fresh object from cached free space
+- **AND** its existing volume remains available while the observation retries
 
 ### Requirement: One configured cap bounds cell growth for every storage class
 
@@ -63,7 +69,7 @@ While an import has a `required_storage_gib` and no recipient, cellctl SHALL tak
 
 The wait SHALL end at `import_growth_deadline`, counted from the import's creation. Its default SHALL be 60 minutes, above `backup_deadline`, and the operator SHALL be able to set it. On expiry, cellctl SHALL fail the import with `IMPORT_STORAGE_UNAVAILABLE` through the existing cleanup.
 
-Local import growth SHALL remain unshipped until an authoritative node budget covers physical allocations, accepted pending requests and same-pass increases. That budget SHALL include unclaimed physical volumes supported by recovery. Publication, admission and every local allocation increase SHALL use that budget when local growth ships. Cached free bytes, a same-pass counter or Kubernetes inventory alone SHALL NOT establish this guarantee. Existing local backup growth SHALL keep its earlier behavior in this delivery.
+Guarded local growth SHALL use the authoritative provider budget for physical allocations, accepted pending requests and competing increases. That budget SHALL include unclaimed physical volumes supported by recovery. Every larger claim SHALL wait for an exact physical-identity and target acknowledgement. Cached free bytes, a same-pass counter or Kubernetes inventory alone SHALL NOT establish this guarantee. Unguarded local cells SHALL retain their earlier backup behavior.
 
 Before local import growth ships, cellctl SHALL retain each accepted claim request when its increase cannot fit beside the snapshot reserve. This SHALL cover cleanup and later reconciliation after failure. Desired size SHALL stay raised, and cellctl SHALL NOT shrink a claim. Unknown room SHALL leave growth waiting; known insufficient room SHALL fail with `IMPORT_STORAGE_NO_ROOM`. The local cutover rehearsal SHALL prove this behavior before local import growth ships.
 
@@ -89,7 +95,7 @@ Before local import growth ships, cellctl SHALL retain each accepted claim reque
 - **THEN** cellctl takes the hold and renders the prepare Job
 - **AND** the import reaches `key_ready`
 
-#### Scenario: A future local growth cannot fit
+#### Scenario: A guarded local growth cannot fit
 
 - **WHEN** local import growth is enabled and its authoritative node budget can no longer hold the required size at the check before the key
 - **THEN** the import ends `failed` with `IMPORT_STORAGE_NO_ROOM` and no key exists

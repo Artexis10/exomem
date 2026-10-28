@@ -108,7 +108,8 @@ class Cluster:
 
 def create_network(run_id: str) -> str:
     network = f"exo-drill-{run_id}"
-    run(["docker", "network", "create", "--subnet", SUBNET, "--ip-range", DYNAMIC_RANGE, network])
+    run(["docker", "network", "create", *infra.docker_labels(run_id), "--subnet", SUBNET,
+         "--ip-range", DYNAMIC_RANGE, network])
     return network
 
 
@@ -117,7 +118,7 @@ def build_agent_image(run_id: str, workdir: Path) -> str:
     context.mkdir(parents=True, exist_ok=True)
     (context / "Dockerfile").write_text(AGENT_DOCKERFILE.format(alpine=images.ALPINE, k3s=images.K3S), encoding="utf-8")
     tag = f"rehearsal.local/k3s-lvm-agent:{run_id}"
-    run(["docker", "build", "--tag", tag, str(context)], timeout=900)
+    run(["docker", "build", *infra.docker_labels(run_id, image=True), "--tag", tag, str(context)], timeout=900)
     return tag
 
 
@@ -133,10 +134,12 @@ def _server_command(stack: infra.Stack, token: str) -> list[str]:
 def start_server(stack: infra.Stack) -> Cluster:
     token = secrets.token_hex(24)
     name = f"exo-drill-server-{stack.run_id}"
+    mounts = infra.image_data_mounts(stack, images.K3S, SERVER_NAME)
     run(
         [
-            "docker", "run", "--privileged", "--detach", "--name", name, "--hostname", SERVER_NAME,
-            "--network", stack.network, "--ip", SERVER_IP, "--mount", infra.containerd_mount(stack),
+            "docker", "run", "--privileged", "--detach", *infra.docker_labels(stack.run_id),
+            "--name", name, "--hostname", SERVER_NAME,
+            "--network", stack.network, "--ip", SERVER_IP, *mounts, "--mount", infra.containerd_mount(stack),
             images.K3S, *_server_command(stack, token),
         ]
     )
@@ -178,10 +181,12 @@ def start_agent(cluster: Cluster, name: str, ip: str) -> Agent:
     conf = stack.workdir / f"lvm-{name}.conf"
     conf.write_text(LVM_CONF.format(device=loop), encoding="utf-8")
     container = f"exo-drill-{name}-{stack.run_id}"
+    mounts = infra.image_data_mounts(stack, cluster.agent_image, name)
     run(
         [
-            "docker", "run", "--privileged", "--detach", "--name", container, "--hostname", name,
-            "--network", stack.network, "--ip", ip, "--mount", infra.containerd_mount(stack),
+            "docker", "run", "--privileged", "--detach", *infra.docker_labels(stack.run_id),
+            "--name", container, "--hostname", name,
+            "--network", stack.network, "--ip", ip, *mounts, "--mount", infra.containerd_mount(stack),
             "--mount", f"type=bind,source={conf},target=/etc/lvm/lvm.conf,readonly",
             # TopoLVM's node plugin mounts volumes with Bidirectional
             # propagation, which needs the kubelet's directories shared.
@@ -270,10 +275,11 @@ def deactivate_volume_group(cluster: Cluster, agent: Agent, *, timeout: float) -
     it is still open. Its volumes and their metadata stay on the disk."""
 
     def deactivated() -> bool:
+        mounts = infra.image_data_mounts(cluster.stack, cluster.agent_image, "deactivate", temporary=True)
         result = run(
             [
-                "docker", "run", "--rm", "--privileged",
-                "--mount", f"type=bind,source={agent.lvm_conf},target=/etc/lvm/lvm.conf,readonly",
+                "docker", "run", "--rm", "--privileged", *infra.docker_labels(cluster.stack.run_id),
+                *mounts, "--mount", f"type=bind,source={agent.lvm_conf},target=/etc/lvm/lvm.conf,readonly",
                 "--entrypoint", "/sbin/lvm", cluster.agent_image, "vgchange", "--activate", "n", VOLUME_GROUP,
             ],
             check=False,
@@ -322,7 +328,8 @@ def restore_etcd(cluster: Cluster, snapshot: str) -> str:
     run(["docker", "stop", "--time", "60", server], timeout=120)
     reset = run(
         [
-            "docker", "run", "--rm", "--privileged", "--name", f"{server}-reset", "--hostname", SERVER_NAME,
+            "docker", "run", "--rm", "--privileged", *infra.docker_labels(cluster.stack.run_id),
+            "--name", f"{server}-reset", "--hostname", SERVER_NAME,
             "--network", cluster.stack.network, "--ip", SERVER_IP, "--volumes-from", server,
             images.K3S, *_server_command(cluster.stack, cluster.token),
             "--cluster-reset", f"--cluster-reset-restore-path={snapshot}",

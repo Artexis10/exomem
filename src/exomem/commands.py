@@ -1182,13 +1182,10 @@ def op_bootstrap(
         # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
         inspect_route="schema_memory(operation=inspect, subject=<registry>)",
     )
+    workflow_families = ("entity-instance/v1", "entity-type/v1", "relation-type/v1", "topic-carrier/v1")
     vocabulary_workflow_projection = {
         "version": "v1",
-        "families": [
-            "entity-instance/v1",
-            "entity-type/v1",
-            "relation-type/v1",
-        ],
+        "families": list(workflow_families),
         # The live wording is shorter to fund the `vocabulary` block.
         "consideration": (
             "Choose reuse/enrich/propose-new or generic/no-edge/defer from source evidence; no quota."
@@ -1199,10 +1196,9 @@ def op_bootstrap(
             )
         ),
         "cadence": (
-            "At capture, review pending vocabulary items with context. "
+            "At capture, review pending items in context. "
             "Anchor a question on a source page/entity; "
-            "relation_question uses both current endpoints. Record a typed decision before "
-            "structural writes."
+            "relation_question uses both current endpoints. Log a decision before structural writes."
             if profile == "compact" else
             (
                 "At a capture boundary, review items with context; anchor a missing identity "
@@ -1246,13 +1242,12 @@ def op_bootstrap(
                 "rationale",
                 "choice",
             ],
+            # Compact omits a defer-only contract: it needs no choice, and review_item_context returns it.
             "choice_contracts": {
                 family: vocabulary_workflow_module.choice_contract(family)
-                for family in (
-                    "entity-instance/v1",
-                    "entity-type/v1",
-                    "relation-type/v1",
-                )
+                for family in workflow_families
+                if profile != "compact"
+                or vocabulary_workflow_module.family_descriptor(family).allowed_decisions != {"defer"}
             },
         },
         "application": {
@@ -1287,6 +1282,17 @@ def op_bootstrap(
                 "schema_memory", {"operation": "save-relations", "subject": "relations"}
             ),
         },
+        # Compact discovery is the family listing and the vocabulary-workflow advert.
+        **({
+            "topic_carrier": {
+                "inspect": vocabulary_operation(
+                    "schema_memory", {"operation": "inspect", "subject": "topic-carriers"}
+                ),
+                "apply": vocabulary_operation(
+                    "schema_memory", {"operation": "save", "subject": "topic-carriers"}
+                ),
+            },
+        } if profile != "compact" else {}),
         "authority": {
             "contract_version": "v1",
             "scoped_delegation": False,
@@ -2997,6 +3003,8 @@ def op_find(
             ):
                 active_budget.note_skipped("graph_enrich")
                 graph_enrich = False
+            # One resolver for the assembler and the release gate, so a page is decided once.
+            strip_for = egress_module.release_strip_resolver(vault_root, purpose=purpose)
             with find_module._span(timings, "pack"):
                 pack_obj = context_pack_module.assemble_pack(
                     vault_root,
@@ -3006,6 +3014,7 @@ def op_find(
                     graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
                     timings=timings,
                     purpose=purpose,
+                    strip_for=strip_for,
                 )
                 if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
                     pack_obj.get("truncation") or []
@@ -3016,7 +3025,9 @@ def op_find(
                 ):
                     active_budget.note_skipped("graph_enrich")
                 if release.active:
-                    pack_obj = egress_module.annotate_pack(pack_obj, release)
+                    pack_obj = egress_module.annotate_pack(
+                        pack_obj, release, strip_for=strip_for
+                    )
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone
@@ -11014,7 +11025,8 @@ def op_schema_memory(
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
-            source-kinds, domains, statuses, planning-values, note-types or homes);
+            source-kinds, domains, statuses, planning-values, note-types, homes,
+            topic-carriers);
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
@@ -11544,7 +11556,7 @@ def op_schema_memory(
                 current = relation_registry_module.load_registry(vault_root)
                 relation_registry_module.require_current_hash(current.extension_hash, expected_hash)
                 relation_registry_module.merge_extension_delta(
-                    memory_schema_module.relation_registry_proposal(current), proposal
+                    memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
                 )
                 return vocabulary_contract.queue_for_owner(
                     vault_root,
@@ -11563,7 +11575,7 @@ def op_schema_memory(
                 current.extension_hash, expected_hash
             )
             relation_registry_module.merge_extension_delta(
-                memory_schema_module.relation_registry_proposal(current), proposal
+                memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
             )
             from .writer_lease import active_manager, active_mutation_request_id
 
@@ -11578,7 +11590,7 @@ def op_schema_memory(
                     current.extension_hash, expected_hash
                 )
                 merged = relation_registry_module.merge_extension_delta(
-                    memory_schema_module.relation_registry_proposal(current), proposal
+                    memory_schema_module.relation_registry_merge_base(vault_root, current, proposal), proposal
                 )
                 before = load_vocabulary(relation_registry_module.SPEC, vault_root)
                 saved = relation_registry_module.save_registry(

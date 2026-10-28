@@ -2338,6 +2338,26 @@ def test_filter_withheld_entries_drops_bare_path_strings(vault: Path) -> None:
     assert out["inbound"] == [OPEN_PATH]
 
 
+def test_filter_withheld_entries_decides_a_reference_to_a_symlinked_page(vault: Path) -> None:
+    """A page that is a symlink is still a page, so its reference is decided.
+
+    Reading the link's own file type instead of the file it points to would call the
+    alias "not a vault item" and keep a reference to a withheld page.
+    """
+    _restricted_vault(vault)
+    alias = "Knowledge Base/Notes/Patterns/alias.md"
+    try:
+        (vault / alias).symlink_to(vault / OPEN_PATH)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    out = egress.filter_withheld_entries(
+        vault, {"inbound": [alias, OPEN_PATH]}, principal=_external()
+    )
+
+    assert out["inbound"] == [OPEN_PATH]
+
+
 def test_structure_filter_gates_governed_csv_and_resource_entries(vault: Path) -> None:
     csv_path = "Knowledge Base/Notes/Patterns/private.csv"
     target = vault / csv_path
@@ -3526,7 +3546,7 @@ def test_pack_governance_block_is_absent_when_there_are_no_notices() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack({"packed_paths": []}, release, strip_for=lambda _path: ())
     assert pack is not None
     assert "governance" not in pack
 
@@ -3539,7 +3559,7 @@ def test_pack_governance_block_is_present_when_a_notice_exists() -> None:
         withheld_paths=frozenset({RESTRICTED_PATH}),
         active=True,
     )
-    pack = egress.annotate_pack({"packed_paths": []}, release)
+    pack = egress.annotate_pack({"packed_paths": []}, release, strip_for=lambda _path: ())
     assert pack is not None
     assert pack["governance"]["notices"]
 
