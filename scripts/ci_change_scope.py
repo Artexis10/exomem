@@ -1,6 +1,7 @@
 """Decide whether a pull request's change can alter more than its docs tests.
 
-CI runs every test shard unless a pull request changes only prose and
+CI runs every test shard for Full scope. A partial pull request can narrow
+its checks when it changes only prose and
 specifications: `docs/`, `openspec/`, or Markdown at the repository root other
 than `README.md`. None of these paths is a package input (the wheel builds from
 `src/` only, and the sdist adds `README.md`, `LICENSE` and `pyproject.toml`),
@@ -63,7 +64,7 @@ def changed_paths() -> list[str] | None:
 
 
 def docs_only(event_name: str) -> bool:
-    if event_name != "pull_request":
+    if event_name != "pull_request" or os.environ.get("FULL_CI") == "true":
         return False
     paths = changed_paths()
     # An empty merge diff changes nothing that a test could observe.
