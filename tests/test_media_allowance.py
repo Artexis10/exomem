@@ -57,7 +57,7 @@ def test_unclosed_headers_never_look_like_absent_frontmatter(raw: bytes):
         vault_module.read_frontmatter_header(io.BytesIO(raw), 16384)
 
 
-def test_allowance_counts_large_transcripts_once_without_reading_their_bodies(custody, monkeypatch):
+def test_allowance_counts_large_transcripts_once_with_bounded_body_prefetch(custody, monkeypatch):
     vault, page, header = custody
     header = header.replace(b"binary_size:", b"description: " + b"x" * 9000 + b"\nbinary_size:")
     trash_root = "Knowledge Base/_trash/bundle"
@@ -74,11 +74,14 @@ def test_allowance_counts_large_transcripts_once_without_reading_their_bodies(cu
     }))
     read_header = vault_module.read_frontmatter_header
     read_sizes = []
+    descriptor_read_sizes = []
 
     def observe(stream, *args, **kwargs):
         start = stream.tell()
+        descriptor_start = os.lseek(stream.fileno(), 0, os.SEEK_CUR)
         result = read_header(stream, *args, **kwargs)
         read_sizes.append(stream.tell() - start)
+        descriptor_read_sizes.append(os.lseek(stream.fileno(), 0, os.SEEK_CUR) - descriptor_start)
         return result
 
     original_path = trash_metadata.original_path
@@ -94,6 +97,7 @@ def test_allowance_counts_large_transcripts_once_without_reading_their_bodies(cu
     assert usage.used_bytes == 23
     assert len(usage.versions) == 1
     assert read_sizes == [len(header), len(header)]
+    assert all(len(header) <= size <= len(header) + io.DEFAULT_BUFFER_SIZE for size in descriptor_read_sizes)
     assert retained_keys and all(keys == {"original_path"} for keys in retained_keys)
     assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
 

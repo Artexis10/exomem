@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import logging
 import os
 import re
@@ -2415,7 +2416,9 @@ def _iter_generic_tree_held(
                             from . import runtime_resources, vault
 
                             with runtime_resources.parser_preparation(info.st_size) as preparation:
-                                with os.fdopen(os.dup(descriptor), "rb", buffering=0) as stream:
+                                preparation.reserve_source(0)
+                                preparation.reserve(preparation.reserved + io.DEFAULT_BUFFER_SIZE)
+                                with os.fdopen(os.dup(descriptor), "rb", buffering=io.DEFAULT_BUFFER_SIZE) as stream:
                                     markdown = vault.read_frontmatter_header(
                                         stream, markdown_header_limit, reserve=preparation.reserve_source,
                                     )
