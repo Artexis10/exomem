@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import tempfile
 import threading
@@ -224,8 +223,6 @@ class TimedTokens:
 class WindowSplit:
     segments: tuple[TimedTokens, ...]
     seek: int
-    #: End of the last closed segment when the decode ended on a closing timestamp, else None.
-    closed_end: int | None
 
 
 def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, window_samples: int, rate: int) -> WindowSplit:
@@ -244,8 +241,7 @@ def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, w
     if not cuts:
         stamps = [token for token in tokens if token >= timestamp_begin]
         end = sample(stamps[-1]) if stamps and stamps[-1] != timestamp_begin else window_samples
-        closed_end = sample(tokens[-1]) if single_ending else None
-        return WindowSplit((TimedTokens(0, end, tuple(t for t in tokens if t < timestamp_begin)),), window_samples, closed_end)
+        return WindowSplit((TimedTokens(0, end, tuple(t for t in tokens if t < timestamp_begin)),), window_samples)
     if single_ending:
         cuts.append(len(tokens))
     segments, previous = [], 0
@@ -253,23 +249,7 @@ def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, w
         segments.append(timed(list(tokens[previous:cut])))
         previous = cut
     content_end = sample(tokens[previous - 1])
-    return WindowSplit(tuple(segments), window_samples if single_ending else content_end, content_end if single_ending else None)
-
-
-def plan_window(
-    tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, window_samples: int, rate: int,
-    speech: list[tuple[int, int]], policy: dict,
-) -> WindowSplit:
-    """Split a window; after a closing timestamp, seek to the last closed segment's end if speech runs on past it."""
-    split = split_window(tokens, timestamp_begin=timestamp_begin, window_samples=window_samples, rate=rate)
-    min_seek = int(policy["min_seek_s"] * rate)
-    seek = split.seek
-    if split.closed_end is not None:
-        left_behind = sum(max(0, end - max(start, split.closed_end)) for start, end in speech)
-        if left_behind >= policy["trailing_speech_s"] * rate:
-            seek = split.closed_end
-    # Never seek by less than min_seek, so a window that decodes nothing still moves on.
-    return WindowSplit(split.segments, min(max(seek, min_seek), window_samples), split.closed_end)
+    return WindowSplit(tuple(segments), window_samples if single_ending else content_end)
 
 
 def decode_with_fallback(decode: Callable[[float], Decoded], policy: dict) -> Decoded:
@@ -360,15 +340,8 @@ class OnnxWhisperBackend:
         self._suppressed = np.asarray(sorted({*map(int, generation["suppress_tokens"]), *protocol}), dtype=np.int64)
         self._begin_suppressed = np.asarray(generation["begin_suppress_tokens"], dtype=np.int64)
         policy = self.spec["decoding"]
-        seek_seconds = (policy["trailing_speech_s"], policy["min_seek_s"])
         # The prompt (start, language, task) and the new tokens share the text context.
-        if (
-            not policy["temperatures"] or policy["max_new_tokens"] + 3 > int(generation["max_length"])
-            or any(
-                isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0
-                for value in seek_seconds
-            )
-        ):
+        if not policy["temperatures"] or policy["max_new_tokens"] + 3 > int(generation["max_length"]):
             raise ValueError("the speech registry's decoding policy does not fit the model")
         self._model, self._vad = model, vad
 
@@ -449,20 +422,20 @@ class OnnxWhisperBackend:
                     vad_waveform = window / peak if peak > 0 else window
                     # Silero's 16 kHz input needs one hop and its context samples.
                     padded = np.pad(vad_waveform, (0, max(0, self.spec["vad_min_samples"] - length)))
-                    speech = [(int(a), int(b)) for a, b in next(self._vad.segment_batch(padded[None], np.array([len(padded)]), rate))]
+                    detected = next(self._vad.segment_batch(padded[None], np.array([len(padded)]), rate))
                     advance = length
                     # VAD skips non-speech but leaves spoken windows unchanged.
-                    if speech:
+                    if next(detected, None) is not None:
                         # Like the local engine, one language serves the whole file.
                         language, tokens = self._recognize(window, language, seed=seek)
-                        plan = plan_window(
+                        plan = split_window(
                             tokens, timestamp_begin=self._timestamp_begin, window_samples=length, rate=rate,
-                            speech=speech, policy=self.spec["decoding"],
                         )
                         advance = plan.seek
                         for timed in plan.segments:
                             text = self._text(list(timed.tokens)).strip() if timed.tokens else ""
-                            # An instantaneous segment carries no span; Whisper's transcribe drops it.
+                            # Clamping timestamps to this window can erase a span beyond its end.
+                            # Drop that text, usually padding hallucination; an overshot final word can also be lost.
                             if text and timed.end > timed.start:
                                 segment = Segment((seek + timed.start) / rate, (seek + timed.end) / rate, text)
                                 done.append(segment)

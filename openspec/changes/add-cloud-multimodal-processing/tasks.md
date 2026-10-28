@@ -69,7 +69,7 @@ Cell-sized backlog acceptance and weight sharing across live cells remain tasks 
 The wider bake-off no longer blocks this delivery. Future model or routing changes require the frozen quality comparison and fresh confirmation in D6.
 
 - [ ] 4.4 Qualify later coverage or model upgrades on at least 100 languages and fresh confirmation, with the unchanged 2.0-point bound. This upgrade work does not gate the selected initial default.
-- [ ] 4.5 Transcribe long recordings under design D6: language once per file, the reference decoding fallback, timestamp-driven seeking and resumable progress. Verify on 30-minute English and Japanese recordings at 2 CPU: WER and CER against the source texts, per-window wall time, peaks, and a stopped run that resumes to the same transcript.
+- [ ] 4.5 Transcribe long recordings under design D6: language once per file, the reference decoding fallback, timestamp-driven seeking and resumable progress. Verify on 30-minute English and Japanese recordings at 2 CPU: WER and CER against the source texts, per-window wall time, peaks, and a stopped run that resumes to the same transcript. The paired trailing-speech retry ablation showed no change in either language, so the retry and both thresholds were removed. Final workflow proof must use shared weights explicitly; the earlier ablation used personal prepacking defaults.
 
 ## 5. Integration and closure
 

@@ -37,8 +37,6 @@ POLICY = {
     "temperatures": [0.0, 0.2],
     "compression_ratio_threshold": 2.4,
     "logprob_threshold": -1.0,
-    "trailing_speech_s": 2.0,
-    "min_seek_s": 1.0,
 }
 RATE = 16000
 
@@ -119,60 +117,33 @@ WINDOW = 30 * RATE
 STEP = int(RATE * 0.02)
 
 
-def _plan(tokens, *, speech=()):
-    from exomem.onnx_asr_runtime import plan_window
+def test_a_closed_final_segment_advances_to_the_next_window():
+    from exomem.onnx_asr_runtime import split_window
 
-    return plan_window(
-        tokens, timestamp_begin=TS, window_samples=WINDOW, rate=RATE, speech=list(speech), policy=POLICY,
-    )
-
-
-def test_a_window_that_ends_early_keeps_the_speech_that_follows_its_content():
-    # [0.0] words [10.0]: one timestamp ends the decode while speech runs on to the window's end.
-    plan = _plan([TS, 1, 2, TS + 500], speech=[(0, WINDOW)])
-
-    assert plan.closed_end == 500 * STEP
-    assert plan.seek == 500 * STEP
-
-
-def test_a_window_that_ends_early_with_no_speech_after_it_seeks_the_whole_window():
-    plan = _plan([TS, 1, 2, TS + 500], speech=[(0, 500 * STEP + RATE)])
+    # [0.0] words [10.0]: the closing timestamp ends the window, as Whisper specifies.
+    plan = split_window([TS, 1, 2, TS + 500], timestamp_begin=TS, window_samples=WINDOW, rate=RATE)
 
     assert plan.seek == WINDOW
-
-
-def test_the_last_window_re_decodes_trailing_speech_like_any_other():
-    # A recording of 25 s that closes at 10 s with speech to 25 s: the 15 s tail is decoded again.
-    plan = _plan([TS, 1, 2, TS + 500], speech=[(0, 25 * RATE)])
-
-    assert plan.seek == 500 * STEP
+    assert plan.segments[0].tokens == (1, 2)
+    assert plan.segments[0].end == 500 * STEP
 
 
 def test_a_decode_that_ends_on_text_never_re_decodes_what_it_emitted():
-    # Only an opening timestamp, then text: nothing closed, so the window is not seeked back to 1 s.
-    plan = _plan([TS + 50, 1, 2, 3], speech=[(5 * RATE, WINDOW)])
+    from exomem.onnx_asr_runtime import split_window
+
+    plan = split_window([TS + 50, 1, 2, 3], timestamp_begin=TS, window_samples=WINDOW, rate=RATE)
 
     assert plan.seek == WINDOW
 
 
-def test_a_closing_timestamp_before_the_minimum_seek_seeks_by_the_minimum():
-    plan = _plan([TS, 1, TS + 20], speech=[(0, WINDOW)])
-
-    assert plan.seek == int(POLICY["min_seek_s"] * RATE)
-
-
 def test_an_unfinished_segment_is_dropped_and_the_seek_stops_at_the_last_complete_timestamp():
+    from exomem.onnx_asr_runtime import split_window
+
     # (0.0 a 5.0)(5.0 b ...) the second segment never closes.
-    plan = _plan([TS, 1, TS + 250, TS + 250, 2, 3], speech=[(0, WINDOW)])
+    plan = split_window([TS, 1, TS + 250, TS + 250, 2, 3], timestamp_begin=TS, window_samples=WINDOW, rate=RATE)
 
     assert [segment.tokens for segment in plan.segments] == [(1,)]
     assert plan.seek == 250 * STEP
-
-
-def test_a_window_whose_decode_makes_no_progress_still_advances_by_the_minimum_seek():
-    plan = _plan([TS, 1, TS, TS, 2], speech=[(0, WINDOW)])
-
-    assert plan.seek == int(POLICY["min_seek_s"] * RATE)
 
 
 class _Stopped(Exception):
