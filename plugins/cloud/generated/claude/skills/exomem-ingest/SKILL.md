@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: b041d8b2e43fdac1d8fde32bbfc8fb9461c57310df8b9fd016b734bf52c2ba1c
+  skill_contract: e9c5b2cd3200f73bdb351b5ab6e62a333b85519c1615c31a23a81e1b2066f6c2
   version: "0.1.0"
 ---
 
@@ -16,18 +16,18 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` directly. Otherwise obtain `bootstrap(operation={"kind": "instructions", "profile": "session", "skill_contract": <metadata.skill_contract>})` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
-Use `configure_memory` set/clear only for an explicit user request to change saved engagement.
+Use `bootstrap/change_settings` set/clear only for an explicit user request to change saved engagement.
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
-in the first write. Use `connect_memory(operation="suggest-links")` when useful
+in the first write. Use `read_connections(operation={'kind': 'suggest-links'})` when useful
 connections are still unknown, not to recheck links already established in context.
 Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
@@ -46,10 +46,10 @@ identity after an uncertain commit.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
-   For a whole folder or collection of existing files, use `adoption_studio` instead of
+   For a whole folder or collection of existing files, use `import_memory` instead of
    capturing one by one. A folder outside the vault is staged first: run
    `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. (Exomem Cloud takes `exomem cloud import <folder>` instead.) Then `start`
+   absolute path. (Exomem Cloud takes `exomem cloud import <folder>` instead.) Then set `operation.kind` to `start`
    with a `collection` name, `select` folders (with a `source_kind` and `domain` per folder rule where known),
    `plan`, `apply`, then `finish`. Repeat `plan` or `apply` with the returned `continuation`
    until none returns, and report the `coverage` from `finish`, including what was refused,
@@ -57,13 +57,13 @@ identity after an uncertain commit.
    A folder of the person's own notes can also become notes. Ask which folders hold them;
    never guess from file names. Give that folder the rule
    `{path, adopt_as: "note", note_type, project?, domain?}`, with a `note_type` that
-   `schema_memory(subject="note-types", operation="inspect")` lists as compiled, and
+   `read_schema(operation={'kind': 'inspect', 'subject': 'note-types'})` lists as compiled, and
    `project` or `domain` where that type needs one. Each Markdown file in the folder keeps
    its Source and also gets a draft note that cites it and keeps its original body. Other
    files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
    after review with the usual writers; a live citation still does not prove semantic coverage.
 3. Inspect available original media or extracted content; record the scope actually read.
-   Media processing is automatic. Use `process_media` for reconciliation, status or retry,
+   Media processing is automatic. Use `read_media/change_media` for reconciliation, status or retry,
    and `read_media` or the exposed source-read route for inspection. Pending extraction
    does not prevent using an available original. Extraction completion says nothing
    about semantic compilation. Respect source-version guards on dependent writes.
@@ -78,8 +78,8 @@ identity after an uncertain commit.
 
 Read [vocabulary](references/vocabulary.md) before changing a registry.
 If the vocabulary reference is missing, inspect the exposed bootstrap schema.
-Use `bootstrap(profile="compact", section="vocabulary")`, or
-`bootstrap(profile="full")` when `section` is unavailable. Follow the returned
+Use `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'vocabulary'})`, or
+`bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` when `section` is unavailable. Follow the returned
 inspect routes and `save` contract. Reuse or alias before proposing justified
 new meaning; save with the current hash and `why`. Report saved versus queued
 and the returned restore route. Use only exposed operations.
@@ -125,14 +125,15 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict and check_by; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
 - Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_memory(include_history=true), optionally for unit_ref, using history_limit and history_continuation. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
-- Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `schema_memory(subject="homes", operation="inspect")` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
+- Exact applicability: obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'authoring'})` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `read_schema(operation={'kind': 'inspect', 'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `read_schema(operation={'kind': 'inspect', 'subject': 'homes'})` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
-- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `observe_memory` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
+- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `change_observations` for one unit, and `edit_note` for a small edit or activation. Tier 2 change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
 - Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.
 - Semantic-unit coverage and relation-review disposition are independent obligations.
+- Validation review: Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition="reviewed_none" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards.
 - Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Use exactly one primary category; kind is the governed form, tags are secondary facets, and relations are typed edges. The rich form's category defaults to its kind, so `category: decision` is redundant when the kind is Decision. Create multiple distinct semantic observations and typed relations when the source genuinely supports them, but never multiply units or relations to satisfy a quota and never duplicate the same fact. Core keys are `action`, `assumption`, `code`, `config`, `constraint`, `decision`, `design`, `fact`, `finding`, `insight`, `preference`, `problem`, `question`, `requirement`, `risk`, `technique`. Core aliases are `actions` → `action`, `assumptions` → `assumption`, `configs` → `config`, `configuration` → `config`, `configurations` → `config`, `constraints` → `constraint`, `decisions` → `decision`, `designs` → `design`, `facts` → `fact`, `findings` → `finding`, `insights` → `insight`, `open_question` → `question`, `open_questions` → `question`, `preferences` → `preference`, `problems` → `problem`, `questions` → `question`, `requirements` → `requirement`, `risks` → `risk`, `techniques` → `technique`. Role example: `- [decision] Relocate to a coastal city next spring #life ^relocation`. Domain example: `- [nutrition] Evening protein improves adherence #experiment ^evening-protein`. Breadth example (life, finance, legal/travel, and career alongside one retained code line):
 
 ```markdown

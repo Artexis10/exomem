@@ -9,7 +9,6 @@ terminal handoff is faked, and it is faked through Lane 1's own committed
 from __future__ import annotations
 
 import hashlib
-from types import SimpleNamespace
 import importlib
 import importlib.util
 import inspect
@@ -18,6 +17,7 @@ import re
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -870,12 +870,19 @@ def test_write_advisory_result_mode_has_mcp_rest_cli_surface_parity(vault: Path)
             encoding="utf-8"
         )
     )
-    assert "write-advisory-result" in schemas["review_memory"]["inputSchema"]["properties"]["mode"][
-        "description"
-    ]
-    assert "write-advisory-result" in schemas["review_memory"]["inputSchema"]["properties"]["ref"][
-        "description"
-    ]
+    from jsonschema import ValidationError, validate
+
+    from exomem.operation_entries import spell_call
+
+    name, arguments = spell_call(
+        "review_memory", {"mode": "write-advisory-result", "ref": "advisory-ref"}, "nested"
+    )
+    assert name == "read_review"
+    assert arguments == {"operation": {"kind": "write-advisory-result", "ref": "advisory-ref"}}
+    schema = schemas[name]["inputSchema"]
+    validate(arguments, schema)
+    with pytest.raises(ValidationError):
+        validate({"operation": {"kind": "write-advisory-result"}}, schema)
 
 
 # ---------------------------------------------------------------------------

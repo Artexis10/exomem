@@ -78,16 +78,16 @@ per-operation rules:
 | `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |
 | `Knowledge Base/_Schema/**` | governed schema and registry writers | Follow the operation envelope and any active holds. Instruction changes require an explicit user request; never rewrite the skill autonomously. |
 
-## A legacy page `observe_memory` refuses
+## A legacy page `prepare_note/change_observations` refuses
 
-`observe_memory` only mutates a writable compiled page. A page with no compiled
+`prepare_note/change_observations` only mutates a writable compiled page. A page with no compiled
 `type`, or no frontmatter at all, refuses with a remediation and a structured
 `resolution` naming the existing edit owner. Use that authorized owner for an
 in-place correction and verify the current page and retained interpretation.
 If the surface lacks that writer, report the unavailable operation and retain
 the intended correction for a capable surface. Do not create a dated child.
 Migrate the legacy page into a compiled type only on request
-(`adoption_studio`) — nothing here does that automatically.
+(`read_import` and `import_memory`) — nothing here does that automatically.
 
 ## Read-only paths (rest of the vault)
 
@@ -159,9 +159,9 @@ source needs correction:
 - For factual error: capture a new source, supersede the compiled notes that drew on the old one.
 - For typo or formatting: leave it. Sources reflect what was captured at capture-time.
 - For a wrong `source_type` or `domain`: correct it with
-  `manage_memory_file(operation='reclassify', path=…, source_kind=…, domain=…, reason=…)`.
+  `change_files(operation={'kind': 'reclassify', 'path': ..., 'source_kind': ..., 'domain': ..., 'reason': ...})`.
 - To undo the latest correction:
-  `manage_memory_file(operation='revert-reclassification', path=…, reason=…)`.
+  `change_files(operation={'kind': 'revert-reclassification', 'path': ..., 'reason': ...})`.
 
 The append-only rule governs **content, not location**, and not the capture-time
 classification. Relocating a source *within* `Sources/` — e.g. into a themed

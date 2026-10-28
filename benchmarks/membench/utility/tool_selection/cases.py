@@ -46,10 +46,20 @@ class Case:
     template_id: str
     seed: int
     params: dict
+    #: Cases that share invented source bytes share a sampling unit. Legacy data keeps its template group.
+    fixture_cluster: str | None = None
 
     @property
     def template(self) -> Template:
+        if self.template_id == "source-derived":
+            from .development import source_template
+
+            return source_template(self.params)
         return TEMPLATES[self.template_id]
+
+    @property
+    def cluster_id(self) -> str:
+        return self.fixture_cluster or self.template_id
 
     @property
     def kind(self) -> str:
@@ -67,12 +77,15 @@ class Case:
         return self.template.seed_steps(self.params)
 
     def as_dict(self) -> dict:
-        return {
+        result = {
             "case_id": self.case_id,
             "template": self.template_id,
             "seed": self.seed,
             "params": self.params,
         }
+        if self.fixture_cluster is not None:
+            result["fixture_cluster"] = self.fixture_cluster
+        return result
 
 
 def case_id_for(template_id: str, seed: int) -> str:
@@ -92,7 +105,16 @@ def dev_cases_from_plan() -> list[Case]:
 
 def load_cases(path: Path) -> list[Case]:
     rows = json.loads(Path(path).read_text(encoding="utf-8"))
-    return [Case(row["case_id"], row["template"], row["seed"], row["params"]) for row in rows]
+    if isinstance(rows, dict):
+        document = rows
+        rows = [
+            {**row, "params": {**row["params"],
+                               "fixture": document["fixtures"][row["params"]["fixture_id"]],
+                               "source_reference_sha256": document["source_reference_sha256"],
+                               "source_commit": document["source_commit"]}}
+            for row in document["cases"]
+        ]
+    return [Case(row["case_id"], row["template"], row["seed"], row["params"], row.get("fixture_cluster")) for row in rows]
 
 
 def dev_cases() -> list[Case]:

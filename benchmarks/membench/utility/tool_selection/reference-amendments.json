@@ -1,0 +1,79 @@
+{
+  "amendments": [
+    {
+      "number": 1,
+      "stage": "free fixture admission, before actor generation",
+      "reason": "The illustrative experiment fixtures did not satisfy the existing note writer contract.",
+      "source_anchors": [
+        "src/exomem/commands.py::op_note",
+        "src/exomem/note.py::_resolve_path",
+        "src/exomem/semantic_contract.py::_missing_semantic_unit_finding",
+        "src/exomem/observe_memory.py::_render_unit",
+        "src/exomem/commands.py::op_link",
+        "src/exomem/link.py::_render_entity"
+      ],
+      "changes": [
+        "Declare domain laboratory, started 2026-10-01 and duration ongoing for both experiments.",
+        "Use the registry-projected Laboratory folder and the writer's 2026-10 filename prefix.",
+        "Create the cache page as active with its first declared rich unit; add the sibling through observe_memory.",
+        "Put the unchanged primary-marker paragraph below a Hypothesis heading on the active flight checklist.",
+        "Bind generated page identities from the admitted fixture; do not treat illustrative UUIDs as expected content.",
+        "Materialize authored Markdown bodies as LF text before product calls; no literal backslash-n remains in body fields.",
+        "Declare active lifecycle explicitly and materialize the entity summary below the documented Summary heading; check its complete declared body."
+      ],
+      "expected_fact_changes": "No observation content, category, metadata, preference, question or requested append fact changed.",
+      "original_reference": "The evaluator's source draft remains unchanged. The development case file records its SHA-256."
+    },
+    {
+      "number": 2,
+      "stage": "free fixture admission, before actor generation",
+      "reason": "The category registry refuses noncanonical delta keys.",
+      "source_anchors": [
+        "src/exomem/vocabulary/registry.py::apply_delta",
+        "src/exomem/semantic_language_registry.py::_CategoryAdapter.normalize_key"
+      ],
+      "changes": [
+        "Use follow_up for the seeded category key and release_check for the requested category key.",
+        "Keep the independently authored descriptions and the natural-language release-check request."
+      ],
+      "expected_fact_changes": "Only the source-owned canonical key spelling changes; no category meaning or existing entry changes."
+    },
+    {
+      "number": 3,
+      "stage": "free adoption fixture admission, before actor generation",
+      "reason": "The merged collection planner persists collection provenance and complete plan items.",
+      "source_commit": "9cc52a34e9601d791e6d3e9662ea660eee3212bd",
+      "source_anchors": [
+        "src/exomem/commands.py::op_adoption_studio",
+        "src/exomem/adoption_run.py::start; select; plan; AdoptionRunStore; plan_id_for",
+        "src/exomem/adoption_plan.py::plan_item; item_frontmatter; item_digest; resolve_links"
+      ],
+      "changes": [
+        "Start the old-notes collection and select its exact-file include rule through the product; persist exactly one selecting run without a plan or outcomes.",
+        "Capture the source-default local date as an explicit fixture input before the pair; refresh and re-admit it if the pair moves to another date.",
+        "Assert the collection label, collection-relative path, text form, empty classification, tags, aliases and links, and null artifact path required by the merged plan format.",
+        "Retain the original unclassified Imported destination and all original content, byte-count and SHA-256 facts.",
+        "Bind run identity and selection hash to the admitted seed; check plan identity with the source-owned digest over the independent expected items."
+      ],
+      "expected_fact_changes": "No original content, selected path, title, unclassified Source meaning or requested effect changes. Planning persists one existing run and creates no import.",
+      "original_reference": "The evaluator source draft remains immutable."
+    },
+    {
+      "number": 4,
+      "stage": "offline integrated-source review after the closed smoke run",
+      "reason": "The merged registry save records a promotion and the merged import planner persists note counters.",
+      "source_anchors": [
+        "src/exomem/promotions.py::record_registry; record",
+        "src/exomem/adoption_run.py::plan",
+        "benchmarks/membench/utility/tool_selection/development.py::source_key",
+        "benchmarks/membench/utility/tool_selection/score.py::_review_without_registry_promotion"
+      ],
+      "changes": [
+        "Compute note counters from the independent expected plan items.",
+        "Permit only a registry promotion for the requested added keys, the exact saved bytes and the new retained history version. Preserve all prior review state."
+      ],
+      "expected_fact_changes": "No requested category, selected file, original content or expected import effect changes.",
+      "original_reference": "Archived keys, captures, scores and reports remain immutable. This amendment changes only the current offline instrument; it does not rescore the completed smoke or provide new actor evidence."
+    }
+  ]
+}

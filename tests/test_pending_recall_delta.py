@@ -2147,7 +2147,9 @@ def test_optional_prompt_keeps_material_when_pending_identity_is_unprovable(
     _seed_adoption_run(tmp_path, run_ref=f"Retain this material: {' '.join(refs)}")
     _as_external_connector_client(monkeypatch)
     mcp = FastMCP("pending-optional-prompt")
-    server.register_adoption_mcp(mcp, vault_root=tmp_path)
+    server.register_adoption_mcp(mcp, vault_root=tmp_path, surface_descriptor=server.capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=False, product_commands=(),
+    ))
 
     rendered = asyncio.run(mcp.render_prompt("continue_adoption"))
     text = json.dumps([getattr(message.content, "text", "") for message in rendered.messages])

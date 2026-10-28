@@ -1,0 +1,684 @@
+{
+ "schema": "tool-selection-source-development/v1",
+ "source_reference_sha256": "10f4b22d3571ce0e10eef741df86ca0d726d94bec967e929c40df67908ff51a9",
+ "source_commit": "508d3409bb0bbe260d0b41d908c81b01e4e2be15",
+ "fixtures": {
+  "cache-trial": {
+   "path": "Knowledge Base/Notes/Experiments/Laboratory/2026-10-cache-trial.md",
+   "frontmatter": {
+    "type": "experiment",
+    "title": "Cache trial",
+    "exomem_id": "11111111-1111-4111-8111-111111111101",
+    "domain": "laboratory",
+    "started": "2026-10-01",
+    "duration": "ongoing",
+    "status": "active"
+   },
+   "units": [
+    {
+     "id": "cache-window",
+     "kind": "hypothesis",
+     "category": "assumption",
+     "content": "The cache window is twelve minutes.",
+     "tags": [
+      "trial"
+     ],
+     "context": "staging run",
+     "relations": [],
+     "verdict": "qualified",
+     "check_by": "2026-11-15"
+    },
+    {
+     "id": "cache-spare",
+     "kind": "hypothesis",
+     "category": "assumption",
+     "content": "The spare node keeps a separate window.",
+     "tags": [
+      "spare"
+     ],
+     "context": null,
+     "relations": [],
+     "verdict": null,
+     "check_by": null
+    }
+   ],
+   "seed_kind": "compiled-note",
+   "body": "# Cache trial\n\nA bounded staging experiment.\n"
+  },
+  "preferences": {
+   "stored": "balanced",
+   "contexts": {
+    "coding": "light",
+    "conversation": "maximal"
+   },
+   "seed_kind": "preferences"
+  },
+  "component-question": {
+   "path": "Knowledge Base/Entities/Concepts/neutral-component.md",
+   "frontmatter": {
+    "type": "entity",
+    "title": "Neutral component",
+    "entity_type": "concept",
+    "exomem_id": "11111111-1111-4111-8111-111111111104",
+    "status": "active"
+   },
+   "body": "# Neutral component\n\n## Summary\n\nA calibration fixture used in a laboratory setup.\n",
+   "review_questions": [],
+   "seed_kind": "entity",
+   "summary": "A calibration fixture used in a laboratory setup."
+  },
+  "empty-media-ledger": {
+   "authored_media_files": [],
+   "media_jobs": [],
+   "seed_kind": "empty-media-ledger"
+  },
+  "flight-checklist": {
+   "path": "Knowledge Base/Notes/Experiments/Laboratory/2026-10-flight-checklist.md",
+   "frontmatter": {
+    "type": "experiment",
+    "title": "Flight checklist",
+    "exomem_id": "11111111-1111-4111-8111-111111111106",
+    "domain": "laboratory",
+    "started": "2026-10-01",
+    "duration": "ongoing",
+    "status": "active"
+   },
+   "body": "# Flight checklist\n\n## Hypothesis\n\nThe primary marker is green.\n",
+   "append": "The reserve marker is blue.",
+   "seed_kind": "compiled-note"
+  },
+  "category-registry": {
+   "subject": "categories",
+   "overlay": {
+    "schema_version": 1,
+    "categories": {
+     "follow_up": {
+      "description": "A check scheduled after an earlier action."
+     }
+    },
+    "kinds": {}
+   },
+   "seed_kind": "registry"
+  },
+  "adoption-selected": {
+   "originals": {
+    "old-notes/checklist.md": "# Old checklist\n\nVerify the green marker.\n"
+   },
+   "selected_paths": [
+    "old-notes/checklist.md"
+   ],
+   "case_date": "2026-10-25",
+   "seed_kind": "adoption",
+   "source_root": "old-notes"
+  }
+ },
+ "cases": [
+  {
+   "case_id": "r2-d01",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "cache-trial",
+   "params": {
+    "fixture_id": "cache-trial",
+    "kind": "read",
+    "prompt": "On the cache trial page, check a proposed edit to the active cache-window hypothesis: change twelve minutes to eight minutes. Keep its category, verdict, revisit date, tags, context and relations. Stop after validation; save nothing. Reply only with {\"answer\":\"validated\"} if the proposal validates.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "observe_memory",
+       "selector": "operation",
+       "value": "validate"
+      }
+     ],
+     "canonical_end_state": {
+      "answer": {
+       "mode": "text",
+       "value": "validated"
+      },
+      "authored_state": "unchanged",
+      "preferences": "unchanged",
+      "review_questions": "unchanged",
+      "registries": "unchanged",
+      "adoption": "unchanged",
+      "media_jobs": "unchanged",
+      "required_preview": {
+       "exact_unit_anchor": "cache-window",
+       "proposed_content": "The cache window is eight minutes.",
+       "committed": false
+      }
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_observe_memory"
+     },
+     {
+      "path": "src/exomem/observe_memory.py",
+      "symbol": "observe_memory"
+     },
+     {
+      "path": "src/exomem/semantic_units.py",
+      "symbol": "parse_semantic_units; _semantic_unit_signature"
+     }
+    ],
+    "reference_amendment": 1
+   }
+  },
+  {
+   "case_id": "r2-d02",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "cache-trial",
+   "params": {
+    "fixture_id": "cache-trial",
+    "kind": "write",
+    "prompt": "Update only the active cache-window hypothesis on the cache trial page: change twelve minutes to eight minutes. Keep its category, verdict, revisit date, tags, context and relations. Read the current unit and page guards, validate the change, then save it. Leave the spare hypothesis alone.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "observe_memory",
+       "selector": "operation",
+       "value": "update"
+      }
+     ],
+     "canonical_end_state": {
+      "units": {
+       "path": "Knowledge Base/Notes/Experiments/Laboratory/2026-10-cache-trial.md",
+       "exact_units": [
+        {
+         "id": "cache-window",
+         "kind": "hypothesis",
+         "category": "assumption",
+         "content": "The cache window is eight minutes.",
+         "tags": [
+          "trial"
+         ],
+         "context": "staging run",
+         "relations": [],
+         "verdict": "qualified",
+         "check_by": "2026-11-15"
+        },
+        {
+         "id": "cache-spare",
+         "kind": "hypothesis",
+         "category": "assumption",
+         "content": "The spare node keeps a separate window.",
+         "tags": [
+          "spare"
+         ],
+         "context": null,
+         "relations": [],
+         "verdict": null,
+         "check_by": null
+        }
+       ]
+      },
+      "page_remainder": "unchanged except source-required prior-interpretation metadata",
+      "all_other_authored_state": "unchanged"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_observe_memory"
+     },
+     {
+      "path": "src/exomem/observe_memory.py",
+      "symbol": "observe_memory"
+     },
+     {
+      "path": "src/exomem/semantic_units.py",
+      "symbol": "parse_semantic_units; _semantic_unit_signature"
+     }
+    ],
+    "reference_amendment": 1
+   }
+  },
+  {
+   "case_id": "r2-d03",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "preferences",
+   "params": {
+    "fixture_id": "preferences",
+    "kind": "write",
+    "prompt": "Remove the saved conversation engagement override. Keep the identity-wide level and the coding override exactly as they are. Inspect the current revision before changing it. This changes engagement only; do not grant access or quiet review signals.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "configure_memory",
+       "selector": "action",
+       "value": "clear"
+      }
+     ],
+     "canonical_end_state": {
+      "preferences": {
+       "stored": "balanced",
+       "contexts": {
+        "coding": "light"
+       },
+       "revision": "new valid revision",
+       "receipt_id": "new nonempty change id"
+      },
+      "all_other_authored_state": "unchanged"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_configure_memory"
+     },
+     {
+      "path": "src/exomem/prominence_preferences.py",
+      "symbol": "clear_preference; _preference_path"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "r2-d04",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "component-question",
+   "params": {
+    "fixture_id": "component-question",
+    "kind": "write",
+    "prompt": "The neutral component page uses a type that may be too broad. Record this meaning question for that page in the entity-type review family: \"Should a calibration fixture use a more specific entity type?\" Do not select a new type, edit the page or register vocabulary.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "review_memory",
+       "selector": "mode",
+       "value": "vocabulary"
+      }
+     ],
+     "canonical_end_state": {
+      "review_questions": {
+       "new_exact_count": 1,
+       "family": "entity-type/v1",
+       "signal": "agent-meaning-question",
+       "question": "Should a calibration fixture use a more specific entity type?",
+       "anchor_path": "Knowledge Base/Entities/Concepts/neutral-component.md",
+       "anchor_content_hash": "sha256 of independently authored seed file",
+       "state": "pending",
+       "decisions": []
+      },
+      "page_files": "unchanged",
+      "registries": "unchanged",
+      "all_other_authored_state": "unchanged"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_review_memory; _review_question_submission; invocation_is_read_only"
+     },
+     {
+      "path": "src/exomem/vocabulary_questions.py",
+      "symbol": "submit"
+     },
+     {
+      "path": "src/exomem/vocabulary_state.py",
+      "symbol": "VocabularyState.observe"
+     },
+     {
+      "path": "src/exomem/vocabulary/packs/core/entity-types.yaml",
+      "symbol": "entries.concept"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "r2-d05",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "empty-media-ledger",
+   "params": {
+    "fixture_id": "empty-media-ledger",
+    "kind": "read",
+    "prompt": "Check the media-processing queue. Report its job count and reconciliation-required count. Do not process media or retry anything. Reply only with a JSON object whose answer has the numeric fields jobs and reconciliation_required.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "process_media",
+       "selector": "operation",
+       "value": "status"
+      }
+     ],
+     "canonical_end_state": {
+      "answer": {
+       "mode": "structured",
+       "value": {
+        "jobs": 0,
+        "reconciliation_required": 0
+       }
+      },
+      "authored_state": "unchanged",
+      "media_job_rows": "unchanged",
+      "media_worker_started_by_actor": false
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_process_media; _process_media"
+     },
+     {
+      "path": "src/exomem/media_jobs.py",
+      "symbol": "status; tool_status"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "r2-d06",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "flight-checklist",
+   "params": {
+    "fixture_id": "flight-checklist",
+    "kind": "read",
+    "prompt": "Check whether the flight checklist page can accept this final paragraph: \"The reserve marker is blue.\" Validate the complete Markdown result, then stop. Do not append it. Reply only with {\"answer\":\"validated\"} if the preview succeeds.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "manage_memory_file",
+       "selector": "operation",
+       "value": "append",
+       "constraints": {
+        "validate_only": true
+       }
+      }
+     ],
+     "canonical_end_state": {
+      "answer": {
+       "mode": "text",
+       "value": "validated"
+      },
+      "authored_state": "unchanged",
+      "required_preview": {
+       "path": "Knowledge Base/Notes/Experiments/Laboratory/2026-10-flight-checklist.md",
+       "contains_proposed_paragraph": "The reserve marker is blue.",
+       "committed": false
+      }
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_manage_memory_file; op_append_to_file"
+     },
+     {
+      "path": "src/exomem/append_to_file.py",
+      "symbol": "append_to_file"
+     },
+     {
+      "path": "src/exomem/semantic_writes.py",
+      "symbol": "preflight_existing; commit_existing"
+     }
+    ],
+    "reference_amendment": 1
+   }
+  },
+  {
+   "case_id": "r2-d07",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "flight-checklist",
+   "params": {
+    "fixture_id": "flight-checklist",
+    "kind": "write",
+    "prompt": "Add this final paragraph to the flight checklist page: \"The reserve marker is blue.\" First validate the complete Markdown result, review the returned transition and relation findings, then append that same paragraph once. Keep the existing checklist intact.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "manage_memory_file",
+       "selector": "operation",
+       "value": "append",
+       "constraints": {
+        "validate_only": false
+       }
+      }
+     ],
+     "canonical_end_state": {
+      "file": {
+       "path": "Knowledge Base/Notes/Experiments/Laboratory/2026-10-flight-checklist.md",
+       "existing_authored_content": "unchanged",
+       "appended_paragraphs": [
+        "The reserve marker is blue."
+       ],
+       "paragraph_occurrences": 1
+      },
+      "all_other_authored_state": "unchanged except source-defined operation log and semantic-review audit"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_manage_memory_file; op_append_to_file"
+     },
+     {
+      "path": "src/exomem/append_to_file.py",
+      "symbol": "append_to_file"
+     },
+     {
+      "path": "src/exomem/semantic_writes.py",
+      "symbol": "preflight_existing; commit_existing"
+     }
+    ],
+    "reference_amendment": 1
+   }
+  },
+  {
+   "case_id": "r2-d08",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "category-registry",
+   "params": {
+    "fixture_id": "category-registry",
+    "kind": "read",
+    "prompt": "Preview adding the custom semantic category release-check, described as \"A check that confirms a release prerequisite.\" Show whether that delta is valid, but do not save a category, a note or a review decision. Reply only with {\"answer\":\"valid\"} if the delta validates.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "schema_memory",
+       "selector": "operation",
+       "value": "propose",
+       "constraints": {
+        "subject": "categories"
+       }
+      }
+     ],
+     "canonical_end_state": {
+      "answer": {
+       "mode": "text",
+       "value": "valid"
+      },
+      "preview_delta": {
+       "upsert": {
+        "release_check": {
+         "description": "A check that confirms a release prerequisite."
+        }
+       }
+      },
+      "registries": "unchanged",
+      "registry_history": "unchanged",
+      "all_other_authored_state": "unchanged"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_schema_memory; _registry_schema_operation"
+     },
+     {
+      "path": "src/exomem/vocabulary/contract.py",
+      "symbol": "propose; save"
+     },
+     {
+      "path": "src/exomem/semantic_language_registry.py",
+      "symbol": "CATEGORY_SPEC; _CategoryAdapter.put"
+     }
+    ],
+    "reference_amendment": 2
+   }
+  },
+  {
+   "case_id": "r2-d09",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "category-registry",
+   "params": {
+    "fixture_id": "category-registry",
+    "kind": "write",
+    "prompt": "Add the custom semantic category release-check, described as \"A check that confirms a release prerequisite.\" Inspect the current category registry, preview the delta, then save it with the current hash and the reason \"Add the release checklist category.\" Keep every existing category and custom kind.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "schema_memory",
+       "selector": "operation",
+       "value": "save",
+       "constraints": {
+        "subject": "categories"
+       }
+      }
+     ],
+     "canonical_end_state": {
+      "registry": {
+       "subject": "categories",
+       "delta": {
+        "upsert": {
+         "release_check": {
+          "description": "A check that confirms a release prerequisite."
+         }
+        }
+       },
+       "prior_entries": "unchanged",
+       "custom_kinds": "unchanged"
+      },
+      "registry_history": {
+       "new_save_events": 1,
+       "reason": "Add the release checklist category.",
+       "previous_overlay": "exact seeded overlay"
+      },
+      "all_other_authored_state": "unchanged except source-defined registry history and audit"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_schema_memory; _registry_schema_operation"
+     },
+     {
+      "path": "src/exomem/vocabulary/contract.py",
+      "symbol": "propose; save"
+     },
+     {
+      "path": "src/exomem/semantic_language_registry.py",
+      "symbol": "CATEGORY_SPEC; _CategoryAdapter.put"
+     }
+    ],
+    "reference_amendment": 2
+   }
+  },
+  {
+   "case_id": "r2-d10",
+   "template": "source-derived",
+   "seed": 0,
+   "fixture_cluster": "adoption-selected",
+   "params": {
+    "fixture_id": "adoption-selected",
+    "kind": "write",
+    "prompt": "There is one prepared adoption run for the old-notes folder. Inspect its current selection, then prepare an import plan for that selection. Stop before applying imports. Keep every original file and do not start another run.",
+    "expected": {
+     "target_operations": [
+      {
+       "command": "adoption_studio",
+       "selector": "action",
+       "value": "status"
+      },
+      {
+       "command": "adoption_studio",
+       "selector": "action",
+       "value": "plan"
+      }
+     ],
+     "canonical_end_state": {
+      "adoption": {
+       "run_count": 1,
+       "phase": "planned",
+       "selection_paths": [
+        "old-notes/checklist.md"
+       ],
+       "plan": {
+        "items": [
+         {
+          "original_path": "old-notes/checklist.md",
+          "original_sha256": "120906663db76fc500be77ed24dac6b815315eceb1a7ad3de43132cd8caa646e",
+          "action": "copy-as-source",
+          "original_bytes": 42,
+          "title": "Old checklist",
+          "target_path": "Knowledge Base/Sources/Imported/{case_date}-old-checklist.md",
+          "frontmatter": {
+           "type": "source",
+           "source_type": "unclassified",
+           "imported_from": "old-notes/checklist.md",
+           "original_sha256": "120906663db76fc500be77ed24dac6b815315eceb1a7ad3de43132cd8caa646e",
+           "original_bytes": 42,
+           "tags": [
+            "imported"
+           ],
+           "import_collection": "old-notes",
+           "collection_path": "checklist.md"
+          },
+          "collection_path": "checklist.md",
+          "form": "text",
+          "classification": null,
+          "tags": [],
+          "rejected_tags": [],
+          "aliases": [],
+          "rejected_aliases": [],
+          "artifact_path": null,
+          "links": {
+           "resolved": [],
+           "unresolved": []
+          }
+         }
+        ],
+        "skipped": [],
+        "warnings": [],
+        "plan_format": 2,
+        "collection": "old-notes",
+        "total_bytes": 42
+       },
+       "outcomes": {}
+      },
+      "original_files": "byte-identical to seeds",
+      "imported_sources_added": 0,
+      "all_other_authored_state": "unchanged except the existing adoption run plan"
+     }
+    },
+    "source_contracts": [
+     {
+      "path": "src/exomem/commands.py",
+      "symbol": "op_adoption_studio"
+     },
+     {
+      "path": "src/exomem/adoption_run.py",
+      "symbol": "AdoptionRunStore; status; select; plan; selection_hash; plan_id_for"
+     },
+     {
+      "path": "src/exomem/adoption_plan.py",
+      "symbol": "plan_item; item_frontmatter; item_digest; plan_total_bytes"
+     },
+     {
+      "path": "src/exomem/source_taxonomy.py",
+      "symbol": "UNCLASSIFIED_KIND; IMPORTED_PATH_LABEL"
+     }
+    ],
+    "reference_amendment": 3
+   }
+  }
+ ]
+}

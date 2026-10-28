@@ -123,5 +123,5 @@ def test_write_tool_guidance_is_bounded_and_routes_to_full_bootstrap() -> None:
     assert semantic_authoring.contract_identity(contract) in rendered
     assert portable["short_selection_rule"] in rendered
     assert portable["examples"]["role"] in rendered
-    assert 'bootstrap(profile="full")' in rendered
+    assert 'bootstrap with operation.kind="instructions", profile="full"' in rendered
     assert ", ".join(portable["core_keys"]) not in rendered

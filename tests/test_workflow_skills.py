@@ -207,7 +207,7 @@ def test_skill_contract_stamps_cover_the_canonical_skill_sources(tmp_path: Path)
 
     for index, (source, old, new) in enumerate((
         (schema / "SKILL.md", "Never recommend", "Always recommend"),
-        (schema / "references" / "engagement.md", "bootstrap()", "bootstrap-now()"),
+        (schema / "references" / "engagement.md", "reports the effective level", "reports a changed effective level"),
         (
             schema / "workflow-skills" / "exomem-capture" / "SKILL.md",
             "Save durable conclusions",
@@ -217,6 +217,7 @@ def test_skill_contract_stamps_cover_the_canonical_skill_sources(tmp_path: Path)
         copied = tmp_path / f"changed-{index}"
         shutil.copytree(schema, copied)
         changed = copied / source.relative_to(schema)
+        assert old in changed.read_text(encoding="utf-8")
         changed.write_text(changed.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
         assert workflow_skills.skill_contract(copied) != expected
         with pytest.raises(ValueError, match="skill contract stamp"):
@@ -293,10 +294,12 @@ def test_workflow_skill_docs_route_through_product_commands() -> None:
 def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() -> None:
     text = (workflow_skills.source_dir("exomem-curate") / "SKILL.md").read_text(encoding="utf-8")
 
-    for action in ("work-item", "propose", "preview"):
+    for action in ("work-item", "preview"):
+        assert f"'kind': 'curation-{action}'" in text
+    for action in ("propose", "apply", "resume", "propose-compensation", "apply-compensation"):
         assert f'curation_action="{action}"' in text
-    for action in ("apply", "resume", "propose-compensation", "apply-compensation"):
-        assert f'curation_action="{action}"' in text
+    assert "Curation writes are CLI-only" in text
+    assert "repair_memory(operation=" not in text
     assert "`structural_suggestions`" in text
     assert "`restructure_execution`" in text
     assert "preview the immutable plan once" in text
@@ -331,7 +334,7 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
         "browse_memory",
         "create_note",
         "edit_note",
-        "observe_memory",
+        "change_observations",
         "supersede_note",
         "capture_source",
         "prepare_note",
@@ -340,14 +343,13 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
         "transfer_artifact",
         "read_records",
         "change_records",
-        "review_memory",
-        "connect_memory",
-        "adopt_vault",
-        "maintain_memory",
-        "schema_memory",
-        "govern_memory",
-        "process_media",
-        "query_dataset",
+        "read_review",
+        "read_connections",
+        "read_import",
+        "check_memory",
+        "read_schema",
+        "read_governance",
+        "change_media",
         "read_media",
     ]:
         assert command in loading_section

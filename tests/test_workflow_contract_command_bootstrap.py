@@ -271,9 +271,11 @@ def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
         "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
     }
 
-    schema = json.loads(
+    operation = json.loads(
         Path("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
-    )["schema_memory"]["inputSchema"]["properties"]["context"]
+    )["read_schema"]["inputSchema"]["properties"]["operation"]
+    resolve = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "resolve")
+    schema = {**resolve["properties"], **operation.get("properties", {})}["context"]
     # Optional-null structure is no longer published; the leaves still accept null.
     context_schema = {key: value for key, value in schema.items() if key != "description"}
     assert context_schema == {
@@ -358,6 +360,20 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
         "domain": ["absent", None],
         "activity": ["known", "implementation"],
     }
+
+    from exomem.operation_entries import spell_call
+
+    public_request = {
+        "subject": "workflow-contracts",
+        "operation": "resolve",
+        "context": {"activity": "implementation"},
+    }
+    name, arguments = spell_call("schema_memory", public_request, "nested")
+    assert name == "read_schema"
+    assert arguments["operation"]["kind"] == "resolve"
+    public_result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=True))
+    expected = _schema(vault, "resolve", context=public_request["context"])
+    assert public_result.structured_content == json.loads(json.dumps(expected))
 
     direct = _schema(vault, "resolve", context=invalid_request["context"])
     assert invalid.structured_content == direct
@@ -458,14 +474,18 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     ) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "BAD_JSON"
 
-    mcp_schema = next(
-        tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]["properties"]["context"]
+    operation = next(
+        tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]["properties"]["operation"]
         for tool in asyncio.run(mcp.list_tools())
-        if tool.name == "schema_memory"
+        if tool.name == "read_schema"
     )
+    resolve = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "resolve")
+    mcp_schema = {**resolve["properties"], **operation.get("properties", {})}["context"]
     rest_schema = TestClient(mcp.http_app()).get("/api/openapi.json").json()["paths"][
         "/api/schema_memory"
     ]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"][
         "context"
     ]
-    assert rest_schema == mcp_schema
+    assert {key: value for key, value in rest_schema.items() if key != "description"} == {
+        key: value for key, value in mcp_schema.items() if key != "description"
+    }

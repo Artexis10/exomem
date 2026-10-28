@@ -13,8 +13,15 @@ from __future__ import annotations
 import pytest
 from epistemic.corpora.context_activation import FixtureCase
 from membench.utility import context_activation_product as product
-from test_activate_context_turn_slice import full_compile_slices
+from test_activate_context_turn_slice import (
+    full_admitted_rankings,
+    full_compile_slices,
+    postings_reads,
+)
 from test_context_activation_real_compiler import PASSING_TODAY
+from test_governance_egress import _external
+
+from exomem.governance import principal
 
 pytestmark = [pytest.mark.timeout(1800)]
 
@@ -24,6 +31,10 @@ ACTIVATING_MATCHES = ("resolved", "ambiguous", "carried")
 _RUNS: dict[str, tuple[product.Tree, dict[str, dict]]] = {}
 #: Each fixture's `turn_slice` from the full anchors compile, the one the shipped leads-only compile must equal.
 _FULL: dict[str, dict] = {}
+#: A restricted caller's `turn_slice` per fixture, ranked from kept postings and from each candidate's text.
+_RESTRICTED: dict[str, dict[str, dict]] = {}
+#: How often the restricted caller's postings-ranked compiles scored from postings.
+_POSTINGS_READS: list[int] = []
 
 
 @pytest.fixture
@@ -42,6 +53,17 @@ def slices(tmp_path_factory: pytest.TempPathFactory) -> tuple[product.Tree, dict
             _FULL.update(
                 {fixture.case_id: product.activate(tree.root, fixture)["turn_slice"] for fixture in tree.fixtures}
             )
+        # Compiled here, while the tree's state is this test's: a later test cannot reopen its catalogue.
+        with pytest.MonkeyPatch.context() as scope, principal.request_scope(_external()):
+            reads = postings_reads(scope)
+            _RESTRICTED["pruned"] = {
+                fixture.case_id: product.activate(tree.root, fixture)["turn_slice"] for fixture in tree.fixtures
+            }
+            _POSTINGS_READS.extend(reads)
+            full_admitted_rankings(scope)
+            _RESTRICTED["full"] = {
+                fixture.case_id: product.activate(tree.root, fixture)["turn_slice"] for fixture in tree.fixtures
+            }
     return _RUNS["run"]
 
 
@@ -100,3 +122,15 @@ def test_every_fixture_gets_the_full_compiles_slice_from_the_leads_only_compile(
     assert set(_FULL) == {fixture.case_id for fixture in tree.fixtures}
     for case_id, block in blocks.items():
         assert block == _FULL[case_id], case_id
+
+
+def test_kept_postings_give_a_restricted_caller_the_full_rankings_slice_on_every_fixture(slices) -> None:
+    """A restricted caller's slice ranks each fixture turn from kept postings: its leads, their match and
+    evidence, and its state are the ones that ranking each candidate's own text gives."""
+    tree, _blocks = slices
+    pruned, full = _RESTRICTED["pruned"], _RESTRICTED["full"]
+    assert set(pruned) == set(full) == {fixture.case_id for fixture in tree.fixtures}
+    for case_id, block in pruned.items():
+        assert block == full[case_id], case_id
+    assert _POSTINGS_READS  # the control: the pruned slices were ranked from postings
+    assert any(block["items"] for block in pruned.values())  # the control: some fixture turn reached a lead
