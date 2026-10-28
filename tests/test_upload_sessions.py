@@ -264,6 +264,54 @@ def test_a_source_session_refuses_invalid_source_metadata_before_receiving_bytes
     assert _parts(vault) == []
 
 
+@pytest.mark.parametrize("restriction", ["raw", "policy"])
+def test_a_withheld_source_commit_keeps_its_bytes_without_publishing_another_copy(vault, monkeypatch, restriction) -> None:
+    """A filtered custody receipt must not disclose a protected original or duplicate it on recovery."""
+    from exomem import server_transfer
+    from exomem.writer_lease import reset_managers_for_tests
+
+    _client(vault, monkeypatch)
+    data = b"An original that remains owner-only after upload."
+    digest = hashlib.sha256(data).hexdigest()
+    target = {"lane": "source", "filename": "protected.bin", "title": "Protected material",
+              "source_type": "session", "domain": None, "url": None, "content_type": None,
+              "raw_protection": restriction == "raw"}
+    target["destination"] = server_transfer._source_session_destination(vault, target, size=len(data), sha256=digest)
+    session, _ = upload_sessions.create(vault, binding="source-upload", length=len(data),
+                                        sha256=digest, target=target, max_bytes=upload_sessions.DEFAULT_MAX_BYTES)
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    patch.close()
+
+    if restriction == "policy":
+        # The original commit was allowed; its lost acknowledgement is recovered after policy changes.
+        server_transfer.commit_session(vault, session.part, session.record)
+        from exomem.governance import policy
+
+        governance = vault / "Knowledge Base" / "_Governance"
+        (governance / "scopes").mkdir(parents=True)
+        (governance / "rules").mkdir()
+        (governance / "scopes" / "patterns.yaml").write_text(
+            'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n'
+            'name: Patterns\npaths: ["Notes/Patterns/**"]\n'
+        )
+        (governance / "rules" / "external.yaml").write_text(
+            'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 0\n'
+        )
+        selected = policy.load(vault)
+        assert not selected.blocked and not selected.empty
+
+    for _ in range(2):
+        with pytest.raises(upload_sessions.CommitFailed) as outcome:
+            server_transfer.commit_session(vault, session.part, session.record)
+        assert outcome.value.code == "SOURCE_OUTCOME_UNKNOWN" and outcome.value.retryable
+        assert session.part.read_bytes() == data
+        reset_managers_for_tests()
+    originals = list((vault / target["destination"]).glob("*.bin"))
+    assert len(originals) == 1 and originals[0].read_bytes() == data
+
+
 @pytest.mark.parametrize("transport", ["resumable", "multipart"])
 def test_source_upload_receipts_do_not_disclose_corpus_advisories(vault, monkeypatch, transport) -> None:
     """A private near-duplicate advisory must not escape through either byte transport."""
@@ -304,7 +352,7 @@ def test_source_upload_receipts_do_not_disclose_corpus_advisories(vault, monkeyp
     data = b"New original bytes."
     token = upload_tokens.mint("sekret", scope=upload_tokens.upload_scope("source"))
     values = {"filename": "material.bin", "sha256": hashlib.sha256(data).hexdigest(),
-              "source_kind": "session", "title": "New original"}
+              "source_kind": "session", "domain": "equipment", "title": "New original"}
     with principal_module.request_scope(who):
         if transport == "multipart":
             response = client.request("POST", "/upload", headers={"Authorization": "Bearer " + token},
@@ -328,6 +376,10 @@ def test_source_upload_receipts_do_not_disclose_corpus_advisories(vault, monkeyp
     assert receipt["size"] == len(data)
     assert receipt["semantic_compilation"]["state"] == "unassessed"
     assert (vault / receipt["artifact_path"]).read_bytes() == data
+    from exomem.vault import parse_frontmatter
+
+    metadata, _, _ = parse_frontmatter((vault / receipt["path"]).read_text())
+    assert metadata["source_type"] == "session" and metadata["domain"] == "equipment"
 
 
 def test_an_incomplete_source_rollback_retains_the_upload_without_another_capture(vault, monkeypatch) -> None:

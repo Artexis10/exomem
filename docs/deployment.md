@@ -1685,6 +1685,13 @@ Source page. It does not accept `archive=members`. Evidence also accepts
 `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
 
+A Source capability does not grant read access to its destination. If governance
+withholds the custody receipt, the session retains the bytes and reports
+`SOURCE_OUTCOME_UNKNOWN`. The canonical commit may already exist.
+Use an authorized reader to inspect
+custody, and reuse this session for a retry. A different caller's credential
+does not change this session's transfer principal.
+
 The service preserves the file only when its SHA-256 matches. `GET` on the
 session returns its state and, after the commit, the receipt. The state
 `retryable` means that the service holds every byte but the commit failed for
