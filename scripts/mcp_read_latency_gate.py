@@ -597,17 +597,17 @@ async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
 
 
 async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, repeats: int) -> dict[str, Any]:
-    """Prepare each arm, restart it and time the cases; returns the samples and arm timings.
+    """Prepare quiet arms and time the cases; returns samples and initial startup timings.
 
-    The first start may build state and loads the fixture. The second start is the one that is
-    timed: it must find existing state and a derived store that is ready, or the arm is refused.
+    Fixture workers stay running after loading and quiescence. Private workers start on their
+    prepared state. Both modes require existing state and ready derived collections before timing.
     """
     try:
         if fixture is not None:
-            await asyncio.gather(*(arm.start(quiescence_limit=1800) for arm in arms.values()))
+            started = await asyncio.gather(*(arm.start(quiescence_limit=1800) for arm in arms.values()))
             await asyncio.gather(*(load_and_quiesce(arm, fixture) for arm in arms.values()))
-            await asyncio.gather(*(arm.stop() for arm in arms.values()))
-        started = await asyncio.gather(*(arm.start(quiescence_limit=900) for arm in arms.values()))
+        else:
+            started = await asyncio.gather(*(arm.start(quiescence_limit=900) for arm in arms.values()))
         timings = dict(zip(arms, started, strict=True))
         for arm in arms.values():
             arm.require_timeable()

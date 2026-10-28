@@ -12,17 +12,23 @@ and `summary.schema.json` defines every document the runner writes.
 Each arm is one release with its own interpreter, vault, state root, lease coordinator and managed
 worker (`python -m exomem.service_manager worker`). The arms never share state.
 
-1. Create the notes of both arms. They hold the same pages byte for byte.
-2. Load the generated Records and Planning collections through each arm's own `change_records`
-   and `change_plans` tools, then write the legacy trackers.
-3. Stop and restart both arms. The restart is the one that is timed.
-4. Wait for quiet: the worker uses under 20% of one CPU for 10 seconds.
-5. Refuse a run that is not timeable (see Refusals), then pause both workers.
-6. Time every case in adjacent pairs. The inactive worker stays stopped. The arm that goes
-   first alternates. The first repeat of each case is an unmeasured warm-up.
+1. Create matching notes for both arms so that their pages are byte-identical.
+2. Start each arm so that its managed worker becomes quiet.
+3. Load generated collections through each arm's change tools so that both hold the fixture.
+4. Write the legacy trackers so that both arms hold the same tracker pages.
+5. Wait for each worker to use under 20% of one CPU for 10 seconds; fixture preparation is quiet.
+6. Check state and derived readiness so that both arms meet the timing requirements.
+7. Pause both workers so that only the arm under measurement runs.
+8. Time each case in adjacent pairs so that each sample has matched base and head values.
+
+The first arm alternates. The first repeat of each case is an unmeasured warm-up.
 
 The timer stops when the parsed terminal response arrives (`recall_canary.measure_call`).
 Assertions and statistics stay outside it.
+
+The workers stay running between fixture loading and measurement. The report's `ready_s` and
+`quiescent_s` describe the initial start. The `fixture-prep` progress line reports loading and the
+quiet wait after loading separately.
 
 ## Modes
 
