@@ -654,7 +654,8 @@ def test_verified_restore_requires_schema_13_before_any_local_store_admission(se
     fresh_state = tmp_path / "fresh-restore-state"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(fresh_state))
     assert not connection.store_path(root).exists()
-    assert "collections-store-schema-13" in authority.required_state_compatibility_ids(root)
+    assert {"collections-store-schema-13", "collections-store-schema-14"} <= set(
+        authority.required_state_compatibility_ids(root))
     assert state_migration.recorded_descriptor_ids(root) is None
     assert source.read_bytes() == before
     # The same old reader refusal applies before adoption can create host state.

@@ -57,7 +57,7 @@ class NativeLayout(Layout):
         Layout.__post_init__(self)
         if len(self.codecs) != len(self.fields) or any(type(codec) is not Codec for codec in self.codecs):
             raise TypedStorageError("native fields require one frozen codec each")
-        if self.identity not in (native_identity.UUID16, native_identity.UTF8):
+        if self.identity not in (native_identity.UUID16, native_identity.UTF8, native_identity.ORDERED):
             raise TypedStorageError("unsupported native identity codec")
         if type(self.database) is not str or not self.database:
             raise TypedStorageError("native metadata requires its database namespace")

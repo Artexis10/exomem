@@ -93,7 +93,7 @@ def job_name(import_id: str, phase: str) -> str:
 
 
 def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation,
-                  jobs: dict[str, ImportJob], *, now: datetime, config=None) -> Decision | None:
+                  jobs: dict[str, ImportJob], *, now: datetime, config=None, storage_no_room: bool = False) -> Decision | None:
     """Separate work completion, volume release and eventual cleanup."""
     from .decide import DEFAULT_RECONCILE_CONFIG
 
@@ -173,6 +173,8 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             (row.observed_storage_capacity_bytes or 0) < required * GIB
             or row.observed_storage_generation != row.generation or observation.pvc_resize_pending
         )
+        if waiting_for_storage and storage_no_room:
+            failure = failure or "IMPORT_STORAGE_NO_ROOM"
         if waiting_for_storage and now - item.created_at >= config.import_growth_deadline:
             failure = failure or "IMPORT_STORAGE_UNAVAILABLE"
     if not running and not cleanup_started:

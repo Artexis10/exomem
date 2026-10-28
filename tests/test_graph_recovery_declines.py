@@ -102,12 +102,13 @@ def test_a_disabled_graph_names_that(
 def test_a_pending_external_change_names_that_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Checked ahead of everything else, so it must report ahead of everything else.
+    """Checked ahead of every graph state, so it must report ahead of them.
 
     Rebuilding against a vault that is still changing underneath is the pass
-    most likely to be wasted, so this guard is deliberately first -- and a
+    most likely to be wasted, so this guard precedes every graph state -- and a
     reader who sees it knows the graph is waiting on the vault rather than on
-    the graph.
+    the graph. Only queued per-path repair comes before it, because that repair
+    needs no rebuild at all.
     """
     _built_graph(tmp_path)
     monkeypatch.setattr(freshness, "external_pending", lambda _root: True)

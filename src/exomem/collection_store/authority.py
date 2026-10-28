@@ -550,16 +550,24 @@ def projection_eligible(writer, projection):
             and owner["collection_id"] in proof.admitted)
 
 
-def collection_admitted(writer, collection_id):
+def admitted_collections(writer):
+    """The collections this release's ownership proof admits now; a failed proof admits none.
+
+    One proof serves a whole window: a read pass proves ownership once, not once per collection.
+    """
     from ..cli_ops import OpError
     from . import ownership
     from .preview import production_bound
 
     try:
-        return collection_id in ownership.current(writer.root, conn=writer.connection,
+        return ownership.current(writer.root, conn=writer.connection,
             private=not production_bound(writer.root)).admitted
     except (held_fs.HeldFsError, OSError, CollectionStoreError, RuntimeError, OpError):
-        return False
+        return frozenset()
+
+
+def collection_admitted(writer, collection_id):
+    return collection_id in admitted_collections(writer)
 
 
 def orphan_cleanup_eligible(writer, directory):

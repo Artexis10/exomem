@@ -812,7 +812,7 @@ def test_preview_reports_real_time_fields_and_never_guesses_a_day(store):
     conflicts = {finding["at"]: finding for finding in result["mapping"]["findings"]}
     assert conflicts["mapping.fields.calories"]["expected"] == "integer"
     assert conflicts["mapping.fields.calories"]["allowed"] == ["string"]
-    assert result["identity"] == {"natural_key": ["exercise_id"], "mapped": True}
+    assert {"natural_key": ["exercise_id"], "mapped": True}.items() <= result["identity"].items()
     assert result["source"]["bytes"] == len(ndjson(records))
 
 

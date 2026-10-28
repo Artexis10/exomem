@@ -24,6 +24,7 @@ REVIEW_FAMILIES = MappingProxyType(
         "entity-instance/v1": "vocabulary_entity_instances",
         "entity-type/v1": "vocabulary_entity_types",
         "relation-type/v1": "vocabulary_relation_types",
+        "topic-carrier/v1": "vocabulary_topic_carriers",
     }
 )
 
@@ -135,6 +136,24 @@ def reconcile_legacy(vault_root: Path) -> dict[str, int]:
     return {"imported": imported, "dropped": dropped}
 
 
+def _admits(actor: Any, payload: Mapping[str, Any], family: str, signal: str) -> bool:
+    """The one rule for whether a notice of this family may be reserved: a resolved caller, no
+    retained legacy notice and every composed disposition normal."""
+    return (
+        actor.resolved
+        and not payload["vocabulary"]["notifications"]
+        and all(
+            review_state.disposition_for(name, payload=payload) == "normal"
+            for name in review_families(family, signal)
+        )
+    )
+
+
+def may_offer(vault_root: Path, family: str, signal: str) -> bool:
+    """Whether `take_advisory` could reserve a notice of this family now, asked before a producer computes one."""
+    return _admits(effective_principal(), review_state.ReviewStateStore(vault_root).load(), family, signal)
+
+
 def take_advisory(vault_root: Path, items: Sequence[WorkItem]) -> dict[str, Any] | None:
     """Observe one bounded provider page and durably reserve at most one notice.
 
@@ -181,10 +200,7 @@ def take_advisory(vault_root: Path, items: Sequence[WorkItem]) -> dict[str, Any]
                 or item.projection_status != "current"
                 or decision_key in section["decisions"]
                 or (origin is not None and origin["state"] != "open")
-                or any(
-                    review_state.disposition_for(family, payload=payload) != "normal"
-                    for family in review_families(item.family, item.signal)
-                )
+                or not _admits(actor, payload, item.family, item.signal)
             ):
                 continue
             try:

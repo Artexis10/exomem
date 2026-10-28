@@ -157,6 +157,7 @@ _TEXT_SUFFIXES = frozenset(
         ".gitattributes",
         ".gitignore",
         ".gitkeep",
+        ".go",
         ".hcl",
         ".html",
         ".htm",
@@ -215,6 +216,7 @@ _TEXT_BASENAMES = frozenset(
         "Procfile",
         "RECORD",
         "WHEEL",
+        "upstream-commit",
     }
 )
 _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".whl", ".zip", ".skill")

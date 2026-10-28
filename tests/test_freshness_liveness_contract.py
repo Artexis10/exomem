@@ -1036,16 +1036,16 @@ def test_watcher_drain_still_marks_unclassified_graph_incompleteness(
 
 
 @pytest.mark.parametrize("admission", ["own_publication", "outside_edit"])
-def test_a_watcher_rearm_widens_to_the_vault_only_for_an_outside_edit(
+def test_a_standing_whole_vault_marker_owns_the_watcher_rearm(
     contract_vault: Path, monkeypatch: pytest.MonkeyPatch, admission: str
 ) -> None:
     """The fan-out re-arm under a queued whole-vault repair.
 
-    A whole-vault repair on the queue makes an unattributed batch's scope
-    unknown, so its re-arm still fences the vault. A batch the watcher admitted
-    only because the writer's own publication failed names its paths exactly.
-    An unscoped mark there turned every later write into another whole-vault
-    rebuild.
+    The drain's whole-vault pass reads every path, so a standing marker owns
+    the repair of an outside edit and of a writer's failed publication alike.
+    A mark on top of it only fenced later writes: unscoped, every later write
+    became another whole-vault rebuild. The marker stays as the record of the
+    debt.
     """
     from exomem import deferred_index, file_watcher
     from exomem.file_watcher import FileWatcher
@@ -1084,12 +1084,8 @@ def test_a_watcher_rearm_widens_to_the_vault_only_for_an_outside_edit(
 
     watcher._flush()
 
-    assert freshness.external_pending(root) is True, "the re-arm did not fire"
-    if admission == "own_publication":
-        assert freshness.external_pending_unscoped(root) is False
-        assert freshness.external_pending_paths(root) == {str(target.resolve())}
-    else:
-        assert freshness.external_pending_unscoped(root) is True
+    assert freshness.external_pending(root) is False, "an owned repair was re-armed"
+    assert deferred_index.graph_full_rebuild_pending(root) is not None
 
 
 def test_a_busy_boundary_does_not_latch_the_external_pending_epoch(
