@@ -2640,10 +2640,12 @@ def _lexical_hits_without(
     words: frozenset[str],
     *,
     freshness_snapshot: Any = None,
+    query_context: Any = None,
 ) -> frozenset[str]:
     """`working_set_resolve.candidates_for`'s dependence check, read at the
-    lexical checkpoint the request's first lexical pass read. Empty when that
-    snapshot is unreadable: the anchors then stay leads."""
+    lexical checkpoint and with the admission (`query_context`) that the
+    request's first lexical pass read. Empty when that snapshot is unreadable:
+    the anchors then stay leads."""
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -2657,7 +2659,7 @@ def _lexical_hits_without(
 
     return working_set_runtime.lexical_hits_without(
         vault_root, turn, pages, words,
-        freshness=freshness, recall_checkpoint=recall_checkpoint,
+        freshness=freshness, recall_checkpoint=recall_checkpoint, query_context=query_context,
     )
 
 
@@ -4021,6 +4023,9 @@ def _compile_packet(
     status_basis: lifecycle_statuses.Basis | None = None,
     trigger: str = "user_turn",
     _intent_resolution: dict[str, Any] | None = None,
+    lexical_admission: Any = None,
+    reader: Any = None,
+    leads_only: bool = False,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -4035,7 +4040,11 @@ def _compile_packet(
     so a packet is always compiled against the profile it was keyed on; left
     out, it is read here. `attribution` is the caller's derived session and
     workspace keys (ruling S5-1) and `marks` the served threads the caller may
-    see, both for the ranking only.
+    see, both for the ranking only. `lexical_admission` is the admission that
+    the request's first lexical pass ranked on, and `reader` the view it was
+    built over (`working_set_runtime.serve`); the carry then reuses both.
+    `leads_only` (the turn slice) skips the resolved anchors' current state
+    and lanes: the slice serves the anchors and never their material.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     task_refresh = trigger == "task_refresh"
@@ -4060,7 +4069,7 @@ def _compile_packet(
         if unchecked:
             independent = _lexical_hits_without(
                 root, turn, frozenset(unchecked), words,
-                freshness_snapshot=freshness_snapshot,
+                freshness_snapshot=freshness_snapshot, query_context=lexical_admission,
             )
             checked.update((path, path in independent) for path in unchecked)
         return frozenset(path for path in pages if checked[path])
@@ -4092,7 +4101,7 @@ def _compile_packet(
     # may already be a caller-supplied released view
     # (`working_set_runtime.serve`); narrowing it again is a no-op for that
     # caller and the only guard for a direct one.
-    visible = _reader_view(root, purpose)
+    visible = reader if reader is not None else _reader_view(root, purpose)
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live
@@ -4673,7 +4682,7 @@ def _compile_packet(
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         from . import working_set_runtime
 
-        query_context = working_set_runtime.request_admission(root, visible, status_basis)
+        query_context = working_set_runtime.request_admission(root, visible, status_basis, lexical_admission)
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,
@@ -4932,51 +4941,59 @@ def _compile_packet(
     # spec's restated "Bounded role lanes" requirement — "no lane SHALL run for
     # a partial anchor").
     lane_anchors = resolution.resolved_anchors
-    if budget_exhausted("working_set.current_state"):
-        raise BudgetExhausted("working_set.current_state")
-    # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
-    # two views of the same collection reads.
-    with _span(timings, "working_set.current_state"):
-        current_state = working_set_state.current_state_for(
-            root,
-            anchors=resolution.resolved_anchors,
-            purpose=purpose,
-            visible=visible,
-            index_generation=index_token[1],
-            index_token=index_token,
-            state_fields=conventions.state_fields,
-            date_fields=conventions.date_fields,
-            status_basis=status_basis,
-            freshness_snapshot=freshness_snapshot,
-        )
+    current_state: Sequence[Mapping[str, Any]] = ()
     reached: dict[str, set[str]] = {}
-    for entry in current_state:
-        if entry.get("path"):
-            reached.setdefault(str(entry.get("anchor") or ""), set()).add(str(entry["path"]))
-    items, missing = run_lanes(
-        root,
-        anchors=lane_anchors,
-        roles=roles,
-        registry=registry,
-        current_state=current_state,
-        timings=timings,
-        freshness_snapshot=freshness_snapshot,
-        precedent_reach=lambda: reach_precedents(
+    items: Sequence[LaneItem] = ()
+    missing: Sequence[Mapping[str, Any]] = ()
+    # Every anchor and ambiguity sense is decided by now, and the guard decides a
+    # resolved packet's anchors without its units. So a leads-only compile reads
+    # no material for them. The pages named beside them below still run their
+    # lanes, because whether such a page is kept can depend on what they read.
+    if not leads_only:
+        if budget_exhausted("working_set.current_state"):
+            raise BudgetExhausted("working_set.current_state")
+        # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
+        # two views of the same collection reads.
+        with _span(timings, "working_set.current_state"):
+            current_state = working_set_state.current_state_for(
+                root,
+                anchors=resolution.resolved_anchors,
+                purpose=purpose,
+                visible=visible,
+                index_generation=index_token[1],
+                index_token=index_token,
+                state_fields=conventions.state_fields,
+                date_fields=conventions.date_fields,
+                status_basis=status_basis,
+                freshness_snapshot=freshness_snapshot,
+            )
+        for entry in current_state:
+            if entry.get("path"):
+                reached.setdefault(str(entry.get("anchor") or ""), set()).add(str(entry["path"]))
+        items, missing = run_lanes(
             root,
-            resolved=lane_anchors,
+            anchors=lane_anchors,
             roles=roles,
             registry=registry,
-            index=index,
+            current_state=current_state,
+            timings=timings,
+            freshness_snapshot=freshness_snapshot,
+            precedent_reach=lambda: reach_precedents(
+                root,
+                resolved=lane_anchors,
+                roles=roles,
+                registry=registry,
+                index=index,
+                visible=visible,
+                reached=reached,
+            ),
             visible=visible,
             reached=reached,
-        ),
-        visible=visible,
-        reached=reached,
-        analysis=analysis,
-        request_anchors=resolution.anchors,
-        status_basis=status_basis,
-        request_segment=working_set_conversation.ORIGIN_FOCUS if task_refresh else _DEFAULT_ORIGIN,
-    )
+            analysis=analysis,
+            request_anchors=resolution.anchors,
+            status_basis=status_basis,
+            request_segment=working_set_conversation.ORIGIN_FOCUS if task_refresh else _DEFAULT_ORIGIN,
+        )
     missing = (
         *missing,
         *(({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else ()),
@@ -5004,6 +5021,7 @@ def _compile_packet(
             visible=visible,
             retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
+            query_context=lexical_admission,
         )
         if beside_anchors:
             items = (*items, *beside_items)
@@ -5053,6 +5071,7 @@ def _named_beside(
     visible: Callable[[str], bool] | None = None,
     retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> tuple[
     tuple[dict[str, Any], ...],
     tuple[LaneItem, ...],
@@ -5072,7 +5091,8 @@ def _named_beside(
 
     Soft: an exhausted budget leaves the resolved material intact. A page the
     lanes read nothing off retains its coverage. Carry lenses use only the
-    packet's remaining role slots.
+    packet's remaining role slots. `query_context` is the request's admission
+    over `visible` and `status_basis`, when it holds one.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     consumed: set[str] = set()
@@ -5095,6 +5115,7 @@ def _named_beside(
         contacts=contacts,
         visible=visible,
         status_basis=status_basis,
+        query_context=query_context,
     )
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:

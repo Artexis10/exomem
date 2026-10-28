@@ -3762,6 +3762,9 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
+    if "map" not in guarded:
+        # A slice is restored only beside the map it was compiled with, so one without a map is never served.
+        guarded.pop("turn_slice", None)
     if "map" in guarded:
         from .. import context_views
 
@@ -3777,7 +3780,19 @@ def guard_working_set(
                 who=who, purpose=purpose,
             )
             # The record holds the compiled display; release filtering only removes fields, text or items, so the cap holds.
-            guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
+            slice_block = None
+            if "turn_slice" in guarded:
+                # The slice stands beside the map: one with no record is replaced by a stub and leaves the map as it is.
+                slice_block = context_views.pinned_slice_block(vault_root, guarded, caller)
+                if slice_block is None:
+                    slice_block = context_views.unavailable_turn_slice()
+                else:
+                    slice_block["items"] = _guard_view_items(
+                        vault_root, {**slice_block, "ref": context_views.SLICE_REF}, caller=caller, policy=policy,
+                        release_gate_active=release_gate_active, who=who, purpose=purpose,
+                    )
+                guarded["turn_slice"] = slice_block
+            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block)
 
     ctx = _packet_release(
         vault_root,
@@ -4453,11 +4468,11 @@ def _working_set_paths(
             for item in value:
                 _collect(item, ref_strict=ref_strict)
 
-    map_block = packet.get("map")
-    if isinstance(map_block, Mapping):
-        for item in map_block.get("items") or ():
-            if isinstance(item, Mapping):
-                _collect(item, ref_strict=not _item_has_own_page_field(item))
+    for view_block in (packet.get("map"), packet.get("turn_slice")):
+        if isinstance(view_block, Mapping):
+            for item in view_block.get("items") or ():
+                if isinstance(item, Mapping):
+                    _collect(item, ref_strict=not _item_has_own_page_field(item))
 
     for section in (
         "recent_context",
@@ -7703,6 +7718,9 @@ def page_filter_over(
     offered = admission_of(keep)
     # Read as the filter is built: the pin's own filter is built before the set exists, and decides what it holds.
     held = _proven_withheld() if withheld is None else withheld
+    # Read once with the filter, like `held`: a ranking decides every admitted page, and `is_tombstoned`
+    # stats the tombstone files again for each one.
+    tombstones = lifecycle.tombstoned_paths(root)
 
     def decide(rel_path: str, publish: bool = False) -> tuple[bool, bool]:
         rel = str(rel_path or "").strip()
@@ -7711,7 +7729,7 @@ def page_filter_over(
         # A page that left is no page to the check below, which would keep it.
         if rel in held:
             return False, False
-        if not lifecycle.is_tombstoned(root, rel):
+        if not lifecycle.is_tombstoned_in(tombstones, rel):
             try:
                 if not (root / rel).is_file():
                     return True, False
@@ -7747,7 +7765,8 @@ class ReaderView:
     from the compile, as in a vault without it. A unit whose removal the guard
     reports (a notice level) stays in the compile, and the guard removes and
     marks it in the served packet. Verdicts are kept for the request, so a unit
-    two lanes read is decided once.
+    two lanes read is decided once. Page verdicts are kept too: the request's
+    admission decides every catalogue page, and the lanes after it ask again.
     """
 
     def __init__(
@@ -7766,9 +7785,14 @@ class ReaderView:
         # Profiles admit a unit by its own source and ref; mentions cannot change their view.
         self._unit_identity_only = unit_identity_only
         self._verdicts: dict[str, str] = {}
+        # Pinned for the request, like the held set and tombstones its filter reads once.
+        self._page_verdicts: dict[str, bool] = {}
 
     def __call__(self, rel_path: str) -> bool:
-        return self._pages(rel_path)
+        verdict = self._page_verdicts.get(rel_path)
+        if verdict is None:
+            verdict = self._page_verdicts[rel_path] = bool(self._pages(rel_path))
+        return verdict
 
     @property
     def admission(self) -> Admission | None:
@@ -7829,12 +7853,17 @@ def reader_view(
     purpose: str | None = None,
     unit_identity_only: bool = False,
     withheld: frozenset[str] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> ReaderView | None:
     """The caller's `ReaderView`, or `None` when nothing is withheld from it
     (`visible_page_filter`: the owner, or no bound caller). `withheld` is its
-    argument of the same name."""
-    pages = visible_page_filter(
-        vault_root, principal=principal, purpose=purpose, withheld=withheld
+    argument of the same name. `keep` is a restricted caller's release
+    decision that the request already built (`page_filter_over`), so its
+    verdicts are reused."""
+    pages = (
+        visible_page_filter(vault_root, principal=principal, purpose=purpose, withheld=withheld)
+        if keep is None
+        else page_filter_over(vault_root, keep, withheld=withheld)
     )
     if pages is None:
         return None

@@ -26,7 +26,8 @@ import math
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 _log = logging.getLogger(__name__)
@@ -257,3 +258,28 @@ def can_afford(reserve: float) -> bool:
     """True when there is no budget at all, or the reserve fits inside it."""
     budget = current()
     return True if budget is None else budget.can_afford(reserve)
+
+
+@contextmanager
+def leaving(reserve: float) -> Iterator[None]:
+    """Run an optional part of the call on a deadline `reserve` seconds before the call's own.
+
+    Stage checks cooperate with this deadline; a synchronous stage can overrun the reserve.
+    Skips and truncations are recorded on the parent budget too, so its response names them.
+    Without a bound budget nothing changes.
+    """
+    parent = current()
+    if parent is None:
+        yield
+        return
+    now = time.monotonic()
+    child = RequestBudget(seconds=max(0.0, parent.deadline - float(reserve) - now), entry=now)
+    token = set_current(child)
+    try:
+        yield
+    finally:
+        reset_current(token)
+        for stage in child.skipped:
+            parent.note_skipped(stage)
+        for stage in child.truncated:
+            parent.note_truncated(stage)
