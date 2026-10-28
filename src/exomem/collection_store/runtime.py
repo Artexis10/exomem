@@ -784,7 +784,7 @@ _CURATION_COMMANDS = frozenset({"maintain_memory", "episode_memory"})
 IMPORT_IDLE_SECONDS = 1.0
 #: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
 IMPORT_RETRY_SECONDS = 30.0
-#: How often a derived rebuild that waits on a missing source looks for it again.
+#: First retry of a missing derived source; repeated stops back off to IMPORT_RETRY_SECONDS.
 DERIVED_RETRY_SECONDS = 2.0
 #: Rows per derived backfill batch; each tick runs one batch for one building collection.
 BACKFILL_BATCH_ROWS = 128
@@ -1133,6 +1133,7 @@ class StoreServer:
         self._served_at = 0.0  # when the store thread last finished a request
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
+        self._derived_retry = DERIVED_RETRY_SECONDS
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._views_owed = False  # a publication pass that a wake or a yielding tick left unstarted
@@ -1562,8 +1563,9 @@ class StoreServer:
         A restart or a takeover opens a new writer handle, whose first derived tick reconciles
         each derived collection (``derived_rows``). After that, a plain read of the derived file
         finds the rebuilds still running, so an idle store takes no checkout. A rebuild waiting
-        on a missing source retries after ``DERIVED_RETRY_SECONDS``; one that finishes lets the
-        import jobs it held continue at once. A rebuild is background work: a step ends after
+        on a missing source backs off from ``DERIVED_RETRY_SECONDS`` to ``IMPORT_RETRY_SECONDS``;
+        one that finishes lets the import jobs it held continue at once.
+        A rebuild is background work: a step ends after
         its batch when another request waits or runs, and the next step waits for it.
         """
         from ..governance import principal
@@ -1598,8 +1600,13 @@ class StoreServer:
             self._derived_pass = rebuild or foreground_priority.PassBudget()
         if outcome == "done":
             self._ticks["import"] = 0.0
-        # A missing source may return any moment; a mismatch waits on a revise or an upgrade.
-        return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS,
+        if outcome == "stopped":
+            # Preserve a quick transient retry without repeatedly taking the boundary for persistent missing sources.
+            retry = self._derived_retry
+            self._derived_retry = min(retry * 2, IMPORT_RETRY_SECONDS)
+            return retry
+        self._derived_retry = DERIVED_RETRY_SECONDS
+        return {"advanced": 0.0, "done": 0.0,
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _aside(self):

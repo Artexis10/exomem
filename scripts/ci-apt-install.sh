@@ -1,25 +1,16 @@
 #!/usr/bin/env bash
 # Install Debian packages on a CI runner with bounded, retried mirror access.
 #
-# `apt-get` applies no usable wall-clock bound of its own. `Acquire::*::Timeout`
-# governs individual socket operations, and a mirror that dribbles bytes -- or
-# stalls somewhere apt is not watching the clock -- sails straight past it. That
-# was measured, not assumed: with those options set, a fetch still hung for the
-# full five minutes a caller allowed it.
-#
-# So the bound that matters is external. Each attempt runs under `timeout`, and
-# it runs *inside* `sudo` so the kill lands on a root-owned `apt-get` rather
-# than on `sudo` itself -- otherwise the child survives, keeps the dpkg lock,
-# and the retry fails on the lock instead of the mirror.
-#
-# The layering is deliberate:
-#   per attempt   `timeout`               -- a stalled mirror loses its turn
-#   across        the retry loop          -- a different mirror may answer
-#   outermost     the caller's step cap   -- backstop if both are wrong again
-# Retries are only worth having if a stall ends an attempt rather than the loop.
+# Socket timeouts do not bound the complete operation, so each phase also has
+# an external deadline inside sudo. Root can then stop its own child processes.
+# The shell retries index updates; apt retries network acquisition. Neither
+# guarantees that another mirror answers.
+# Download packages before the one installation. A slow download must not use
+# dpkg's allowance. An interrupted installation fails without automatic replay.
 set -euo pipefail
 
 : "${CI_APT_UPDATE_TIMEOUT_SECONDS:=45}"
+: "${CI_APT_DOWNLOAD_TIMEOUT_SECONDS:=150}"
 : "${CI_APT_INSTALL_TIMEOUT_SECONDS:=150}"
 : "${CI_APT_ATTEMPTS:=3}"
 
@@ -67,4 +58,12 @@ for attempt in $(seq 1 "${CI_APT_ATTEMPTS}"); do
   sleep $((attempt * 5))
 done
 
-apt_get "${CI_APT_INSTALL_TIMEOUT_SECONDS}" install --yes "${missing[@]}"
+apt_get "${CI_APT_DOWNLOAD_TIMEOUT_SECONDS}" install --yes --download-only "${missing[@]}"
+apt_get "${CI_APT_INSTALL_TIMEOUT_SECONDS}" install --yes --no-download "${missing[@]}"
+
+for package in "$@"; do
+  if ! installed "${package}"; then
+    echo "::error::required package is not installed: ${package}"
+    exit 1
+  fi
+done

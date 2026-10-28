@@ -61,5 +61,6 @@
   "transcript_bytes": [
     10000,
     30000
-  ]
+  ],
+  "paired_shards": 4
 }

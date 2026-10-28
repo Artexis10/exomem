@@ -1,0 +1,27 @@
+# Tasks
+
+## 1. Evidence and guarded merge
+
+- [x] 1.1 Run historical Full coverage on ready PRs with one scope policy; prove correct draft, ready, release, and docs behavior.
+- [x] 1.2 Add the guarded merge command; reproduce failed current-main preflight and prove merge never runs.
+- [x] 1.3 Bind PR merge-tree receipts and inherited gate attempts; prove identical-tree reuse and partial/mismatched proof rejection.
+- [x] 1.4 Balance K3s shards with measured case durations; prove complete disjoint collection and record actual CI job times.
+- [x] 1.5 Partition paired recall sampling without changing its cases or statistics; prove complete provenance-bound aggregation and record actual CI job times.
+- [x] 1.6 Separate bounded package downloads from one installation; prove failure propagation and caller budgets, then observe hosted setup reaching pytest.
+
+CI run 40366767047 passed all six K3s shards and all 24 recall samplers. The longest jobs took 681 seconds and 570 seconds, respectively.
+The longest K3s job included 338 seconds of image building and 311 seconds of tests.
+Core shard 1 on Python 3.13 passed runtime setup and its tests. The whole run failed on inherited Python 3.11 imports.
+These observations verify scheduling and setup; they do not qualify the later source tree.
+
+## 2. Python qualification
+
+- [x] 2.1 Extend maintained recovery tools with scoped qualification; verify official bytes and explicit producer identity.
+- [x] 2.2 Wire qualification after Python publication and document independent image status; verify the publication job graph.
+- [ ] 2.3 Remove the optional CUDA cache export; verify image publication and retain its actual execution timeline.
+
+## 3. Integrated delivery
+
+- [ ] 3.1 Obtain independent exact-content review and green source full CI; retain the review and tested-tree receipt.
+- [ ] 3.2 Synchronize and archive the change after implementation; pass strict validation and archive discipline checks.
+- [ ] 3.3 Merge and release the reviewed batch; retain ready-to-green, ready-to-qualified, Python-prefix, and separate consumer evidence with unknown states explicit.
