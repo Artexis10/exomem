@@ -560,6 +560,8 @@ async def time_cases(arms: dict[str, Arm], cases: list, *, repeats: int, timeout
 
     samples = []
     for index, case in enumerate(cases):
+        started = time.monotonic()
+        progress(f"case-start index={index + 1}/{len(cases)}")
         for repeat in range(repeats + 1):
             first = "base" if (index + repeat) % 2 == 0 else "head"
             for name in (first, "head" if first == "base" else "base"):
@@ -568,10 +570,13 @@ async def time_cases(arms: dict[str, Arm], cases: list, *, repeats: int, timeout
                     measurement = await measure_call(arms[name].client, case, timeout)
                 finally:
                     arms[name].pause()
+                if measurement.failure:
+                    progress(f"sample-failed case_index={index + 1} arm={name} repeat={repeat} outcome={measurement.outcome}")
                 if repeat:
                     samples.append({"case": case.id, "group": case.group, "arm": name, "repeat": repeat - 1,
                                     "first": first, "elapsed_ms": measurement.elapsed_ms,
                                     "outcome": measurement.outcome, "failure": measurement.failure})
+        progress(f"case-complete index={index + 1}/{len(cases)} elapsed_s={time.monotonic() - started:.1f}")
     return samples
 
 
@@ -583,7 +588,7 @@ async def stop_arms(arms: dict[str, Arm]) -> None:
 
 
 def progress(line: str) -> None:
-    """One stderr line per preparation step: a run that overruns its step budget still shows where the time went."""
+    """Log phase and case progress without request or response content."""
     print(line, file=sys.stderr, flush=True)
 
 
@@ -609,16 +614,21 @@ async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, re
         else:
             started = await asyncio.gather(*(arm.start(quiescence_limit=900) for arm in arms.values()))
         timings = dict(zip(arms, started, strict=True))
+        progress("timeability-check-start")
         for arm in arms.values():
             arm.require_timeable()
+        progress("timeability-check-complete")
         for arm in arms.values():
             arm.pause()
         pressure_start = cpu_pressure()
         samples = await time_cases(arms, cases, repeats=repeats)
+        progress(f"measurement-complete samples={len(samples)}")
         return {"samples": samples, "timings": timings,
                 "environment": {"cpu_pressure_start": pressure_start, "cpu_pressure_end": cpu_pressure()}}
     finally:
+        progress("cleanup-start")
         await stop_arms(arms)
+        progress("cleanup-complete")
 
 
 # --- Public fixture runs and the private sandbox ------------------------------

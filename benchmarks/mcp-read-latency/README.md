@@ -30,6 +30,10 @@ The workers stay running between fixture loading and measurement. The report's `
 `quiescent_s` describe the initial start. The `fixture-prep` progress line reports loading and the
 quiet wait after loading separately.
 
+Progress also marks the readiness checks, each case, measurement completion and cleanup.
+Case lines contain only their position and elapsed time. Failed samples report the arm, repeat and outcome,
+including warm-ups. These lines keep a timed-out run diagnosable without logging request or response content.
+
 ## Modes
 
 | Command | Purpose |
