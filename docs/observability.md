@@ -479,6 +479,20 @@ write's. Two knobs, neither changed by default:
   acquisitions while keeping the long-holder warnings, which is the right trade
   when the boundary is not what you are investigating.
 
+`lease_acquired` logs at INFO when the grant changes the fencing token (a first
+grant, a takeover or a re-grant after idle release) and at DEBUG when it
+repeats the held token, because a governed write batch grants the writer lease
+thousands of times an hour. `lease_reclaimed`, `lease_renew_rejected`,
+`lease_idle_released` and `lease_released` stay at INFO. A mutation-lock hold
+from a command or lifecycle boundary keeps its INFO audit pair. A reserved-state
+or machine-frequency hold (`background`, `graph`, `derived-worker`,
+`collection-read`) logs at DEBUG
+when its acquire waited less than one poll interval (25 ms by default) and its
+hold took less than 250 ms; `mutation_lock_hold_summary` counts these. A hold
+that waited, took 250 ms or more, ran overdue or was refused logs at INFO or
+higher. A boundary with no declared holder kind, such as `unknown`, also keeps
+its INFO pair.
+
 Two log lines close loops the spans cannot: `lexical deferred upsert retry
 completed paths=… outcome=…` says what became of a lexical upsert the
 publication barrier was too busy to take, and `file watcher: startup graph
