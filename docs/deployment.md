@@ -1678,7 +1678,7 @@ never goes in a URL. Create a session with the credential that `/upload` takes
 on that listener. The credential fixes the lane; metadata cannot change it.
 Evidence requires `filename`, `sha256` (of the whole file), `scope` and
 `category`. Source requires `filename` and `sha256`; its optional fields are
-`title`, `source_type`, `domain`, `url`, `content_type` and `raw_protection`.
+`title`, `source_kind`, `domain`, `url`, `content_type` and `raw_protection`.
 Source uses the canonical Source writer and stores its original beside the
 Source page. It does not accept `archive=members`. Evidence also accepts
 `raw_protection` and `archive`. One request carries at most 64 MiB, and one session holds at most
@@ -1701,7 +1701,7 @@ Their use on a Cloudflare-transited request is logged as
 no remote client uses them. It is kept out of `/metrics.json`, which is served
 without authentication.
 
-### Resumable uploads from an agent
+### Resumable uploads from a shell
 
 `transfer_artifact(operation="upload", lane="evidence")` returns a `resumable`
 object beside `upload_url`. A Source handoff advertises the same protocol when

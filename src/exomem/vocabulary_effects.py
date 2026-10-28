@@ -89,6 +89,9 @@ class ClassificationReason:
     path: str
     detail: str = ""
 
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "path": self.path, "detail": self.detail}
+
 
 def image_format_refusals(*, is_markdown: bool, size: int | None, ordinary: bool = True) -> tuple[str, ...]:
     """The closed structural-image format checks shared with transport admission."""
@@ -98,9 +101,6 @@ def image_format_refusals(*, is_markdown: bool, size: int | None, ordinary: bool
     if ordinary and not is_markdown:
         reasons.append("unsupported_file_change")
     return tuple(reasons)
-
-    def as_dict(self) -> dict[str, str]:
-        return {"code": self.code, "path": self.path, "detail": self.detail}
 
 
 @dataclass(frozen=True, slots=True)

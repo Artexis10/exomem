@@ -1941,6 +1941,7 @@ def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) ->
     assert set(status) == {
         "operation",
         "healthy",
+        "health_scope",
         "counts",
         "reconciliation_required_count",
         "jobs",
