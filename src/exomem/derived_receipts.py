@@ -3148,52 +3148,6 @@ def settle_component_not_required(
     return "batch_completed" if batch_completed else "settled"
 
 
-def settle_context_catalogue_before(
-    vault_root: Path, *, before: float, now: float | None = None
-) -> tuple[str, ...]:
-    """Complete every unclaimed catalogue obligation of a batch proven before `before`.
-
-    The catalogue pass diffs the whole vault, so one success covers each copy
-    of the obligation whose batch had already committed when it began. Returns
-    the batches this completed.
-    """
-    settled_at = _timestamp(now)
-    connection = deferred_index._connect(vault_root, create=True)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            batch_ids = tuple(
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT c.batch_id FROM derived_batch_components AS c "
-                    "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
-                    "WHERE c.component = 'context_catalogue' AND b.state = 'ready' "
-                    "AND c.state IN ('prepared', 'ready', 'retryable') "
-                    "AND b.created_at <= ?",
-                    (float(before),),
-                ).fetchall()
-            )
-            completed: list[str] = []
-            for batch_id in batch_ids:
-                connection.execute(
-                    "UPDATE derived_batch_components SET state = 'completed', "
-                    "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
-                    "updated_at = ? WHERE batch_id = ? "
-                    "AND component = 'context_catalogue' "
-                    "AND state IN ('prepared', 'ready', 'retryable')",
-                    (settled_at, batch_id),
-                )
-                if _complete_batch_if_settled(connection, batch_id, now=settled_at):
-                    completed.append(batch_id)
-        except Exception:
-            connection.rollback()
-            raise
-        connection.commit()
-        return tuple(completed)
-    finally:
-        connection.close()
-
-
 def defer_component(
     vault_root: Path,
     status: DerivedComponentStatus,

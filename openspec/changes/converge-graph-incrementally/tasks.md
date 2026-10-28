@@ -619,8 +619,17 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   per-path verdict, and the age bounds a refusal that persists. Evidence:
   `test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waited_the_stall`,
   red on the previous head.
-- [ ] 11.7 Sandbox A/B (orchestrator): zero whole-vault passes per ordinary governed
-  write on the real managed worker with its watcher on; drift 0.
+- [x] 11.7 Sandbox A/B: ordinary governed writes start no whole-vault repair on the
+  real managed worker with its watcher on; drift stays zero. Barrier recovery may
+  publish once the oldest queued receipt reaches the existing 275-second bound
+  during sustained writes. Requeueing preserves that age; this task does not
+  change the backstop. The final A/B on head `925de4750` recorded zero dispatch
+  registrations, one age-backstop pass, an empty queue, no full marker, and zero
+  drift. The result and independent approval are recorded on PR #2150, merged as
+  `11e431c83` and included in v0.148.0. A passive post-release observation on
+  2026-10-28 found zero registrations and one persisted barrier-recovery
+  publication across a complete hour of retained logs. A separate 20-second CPU
+  sample still used 1.20 cores; this evidence claims no overall CPU or read gain.
 - [x] 11.8 A classified dispatch failure is queued repair for a caller that may stop
   at queued. The sandbox A/B found the route. The derived drain's dispatch met
   `MUTATION_BUSY` while the graph drain held the boundary, and the failure branch

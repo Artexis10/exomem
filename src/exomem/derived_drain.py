@@ -464,20 +464,6 @@ def _dispatch_claims(
             if completed_current:
                 completed.append(status.batch_id)
                 call_ledger.note_derived_event("component_completed")
-                if status.component is derived_receipts.DerivedComponent.CONTEXT_CATALOGUE:
-                    # The pass folded the whole vault, so it also answers every
-                    # earlier batch's copy of this one obligation.
-                    try:
-                        completed.extend(
-                            derived_receipts.settle_context_catalogue_before(
-                                vault_root, before=started_at, now=started_at
-                            )
-                        )
-                    except Exception:  # noqa: BLE001 - earlier copies stay retryable
-                        log.warning(
-                            "derived context_catalogue settle of earlier batches failed",
-                            exc_info=True,
-                        )
                 continue
             if not completion_failed:
                 failure_code = "generation_changed"

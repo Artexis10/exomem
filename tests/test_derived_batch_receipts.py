@@ -3369,60 +3369,58 @@ def test_coverage_and_census_cost_stays_flat_as_receipts_grow(tmp_path: Path) ->
         assert large[query] <= cost + 64, (query, cost, large[query])
 
 
-def test_one_catalogue_success_settles_every_earlier_open_copy(vault: Path) -> None:
+def test_catalogue_success_keeps_a_commit_after_its_snapshot_owed(vault: Path) -> None:
     protocol = _protocol()
-    drain = _drain()
     catalogue = protocol.DerivedComponent.CONTEXT_CATALOGUE
-    receipts = []
-    for serial in range(3):
-        receipt, target, _before, after = _prepare_one(
-            vault,
-            batch_id=f"catalogue-{serial}",
-            required={catalogue},
-            now=1.0 + serial,
-        )
-        _commit_and_prove(vault, receipt, target, after)
-        receipts.append(receipt)
-
-    drain.drain_once(
-        vault,
-        dispatch=lambda _root, _status: True,
-        observe_current_generation=lambda _root: "generation-1",
-        limit=1,
-        now=10.0,
+    current, target, _, after = _prepare_one(
+        vault, batch_id="catalogue-current", required={catalogue}, now=1.0
+    )
+    _commit_and_prove(vault, current, target, after)
+    late, late_target, _, late_after = _prepare_one(
+        vault, batch_id="catalogue-late", required={catalogue}, now=2.0
     )
 
-    assert [protocol.component_status(vault, r, catalogue).state for r in receipts] == [
-        "completed"
-    ] * 3
-    assert [protocol._load_receipt(vault, r.batch_id).state for r in receipts] == [
-        "completed"
-    ] * 3
+    def refresh_then_commit(_root, status):
+        assert status.batch_id == current.batch_id
+        # The fold has read the vault before this prepared write commits.
+        _commit_and_prove(vault, late, late_target, late_after)
+        return True
 
-
-def test_catalogue_success_leaves_a_batch_that_began_after_the_pass(vault: Path) -> None:
-    protocol = _protocol()
-    drain = _drain()
-    catalogue = protocol.DerivedComponent.CONTEXT_CATALOGUE
-    batches = []
-    for batch_id, prepared_at in (("catalogue-old", 1.0), ("catalogue-new", 50.0)):
-        receipt, target, _before, after = _prepare_one(
-            vault, batch_id=batch_id, required={catalogue}, now=prepared_at
-        )
-        _commit_and_prove(vault, receipt, target, after)
-        batches.append(receipt)
-
-    drain.drain_once(
-        vault,
-        dispatch=lambda _root, _status: True,
-        observe_current_generation=lambda _root: "generation-1",
-        limit=1,
-        now=10.0,
+    _drain().drain_once(
+        vault, dispatch=refresh_then_commit,
+        observe_current_generation=lambda _root: "generation-1", limit=1, now=10.0,
     )
 
-    old, new = batches
-    assert protocol.component_status(vault, old, catalogue).state == "completed"
-    assert protocol.component_status(vault, new, catalogue).state != "completed"
+    assert protocol.component_status(vault, current, catalogue).state == "completed"
+    assert protocol.component_status(vault, late, catalogue).state == "ready"
+    assert protocol._load_receipt(vault, late.batch_id).state == "ready"
+
+
+def test_catalogue_success_keeps_unfinished_graph_inputs_owed(vault: Path) -> None:
+    protocol = _protocol()
+    catalogue = protocol.DerivedComponent.CONTEXT_CATALOGUE
+    current, target, _, after = _prepare_one(
+        vault, batch_id="catalogue-current", required={catalogue}, now=1.0
+    )
+    _commit_and_prove(vault, current, target, after)
+    pending, target, _, after = _prepare_one(
+        vault, batch_id="catalogue-graph", required={catalogue, protocol.DerivedComponent.GRAPH},
+        now=2.0,
+    )
+    _commit_and_prove(vault, pending, target, after)
+
+    def refresh(_root, status):
+        assert status.batch_id == current.batch_id
+        return True
+
+    _drain().drain_once(
+        vault, dispatch=refresh, observe_current_generation=lambda _root: "generation-1",
+        limit=1, now=10.0,
+    )
+
+    assert protocol.component_status(vault, current, catalogue).state == "completed"
+    assert protocol.component_status(vault, pending, protocol.DerivedComponent.GRAPH).state == "ready"
+    assert protocol.component_status(vault, pending, catalogue).state == "prepared"
 
 
 def test_recovery_exception_stamps_the_batch_and_leaves_sibling_components_alone(
