@@ -384,6 +384,14 @@ def execute_write_advisory(
         if ref is None
         else derived_receipts.read_advisory_result(vault_root, ref, now=now)
     )
+    if stored is None and derived_receipts.advisory_result_lapsed(
+        vault_root, ref, now=now
+    ):
+        # The advisory is optional and its result outlived both deadlines, so
+        # nothing can ever publish it: the caller settles the component.
+        return AdvisoryExecution(
+            batch_id=batch_id, outcome="expired", failure_code="advisory_unavailable"
+        )
     if stored is None or stored.target_rel_path is None:
         # No addressable result row, or a pre-extension row with no target
         # identity: it stays exactly resolvable and fails closed in the store.

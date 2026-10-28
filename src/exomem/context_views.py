@@ -56,7 +56,7 @@ from . import (
     working_set_resolve,
     working_set_state,
 )
-from .activation_result import INDEX_WARMING
+from .activation_result import AMBIGUOUS, INDEX_WARMING, UNRESOLVED, WITHHELD
 from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
@@ -116,6 +116,31 @@ MAP_KIND_SHARES: dict[str, float] = {
     KIND_ANCHOR: 0.3,
     KIND_COLLECTION: 0.2,
     KIND_THREAD: 0.2,
+}
+
+#: The share of an activation packet's budget that the turn slice holds back while the slice is on.
+#: The map then always compiles into what is left, so it is the same on every turn. The slice is on
+#: by default (design D13), and `EXOMEM_ACTIVATION_TURN_SLICE=off` is the rollback. A budget whose
+#: share cannot hold one line holds back nothing (`_slice_reserve`).
+TURN_SLICE_SHARE = 0.25
+
+#: The key a turn slice's record is kept under. It names no view and is never served.
+SLICE_REF = "exomem://turn-slice"
+SLICE_DESCRIPTION = (
+    "What this turn's words reached, with the evidence. Not checked for relevance; read a ref before relying on it."
+)
+#: The states of a turn slice. `ready` lists leads; `empty` is a turn that reached nothing the caller may
+#: see; `skipped` is a request budget or a share with no room for a line; `unavailable` is a fault.
+SLICE_EMPTY = "empty"
+SLICE_SKIPPED = "skipped"
+#: How a lead was reached, strongest first: the closed set of a slice item's `match`, in listing order.
+MATCHES = ("resolved", "ambiguous", "carried", "partial", "named", "related")  # nosemgrep: ep-word-set -- The packet specification fixes this set.
+#: The anchor statuses that make a lead, and the match each one is. The packet specification fixes both sets.
+_MATCH_OF_STATUS = {  # nosemgrep: ep-word-set -- Fixed anchor statuses of the activation packet.
+    "resolved": "resolved",
+    "partial": "partial",
+    working_set_resolve.RETRIEVAL_CARRIED_STATUS: "carried",
+    working_set_resolve.RETRIEVAL_NAMED_STATUS: "named",
 }
 
 #: The current-state resolver's wire fields, with the statement first and its attribution after it.
@@ -920,16 +945,18 @@ def map_within(
 @dataclass(frozen=True, slots=True)
 class _ActivationMap:
     view: View
+    world: _World
     selected: tuple[int, ...]
     overflow: str
     empty: bool
 
 
-def _activation_map(prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None) -> _ActivationMap:
+def _activation_map(
+    prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None, world: _World,
+) -> _ActivationMap:
     """Budget before reading state; only candidate rows pay the current-state resolver's cost."""
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None
-    world = _world(catalogue, caller)
     rows = tuple(_view_rows(prepared.target, prepared.key, world, prepared.registries))
     states: dict[str, dict[str, Any]] = {}
     view = View(
@@ -963,10 +990,11 @@ def _activation_map(prepared: _Prepared, max_chars: int, timings: find_types.Fin
     # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
     items = [_map_item(view, rows[index]) for index in selected]
     generation = _digest(json.dumps([items, available, overflow, not world.rows, view.stale, view.graph], sort_keys=True))
-    return _ActivationMap(replace(view, generation=generation, state_available=available), selected, overflow, not world.rows)
+    return _ActivationMap(replace(view, generation=generation, state_available=available), world, selected, overflow, not world.rows)
 
 
-# The activation cache shares the existing packet cache's resource bound. Restricted builds never enter it.
+# The bounded owner cache retains the admitted world so warm slices reuse the map's membership joins.
+# Restricted builds never enter it.
 _OWNER_MAPS: OrderedDict[tuple[Any, ...], _ActivationMap] = OrderedDict()
 _OWNER_MAPS_LOCK = threading.Lock()
 
@@ -983,17 +1011,24 @@ def map_packet_chars(block: Mapping[str, Any]) -> int:
 def activation_packet(
     vault_root: Path, max_chars: int, *, purpose: str | None = None,
     generation: Mapping[str, Any], timings: find_types.FindTimings | None = None,
+    turn_leads: Callable[[CallerView], TurnLeads] | None = None,
 ) -> dict[str, Any]:
-    """Serve the turn-independent map from the published catalogue for this caller."""
+    """Serve the turn-independent map from the published catalogue for this caller.
+
+    `turn_leads` turns the turn slice on: it holds back `TURN_SLICE_SHARE` of the budget for the slice
+    (so the map is the same on every turn), and it is called once, after the map is compiled, with the
+    map's caller view, for what the turn's words reached. A fault in it, or no room for a line, sets the
+    slice's state and never changes the map.
+    """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-            return _activation_packet(vault_root, max_chars, purpose, generation, timings)
-    return _activation_packet(vault_root, max_chars, purpose, generation, timings)
+            return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads)
+    return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads)
 
 
 def _activation_packet(
     root: Path, max_chars: int, purpose: str | None, generation: Mapping[str, Any],
-    timings: find_types.FindTimings | None,
+    timings: find_types.FindTimings | None, turn_leads: Callable[[CallerView], TurnLeads] | None = None,
 ) -> dict[str, Any]:
     with find_types.timing_span(timings, "working_set.catalogue"):
         prepared = _prepare(root, MAP_REF, None, purpose, str(generation.get("freshness_key") or ""))
@@ -1006,6 +1041,8 @@ def _activation_packet(
         }
         view = _usable(prepared)
         description = "Index of what exists."
+        reserve = 0 if turn_leads is None else _slice_reserve(max_chars)
+        map_chars = max_chars - reserve - len(description) - 1
         if view is None:
             assert catalogue is not None
             # Only a caller who may use the owner cache builds its key: the key reads every registry.
@@ -1013,7 +1050,7 @@ def _activation_packet(
                 Path(root).absolute(), catalogue.token(), prepared.registries.digest if prepared.registries is not None else "",
                 str(generation.get("freshness_key") or ""), prepared.caller.binding,
                 metadata.get("index_generation"), metadata["roles_hash"], metadata["conventions_hash"],
-                prepared.unlisted, tuple(catalogue.pending()), max_chars,
+                prepared.unlisted, tuple(catalogue.pending()), map_chars,
             )
             with _OWNER_MAPS_LOCK:
                 compiled = None if key is None else _OWNER_MAPS.get(key)
@@ -1021,7 +1058,8 @@ def _activation_packet(
                     _OWNER_MAPS.move_to_end(key)
             with find_types.timing_span(timings, "working_set.map", source="cache" if compiled else "computed"):
                 if compiled is None:
-                    compiled = _activation_map(prepared, max_chars - len(description) - 1, timings)
+                    world = _world(catalogue, prepared.caller)
+                    compiled = _activation_map(prepared, map_chars, timings, world)
                     if key is not None and compiled.view.state_available and catalogue.token() == key[1]:
                         with _OWNER_MAPS_LOCK:
                             _OWNER_MAPS[key] = compiled
@@ -1050,12 +1088,264 @@ def _activation_packet(
         )
         packet["map"] = block
         packet["budget"]["used_chars"] = map_packet_chars(block)
+        if turn_leads is not None:
+            slice_block = _turn_slice(
+                prepared, turn_leads, world=compiled.world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
+            )
+            packet["turn_slice"] = slice_block
+            packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
         packet["abstained"] = False
         packet.pop("abstention", None)
         return packet
     finally:
         if catalogue is not None:
             catalogue.close()
+
+
+# --------------------------------------------------------------------------- #
+# The turn slice
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class Lead:
+    """One page, anchor or collection that the turn's words reached, as the guarded compile named it."""
+
+    ref: str
+    match: str
+    evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnLeads:
+    """What the turn reached: `READY` with its leads, `SLICE_EMPTY` with none, or why there is no answer.
+
+    `evidence` holds the compile's own evidence states (`lexical_evidence`, `semantic_evidence`) as its
+    packet reported them, so a slice that is empty because a lane was warming says so.
+    """
+
+    state: str
+    leads: tuple[Lead, ...] = ()
+    evidence: tuple[tuple[str, str], ...] = ()
+
+
+def _lead_ref(item: Mapping[str, Any]) -> str:
+    return str(item.get("ref") or item.get("path") or "")
+
+
+def _lead_evidence(item: Mapping[str, Any]) -> tuple[str, ...]:
+    """The item's evidence kinds, only those of the closed vocabulary, in its reporting order."""
+    named = {kind for kind in item.get("evidence") or () if isinstance(kind, str)}
+    return tuple(kind for kind in working_set_resolve.EVIDENCE_KINDS if kind in named)
+
+
+#: The abstentions that answer the turn itself, so their packet is read for leads like a served one.
+_TURN_ANSWERS = frozenset({UNRESOLVED, AMBIGUOUS, WITHHELD})
+
+
+def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
+    """What the slice reads off one guarded anchors compile, served or abstained: the one place its outcome
+    becomes a slice state.
+
+    A served packet, and an abstention that answers the turn (nothing reached, a question between senses,
+    everything withheld), give their leads: anchors, the senses of an ambiguous turn and related pages. A
+    withheld packet so reads as a turn that reached nothing, and the slice says nothing about what was
+    withheld. An abstention that the request budget caused (it carries `request_budget`) is `skipped`; any
+    other one (a fault, a warming index, evidence that changed under the compile) is `unavailable`.
+
+    `recent_context` is turn-independent and is never a lead. An anchor that is one sense of an ambiguous
+    turn is listed as `ambiguous` whatever its own status. Strongest match first, the compile's order within one.
+    """
+    generation = packet.get("generation")
+    evidence = tuple(
+        (name, str(generation[name]))
+        for name in ("lexical_evidence", "semantic_evidence")  # nosemgrep: ep-word-set -- The packet's two evidence-state fields.
+        if isinstance(generation, Mapping) and generation.get(name)
+    )
+    abstention = packet.get("abstention")
+    if packet.get("abstained") and (not isinstance(abstention, Mapping) or abstention.get("reason") not in _TURN_ANSWERS):
+        return TurnLeads(SLICE_SKIPPED if "request_budget" in packet else UNAVAILABLE, (), evidence)
+    senses = {
+        _lead_ref(item) for item in packet.get("ambiguity") or () if isinstance(item, Mapping)
+    }
+    found: dict[str, Lead] = {}
+
+    def add(item: Mapping[str, Any], match: str | None) -> None:
+        ref = _lead_ref(item)
+        if ref and match is not None and ref not in found:
+            found[ref] = Lead(ref, match, _lead_evidence(item))
+
+    for item in packet.get("anchors") or ():
+        if isinstance(item, Mapping):
+            add(item, "ambiguous" if _lead_ref(item) in senses else _MATCH_OF_STATUS.get(item.get("status")))
+    for item in packet.get("ambiguity") or ():
+        if isinstance(item, Mapping):
+            add(item, "ambiguous")
+    for item in packet.get("related") or ():
+        if isinstance(item, Mapping):
+            add(item, "related")
+    leads = tuple(sorted(found.values(), key=lambda lead: MATCHES.index(lead.match)))
+    return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence)
+
+
+def slice_item_line(item: Mapping[str, Any]) -> str:
+    """Render one slice item: how the turn reached it, its map line, and the evidence."""
+    line = f"{item['match']}: {map_item_line(item)}"
+    if item.get("evidence"):
+        line += " (evidence: " + ", ".join(item["evidence"]) + ")"
+    return line
+
+
+def _slice_overflow(count: int) -> str:
+    return f"Not shown: {count}."
+
+
+def slice_packet_chars(block: Mapping[str, Any]) -> int:
+    """The prose budget charged for a slice, rendered as `slice_item_line` selects it. A slice with no lines costs none."""
+    if block.get("state") != READY or not block.get("description"):
+        return 0
+    lines = [str(block["description"])]
+    lines.extend(slice_item_line(item) for item in block.get("items", ()))
+    if block.get("overflow"):
+        lines.append(_slice_overflow(int(block["overflow"])))
+    # One newline joins the slice to the map text before it.
+    return len("\n".join(lines)) + 1
+
+
+def packet_chars(map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | None) -> int:
+    """What a maps packet is charged: its map, and its turn slice when it carries one."""
+    return map_packet_chars(map_block) + (0 if slice_block is None else slice_packet_chars(slice_block))
+
+
+def _slice_reserve(max_chars: int) -> int:
+    """The characters that the slice holds back of `max_chars`: its share, or none where the share cannot hold
+    the description and the shortest line that any slice can have. It reads the budget alone, so the map is
+    still the same on every turn."""
+    reserve = int(max_chars * TURN_SLICE_SHARE)
+    # The shortest match and kind of their closed sets (an item is a map row's kind or a note), with a one-character
+    # title and ref.
+    kind = min((*MAP_KIND_SHARES, context_catalogue.KIND_NOTE), key=len)
+    shortest = slice_item_line({"match": min(MATCHES, key=len), "kind": kind, "title": "?", "ref": "?"})
+    return reserve if reserve - 1 - len(SLICE_DESCRIPTION) >= len(shortest) + 1 else 0
+
+
+def _turn_slice(
+    prepared: _Prepared, turn_leads: Callable[[CallerView], TurnLeads], *, world: _World | None, limit: int, reserve: int,
+    timings: find_types.FindTimings | None,
+) -> dict[str, Any]:
+    """The turn slice for this caller, in the `reserve` that the map left. It never raises and never touches the map."""
+    state, chosen, overflow, evidence = UNAVAILABLE, [], 0, ()
+    extras: dict[str, dict[str, Any]] = {}
+    states: dict[str, dict[str, Any]] = {}
+    try:
+        # The map's view: its release filter has already decided every page the map admitted.
+        # A share with no room for a line skips the slice without compiling it.
+        leads = turn_leads(prepared.caller) if reserve else TurnLeads(SLICE_SKIPPED)
+        state, evidence = leads.state, leads.evidence
+        if state == READY:
+            with find_types.timing_span(timings, "working_set.turn_slice"):
+                # A lead has the same membership, project activity and thread head as in the caller's full map view.
+                rows, extras = _slice_rows(prepared, leads, world)
+                if rows:
+                    chosen, overflow = _slice_within(prepared, rows, extras, states, reserve - 1 - len(SLICE_DESCRIPTION))
+                # No admitted lead is an empty turn; leads with no room for one whole line are a skipped slice.
+                state = READY if chosen else (SLICE_SKIPPED if rows else SLICE_EMPTY)
+    except Exception:  # noqa: BLE001 - a slice that cannot be built is a state, never a fault of the map
+        log.warning("turn slice unavailable", exc_info=True)
+        state, chosen, overflow, extras, states = UNAVAILABLE, [], 0, {}, {}
+    shown = {row.entry_id: extras[row.entry_id] for row in chosen}
+    block: dict[str, Any] = {"state": state}
+    if state == READY:
+        block["description"] = SLICE_DESCRIPTION
+        if overflow:
+            block["overflow"] = overflow
+    # The compile's evidence states, so a slice that a warming lane left empty is not a silent `empty`.
+    block.update(evidence)
+    # The record's key: the content this slice serves, so the same content is the same generation.
+    block["generation"] = _digest(json.dumps(
+        [state, [[row.digest(), shown[row.entry_id], states.get(row.entry_id)] for row in chosen], overflow, evidence],
+        sort_keys=True,
+    ))
+    view = View(SLICE_REF, READY, block["generation"], False, tuple(chosen), None, states)
+    block["items"] = served_items(
+        prepared.root, view, chosen, prepared.caller, block=block, limit=limit, extras=shown
+    )
+    return block
+
+
+def _slice_rows(
+    prepared: _Prepared, leads: TurnLeads, world: _World | None,
+) -> tuple[tuple[Row, ...], dict[str, dict[str, Any]]]:
+    """The caller's rows for the leads, in lead order, with how each was reached.
+
+    A lead names a catalogue entry by its id or its ref. A lead the caller may not see, or that names no
+    entry, has no row, and its text is never read: display text comes from admitted entries alone.
+    """
+    catalogue, caller = prepared.catalogue, prepared.caller
+    assert catalogue is not None  # `_usable` returned None
+    world = world if world is not None else _world(catalogue, caller)
+    by_name: dict[str, Row] = {}
+    for row in world.rows:
+        by_name.setdefault(row.entry_id, row)
+        by_name.setdefault(row.ref, row)
+    rows: list[Row] = []
+    extras: dict[str, dict[str, Any]] = {}
+    for lead in leads.leads:
+        row = by_name.get(lead.ref)
+        if row is not None and row.entry_id not in extras:
+            rows.append(row)
+            extras[row.entry_id] = {"match": lead.match, "evidence": list(lead.evidence)}
+    return tuple(rows), extras
+
+
+def _slice_within(
+    prepared: _Prepared, rows: Sequence[Row], extras: Mapping[str, Mapping[str, Any]],
+    states: dict[str, dict[str, Any]], available: int,
+) -> tuple[list[Row], int]:
+    """The leading rows whose whole lines fit `available` characters, and how many rows were left out.
+
+    A line is never cut and a stronger lead is never passed over for a weaker one. State is read only for a
+    row whose line without it fits. What is left out is a count, whose own line is kept room for.
+    """
+    index = working_set_index.WorkingSetIndex(prepared.root)
+    anchors: dict[str, Any] | None = None
+    readable = True
+
+    def read_state(row: Row) -> None:
+        nonlocal anchors, readable
+        if not readable or row.kind not in (KIND_ANCHOR, KIND_COLLECTION):
+            return
+        try:
+            if anchors is None:
+                anchors = {anchor.anchor_id: anchor for anchor in index.anchors()}
+            anchor = anchors.get(row.entry_id)
+            if anchor is not None:
+                states.update(_anchor_states(prepared.root, (anchor,), prepared.caller, index.token()))
+        except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
+            states.clear()
+            readable = False
+
+    chosen: list[Row] = []
+    used = 0
+    footer = len(_slice_overflow(len(rows))) + 1
+    try:
+        for position, row in enumerate(rows):
+            # Room for the count is kept back until the last row, which needs none when every row is shown.
+            remaining = available - used - (0 if position == len(rows) - 1 else footer)
+            item = {**row.item(), **extras[row.entry_id]}
+            # State can only add text, so a line that does not fit without it needs no state read.
+            if len(slice_item_line(item)) + 1 > remaining:
+                break
+            read_state(row)
+            line = len(slice_item_line({**item, "state": states.get(row.entry_id)})) + 1
+            if line > remaining:
+                states.pop(row.entry_id, None)
+                break
+            chosen.append(row)
+            used += line
+    finally:
+        index.close()
+    return chosen, len(rows) - len(chosen)
 
 
 # --------------------------------------------------------------------------- #
@@ -1220,6 +1510,8 @@ class _Served:
     missing: tuple[dict[str, Any], ...] = ()
     block: dict[str, Any] | None = None
     limits: frozenset[int] = frozenset()
+    #: Fields a turn slice adds to its items, by entry id: how the turn reached each one.
+    extras: dict[str, dict[str, Any]] | None = None
 
 
 def _served_key(
@@ -1237,12 +1529,16 @@ def _items(served: _Served) -> list[dict[str, Any]]:
     if served.states is not None:
         for row, item in zip(served.rows, items, strict=True):
             item["state"] = copy.deepcopy(served.states.get(row.entry_id))
+    if served.extras is not None:
+        for row, item in zip(served.rows, items, strict=True):
+            item.update(copy.deepcopy(served.extras.get(row.entry_id) or {}))
     return items
 
 
 def served_items(
     vault_root: Path, view: View, rows: Sequence[Row | ProfileLine], caller: CallerView, *,
     continuation: str | None = None, block: Mapping[str, Any] | None = None, limit: int | None = None,
+    extras: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The items `rows` are served as. The invocation that compiled them keeps them for the terminal guard.
 
@@ -1259,6 +1555,7 @@ def served_items(
         # The block keeps its `items` key, empty, so a restored block keeps its key order.
         None if block is None else copy.deepcopy({**block, "items": []}),
         frozenset() if limit is None else frozenset((limit,)),
+        None if extras is None else copy.deepcopy({key: dict(value) for key, value in extras.items()}),
     )
     store = principal_module.invocation_served()
     if store is not None and view.generation is not None:
@@ -1349,6 +1646,29 @@ def unavailable_map_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
     # `abstained_packet` clamps the limit it is given into the declared range.
     limit = (packet.get("budget") or {}).get("limit_chars")
     return working_set.abstained_packet(reason=UNAVAILABLE, max_chars=limit, generation=generation)
+
+
+def pinned_slice_block(vault_root: Path, packet: Mapping[str, Any], caller: CallerView) -> dict[str, Any] | None:
+    """The turn slice that this invocation compiled for `packet`, or None when it compiled none.
+
+    The block is chosen by its own `generation`, and must be the one compiled for the packet's character
+    limit, as `pinned_map_block` does for the map. So an untrusted block field, or a slice budgeted for a
+    larger packet, never reaches the wire.
+    """
+    block = packet.get("turn_slice")
+    budget = packet.get("budget")
+    if not isinstance(block, Mapping) or not isinstance(budget, Mapping):
+        return None
+    limit = budget.get("limit_chars")
+    served = _record(vault_root, SLICE_REF, block.get("generation"), None, caller)
+    if served is None or served.block is None or type(limit) is not int or limit not in served.limits:
+        return None
+    return {**copy.deepcopy(served.block), "items": _items(served)}
+
+
+def unavailable_turn_slice() -> dict[str, Any]:
+    """The slice that a packet is served with when its block has no record: no item, and the map untouched."""
+    return {"state": UNAVAILABLE, "items": []}
 
 
 def _response(
