@@ -213,12 +213,11 @@ def _source_upload_receipt(vault_root: Path, result: dict) -> dict:
 
 def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     """Publish one Source through the maintained mutation replay protocol."""
-    from types import SimpleNamespace
-
     from . import add, schema
     from .cli_ops import OpError
+    from .command_surface import Command
     from .vault import BatchWriteError
-    from .writer_lease import _PostCommitOutcomeUncertain, get_manager
+    from .writer_lease import _PostCommitOutcomeUncertain, invoke_command
 
     def publish(root: Path, *, target: dict, length: int, sha256: str, session_id: str) -> dict:
         if _source_session_destination(root, target, size=length, sha256=sha256) != target["destination"]:
@@ -242,11 +241,12 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     # A lane token carries no caller identity. Keep the same transfer floor across startup recovery.
     with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
         try:
-            result = get_manager().invoke(
-                SimpleNamespace(name="upload_source_session", read_only=False, response_detail="legacy", leaf=publish),
-                (vault_root,),
-                {"target": record["target"], "length": record["length"],
-                 "sha256": record["sha256"], "session_id": record["id"]},
+            result = invoke_command(
+                Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
+                        cli_writes=True, response_detail="legacy"),
+                vault_root,
+                target=record["target"], length=record["length"],
+                sha256=record["sha256"], session_id=record["id"],
                 idempotency_key=record["id"], public_idempotency_key=None,
             )
         except OpError as error:

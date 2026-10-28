@@ -143,6 +143,11 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
        Only the receipt that `capture_source` returns proves custody; the upload reply
        proves only a temporary hold.
 
+    Classify a held Source when calling `capture_source`, using `source_kind` and
+    a clear `domain` when known. A personal server also accepts direct Source
+    uploads with these form fields; follow "Delivering the bytes" in
+    `operations.md`. Keep classification fields out of the held-upload request.
+
     The client caps the file the sandbox receives, not Exomem: use the client's own
     attachment limit. The handoff's `max_bytes` is the service's own limit. Pasted
     inline images never reach the sandbox. If the sandbox cannot reach `upload_url`, say so; never guess an
