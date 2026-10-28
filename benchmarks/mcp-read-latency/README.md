@@ -118,3 +118,6 @@ The expected material comes from the fixture's authored manifest. The map does n
 these cases measure the map path, not turn-specific anchor resolution.
 Every fragment pins `profile_sha256` and `cases_sha256`; the contract pins the profile as
 `fixture_profile_sha256`. A changed profile needs a new digest in the contract.
+
+Case shards divide measurement time across CI jobs. Each shard prepares the complete fixture;
+aggregation requires every shard before it computes group verdicts.
