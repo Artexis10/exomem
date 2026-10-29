@@ -27,9 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
 # No token or quality gain is claimed. Each changed ceiling rounds up to 50 bytes.
 # The separate bootstrap core budget stays unchanged.
-# Remote curation writes add six repair_memory variants, so the budget rises 1,750 B and remote clients
+# Remote curation writes add six repair_memory variants, so the budget rises 1,800 B and remote clients
 # keep the curation workflow that local clients have.
-TOTAL_BUDGET = 161_950
+TOTAL_BUDGET = 162_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {

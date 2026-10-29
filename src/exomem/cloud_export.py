@@ -31,6 +31,7 @@ EXPORT_FAILED = "EXPORT_FAILED"
 EXPORT_TOO_LARGE = "EXPORT_TOO_LARGE"
 EXPORT_UPLOAD_FAILED = "EXPORT_UPLOAD_FAILED"
 SOURCE_CHANGED_DURING_EXPORT = "SOURCE_CHANGED_DURING_EXPORT"
+EXPORT_CASE_COLLISION = "CASE_COLLISION"
 # A part PUT is idempotent, so a transient failure is retried this often.
 UPLOAD_ATTEMPTS = 3
 # A socket idle this long fails the part; a 64 MiB part has minutes on a slow link.
@@ -181,6 +182,8 @@ def _portability_code(error: vault_portability.PortabilityError) -> str:
     # The portability module's own fixed codes, mapped onto C6's.
     if error.code == "SOURCE_CHANGED_DURING_EXPORT":
         return SOURCE_CHANGED_DURING_EXPORT
+    if error.code == "CASE_COLLISION":
+        return EXPORT_CASE_COLLISION
     if error.code == "RESOURCE_LIMIT_EXCEEDED" and error.limit == "max_file_bytes":
         return EXPORT_TOO_LARGE
     return EXPORT_FAILED

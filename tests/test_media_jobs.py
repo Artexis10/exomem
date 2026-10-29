@@ -49,6 +49,60 @@ def _sharing_failure(job: media_jobs.MediaJob, *, winerror: int = 5) -> str:
     )
 
 
+def test_old_ledger_read_stays_pure_and_the_next_write_adds_offload_columns(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job_id = store.enqueue(_job(vault))
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
+        connection.execute("ALTER TABLE jobs DROP COLUMN do_offload")
+
+    retained = media_jobs.MediaJobStore(vault, create=False)
+    pending = retained.next_pending()
+    assert pending.id == job_id and not pending.do_offload and pending.offload_generation == 0
+    with sqlite3.connect(store.path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+        assert "do_offload" not in columns and "offload_generation" not in columns
+    claimed = retained.claim_next()
+    assert claimed.id == job_id and claimed.do_ocr and not claimed.do_offload
+
+
+def test_interrupted_offload_column_upgrade_recovers_the_pending_job(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault)
+    job_id = store.enqueue(job)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
+
+    recovered = media_jobs.MediaJobStore(vault)
+    recovered.enqueue(media_jobs.MediaJob(job.binary_path, job.sidecar_path, job.media_type, do_offload=True))
+    claimed = recovered.claim_next()
+    assert claimed.id == job_id and claimed.do_ocr and claimed.do_offload
+    assert recovered.complete_offload(claimed)
+    recovered.complete(claimed)
+    assert recovered.get(job_id) is None
+
+
+def test_processing_finalization_retirement_and_discard_preserve_the_offload_row(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    processing = _job(vault)
+    store.enqueue(processing)
+    claimed = store.claim_next()
+    assert store.record_result(
+        claimed, kind="extraction", sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "completed transcript", "engine": "test"},
+    )
+    offload_id = store.enqueue(media_jobs.MediaJob(
+        processing.binary_path, processing.sidecar_path, "binary", do_ocr=False, do_offload=True,
+    ))
+    [result] = store.pending_results()
+    assert store.finalize_result(result, requeue_remaining=True)
+    store.retire_ocr(processing.binary_path, processing.media_type)
+    store.discard(processing)
+    assert store.get(offload_id).do_offload
+    assert store.claim_next().id == offload_id
+
+
 def test_result_custody_rejects_a_refunded_stale_claim(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     job_id = store.enqueue(_job(vault))

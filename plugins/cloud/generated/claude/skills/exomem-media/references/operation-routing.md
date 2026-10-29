@@ -78,11 +78,14 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   **`capture_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`**,
   and proof-bearing material takes
   **`preserve_artifacts(scope="...", category="...", files=[...])`** — the same
-  handle shape either way. On claude.ai web, call whichever of those fits
-  directly when the client supplies file handles. Otherwise call
-  **`transfer_artifact(operation="upload")`** for a short-lived `{token, upload_url}`. If the
-  file-owning client can reach `upload_url`, multipart-`curl` the attached files there; otherwise
-  open the prefilled browser upload form or give its URL to the user for a manual upload.
+  handle shape either way. When the client supplies file handles, call whichever
+  of those fits directly. Otherwise use the route for your client under
+  "A shared file that is evidence" below. A personal server (never Exomem Cloud) also
+  offers a direct upload: **`transfer_artifact(operation="upload")`** without `hold` returns a
+  short-lived `{token, upload_url}`, and a multipart `POST` there with `scope` and `category`
+  form fields stores the file straight in Evidence. If the file-owning client cannot reach
+  `upload_url`, open the prefilled browser upload form or give its URL to the user for a
+  manual upload.
   **Searchable binaries are automatic:** the server transcribes audio/video
   (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
   documents (docx/xlsx/pptx/html via MarkItDown; txt/eml/ics via native parsers),
@@ -107,13 +110,45 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     the local token that sent it, so the MCP connection must use that same local
     token. `--lane source` holds it for `capture_source`; `--scope S --category C`
     preserves straight to Evidence.
-  - **claude.ai (no file handle):** only with the user's opt-in (code execution on,
-    the Exomem host allowed for network access, a fresh conversation), call
-    `transfer_artifact(operation="upload")` and `curl` the attached file from the
-    sandbox to `upload_url` with `scope`, `category` and a `text` transcription.
-    Pasted inline images never reach the sandbox.
-  - **No path for the bytes:** tell the user the original was not preserved and
-    offer the browser upload form. Custody is proven only by a returned
+  - **Sandbox clients (claude.ai, Claude desktop chat, Cowork; no file handle, no
+    local token):** only with the user's opt-in (code execution on, the Exomem host
+    allowed for network access, a fresh conversation), hold the bytes with the
+    session's own upload handoff. It needs no user token and works on Exomem Cloud and
+    on a personal server; a Cloud cell accepts no other upload.
+    1. In the sandbox, compute the file's SHA-256, for example with `sha256sum <file>`.
+    2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256="<digest>")`.
+       On a personal server, `lane="evidence"` holds the file for `preserve_artifacts` instead.
+    3. Save the returned JSON to a file in the sandbox, for example `handoff.json`. Its
+       `token` is a secret: never print it or put it in a message. It works once and
+       expires within fifteen minutes, so prepare the file and digest first.
+    4. Send the bytes in one of two ways.
+       - Install the CLI (`pip install exomem`) and run
+         `exomem attach <file> --handoff-file handoff.json --root <dir>`, where `<dir>`
+         holds the file. It prints the reply.
+       - When installing is not possible, or the installed release has no
+         `--handoff-file`, send the request that the CLI sends: one multipart `POST` to the
+         handoff's `upload_url`, with the header `Authorization: Bearer <token>` and
+         the form fields `file`, `hold=1` and `lane` (the handoff's `lane`), and no other
+         field such as `scope` or `category`; the service refuses them.
+
+         ```
+         TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')
+         URL=$(python3 -c 'import json; print(json.load(open("handoff.json"))["upload_url"])')
+         LANE=$(python3 -c 'import json; print(json.load(open("handoff.json"))["lane"])')
+         curl -sS -H "Authorization: Bearer $TOKEN" -F "file=@<file>" -F hold=1 -F "lane=$LANE" "$URL"
+         ```
+    5. Check the reply: `state` is `held`, `hash` equals the digest and `size` equals the
+       file's size. Pass its `file` object unchanged to
+       `capture_source(title="...", source_kind="...", files=[<file>], expected_sha256="<digest>")`.
+       Only the receipt that `capture_source` returns proves custody; the upload reply
+       proves only a temporary hold.
+
+    The client caps the file the sandbox receives, not Exomem: use the client's own
+    attachment limit. The handoff's `max_bytes` is the service's own limit. Pasted
+    inline images never reach the sandbox. If the sandbox cannot reach `upload_url`, say so; never guess an
+    endpoint or read a credential from the user's environment.
+  - **No path for the bytes:** tell the user the original was not preserved and, on a
+    personal server, offer the browser upload form. Custody is proven only by a returned
     `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
 - **Media processing is automatic and actionable — `read_media/change_media`.** Supported
   audio and video preserved through Exomem or copied directly into the governed
@@ -132,7 +167,9 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   it needs no hidden header. Large originals use HTTPS before base64 encoding.
   A prepared handoff proves no consumption: verify the recovered bytes before
   claiming success. Native attachment rendering in other clients remains unverified.
-  Desktop/personal endpoints serve recovery; Cloud outbound delivery remains unavailable.
+  Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
+  blob: run its `next_step`, `exomem cloud download -- '<path>'`, which fetches the exact
+  original over the owner's sign-in and keeps it only if its size and SHA-256 match.
   Notes and exports use their separate read and export paths.
 - **Media hits in `find` are first-class.** An extracted media sidecar carries
   `media_type` and `media_file` (a pointer to the original binary). Treat the

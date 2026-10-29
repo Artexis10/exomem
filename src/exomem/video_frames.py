@@ -95,6 +95,29 @@ def _encode_jpeg(img) -> bytes:
 
 
 def get_frames(
+    vault_root: Path, path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
+    start_sec: float | None = None, end_sec: float | None = None,
+) -> FramesResult:
+    from . import originals
+    from .media_store import open_original
+
+    if originals.binding_for(vault_root) is None:
+        return _get_frames_local(vault_root, path, max_frames=max_frames,
+                                 start_sec=start_sec, end_sec=end_sec)
+    try:
+        target, relative = resolve_under_vault(vault_root, path)
+        if access.refuse_if_excluded(vault_root, relative):
+            raise VideoFramesError("NOT_FOUND", "video does not exist")
+        with open_original(vault_root, target):
+            return _get_frames_local(vault_root, path, max_frames=max_frames,
+                                     start_sec=start_sec, end_sec=end_sec)
+    except VaultPathError as error:
+        raise VideoFramesError(error.code, error.reason) from error
+    except reserved_paths.ReservedPathLeafError as error:
+        raise VideoFramesError("NOT_FOUND", "video does not exist") from error
+
+
+def _get_frames_local(
     vault_root: Path,
     path: str,
     *,

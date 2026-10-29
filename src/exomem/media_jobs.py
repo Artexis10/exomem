@@ -1,9 +1,9 @@
-"""Durable, rebuildable media-job ledger.
+"""Durable media jobs, cache identities and authoritative offload protections.
 
 The ledger is deliberately stdlib-only so the long-lived server and resource-status
 paths can inspect media work without importing torch, MLX, CTranslate2, or Exomem's
-model modules. User-authored evidence sidecars remain the source of truth; deleting
-this derived database is safe because startup scans reconstruct missing work.
+model modules. Jobs and cache rows are rebuildable. Pending offload protections
+are authoritative until a durable sidecar reference replaces them; keep this database.
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ RUNNING = "running"
 BLOCKED = "blocked"
 FAILED = "failed"
 COMPLETED = "completed"
+# This queue token names offload-only work, not a vocabulary classification.
+OFFLOAD_MEDIA_TYPE = "binary"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
 # Bump when _key's composition changes so existing stores re-key on next open.
@@ -418,6 +420,8 @@ class MediaJob:
     do_ocr: bool = True
     do_clip: bool = False
     do_reembed: bool = False
+    do_offload: bool = False
+    offload_generation: int = 0
     id: int | None = None
     attempts: int = 0
     claim_revision: int = 0
@@ -497,7 +501,7 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     state that belonged to its OCR stage; a row with nothing left goes.
     """
     deleted = conn.execute(
-        "DELETE FROM jobs WHERE " + match + " AND do_clip = 0 AND do_reembed = 0", params
+        "DELETE FROM jobs WHERE " + match + " AND do_clip = 0 AND do_reembed = 0 AND do_offload = 0", params
     ).rowcount
     kept = conn.execute(
         "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, blocked_reason = NULL, "
@@ -571,7 +575,13 @@ class MediaJobStore:
             # coordination boundary is still held.  An empty new database does
             # not create WAL/SHM merely by negotiating WAL mode.
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("COMMIT")
+            try:
+                self._migrate_offload_columns(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                conn.close()
+                raise
         try:
             reserved_paths._publish_sqlite_owner_family(
                 self.vault_root,
@@ -588,6 +598,7 @@ class MediaJobStore:
         conn = self._connect()
         try:
             with conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS jobs (
@@ -615,6 +626,22 @@ class MediaJobStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS jobs_binary_rel ON jobs(binary_rel)"
                 )
+                self._migrate_offload_columns(conn)
+                # Protections deliberately have no job foreign key: completing,
+                # discarding or rebuilding work must never unprotect an upload.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_protections ("
+                             "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, "
+                             "object TEXT NOT NULL, created_at REAL NOT NULL)")
+                conn.execute("CREATE TABLE IF NOT EXISTS media_cache ("
+                             "binary_rel TEXT PRIMARY KEY, reference TEXT NOT NULL, "
+                             "sha256 TEXT NOT NULL, identity TEXT NOT NULL, last_read REAL NOT NULL)")
+                conn.execute("CREATE TABLE IF NOT EXISTS media_access ("
+                             "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, pid INTEGER NOT NULL, "
+                             "temporary_bytes INTEGER NOT NULL DEFAULT 0, hydrating INTEGER NOT NULL DEFAULT 0)")
+                # A store refusal that is final for one original's exact bytes; rebuildable.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_offload_refusals ("
+                             "binary_rel TEXT PRIMARY KEY, sha256 TEXT NOT NULL, code TEXT NOT NULL, "
+                             "ciphertext_size INTEGER NOT NULL, created_at REAL NOT NULL)")
                 self._migrate_claim_revision(conn)
                 self._migrate_blocked_reasons(conn)
                 conn.execute(
@@ -672,6 +699,16 @@ class MediaJobStore:
                 self._migrate_job_key(conn)
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_offload_columns(conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if not columns:
+            return
+        if "do_offload" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN do_offload INTEGER NOT NULL DEFAULT 0")
+        if "offload_generation" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN offload_generation INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _migrate_claim_revision(conn: sqlite3.Connection) -> None:
@@ -759,7 +796,7 @@ class MediaJobStore:
         for job in conn.execute(
             """
             SELECT id, job_key, binary_rel, sidecar_rel, media_type,
-                   do_ocr, do_clip, do_reembed
+                   do_ocr, do_clip, do_reembed, do_offload, offload_generation
             FROM jobs ORDER BY id
             """
         ).fetchall():
@@ -773,13 +810,16 @@ class MediaJobStore:
             conn.execute(
                 """
                 UPDATE jobs SET do_ocr = MAX(do_ocr, ?), do_clip = MAX(do_clip, ?),
-                    do_reembed = MAX(do_reembed, ?), updated_at = ?
+                    do_reembed = MAX(do_reembed, ?), do_offload = MAX(do_offload, ?),
+                    offload_generation = MAX(offload_generation, ?), updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     job["do_ocr"],
                     job["do_clip"],
                     job["do_reembed"],
+                    job["do_offload"],
+                    job["offload_generation"],
                     time.time(),
                     keeper["id"],
                 ),
@@ -827,19 +867,22 @@ class MediaJobStore:
         now = time.time()
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             with conn:
                 conn.execute(
                     """
                     INSERT INTO jobs (
                         job_key, binary_rel, sidecar_rel, media_type,
-                        do_ocr, do_clip, do_reembed, state,
+                        do_ocr, do_clip, do_reembed, do_offload, offload_generation, state,
                         attempts, created_at, updated_at, last_error
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
                     ON CONFLICT(job_key) DO UPDATE SET
                         do_ocr = MAX(jobs.do_ocr, excluded.do_ocr),
                         ocr_generation = jobs.ocr_generation + excluded.do_ocr,
                         do_clip = MAX(jobs.do_clip, excluded.do_clip),
                         do_reembed = MAX(jobs.do_reembed, excluded.do_reembed),
+                        do_offload = MAX(jobs.do_offload, excluded.do_offload),
+                        offload_generation = jobs.offload_generation + excluded.do_offload,
                         updated_at = excluded.updated_at
                     """,
                     (
@@ -850,6 +893,8 @@ class MediaJobStore:
                         int(job.do_ocr),
                         int(job.do_clip),
                         int(job.do_reembed),
+                        int(job.do_offload),
+                        int(job.do_offload),
                         now,
                         now,
                     ),
@@ -859,23 +904,49 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def discard(self, job: MediaJob) -> int:
-        """Remove the durable row for an artifact already completed in Markdown."""
-        binary_rel = self._relative(job.binary_path)
-        key = self._key(binary_rel, job.media_type)
+    def complete_offload(self, job: MediaJob) -> bool:
+        """Acknowledge exactly this claim's offload demand, never a newer one."""
         conn = self._connect()
         try:
             with conn:
-                if job.id is not None:
-                    return int(
-                        conn.execute(
-                            "DELETE FROM jobs WHERE id = ? AND claim_revision = ?",
-                            (job.id, job.claim_revision),
-                        ).rowcount
-                    )
-                return int(
-                    conn.execute("DELETE FROM jobs WHERE job_key = ?", (key,)).rowcount
-                )
+                return conn.execute(
+                    "UPDATE jobs SET do_offload = 0 WHERE id = ? AND claim_revision = ? "
+                    "AND offload_generation = ?",
+                    (job.id, job.claim_revision, job.offload_generation),
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def rearm_offload(self, job: MediaJob) -> bool:
+        """Return a failed or blocked attempt's retained offload demand to the queue."""
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', last_error = NULL, blocked_reason = NULL, "
+                    "blocked_context = NULL, updated_at = ? WHERE id = ? AND claim_revision = ? "
+                    "AND do_offload = 1 AND state IN ('failed', 'blocked') AND NOT EXISTS "
+                    "(SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id)",
+                    (time.time(), job.id, job.claim_revision),
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def discard(self, job: MediaJob) -> int:
+        """Discard obsolete processing while preserving independent offload demand."""
+        match = "id = ? AND claim_revision = ?" if job.id is not None else "job_key = ?"
+        params = ((job.id, job.claim_revision) if job.id is not None
+                  else (self._key(self._relative(job.binary_path), job.media_type),))
+        conn = self._connect()
+        try:
+            with conn:
+                deleted = conn.execute("DELETE FROM jobs WHERE " + match + " AND do_offload = 0", params).rowcount
+                kept = conn.execute(
+                    "UPDATE jobs SET do_ocr = 0, do_clip = 0, do_reembed = 0, "
+                    "state = 'pending', last_error = NULL, blocked_reason = NULL, blocked_context = NULL "
+                    "WHERE " + match + " AND do_offload = 1", params,
+                ).rowcount
+                return int(deleted + kept)
         finally:
             conn.close()
 
@@ -947,7 +1018,7 @@ class MediaJobStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT do_ocr, do_clip, do_reembed, state, claim_revision "
+                "SELECT do_ocr, do_clip, do_reembed, do_offload, state, claim_revision "
                 "FROM jobs WHERE id = ?",
                 (job.id,),
             ).fetchone()
@@ -963,7 +1034,7 @@ class MediaJobStore:
                 "do_clip": bool(row["do_clip"]) and not job.do_clip,
                 "do_reembed": bool(row["do_reembed"]) and not job.do_reembed,
             }
-            if any(remaining.values()):
+            if any(remaining.values()) or row["do_offload"]:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
@@ -1553,7 +1624,7 @@ class MediaJobStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT do_ocr, do_clip, do_reembed, state, claim_revision, ocr_generation "
+                "SELECT do_ocr, do_clip, do_reembed, do_offload, state, claim_revision, ocr_generation "
                 "FROM jobs WHERE id = ?",
                 (result.job_id,),
             ).fetchone()
@@ -1578,7 +1649,7 @@ class MediaJobStore:
                     else 0
                 )
                 state_placeholders = ",".join("?" for _ in allowed_states)
-                if remaining_ocr or row["do_clip"] or row["do_reembed"]:
+                if remaining_ocr or row["do_clip"] or row["do_reembed"] or row["do_offload"]:
                     delete_job = False
                     changed = conn.execute(
                         """
@@ -1660,27 +1731,25 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def get_by_binary(self, binary_path: Path) -> MediaJob | None:
-        """Return the exact durable row for one vault-relative binary."""
+    def get_by_binary(self, binary_path: Path, *, media_type: str | None = None) -> MediaJob | None:
+        """Return processing work, or the exact requested queue kind, for a binary."""
         binary_rel = self._relative(binary_path)
         conn = self._connect()
         try:
-            row = conn.execute("SELECT * FROM jobs WHERE binary_rel = ?", (binary_rel,)).fetchone()
+            if media_type is None:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE binary_rel = ? AND media_type != ? ORDER BY id LIMIT 1",
+                    (binary_rel, OFFLOAD_MEDIA_TYPE),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM jobs WHERE job_key = ?", (self._key(binary_rel, media_type),)).fetchone()
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
 
     def has_binary(self, binary_path: Path) -> bool:
-        """Whether the ledger has work for this exact vault-relative binary."""
-        binary_rel = self._relative(binary_path)
-        conn = self._connect()
-        try:
-            return conn.execute(
-                "SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
-                (binary_rel,),
-            ).fetchone() is not None
-        finally:
-            conn.close()
+        """Whether the ledger has processing work for this exact vault-relative binary."""
+        return self.get_by_binary(binary_path) is not None
 
     def has_pending_ocr(self, binary_path: Path) -> bool:
         """Whether the ledger still holds an OCR stage for this exact binary."""
@@ -2098,6 +2167,8 @@ class MediaJobStore:
             do_ocr=bool(row["do_ocr"]),
             do_clip=bool(row["do_clip"]),
             do_reembed=bool(row["do_reembed"]),
+            do_offload=bool(row["do_offload"]) if "do_offload" in row.keys() else False,
+            offload_generation=int(row["offload_generation"]) if "offload_generation" in row.keys() else 0,
             attempts=int(row["attempts"]),
             claim_revision=int(row["claim_revision"]),
             ocr_generation=int(row["ocr_generation"]),
@@ -2391,7 +2462,14 @@ TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "job
 def tool_status(vault_root: Path | None) -> dict[str, Any]:
     """The `process_media status` view of `status`, without operator detail."""
     full = status(vault_root)
-    return {field: full[field] for field in TOOL_STATUS_FIELDS}
+    result = {field: full[field] for field in TOOL_STATUS_FIELDS}
+    if vault_root is not None:
+        from . import media_store, originals
+
+        if originals.binding_for(vault_root) is not None:
+            result["stored_originals"] = media_store.processing_status(vault_root)
+            result["offload_refusals"] = media_store.offload_refusals(vault_root)
+    return result
 
 
 def tool_job_state(vault_root: Path, state: str, job_id: int | None) -> str:

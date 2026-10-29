@@ -27,6 +27,14 @@ from .collection_store import (
 
 
 def archive_members(vault: Path) -> list[Path]:
+    from .kbdir import kb_dirname
+    from .media_store import local_originals
+
+    with local_originals(vault, (kb_dirname(),)):
+        return _archive_members_local(vault)
+
+
+def _archive_members_local(vault: Path) -> list[Path]:
     """Select canonical tar members and their parents through the shared classifier.
 
     Call tar.add with recursive=False: a discarded directory must not add its children.

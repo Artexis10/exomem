@@ -209,7 +209,9 @@ def test_bootstrap_full_teaches_copyable_direct_and_fallback_artifact_calls(vaul
     calls = [example["call"] for example in examples]
 
     assert any("preserve_artifacts(scope='...'" in call and "download_url" in call for call in calls)
-    assert any("transfer_artifact(operation='upload')" in call and "/upload" in call for call in calls)
+    # A client without handles must be taught the held upload, the only upload Cloud serves.
+    assert any("transfer_artifact(operation='upload'" in call and "hold=true" in call
+               and "upload_url" in call for call in calls)
 
 
 def test_bootstrap_routes_observed_state_to_records_without_activating_state(

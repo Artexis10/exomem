@@ -11,6 +11,7 @@ import os
 import secrets
 import sys
 import threading
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,9 +33,28 @@ class HeldFsError(Exception):
     cause: OSError | None = field(default=None, repr=False, compare=False)
     source_leaf: str | None = field(default=None, repr=False, compare=False)
     destination_leaf: str | None = field(default=None, repr=False, compare=False)
+    #: On PATH_VARIANT_EXISTS, the sibling's spelling, for the caller to name.
+    existing_leaf: str | None = field(default=None, repr=False, compare=False)
 
     def __str__(self) -> str:
         return f"{self.code}: {self.detail}"
+
+
+def vault_name_key(name: str, *, form: str = "NFC") -> str:
+    """The identity key of one vault path part: normalise, then casefold.
+
+    Path identity belongs to the vault, not the host filesystem. Two names with
+    one key cannot sit in one folder, because Windows and default macOS would
+    hold them as a single entry. This is the only spelling of that rule;
+    `form="NFKC"` serves the looser audit and vocabulary comparisons.
+    """
+    return unicodedata.normalize(form, name).casefold()
+
+
+def name_variants(names: Iterable[str], name: str) -> list[str]:
+    """The names in `names` that share `name`'s `vault_name_key` but not its spelling, sorted."""
+    key = vault_name_key(name)
+    return sorted(other for other in names if other != name and vault_name_key(other) == key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +197,16 @@ class HeldFilesystem:
         create: bool = False,
         exclusive: bool = False,
         access: str = "read",
+        scratch: bool = False,
     ) -> HeldResult[HeldDirectory]:
+        """Hold the directory at `relative`, creating missing parts when `create` is set.
+
+        A folder that this call creates is refused with PATH_VARIANT_EXISTS when
+        its parent already holds a name with the same `vault_name_key`, so no
+        creator can split a folder by case or Unicode form. `scratch=True` marks
+        a randomly named working folder that the caller removes again: it cannot
+        collide, so it skips the parent listing that the check costs.
+        """
         raise NotImplementedError
 
     def file(

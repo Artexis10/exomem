@@ -91,3 +91,12 @@ These exposed recordings establish regression coverage; the English prose refere
 
 Evidence: `tests/test_media_result_staleness.py` covers inline and durable publication, concurrent edits and recovery on either side of the canonical write.
 `tests/test_media_jobs.py` covers additive migration and optional evidence-version validation.
+
+## 7. Node media-slot lease
+
+- [x] 7.1 Add the media-slot service under design D10: the pool rule, first-in first-out grants, one entry per cell and per address, a lease counted from collection, the stated byte count and timeout, and the restart hold. Verify `tests/test_media_slot_lease.py`.
+- [x] 7.2 Add the chart Deployment, Service, NetworkPolicy, values and schema, off by default. Verify `infra/cellctl/tests/test_platform_chart_headers.py`: with the switch off, the chart renders as before.
+- [x] 7.3 Render the service URL and one egress rule into the selected cells through cellctl and its admission policy. Verify `infra/cellctl/tests/test_media_slot_lease.py`: a selected cell gains exactly one rule, and an unselected cell keeps its digest.
+- [x] 7.4 Ask for a slot sized for the job the child will claim before each media child starts, release it when the child exits, and have the child refuse a heavier job. Verify an unreachable service leaves the job pending with no counted stop, and a recovered heavier job runs under a slot sized for it (`tests/test_media_slot_client.py`, `tests/test_media_worker_slot.py`).
+- [ ] 7.5 Measure the pool on the production node with two cells contending, and set `mediaSlotLease.poolMiB` from the measured headroom. Verify no eviction and no OOM while both cells hold work.
+- [ ] 7.6 Roll the service out under an operator-approved live change: one canary cell, then the fleet switch. Verify the runbook steps in `docs/runbooks/cloud-media.md` and that every cell holds a slot before it starts a child.
