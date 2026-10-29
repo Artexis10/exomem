@@ -40,6 +40,7 @@ from . import (
     context_refs,
     due_state,
     held_fs,
+    import_stage,
     knowledge_packs,
     note_types,
     request_budget,
@@ -911,6 +912,19 @@ def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
+def _recorded_stage(root: Path, source_root: str) -> dict | None:
+    """`{"stage": id, "proof": ...}` when `source_root` lies in an import stage that has a member manifest, else None.
+
+    The manifest itself is read again at each apply, never stored in the run: a discarded stage must stop
+    being consumable at once.
+    """
+    parts = source_root.split("/") if source_root else []
+    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
+        return None
+    stage = import_stage.read(root, parts[1])
+    return None if stage is None else {"stage": stage.import_id, "proof": stage.proof}
+
+
 def _refuse_outside_vault(root: Path, path: str) -> None:
     """Refuse a `start` path that names a place outside the vault, before `_clean` can reshape it.
 
@@ -961,6 +975,7 @@ def start(
     include_hidden: bool = False,
     initialize_kb: bool = False,
     collection: str | None = None,
+    consume: bool = True,
     today: dt.date | None = None,
 ) -> dict:
     root = Path(root)
@@ -1004,6 +1019,8 @@ def start(
         "phase": "selecting",
         "source_root": source_root,
         "collection": _collection_of(root, source_root, collection),
+        "stage": _recorded_stage(root, source_root),
+        "consume": consume,
         "scan_summary": {
             "totals": scan.get("totals", {}),
             "kb": scan.get("kb", {}),
