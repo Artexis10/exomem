@@ -39,10 +39,6 @@ RESIDUAL_REASON = {
     HIDDEN_FOLDER: "ineligible",
     HIDDEN_FILE: "outside_run",
 }
-# A page counts only its own files under these; a leftover on another page reads `outside_run`.
-COUNTED_REASONS = ("text", "over_ceiling", "ineligible")
-# A staged file under these has not gone where it should: it failed, was kept, or was skipped.
-EMPTY_REASONS = ("failed", "kept", "pending", "unselected")
 STAGE_DIR = "_Imports"  # the vault folder that holds a Cloud import's stage
 
 TEXT_KINDS = ("note", "caption")
@@ -118,14 +114,6 @@ class Sizing:
     scaled: bool
     proves_one_copy_only: bool
     note: str
-
-
-@dataclass(frozen=True)
-class Tally:
-    """What the residual reports said over all pages."""
-
-    files_by_reason: dict[str, int]
-    final_files: int
 
 
 def disposition_of(kind: str, size: int, *, ceiling: int, hidden: str | None, include_hidden: bool) -> str:
@@ -484,30 +472,22 @@ def check_members(entries: Iterable[Entry], members: Iterable[Mapping]) -> list[
     return problems
 
 
-def tally_residuals(residuals: Sequence[Mapping | None]) -> Tally:
-    """Add each page's residual files by reason; the last page also says how much is left in all."""
-    totals: dict[str, int] = {}
-    for residual in residuals:
-        for reason, row in ((residual or {}).get("by_reason") or {}).items():
-            totals[reason] = totals.get(reason, 0) + int((row or {}).get("files", 0))
-    last = residuals[-1] if residuals else None
-    return Tally(totals, int((last or {}).get("files", 0)))
+def residual_files_by_reason(residual: Mapping | None) -> dict[str, int]:
+    return {reason: int((row or {}).get("files", 0)) for reason, row in ((residual or {}).get("by_reason") or {}).items()}
 
 
-def check_residual(entries: Iterable[Entry], tally: Tally) -> list[str]:
-    """The pages' residual reports agree with the key, by reason, and nothing was left unfiled."""
+def check_residual(entries: Iterable[Entry], residual: Mapping | None) -> list[str]:
+    """The last page's residual report, which covers the whole stage, agrees with the key by reason."""
     expected = expected_by_reason(entries)
-    problems = []
-    for reason in COUNTED_REASONS:
-        reported, wanted = tally.files_by_reason.get(reason, 0), expected.get(reason, 0)
-        if reported != wanted:
-            problems.append(f"residual reason {reason}: the key expects {wanted} files, the pages reported {reported}")
-    for reason in EMPTY_REASONS:
-        if tally.files_by_reason.get(reason, 0):
-            problems.append(f"residual reason {reason}: {tally.files_by_reason[reason]} files; none should remain")
-    wanted_total = sum(expected.values())
-    if tally.final_files != wanted_total:
-        problems.append(f"{tally.final_files} files left in the stage after the last page, the key expects {wanted_total}")
+    reported = residual_files_by_reason(residual)
+    problems = [
+        f"residual reason {reason}: the key expects {expected.get(reason, 0)} files, the last page reported {reported.get(reason, 0)}"
+        for reason in sorted(set(expected) | set(reported))
+        if expected.get(reason, 0) != reported.get(reason, 0)
+    ]
+    left, wanted_total = int((residual or {}).get("files", 0)), sum(expected.values())
+    if left != wanted_total:
+        problems.append(f"{left} files left in the stage after the last page, the key expects {wanted_total}")
     return problems
 
 

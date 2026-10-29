@@ -241,3 +241,21 @@ def test_finish_of_a_page_that_later_pages_follow_does_not_offer_to_discard_thei
     assert final["more_pages"] is False and final["by_reason"] == {"text": {"files": 1, "bytes": len(note)}}
     assert stage.removeprefix("_Imports/") in final["discard"]
     assert {"review-residual", "discard"} <= {action["action"] for action in finished_last["next_actions"]}
+
+
+def test_the_last_page_reports_an_earlier_page_s_failed_file_as_failed_before_it_offers_the_discard(
+        tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    stage = _stage(vault, {"a.pdf": PDF + b"a", "b.pdf": PDF + b"b", "c.pdf": PDF + b"c", "plan.md": note})
+    first = adoption_run.start(vault, path=stage, collection="Field Notes", max_candidates=2, today=TODAY)
+    plan_id = _plan_page(vault, first, stage)
+    (vault / stage / "a.pdf").write_bytes(PDF + b"changed after the plan")
+    adoption_run.apply(vault, run_id=first["run_id"], plan_id=plan_id, today=TODAY)
+    adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
+    last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
+    _apply_page(vault, last, stage)
+
+    final = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)["finish"]["residual"]
+
+    assert {reason: row["files"] for reason, row in final["by_reason"].items()} == {"failed": 1, "text": 1}

@@ -126,7 +126,7 @@ def _finish(consumed, *, files, by_reason):
     return {"finish": {"consumed": consumed, "residual": {"files": files, "by_reason": by_reason}}}
 
 
-def test_paging_follows_next_after_and_adds_up_what_each_page_consumed_and_left():
+def test_paging_follows_next_after_adds_up_consumed_and_keeps_the_last_page_residual():
     agent = Scripted({
         "start": [_page(["a"], next_after="cursor"), _page(["b"])],
         "select": [{}, {}], "plan": [{"plan": {"plan_id": "p1"}}, {"plan": {"plan_id": "p2"}}],
@@ -140,7 +140,8 @@ def test_paging_follows_next_after_and_adds_up_what_each_page_consumed_and_left(
 
     assert problems == {"manifest_proof": [], "no_space_failure": [], "filing": []}
     assert folder.consumed == 7
-    assert folder.tally.files_by_reason == {"outside_run": 1, "text": 4} and folder.tally.final_files == 2
+    assert folder.report["residual_files_left"] == 2
+    assert folder.report["residual_by_reason_files"] == {"text": 2}
     starts = [fields for kind, fields in agent.asked if kind == "start"]
     assert "after" not in starts[0] and starts[1] == {"after": "cursor"}
 

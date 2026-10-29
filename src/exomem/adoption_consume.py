@@ -82,29 +82,16 @@ def remove_staged(root: Path, stage: import_stage.Stage, planned: dict) -> bool:
     return True
 
 
-def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | None:
-    """What is still in the run's stage, by why it stays, with counts and bytes; None for a run with no stage.
-
-    `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. The reasons are a
-    closed set of result keys that this report defines, not vocabulary: `failed`, `text`, `kept`, `pending`,
-    `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then
-    reports) and `outside_run` (hidden or added after the scan, or on another page of a paged scan). The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem
-    command, so its stage goes by hand. Both name the whole stage folder, which holds the residual and
-    nothing else. A page that later pages follow names no discard route, because the folder still holds
-    their files: `more_pages` says so.
-    """
-    recorded_stage = run.get("stage")
-    if not isinstance(recorded_stage, dict):
-        return None
-    folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
-    inventory = {row["path"]: row for row in run.get("inventory") or []}
-    plan = run.get("plan") or {}
+def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
+    """Why a staged file stays, as one page of the scan sees it; the classifier returns None for a file the page did not scan."""
+    inventory = {row["path"]: row for row in page.get("inventory") or []}
+    plan = page.get("plan") or {}
     items = {item["original_path"]: item for item in plan.get("items") or []}
     skipped = {row.get("path"): row.get("code") for row in plan.get("skipped") or []}
-    selected = set((run.get("selection") or {}).get("paths") or [])
-    outcomes = run.get("outcomes") or {}
+    selected = set((page.get("selection") or {}).get("paths") or [])
+    outcomes = page.get("outcomes") or {}
 
-    def why(path: str) -> str:
+    def classify(path: str) -> str | None:
         item = items.get(path)
         if item is not None:
             status = (outcomes.get(path) or {}).get("status")
@@ -123,6 +110,35 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
         ancestors = (path.rsplit("/", depth)[0] for depth in range(1, path.count("/") + 1))
         if any((inventory.get(ancestor) or {}).get("kind") == "folder" for ancestor in ancestors):
             return "ineligible"  # a hidden folder that the scan did not enter
+        return None
+
+    return classify
+
+
+def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = ()) -> dict | None:
+    """What is still in the run's stage, by why it stays, with counts and bytes; None for a run with no stage.
+
+    `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
+    the earlier pages of a paged scan, nearest first; each file is classified by the page that scanned it, so
+    the last page's report covers the whole stage. The reasons are a closed set of result keys that this
+    report defines, not vocabulary: `failed`, `text`, `kept`, `pending`, `unselected`, `ineligible`,
+    `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then reports) and `outside_run` (hidden
+    or added after the scan, or on a later page not yet scanned). The Cloud route discards a stage with
+    `transfer_memory`; a local import has no Exomem command, so its stage goes by hand. Both name the whole
+    stage folder, which holds the residual and nothing else. A page that later pages follow names no discard
+    route, because the folder still holds their files: `more_pages` says so.
+    """
+    recorded_stage = run.get("stage")
+    if not isinstance(recorded_stage, dict):
+        return None
+    folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
+    classifiers = [_page_classifier(page, filed_statuses) for page in (run, *earlier_pages)]
+
+    def why(path: str) -> str:
+        for classify in classifiers:
+            reason = classify(path)
+            if reason is not None:
+                return reason
         return "outside_run"
 
     by_reason: dict[str, dict[str, int]] = {}

@@ -401,7 +401,7 @@ class Folder:
     sentinel: str
     import_id: str = ""
     proof: str = ""  # the receipt's proof token, read from the cell
-    tally: fixture.Tally | None = None
+    residual: Mapping | None = None  # the last page's report, which covers the whole stage
     consumed: int = 0
     report: dict[str, Any] = field(default_factory=dict)
 
@@ -523,7 +523,6 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
     """Page through the stage as the tool text says. Returns the problems found, by criterion."""
     stage_path = f"{fixture.STAGE_DIR}/{folder.import_id}"
     pages: list[dict[str, Any]] = folder.report.setdefault("pages", [])
-    residuals: list[Mapping | None] = []
     problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": []}
     consumed = 0
     fields: dict[str, Any] = {"path": stage_path, "collection": CELL_COLLECTION[folder.name],
@@ -582,7 +581,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
             break
         finished, finish_seconds = await agent.import_op("finish", run_id=run_id)
         finish = finished.get("finish") or {}
-        residuals.append(finish.get("residual"))
+        folder.residual = finish.get("residual")
         consumed += int(finish.get("consumed") or 0)
         page.update({"finish_seconds": round(finish_seconds, 2), "consumed": finish.get("consumed"),
                      "residual_files": (finish.get("residual") or {}).get("files")})
@@ -591,10 +590,9 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         if not next_after:
             break
         fields = {"after": next_after}
-    tally = fixture.tally_residuals(residuals)
-    folder.tally, folder.consumed = tally, consumed
-    folder.report["residual_by_reason_files"] = tally.files_by_reason
-    folder.report["residual_files_left"] = tally.final_files
+    folder.consumed = consumed
+    folder.report["residual_by_reason_files"] = fixture.residual_files_by_reason(folder.residual)
+    folder.report["residual_files_left"] = int((folder.residual or {}).get("files", 0))
     folder.report["consumed"] = consumed
     return problems
 
@@ -740,7 +738,7 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
     plan.require_time(f"the {name} folder's leftover was discarded", seconds=300)
     with phase("discard"):
         leftover, criteria["discarded"] = await discard(ctx, agent, plan, folder)
-    criteria["residual"] = fixture.check_residual(folder.entries, folder.tally) + leftover
+    criteria["residual"] = fixture.check_residual(folder.entries, folder.residual) + leftover
     with phase("index_drain"):
         folder.report["index_queues"] = await wait_index(ctx, plan)
     await asyncio.to_thread(enospc_count, ctx, space)

@@ -23,7 +23,6 @@ from cloud_rehearsal.large_import_fixture import (
     OVER_CEILING,
     Entry,
     SizingError,
-    Tally,
 )
 
 CEILING = 2 * MIB
@@ -112,6 +111,7 @@ def test_notes_link_to_notes_and_attachments_that_exist(tmp_path):
     attachments = {e.path.rsplit("/", 1)[-1] for e in entries if e.path.startswith("attachments/")}
 
     texts = [(tmp_path / e.path).read_text() for e in entries if e.path.startswith("notes/area-")]
+    # A regex here reads only `note_text`'s own fixed `[[x]]` output; this environment cannot import exomem's parser.
     links = {target for text in texts for target in re.findall(r"(?<!!)\[\[([^\]|#]+)\]\]", text)}
     embeds = {target for text in texts for target in re.findall(r"!\[\[([^\]|#]+)\]\]", text)}
     assert links and links <= stems
@@ -237,22 +237,15 @@ def _page(**reasons):
     return {"files": sum(reasons.values()), "by_reason": by_reason}
 
 
-def test_the_residual_is_summed_over_pages_and_the_last_page_gives_the_total_left():
-    tally = fixture.tally_residuals([_page(ineligible=1, outside_run=3), None, _page(text=1, outside_run=3)])
+def test_the_last_page_residual_must_equal_the_key_by_reason_and_leave_nothing_unfiled():
+    assert fixture.check_residual(KEY, _page(ineligible=1, over_ceiling=1, text=1, outside_run=1)) == []
 
-    assert tally == Tally({"ineligible": 1, "outside_run": 6, "text": 1}, 4)
-
-
-def test_the_residual_must_equal_the_key_by_reason_and_leave_nothing_unfiled():
-    pages = [_page(ineligible=1, outside_run=2), _page(over_ceiling=1, text=1, outside_run=2)]
-    assert fixture.check_residual(KEY, fixture.tally_residuals(pages)) == []
-
-    unconsumed = [_page(ineligible=1, kept=1, outside_run=2), _page(over_ceiling=1, text=1, outside_run=2)]
-    miscounted = [_page(ineligible=1, outside_run=2), _page(over_ceiling=1, outside_run=2)]
-    extra = [_page(ineligible=1, outside_run=2), _page(over_ceiling=1, text=1, outside_run=5)]
-    assert any("kept" in problem for problem in fixture.check_residual(KEY, fixture.tally_residuals(unconsumed)))
-    assert any("text" in problem for problem in fixture.check_residual(KEY, fixture.tally_residuals(miscounted)))
-    assert any("left in the stage" in problem for problem in fixture.check_residual(KEY, fixture.tally_residuals(extra)))
+    unconsumed = _page(ineligible=1, over_ceiling=1, text=1, kept=1, outside_run=1)
+    miscounted = _page(ineligible=1, over_ceiling=1, outside_run=1)
+    extra = _page(ineligible=1, over_ceiling=1, text=1, outside_run=4)
+    assert any("kept" in problem for problem in fixture.check_residual(KEY, unconsumed))
+    assert any("text" in problem for problem in fixture.check_residual(KEY, miscounted))
+    assert any("left in the stage" in problem for problem in fixture.check_residual(KEY, extra))
 
 
 def test_consumed_must_equal_the_artifacts_the_key_says_were_filed():

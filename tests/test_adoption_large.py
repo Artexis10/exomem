@@ -197,3 +197,42 @@ def test_apply_stops_before_a_chunk_that_does_not_fit_the_free_space_and_a_later
     assert len(list((vault / "Knowledge Base" / "Sources").rglob("*.bin"))) == 3
     assert "apply_stop" not in resumed and resumed["phase"] == "applied"
     assert {action["action"]: action["status"] for action in resumed["next_actions"]} == {"finish": "available"}
+
+
+def test_a_continuation_that_stopped_before_removing_a_chunk_s_staged_copies_removes_them_when_it_is_repeated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reserve, size = 100_000, 4000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)
+    vault = _vault(tmp_path)
+    capacity = [reserve + 2 * size]  # the first call files one copy, then stops with a continuation
+
+    def free_bytes() -> int:
+        filed = sum(path.stat().st_size for path in (vault / "Knowledge Base" / "Sources").rglob("*") if path.is_file())
+        return capacity[0] - filed
+
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage(capacity[0] * 2, 0, free_bytes()))
+    stage = _stage(vault, {f"scans/{n}.bin": bytes([65 + n]) * size for n in range(2)})
+    run = adoption_run.start(vault, path=stage, today=TODAY)
+    plan_id = _plan(vault, run, stage)
+    stopped = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)
+    capacity[0] += 10 * size
+
+    def stop(*_arguments, **_keywords):
+        raise KeyboardInterrupt
+
+    # The second chunk commits; the call dies before it removes that chunk's staged copy.
+    with monkeypatch.context() as stopping:
+        stopping.setattr(adoption_run.adoption_consume, "remove_staged", stop)
+        with pytest.raises(KeyboardInterrupt):
+            adoption_run.apply(
+                vault, run_id=run["run_id"], plan_id=plan_id, continuation=stopped["continuation"], today=TODAY)
+
+    repeated = adoption_run.apply(
+        vault, run_id=run["run_id"], plan_id=plan_id, continuation=stopped["continuation"], today=TODAY)
+
+    assert repeated["phase"] == "applied" and repeated["progress"]["failed"] == 0
+    assert all(outcome.get("consumed") is True for outcome in repeated["outcomes"].values())
+    assert not [path for path in (vault / stage).rglob("*.bin")]

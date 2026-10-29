@@ -1314,6 +1314,20 @@ def _unapplied(run: dict) -> bool:
     return any((outcomes.get(path) or {}).get("status") not in _APPLIED_STATUSES for path in paths)
 
 
+def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
+    """The earlier pages of this run's paged scan, nearest first; a page whose record is gone ends the chain."""
+    pages: list[dict] = []
+    previous = (run.get("paging") or {}).get("previous")
+    while previous:
+        try:
+            earlier = store.load(previous)
+        except AdoptionRunError:
+            break
+        pages.append(earlier)
+        previous = (earlier.get("paging") or {}).get("previous")
+    return tuple(pages)
+
+
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
     """The id of the nearest earlier page of this run's collection that still has work to apply, or None.
 
@@ -1321,16 +1335,10 @@ def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
     a later page may plan only after the earlier ones have applied. A finished or cancelled page
     holds none.
     """
-    previous = (run.get("paging") or {}).get("previous")
-    while previous:
-        try:
-            earlier = store.load(previous)
-        except AdoptionRunError:
-            return None  # a page whose record is gone holds no work
+    for earlier in _earlier_pages(store, run):  # a page whose record is gone holds no work
         # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
         if earlier["phase"] not in ("done", "cancelled") and _unapplied(earlier):
-            return previous
-        previous = (earlier.get("paging") or {}).get("previous")
+            return earlier["run_id"]
     return None
 
 
@@ -1569,7 +1577,7 @@ def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None,
         hash_artifact=False,
     )
     if isinstance(read, dict):
-        code = "SOURCE_CHANGED" if read["code"] == "TOO_LARGE" else read["code"]
+        code = "SOURCE_CHANGED" if read["code"] == adoption_plan.OVER_CEILING else read["code"]
         return None, _failed(code, read["reason"])
     facts, text = read
     if facts["original_bytes"] != planned["original_bytes"] or (
@@ -1870,13 +1878,12 @@ def _apply_chunk(
             # Not a failure when adoption already filed it and removed the staged copy.
             earlier = _filed_and_gone(root, run, reads, planned)
             if earlier is not None:
-                outcomes[path] = {
-                    **_already_applied(
-                        earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
-                    ),
-                    "consumed": True,
-                }
-                stats["consumed"] += 1
+                outcomes[path] = _already_applied(
+                    earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
+                )
+                if run.get("consume", True):  # a run that opted out claims no removal
+                    outcomes[path]["consumed"] = True
+                    stats["consumed"] += 1
                 continue
         if failure is not None:
             outcomes[path] = failure
@@ -2113,7 +2120,9 @@ def _settle_staged(
         return
     stage = reads.recorded_stage(root, run)
     if not os.path.lexists(root / planned["original_path"]):
-        consumed = _filed_and_gone(root, run, reads, planned) is not None
+        if _filed_and_gone(root, run, reads, planned) is None or not run.get("consume", True):
+            return  # nothing is left to hash, and a run that opted out claims no removal
+        consumed = True
     else:
         consumed = (
             stage is not None and run.get("consume", True) and planned["form"] == "artifact"
@@ -2229,6 +2238,14 @@ def apply(
                 if in_scope and path in by_path and outcomes[path].get("status") in _APPLIED_STATUSES:
                     outcomes[path] = {**outcomes[path], "status": "already-applied"}
                     _settle_staged(root, run, reads, by_path[path], outcomes[path], stats)
+        else:
+            # A call that stopped between a chunk's commit and its settlement left those items unsettled.
+            for path, outcome in outcomes.items():
+                if (
+                    path in by_path and outcome.get("status") in _APPLIED_STATUSES
+                    and "consumed" not in outcome and "original_unchanged" not in outcome
+                ):
+                    _settle_staged(root, run, reads, by_path[path], outcome, stats)
         run["outcomes"] = outcomes
 
         run.pop("apply_stop", None)
@@ -2593,7 +2610,7 @@ def finish(
         coverage = _coverage(root, run, _call_budget())
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
-        stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES)
+        stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
         if stage_residual is not None:
             stage_residual["removed_empty_folders"] = removed_folders
         # The counts the last `apply` recorded from its own re-hash — never a fresh
