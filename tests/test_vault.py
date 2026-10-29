@@ -5,6 +5,7 @@ import io
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -268,6 +269,237 @@ def test_batch_write_rejects_changed_binary_stream_before_publication(
     assert changed.value.code == "PATH_GUARD_CONTENT"
     assert not binary.exists()
     assert not companion.exists()
+
+
+def test_batch_write_refuses_binary_stage_rewritten_between_last_check_and_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"reviewed payload"
+    rewritten = b"tampered payload"
+    assert len(rewritten) == len(payload)
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    companion = tmp_path / "Evidence" / "artifact.bin.md"
+    real_hook = vault._before_batch_destination_published
+    rewrites = 0
+
+    def rewrite_stage_in_place(path: Path, *, restoring: bool) -> None:
+        nonlocal rewrites
+        real_hook(path, restoring=restoring)
+        if path == binary and not restoring and rewrites == 0:
+            rewrites += 1
+            (stage,) = binary.parent.glob(".exomem-batch-*/stage-1.tmp")
+            with stage.open("r+b") as handle:
+                handle.write(rewritten)
+
+    monkeypatch.setattr(vault, "_before_batch_destination_published", rewrite_stage_in_place)
+
+    with pytest.raises(vault.BatchWriteError) as changed:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    companion,
+                    "companion",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(payload),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+        )
+
+    # The companion is rolled back and the rewritten bytes never reach the destination. Cleanup
+    # keeps the changed stage in its workspace rather than delete bytes it cannot account for.
+    assert rewrites == 1
+    assert isinstance(changed.value.__cause__, vault.PathGuardError)
+    assert changed.value.__cause__.code == "PATH_GUARD_CONTENT"
+    assert changed.value.code == "BATCH_CLEANUP_INCOMPLETE"
+    assert not binary.exists()
+    assert not companion.exists()
+    assert not list(tmp_path.rglob(f"{held_fs.PUBLISH_TEMP_PREFIX}*"))
+
+
+@pytest.mark.parametrize("generation_trusted", [True, False])
+def test_batch_write_detects_installed_binary_rewritten_before_a_later_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    generation_trusted: bool,
+) -> None:
+    monkeypatch.setattr(vault, "STAT_GENERATION_TRUSTED", generation_trusted)
+    payload = b"reviewed payload"
+    rewritten = b"tampered payload"
+    assert len(rewritten) == len(payload)
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    first_note = tmp_path / "Evidence" / "first.md"
+    last_note = tmp_path / "Evidence" / "last.md"
+    real_hook = vault._before_batch_destination_published
+
+    def rewrite_installed_binary(path: Path, *, restoring: bool) -> None:
+        real_hook(path, restoring=restoring)
+        if path == first_note and not restoring:
+            # Outside the filesystem's timestamp tick, which the requirement excludes.
+            time.sleep(0.05)
+            with binary.open("r+b") as handle:
+                handle.write(rewritten)
+
+    monkeypatch.setattr(vault, "_before_batch_destination_published", rewrite_installed_binary)
+
+    with pytest.raises(vault.BatchWriteError) as failed:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(payload),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    first_note,
+                    "first",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    last_note,
+                    "last",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+        )
+
+    # The rewrite is caught before the last note is published, and rollback removes the
+    # notes but refuses to delete bytes that are no longer the ones the batch installed.
+    assert isinstance(failed.value.__cause__, vault.PathGuardError)
+    assert failed.value.__cause__.code == "PATH_GUARD_CONTENT"
+    assert failed.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert not first_note.exists()
+    assert not last_note.exists()
+    assert binary.read_bytes() == rewritten
+
+
+def test_batch_write_does_not_vouch_for_a_binary_extended_after_its_verified_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"reviewed payload"
+    extra = b" plus appended bytes"
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    companion = tmp_path / "Evidence" / "artifact.bin.md"
+    real_publish = held_fs.publish_bytes
+
+    def append_after_install(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
+        published = real_publish(filesystem, parent, leaf, data, **kwargs)
+        if leaf == binary.name and published.ok:
+            with binary.open("ab") as handle:
+                handle.write(extra)
+        return published
+
+    monkeypatch.setattr(vault.held_fs, "publish_bytes", append_after_install)
+
+    with pytest.raises(vault.BatchWriteError) as failed:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    companion,
+                    "companion",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(payload),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+        )
+
+    # The batch refuses to bind bytes it did not copy, and rollback leaves them in place.
+    assert failed.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert binary.read_bytes() == payload + extra
+    assert not companion.exists()
+
+
+@pytest.mark.parametrize("touched", ["stage", "installed"])
+def test_batch_write_survives_a_timestamp_reset_that_leaves_the_binary_bytes_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    touched: str,
+) -> None:
+    payload = b"reviewed payload"
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    first_note = tmp_path / "Evidence" / "first.md"
+    last_note = tmp_path / "Evidence" / "last.md"
+    real_hook = vault._before_batch_destination_published
+    touches = 0
+
+    def reset_timestamp(path: Path) -> None:
+        nonlocal touches
+        touches += 1
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+
+    def touch_binary(path: Path, *, restoring: bool) -> None:
+        real_hook(path, restoring=restoring)
+        if touched == "stage" and path == first_note:
+            (stage,) = binary.parent.glob(".exomem-batch-*/stage-1.tmp")
+            reset_timestamp(stage)
+        if touched == "installed" and path == last_note:
+            reset_timestamp(binary)
+
+    monkeypatch.setattr(vault, "_before_batch_destination_published", touch_binary)
+
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                first_note,
+                "first",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+            vault.PlannedWrite(
+                binary,
+                vault.PreparedBinaryContent(
+                    io.BytesIO(payload),
+                    len(payload),
+                    hashlib.sha256(payload).hexdigest(),
+                ),
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+            vault.PlannedWrite(
+                last_note,
+                "last",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+        ],
+        vault_root=tmp_path,
+    )
+
+    assert touches == 1
+    assert binary.read_bytes() == payload
+    assert first_note.exists() and last_note.exists()
 
 
 def test_batch_write_rolls_back_binary_when_later_publication_fails(
