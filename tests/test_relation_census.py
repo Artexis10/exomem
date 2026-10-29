@@ -995,6 +995,9 @@ def test_census_streams_edges_instead_of_holding_them(
             _page("insight", f"Page {index}", f"- supports [[{NOTES}/page-{(index + 1) % 40:02d}]]"),
         )
     _built(vault)
+    # Resolve lazy admission imports on the small graph before tracing edge growth.
+    relation_census.census(vault)
+    relation_census.sample(vault, size=40)
     sidecar = epistemic_graph.sidecar_path(vault)
     connection = sqlite3.connect(sidecar)
     columns = [row[1] for row in connection.execute("PRAGMA table_info(graph_edges)")]
