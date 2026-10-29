@@ -340,6 +340,22 @@ Raw capture remains valid without compilation.
    One live citing derivative clears the citation backlog only; the server reports semantic compilation as `unassessed`.
    Do not add notes or edges to reach a count or repeat the same source warning indefinitely.
 
+### Several recordings and documents
+
+When the sources are a set of recordings and documents, such as a seminar series or a case file, run the pass above with these additions:
+
+1. Inventory every source and check its extraction before reading it: processing state, `asr_language`, `asr_language_probability` and `asr_language_source` in the sidecar, and faults such as a wrong language or one line repeated. Reprocess a faulty extraction with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` before relying on it.
+2. Build a timeline. Order recordings by capture time, and mark recorder splits (one session in several files), overlaps and duplicates, so each session counts once.
+3. Read transcripts by time range and documents by page. Cite `[m:ss]` ranges and `[page N]` markers, not whole files.
+4. Give each claim one attribution class. The open observation category names the class, such as `source_asserted`, `verified`, `user_position` or `question`, and the `(context)` slot holds the citation, as in `- [verified] <claim> (<primary source and section>)`.
+   - Source-asserted: a speaker or document says it.
+   - Independently verified: checked against a primary source, which the `(context)` cites.
+   - The user's own positions: record only what the user states. Where one is missing, leave a marked slot such as `(user position: to confirm)`; never infer it.
+   - Open questions: record what remains unresolved.
+5. Check legal, scientific and numeric claims against primary sources, such as the statute text, the paper or the dataset, before marking them verified. An unchecked claim stays source-asserted.
+6. Keep a coverage ledger with one row per source: the ranges or pages read, the outputs that cite it, and what stays unread or unavailable.
+7. Finish with an audit of the ledger against the committed outputs. Report sources with no output, unread ranges and unverified claims as gaps.
+
 ## Linking discipline
 
 Link every compiled page to what it actually connects to — this is Write

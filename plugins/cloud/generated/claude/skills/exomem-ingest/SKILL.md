@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 4c2d116501e2022afac2686d0e0352ce1d3e176148d10f436f3119c33c83a42a
+  skill_contract: e7776dd38de84be5ef19a1d8329bec590fe32368d9c338182a91bc1d07b3f76f
   version: "0.1.0"
 ---
 
@@ -63,7 +63,7 @@ identity after an uncertain commit.
    files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
    after review with the usual writers; a live citation still does not prove semantic coverage.
 3. Inspect available original media or extracted content; record the scope actually read.
-   Media processing is automatic. Use `read_media/change_media` for reconciliation, status or retry,
+   Media processing is automatic. Use `read_media/change_media` for reconciliation, status, retry or reprocess,
    and `read_media` or the exposed source-read route for inspection. Pending extraction
    does not prevent using an available original. Extraction completion says nothing
    about semantic compilation. Respect source-version guards on dependent writes.
