@@ -82,7 +82,7 @@ from typing import Any, Generic, Literal, TypeVar
 from . import call_spans, foreground_priority, reserved_paths
 from .find_types import RankingPage
 from .kbdir import kb_dirname
-from .published_admission import Admission, admission_of
+from .published_admission import Admission, admission_of, deciding
 
 log = logging.getLogger(__name__)
 
@@ -9619,13 +9619,15 @@ class LexicalStore:
         """
         decided: dict[str, bool] = {}
         stored: dict[str, bool] = {}
-        for path in plan.missing:
-            allowed, page_local = admission.decide(path, True)
-            decided[path] = allowed
-            if page_local and path not in plan.live and plan.signatures is not None:
-                signature = plan.signatures.get(path)
-                if signature is not None and self._page_unchanged_since(path, signature):
-                    stored[sys.intern(path)] = allowed
+        # A collection store decides its pages on one thread, so the pages it owns share one store request.
+        with deciding(plan.missing):
+            for path in plan.missing:
+                allowed, page_local = admission.decide(path, True)
+                decided[path] = allowed
+                if page_local and path not in plan.live and plan.signatures is not None:
+                    signature = plan.signatures.get(path)
+                    if signature is not None and self._page_unchanged_since(path, signature):
+                        stored[sys.intern(path)] = allowed
         if stored or not plan.current:
             known = plan.signatures or {}
             allowed_map = {
