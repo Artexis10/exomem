@@ -70,7 +70,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -2715,6 +2715,79 @@ class _AdmittedStatisticsEntry:
     postings: Any = None
 
 
+#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes each, so 32 MiB, which
+#: holds about 10,000 pages of 400 distinct words. A corpus past it keeps no base, and its next build counts
+#: every page.
+_ADMITTED_BASE_TERMS_MAX = 4_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmittedBase:
+    """What an admitted corpus's statistics were built from, so the next build re-reads only the pages that differ.
+
+    `pages` maps a page to `(digest of its stemmed text, token count, unique terms in first-seen order)`.
+    A page's entry is a function of its stemmed text alone, so the base serves any later corpus.
+    """
+
+    pages: Mapping[str, tuple[bytes, int, tuple[str, ...]]]
+    frequency: Mapping[str, int]
+
+
+def _text_digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+
+
+def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...]]:
+    """One page's token count and unique terms, interned so the pages of a base share each term."""
+    words = stemmed.split()
+    return len(words), tuple(map(sys.intern, dict.fromkeys(words)))
+
+
+def _admitted_corpus(
+    rows: Mapping[str, str], digests: Mapping[str, bytes], base: _AdmittedBase | None
+) -> tuple[Any, Any, _AdmittedBase | None]:
+    """The Okapi figures, postings and base of the corpus `rows` (page -> stemmed text), which `digests` fingerprints.
+
+    A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
+    and the word counts move by exactly the terms that left or entered. The result equals
+    `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    """
+    from . import bm25 as bm25_module
+
+    held = base.pages if base is not None else {}
+    pages: dict[str, tuple[bytes, int, tuple[str, ...]]] = {}
+    for path, text in rows.items():
+        kept = held.get(path)
+        if kept is not None and kept[0] == digests[path]:
+            pages[path] = kept
+        else:
+            length, terms = _page_terms(text)
+            pages[path] = (digests[path], length, terms)
+    # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
+    ordered = sorted(pages)
+    if base is None:
+        # Counting in that order leaves the counts in the order `of` gives.
+        frequency = dict(Counter(itertools.chain.from_iterable(pages[path][2] for path in ordered)))
+    else:
+        counts = Counter(base.frequency)
+        counts.subtract(itertools.chain.from_iterable(
+            kept[2] for path, kept in held.items() if pages.get(path) is not kept
+        ))
+        counts.update(itertools.chain.from_iterable(
+            page[2] for path, page in pages.items() if held.get(path) is not page
+        ))
+        # The base's order is stale: an edit can bring a word forward, a delete can end one.
+        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path][2] for path in ordered))
+        frequency = {term: counts[term] for term in first_seen}
+    statistics = bm25_module.CorpusStatistics.from_counts(
+        len(pages), sum(page[1] for page in pages.values()), frequency
+    )
+    postings = bm25_module.CorpusPostings({path: page[1] for path, page in pages.items()})
+    kept_terms = sum(len(page[2]) for page in pages.values())
+    retained = _AdmittedBase(pages, statistics.document_frequency) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
+    return statistics, postings, retained
+
+
 @dataclass(frozen=True, slots=True)
 class _AdmittedRecallRows:
     """One snapshot's structural rows; retain no caller or lifecycle decisions."""
@@ -4348,6 +4421,9 @@ class LexicalStore:
         # corpus's Okapi figures. A miss can reuse the math after a complete
         # SQL input check. Each entry holds one vocabulary-sized mapping.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
+        # scope -> the pages the latest admitted corpus of that scope was built from;
+        # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
+        self._admitted_bases: dict[str, _AdmittedBase] = {}
         # (scope, catalogue snapshot generation) -> that snapshot's admitted
         # recall rows, and the lock a miss holds while one request fills it.
         # See `_admitted_recall_rows`.
@@ -8529,8 +8605,6 @@ class LexicalStore:
     ) -> tuple[_AdmittedStatisticsEntry, tuple]:
         """Okapi figures reused only for the same snapshot or complete SQL inputs,
         with the snapshot generation they were read at."""
-        from . import bm25 as bm25_module
-
         owns_snapshot = not conn.in_transaction
         if owns_snapshot:
             conn.execute("BEGIN")
@@ -8552,13 +8626,14 @@ class LexicalStore:
                 "ORDER BY p.path",
                 (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
             ))
+            digests = {path: _text_digest(stemmed) for path, stemmed in rows.items()}
             fingerprint = hashlib.sha256()
-            for path, stemmed in rows.items():
-                for value in (path, stemmed):
-                    encoded = value.encode("utf-8", "surrogatepass")
-                    # Length framing keeps field and row boundaries unambiguous.
-                    fingerprint.update(len(encoded).to_bytes(8, "big"))
-                    fingerprint.update(encoded)
+            for path, page_digest in digests.items():
+                encoded = path.encode("utf-8", "surrogatepass")
+                # Length framing keeps field and row boundaries unambiguous; a digest has a fixed size.
+                fingerprint.update(len(encoded).to_bytes(8, "big"))
+                fingerprint.update(encoded)
+                fingerprint.update(page_digest)
             current_fingerprint = fingerprint.digest()
 
             def same_inputs(retained_key: tuple, entry: _AdmittedStatisticsEntry) -> bool:
@@ -8577,11 +8652,14 @@ class LexicalStore:
                 statistics, postings = retained.statistics, retained.postings
             else:
                 call_spans.measure(call_spans.STATS_REBUILT)
-                documents = {path: stemmed.split() for path, stemmed in rows.items()}
-                statistics = bm25_module.CorpusStatistics.of(documents)
-                postings = bm25_module.CorpusPostings(
-                    {path: len(document) for path, document in documents.items()}
-                )
+                with self._term_frequency_cache_lock:
+                    base = self._admitted_bases.get(scope)
+                statistics, postings, base = _admitted_corpus(rows, digests, base)
+                with self._term_frequency_cache_lock:
+                    if base is None:
+                        self._admitted_bases.pop(scope, None)
+                    else:
+                        self._admitted_bases[scope] = base
             with self._term_frequency_cache_lock:
                 # Equivalent snapshot aliases must not evict another admitted corpus.
                 # Recheck here because another reader can install during aggregation.

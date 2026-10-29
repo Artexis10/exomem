@@ -400,7 +400,16 @@ class CorpusStatistics:
             length += len(document)
             for word in dict.fromkeys(document):
                 frequency[word] = frequency.get(word, 0) + 1
-        pages = len(tokens_by_path)
+        return cls.from_counts(len(tokens_by_path), length, frequency)
+
+    @classmethod
+    def from_counts(cls, pages: int, length: int, frequency: dict[str, int]) -> CorpusStatistics:
+        """The figures of a corpus of `pages` documents with `length` tokens in all.
+
+        `frequency` holds each word's document count in the order `of` gives, which is the
+        first-seen order of the words over the documents sorted by path: the idf floor sums
+        over it in that order, so another order gives a different last bit.
+        """
         idf_sum = 0
         for count in frequency.values():
             idf_sum += math.log(pages - count + 0.5) - math.log(count + 0.5)
