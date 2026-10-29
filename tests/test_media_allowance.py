@@ -71,12 +71,15 @@ def test_admission_does_not_publish_a_projection_from_unknown_or_conflicting_cus
         (b"\xef\xbb\xbf---\r\nkey: value\r\n---\r\nbody", b"\xef\xbb\xbf---\r\nkey: value\r\n---\r\n"),
         (b"---\nkey: value\n---", b"---\nkey: value\n---"),
         (b"---\n\n---\nbody", b"---\n\n---\n"),
+        (b"---\n---\nbody", b"---\n---\n"),
+        (b"---\r\n---\r\nbody", b"---\r\n---\r\n"),
+        (b"---\n---", b"---\n---"),
         (b"---\nkey: value\n---not-a-fence\n---\nbody", b"---\nkey: value\n---not-a-fence\n---\n"),
         (b"---\nkey: value\n----\n---\nbody", b"---\nkey: value\n----\n---\n"),
         (b"ordinary" * 20000, b""),
         (b"---ordinary" * 20000, b""),
     ],
-    ids=["lf", "bom-crlf", "eof", "empty", "dash-prefix", "four-dashes", "long-prose", "long-dash-prose"],
+    ids=["lf", "bom-crlf", "eof", "empty", "empty-lf", "empty-crlf", "empty-eof", "dash-prefix", "four-dashes", "long-prose", "long-dash-prose"],
 )
 def test_header_reader_preserves_the_existing_fence_envelope(raw: bytes, expected: bytes):
     header = vault_module.read_frontmatter_header(io.BytesIO(raw), 16384)
@@ -85,7 +88,7 @@ def test_header_reader_preserves_the_existing_fence_envelope(raw: bytes, expecte
         assert vault_module.parse_frontmatter(header.decode())[2] == vault_module.parse_frontmatter(raw.decode(errors="replace"))[2]
 
 
-@pytest.mark.parametrize("raw", [b"---\n---\n", b"---\nkey: value\n---not-a-fence", b"---\nunclosed"])
+@pytest.mark.parametrize("raw", [b"---\nkey: value\n---not-a-fence", b"---\nunclosed"])
 def test_unclosed_headers_never_look_like_absent_frontmatter(raw: bytes):
     with pytest.raises(vault_module.FrontmatterError):
         vault_module.read_frontmatter_header(io.BytesIO(raw), 16384)

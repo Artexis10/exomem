@@ -97,6 +97,12 @@ def test_strict_frontmatter_distinguishes_incomplete_headers_from_plain_notes() 
     assert vault.parse_frontmatter("---\n# An empty header.\n---\nBody.\n", strict=True)[0] == {}
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_empty_frontmatter_keeps_the_document_body(newline: str) -> None:
+    source = f"---{newline}---{newline}Body.{newline}"
+    assert vault.parse_frontmatter(source, strict=True) == ({}, f"Body.{newline}", "")
+
+
 def test_create_only_write_refuses_existing_leaf_and_preserves_legacy_overwrite(
     tmp_path: Path,
 ) -> None:

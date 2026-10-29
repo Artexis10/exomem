@@ -373,7 +373,8 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 # Markdown fences delimit YAML; the optional UTF-8 BOM stays outside the YAML block.
 _FM_OPEN = "(?:\ufeff)?---\\r?\\n"
-_FM_CLOSE = r"\r?\n---(?:\r?\n|\Z)"
+# An empty YAML block shares the opening fence's newline with the closing fence.
+_FM_CLOSE = r"(?:\r?\n|(?<=\n))---(?:\r?\n|\Z)"
 _FM_PATTERN = re.compile(r"^" + _FM_OPEN + r"(.*?)" + _FM_CLOSE + r"(.*)", re.DOTALL)
 _FM_OPEN_BYTES = re.compile((r"^" + _FM_OPEN).encode("utf-8"))
 _FM_CLOSE_BYTES = re.compile(_FM_CLOSE.encode("utf-8"))
