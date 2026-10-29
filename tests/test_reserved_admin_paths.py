@@ -54,7 +54,7 @@ def test_complete_census_includes_retained_content_and_excludes_private_state(tm
     for relative in expected | {"_Governance/rules/private.md"}:
         target = kb / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("An ordinary document.\n")
+        target.write_bytes(b"An ordinary document.\n")
     entries = reserved_paths.list_generic_tree(
         tmp_path, "Knowledge Base", require_complete=True,
         select=lambda candidates: (path for path, kind in candidates if path.endswith(".md")),
