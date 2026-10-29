@@ -829,11 +829,14 @@ def _next_actions(run: dict) -> list[dict]:
         )
     elif phase == "applying":
         stop = run.get("apply_stop")
-        actions.append(
-            {"action": "apply", "status": "available",
-             "description": stop["next"] if stop else
-             "Apply stopped with work left; call apply again with the continuation."}
-        )
+        if stop:
+            # Blocked, not available: the continuation that this reply carries stops at the same chunk again.
+            actions.append({"action": "apply", "status": "blocked", "description": stop["next"]})
+        else:
+            actions.append(
+                {"action": "apply", "status": "available",
+                 "description": "Apply stopped with work left; call apply again with the continuation."}
+            )
     elif phase in ("applied", "partial"):
         actions.append(
             {"action": "finish", "status": "available",
@@ -849,7 +852,32 @@ def _next_actions(run: dict) -> list[dict]:
             {"action": "work-item", "status": "available",
              "description": "Load bounded read-only context to submit structured proposals."}
         )
+        actions.extend(_residual_actions((run.get("finish") or {}).get("residual")))
+    if _open_cursor(run, "after"):
+        actions.append(
+            {"action": "start", "status": "available",
+             "description": "More files remain beyond this page. Call start with after set to next_after, "
+                            "and no path or collection. Pages file in order: apply this page before planning the next."}
+        )
     return actions
+
+
+def _residual_actions(residual: dict | None) -> list[dict]:
+    """Review the staged files that remain with the person, then discard; neither while later pages follow.
+
+    A page that later pages follow leaves the review and the discard to the last page, because the folder
+    still holds files that those pages file.
+    """
+    # A run finished before paging existed has no `more_pages` key, and no later page.
+    if not residual or not residual["files"] or residual.get("more_pages"):
+        return []
+    return [
+        {"action": "review-residual", "status": "available",
+         "description": f"{residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
+                        "finish.residual.by_reason says why. Review them with the person before anything is discarded."},
+        {"action": "discard", "status": "available",
+         "description": f"Only after the person agrees, and permanently: {residual['discard']}."},
+    ]
 
 
 def _handoff(run: dict) -> dict:
@@ -1028,8 +1056,12 @@ def _page_cursor(root: Path, after: str) -> tuple[dict, str, dict]:
         ) from exc
 
 
-def _pinned_scan(entry: dict, path: str, collection: str | None) -> dict:
-    """What the first page fixed for every later page, refusing a call that names something else."""
+def _pinned_scan(entry: dict, path: str, collection: str | None, consume: bool) -> dict:
+    """What the first page fixed for every later page, refusing a call that names something else.
+
+    A caller that opts out of consuming on a later page of a consuming scan is refused, because the pinned
+    choice would otherwise delete the staged copies that the caller asked to keep.
+    """
     pinned = entry["after"]
     if _clean(path) not in ("", pinned["path"]) or (
         (collection or "").strip() and adoption_plan.nfc(collection.strip()) != pinned["collection"]["label"]
@@ -1038,6 +1070,12 @@ def _pinned_scan(entry: dict, path: str, collection: str | None) -> dict:
             "INVALID_CONTINUATION",
             f"that after cursor belongs to the scan of {pinned['path']!r} as collection "
             f"{pinned['collection']['label']!r}; pass the same path and collection, or neither",
+        )
+    if pinned["consume"] and not consume:
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            "that after cursor belongs to a scan that removes staged copies once filed; "
+            "omit consume, since a later page keeps the choice of the first page",
         )
     return pinned
 
@@ -1064,7 +1102,7 @@ def start(
     source_run = entry = pinned = None
     if after:
         source_run, token, entry = _page_cursor(root, after)
-        pinned = _pinned_scan(entry, path, collection)
+        pinned = _pinned_scan(entry, path, collection, consume)
         path, include_hidden = pinned["path"], pinned["include_hidden"]
         consume, max_candidates = pinned["consume"], pinned["max_candidates"]
     _refuse_outside_vault(root, path)
@@ -1687,7 +1725,8 @@ def _space_shortfall(root: Path, chunk: list[dict]) -> dict | None:
         return None
     return {
         "code": "INSUFFICIENT_SPACE", "chunk_bytes": needed, "reserve_bytes": reserve, "free_bytes": free,
-        "next": "Free space on the vault's volume, then call apply again: it resumes at this chunk.",
+        "next": "Stop. The continuation stops at this chunk again until the vault's volume has this chunk's bytes "
+                "plus the reserve free. Free space and tell the person, then call apply again: it resumes at this chunk.",
     }
 
 

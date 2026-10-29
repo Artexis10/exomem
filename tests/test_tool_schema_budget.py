@@ -36,7 +36,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3350,
-    "import_memory": 5650,
+    "import_memory": 5850,
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
@@ -94,7 +94,7 @@ TOOL_CEILINGS: dict[str, int] = {
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 1600,
+    "observe_transfer": 1850,
     "transfer_memory": 1650,
 }
 

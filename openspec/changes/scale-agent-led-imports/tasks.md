@@ -24,7 +24,7 @@
 
 ## 4. Agent guidance
 
-- [ ] 4.1 Update the `observe_transfer` description, the `import_handoff` routes and the `adoption_studio` next actions to name the whole flow, including the next page and the residual review. Add a generic import reference to the skill scaffold. Regenerate the tool-surface contract and the plugin packages. Verify: the tool-surface and scaffold-leak tests pass, and the next actions name `next_after` while it is set.
+- [x] 4.1 Update the `observe_transfer` description, the `import_handoff` routes and the `adoption_studio` next actions to name the whole flow, including the next page and the residual review. Add a generic import reference to the skill scaffold. Regenerate the tool-surface contract and the plugin packages. Verify: the tool-surface and scaffold-leak tests pass, and the next actions name `next_after` while it is set.
 
 ## 5. Proof
 

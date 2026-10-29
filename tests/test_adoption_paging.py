@@ -136,11 +136,27 @@ def test_a_cursor_the_server_did_not_issue_is_refused_and_a_used_one_returns_its
     with pytest.raises(adoption_run.AdoptionRunError) as elsewhere:
         adoption_run.start(vault, path="Elsewhere", after=first["next_after"], today=TODAY)
     assert elsewhere.value.code == "INVALID_CONTINUATION"
+    with pytest.raises(adoption_run.AdoptionRunError) as opted_out:  # the first page consumes; a later page must too
+        adoption_run.start(vault, path=folder, after=first["next_after"], consume=False, today=TODAY)
+    assert opted_out.value.code == "INVALID_CONTINUATION"
 
     second = adoption_run.start(vault, path=folder, after=first["next_after"], today=TODAY)
     again = adoption_run.start(vault, path=folder, after=first["next_after"], today=TODAY)
 
     assert again["run_id"] == second["run_id"] and len(adoption_run.status(vault)["runs"]) == 2
+
+
+def test_next_actions_name_the_next_page_only_while_next_after_is_set(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    folder = _folder(vault, {f"scan-{n}.pdf": PDF + bytes([n]) for n in range(3)})
+
+    first = adoption_run.start(vault, path=folder, max_candidates=2, today=TODAY)
+    last = adoption_run.start(vault, path=folder, after=first["next_after"], today=TODAY)
+
+    assert first["next_after"] and "start" in {action["action"] for action in first["next_actions"]}
+    assert "next_after" not in last and "start" not in {action["action"] for action in last["next_actions"]}
+    taken = adoption_run.status(vault, run_id=first["run_id"])
+    assert "next_after" not in taken and "start" not in {action["action"] for action in taken["next_actions"]}
 
 
 def test_a_name_that_two_files_share_stays_unresolved_and_an_alias_alone_never_resolves(tmp_path: Path) -> None:
@@ -211,13 +227,17 @@ def test_finish_of_a_page_that_later_pages_follow_does_not_offer_to_discard_thei
     first = adoption_run.start(vault, path=stage, collection="Field Notes", max_candidates=2, today=TODAY)
     _apply_page(vault, first, stage)
 
-    early = adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)["finish"]["residual"]
+    finished_early = adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
+    early = finished_early["finish"]["residual"]
 
     assert (early["more_pages"], early["files"], early["discard"]) == (True, 1, None)
+    assert not {"review-residual", "discard"} & {action["action"] for action in finished_early["next_actions"]}
     last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
     _apply_page(vault, last, stage)
 
-    final = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)["finish"]["residual"]
+    finished_last = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)
+    final = finished_last["finish"]["residual"]
 
     assert final["more_pages"] is False and final["by_reason"] == {"text": {"files": 1, "bytes": len(note)}}
     assert stage.removeprefix("_Imports/") in final["discard"]
+    assert {"review-residual", "discard"} <= {action["action"] for action in finished_last["next_actions"]}

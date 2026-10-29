@@ -572,7 +572,7 @@ _REMAINING = {
         _row("compile-selected", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
     )),
     "adoption_studio": ("action", (
-        _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection")),
+        _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume")),
         _row("status", "read_import", ("run_id", "path")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",)),

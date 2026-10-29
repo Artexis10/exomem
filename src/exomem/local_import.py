@@ -206,14 +206,14 @@ def _checks_before_copy(root: Path, vault: Path) -> None:
         raise LocalImportError("FOLDER_NAME_UNUSABLE", "the folder needs a name that does not start with a dot")
 
 
-def _advice(selection: import_selection.Selection, name: str, free_after: int, progress: Progress) -> None:
+def _advice(selection: import_selection.Selection, free_after: int, progress: Progress) -> None:
     """Warnings that do not stop the copy: limits the adoption engine applies after the files are staged."""
     from . import adoption_run, client_artifacts
 
     if len(selection.kept) > adoption_run.MAX_CANDIDATES_DEFAULT:
-        progress.say(f"Note: adoption lists up to {adoption_run.MAX_CANDIDATES_DEFAULT:,} files per start; "
-                     f"this folder has {len(selection.kept):,}. Start on subfolders of the printed path to cover the rest, "
-                     f'and pass collection="{name}" to each start so that they stay one collection.')
+        progress.say(f"Note: adoption lists up to {adoption_run.MAX_CANDIDATES_DEFAULT:,} files per page; "
+                     f"this folder has {len(selection.kept):,}. Each page reply carries next_after: "
+                     "call start again with it until a reply has none.")
     ceiling = client_artifacts.adoption_ceiling()
     large = sum(1 for item in selection.kept if item.size > ceiling)
     if large:
@@ -500,7 +500,7 @@ def stage(folder: Path, vault: Path, *, include_hidden: bool = False, use_gitign
                 for skipped in selection.skipped:
                     journal.add({"kind": "left_out", "path": skipped.rel, "code": skipped.reason.name,
                                  "dir": skipped.is_dir, "files": skipped.files, "bytes": skipped.bytes})
-            _advice(selection, root.name, free - run.needed, progress)
+            _advice(selection, free - run.needed, progress)
             try:
                 filesystem = held_fs.acquire(vault).require()
             except held_fs.HeldFsError as error:

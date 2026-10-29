@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: e9c5b2cd3200f73bdb351b5ab6e62a333b85519c1615c31a23a81e1b2066f6c2
+  skill_contract: 94678ed1e25eb6d61f8afe94333b69f393cb07018d3b6e758c29e8334ad3586b
   version: "0.1.0"
 ---
 
@@ -53,7 +53,8 @@ identity after an uncertain commit.
    with a `collection` name, `select` folders (with a `source_kind` and `domain` per folder rule where known),
    `plan`, `apply`, then `finish`. Repeat `plan` or `apply` with the returned `continuation`
    until none returns, and report the `coverage` from `finish`, including what was refused,
-   what is still pending and how many notes were created.
+   what is still pending and how many notes were created. For a large folder, a full disk
+   or a staged copy to discard, follow [importing](references/importing.md).
    A folder of the person's own notes can also become notes. Ask which folders hold them;
    never guess from file names. Give that folder the rule
    `{path, adopt_as: "note", note_type, project?, domain?}`, with a `note_type` that

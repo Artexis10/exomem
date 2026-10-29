@@ -188,9 +188,12 @@ def test_apply_stops_before_a_chunk_that_does_not_fit_the_free_space_and_a_later
     assert space is not None and space["code"] == "INSUFFICIENT_SPACE"
     assert (space["chunk_bytes"], space["reserve_bytes"], space["free_bytes"]) == (size, reserve, free_bytes())
     assert stopped["phase"] == "applying"
+    assert stopped["continuation"]  # the reply still carries one, so the next action must say it cannot be followed yet
+    assert {action["action"]: action["status"] for action in stopped["next_actions"]} == {"apply": "blocked"}
 
     capacity[0] += 10 * size
     resumed = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)
 
     assert len(list((vault / "Knowledge Base" / "Sources").rglob("*.bin"))) == 3
     assert "apply_stop" not in resumed and resumed["phase"] == "applied"
+    assert {action["action"]: action["status"] for action in resumed["next_actions"]} == {"finish": "available"}

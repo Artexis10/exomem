@@ -4265,6 +4265,15 @@
                 "collection": {
                   "type": "string",
                   "description": "For `start`, a name kept across re-imports."
+                },
+                "after": {
+                  "type": "string",
+                  "description": "For `start`, the previous page's `next_after`."
+                },
+                "consume": {
+                  "description": "For `start`, false keeps staged copies after filing.",
+                  "type": "boolean",
+                  "default": true
                 }
               },
               "required": [

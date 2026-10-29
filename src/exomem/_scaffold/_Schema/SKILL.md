@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: e9c5b2cd3200f73bdb351b5ab6e62a333b85519c1615c31a23a81e1b2066f6c2
+  skill_contract: 94678ed1e25eb6d61f8afe94333b69f393cb07018d3b6e758c29e8334ad3586b
   version: "0.32.0"
 ---
 
@@ -66,6 +66,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Save intent or observed events; interpret an ambiguous action | `read_plans`, `change_plans`, `read_records`, `change_records`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `record_episode/read_episode` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
+| Bring a folder, ZIP or notes export into the Knowledge Base | `read_import` and `import_memory`; on Cloud also `observe_transfer` and `transfer_memory` | [importing](references/importing.md); [operation details](references/operations.md); [mutation results](references/mutation-results.md) before any mutation |
 | Review, adopt, audit, restructure, or maintain a vault | `read_review/triage_memory`, `triage_memory`, `read_import` and `import_memory`, `check_memory/repair_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `read_schema/change_schema` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Give maps topics, or file unfiled pages under topics | `read_review(operation={'kind': 'vocabulary'})` topic-carrier items, then `read_schema/change_schema` with `subject="topic-carriers"` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
