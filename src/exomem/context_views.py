@@ -1230,7 +1230,7 @@ def _map_description() -> str:
 
 
 #: The description of a map block that repeats nothing: the caller already holds this generation.
-UNCHANGED_DESCRIPTION = "The map you hold is current."
+UNCHANGED_DESCRIPTION = "The map you hold has not changed."
 
 
 def activation_packet(

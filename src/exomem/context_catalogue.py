@@ -100,8 +100,8 @@ SQL_VARIABLE_CHUNK = 500
 INLINE_FOLD_LIMIT = 200
 
 #: How far `ensure_unlisted` may advance a warm catalogue on the calling thread.
-#: `inline` folds a bounded burst and schedules the rest; `defer` folds nothing and
-#: schedules nothing, so the caller serves what is stored and names the lag;
+#: `inline` folds a bounded burst and schedules the rest; `defer` folds nothing on a warm
+#: catalogue (a cold one still schedules its build), so the caller serves what is stored and names the lag;
 #: `background` is the one scheduled pass, which folds all of it and proves the graph.
 FOLD_INLINE = "inline"
 FOLD_DEFER = "defer"
@@ -1259,7 +1259,7 @@ def _graph_token(vault_root: Path, prove: bool | str = True) -> str:
     except Exception:  # noqa: BLE001 - an unreadable graph token means the edges are pulled
         log.debug("context catalogue: graph token unavailable", exc_info=True)
         return ""
-    if token == (GRAPH_UNPROVEN,):
+    if token == epistemic_graph.UNPROVEN_TOKEN:
         return GRAPH_UNPROVEN
     return json.dumps(list(token)) if token else ""
 

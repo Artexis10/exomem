@@ -9953,6 +9953,10 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     )
 
 
+#: `cache_token` while another reader's cold proof of the sidecar is running.
+UNPROVEN_TOKEN = ("unproven",)
+
+
 def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     """`(schema_version, extension_registry_hash, generation, instance)` or None.
 
@@ -9971,7 +9975,7 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     outcome: list[str] = []
     conn = idx._open_read_snapshot(outcome_out=outcome)
     if conn is None:
-        return ("unproven",) if outcome else None
+        return UNPROVEN_TOKEN if outcome else None
     try:
         values = dict(
             conn.execute(

@@ -2541,7 +2541,7 @@ def test_the_hook_renders_a_map_the_server_sent_unchanged_as_its_one_line(
     hook._activation_map_path(SESSION).unlink()  # the hook's own record of the generation is gone
     packet["map"] = {
         "ref": "exomem://map", "generation": "map-1", "stale": False, "unchanged": True,
-        "description": "The map you hold is current.", "items": [],
+        "description": "The map you hold has not changed.", "items": [],
     }
     unchanged = _context(_run(monkeypatch, capsys, _event(), tmp_path))
     assert "map unchanged" in unchanged and "[exomem://map]" in unchanged and "Depot Ledger" not in unchanged

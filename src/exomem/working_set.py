@@ -4566,17 +4566,20 @@ def _compile_packet(
         and not analysis.referential
         and (band_paths := working_set_resolve.band_yieldable_paths(resolution))
     ):
-        rival = dominant_carry(
-            _carry_by_retrieval(
-                root,
-                turn=turn,
-                timings=timings,
-                freshness_snapshot=freshness_snapshot,
-                lexical_seconds=lexical_seconds,
-                visible=visible,
-                status_basis=status_basis,
+        try:
+            rival = dominant_carry(
+                _carry_by_retrieval(
+                    root,
+                    turn=turn,
+                    timings=timings,
+                    freshness_snapshot=freshness_snapshot,
+                    lexical_seconds=lexical_seconds,
+                    visible=visible,
+                    status_basis=status_basis,
+                )
             )
-        )
+        except BudgetExhausted:
+            rival = None  # the rival carry yielded to the deadline (noted on the budget); the band's resolution stands
         if rival is not None and rival[0] not in band_paths:
             packet = _carried_packet(
                 root,
@@ -5108,18 +5111,21 @@ def _named_beside(
             if path:
                 exclude.add(str(path))
     contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
-    groups = _carry_groups_by_retrieval(
-        vault_root,
-        turn=turn,
-        timings=timings,
-        freshness_snapshot=freshness_snapshot,
-        lexical_seconds=lexical_seconds,
-        skip_terms=" ".join(sorted(consumed)),
-        contacts=contacts,
-        visible=visible,
-        status_basis=status_basis,
-        query_context=query_context,
-    )
+    try:
+        groups = _carry_groups_by_retrieval(
+            vault_root,
+            turn=turn,
+            timings=timings,
+            freshness_snapshot=freshness_snapshot,
+            lexical_seconds=lexical_seconds,
+            skip_terms=" ".join(sorted(consumed)),
+            contacts=contacts,
+            visible=visible,
+            status_basis=status_basis,
+            query_context=query_context,
+        )
+    except BudgetExhausted:
+        groups = ()  # the carry yielded to the deadline (noted on the budget); the resolved material stands
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:
         return (), (), (), tuple(dict(role) for role in selected_roles)

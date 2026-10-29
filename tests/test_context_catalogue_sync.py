@@ -222,7 +222,7 @@ def test_a_request_path_fold_does_not_wait_for_another_readers_graph_proof(
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()  # the graph moved, so the next fold must pull
     monkeypatch.setattr(
         epistemic_graph, "cache_token",
-        lambda root, prove=True: (cc.GRAPH_UNPROVEN,) if prove == epistemic_graph.SINGLE_FLIGHT else real(root, prove=prove),
+        lambda root, prove=True: epistemic_graph.UNPROVEN_TOKEN if prove == epistemic_graph.SINGLE_FLIGHT else real(root, prove=prove),
     )
 
     catalogue.update([page], prove=epistemic_graph.SINGLE_FLIGHT)
