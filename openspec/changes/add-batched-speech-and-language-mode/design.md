@@ -5,6 +5,7 @@
 | Probe | Result |
 |---|---|
 | Batched, batch 16, `et`, default options | 61 s against 380 s sequential; 95 lines against 364; one line per 25–30 s window |
+| Batched, batch 16, `et`, `without_timestamps: false` (shipped) | 110 s against 355 s sequential; 342 lines against 364; median line start gap 6 s |
 | Sequential `multilingual=True`, same file | identical words to the single-language run; 34% slower |
 | Sequential `multilingual=True`, an English call | clean English |
 

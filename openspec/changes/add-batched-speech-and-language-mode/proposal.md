@@ -1,6 +1,6 @@
 ## Why
 
-The local speech stage decodes one 30-second window after another. On a GPU, faster-whisper's batched pipeline decodes many VAD-selected windows at once. On a 60-minute lecture it took 61 s against 380 s for the sequential run, on the same GPU and model. The first batched run had one defect: it wrote one line per 25–30 s window, which is too coarse to cite. The cause is the pipeline's default `without_timestamps=True`, not batching itself.
+The local speech stage decodes one 30-second window after another. On a GPU, faster-whisper's batched pipeline decodes many VAD-selected windows at once. On a 60-minute lecture it took 61 s against 380 s for the sequential run, on the same GPU and model. With segment timestamps kept, as shipped, it took 110 s against 355 s. The first batched run had one defect: it wrote one line per 25–30 s window, which is too coarse to cite. The cause is the pipeline's default `without_timestamps=True`, not batching itself.
 
 Recordings can also hold more than one language, such as a lecture with an English aside or a bilingual meeting. Today a caller can pin one language only on a reprocess call, and only one. Nothing lets the agent say at processing time that a recording holds several languages. The engine supports per-window detection (`multilingual=True`), which cost 34% more time on one Estonian lecture and changed no words there.
 
