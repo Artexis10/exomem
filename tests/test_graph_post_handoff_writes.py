@@ -435,19 +435,18 @@ def _rebuild_reasons_this_write(root: Path, caplog: pytest.LogCaptureFixture) ->
 def _drain_repair_queue(root: Path, watcher: file_watcher.FileWatcher) -> int:
     """Publish the observed external events, then drain the durable graph queue."""
     watcher._flush()
-    for _ in range(12):
-        if not deferred_index.list_graph_paths(root):
-            return 0
-        index_sync.drain_graph_work(root, limit=64)
-    return len(deferred_index.list_graph_paths(root))
+    return _drain_graph_queue(root)
 
 
 def _drain_graph_queue(root: Path) -> int:
     """Drain the durable graph queue without a watcher to publish events first."""
-    for _ in range(12):
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
         if not deferred_index.list_graph_paths(root):
             return 0
-        index_sync.drain_graph_work(root, limit=64)
+        if not index_sync.drain_graph_work(root, limit=64):
+            # A background publisher may hold the boundary during this nonblocking drain.
+            time.sleep(0.05)
     return len(deferred_index.list_graph_paths(root))
 
 
