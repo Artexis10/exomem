@@ -45,9 +45,14 @@ def test_scope_promotes_ready_source_prs_and_preserves_release_targeting(
 
 
 @pytest.mark.parametrize(
-    "producer_event,issuing_attempt", [("workflow_dispatch", 2), ("pull_request", 1)]
+    "producer_event,issuing_attempt,change",
+    [
+        (event, attempt, change)
+        for event, attempt in [("workflow_dispatch", 2), ("pull_request", 1)]
+        for change in [None, "tree", "scope", "attempt", "repository", "expired"]
+    ]
+    + [("pull_request", 1, "base")],
 )
-@pytest.mark.parametrize("change", [None, "tree", "scope", "attempt", "repository", "expired"])
 def test_squash_reuses_only_complete_matching_full_receipt(
     monkeypatch, change, producer_event, issuing_attempt
 ):
@@ -97,6 +102,8 @@ def test_squash_reuses_only_complete_matching_full_receipt(
         }
     if change == "expired":
         artifact["expired"] = True
+    elif change == "base":
+        receipt["pull_request"]["base"]["sha"] = "f" * 40
     elif change:
         key = {
             "tree": "tested_tree",
@@ -240,8 +247,16 @@ def test_missing_receipt_keeps_only_the_legacy_exact_main_contract(monkeypatch, 
         assert selected["contract"] == "legacy-exact-main"
 
 
-@pytest.mark.parametrize("event", ["workflow_dispatch", "pull_request"])
-def test_record_cli_uses_the_real_checkout_tree(tmp_path, event):
+@pytest.mark.parametrize(
+    "event,advance_base,shallow",
+    [
+        ("workflow_dispatch", False, False),
+        ("pull_request", False, False),
+        ("pull_request", True, False),
+        ("pull_request", True, True),
+    ],
+)
+def test_record_cli_uses_the_real_checkout_tree(tmp_path, event, advance_base, shallow):
     """A receipt describes the actual Git checkout, independently of an event's claimed SHA."""
     subprocess.run(["git", "init", "--quiet", "-b", "main", str(tmp_path)], check=True)
     (tmp_path / "source.txt").write_text("tested source\n")
@@ -284,6 +299,13 @@ def test_record_cli_uses_the_real_checkout_tree(tmp_path, event):
             ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
         ).strip()
         subprocess.run(["git", "checkout", "--quiet", "main"], cwd=tmp_path, check=True)
+        if advance_base:
+            (tmp_path / "target.txt").write_text("new target source\n")
+            subprocess.run(["git", "add", "target.txt"], cwd=tmp_path, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "target"], cwd=tmp_path, check=True)
+        tested_base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+        ).strip()
         subprocess.run(
             ["git", "merge", "--quiet", "--no-ff", "topic", "-m", "merge"], cwd=tmp_path, check=True
         )
@@ -295,6 +317,17 @@ def test_record_cli_uses_the_real_checkout_tree(tmp_path, event):
                 "base": {"sha": base},
             },
         }
+    checkout = tmp_path
+    if shallow:
+        checkout = tmp_path / "shallow"
+        subprocess.run(
+            [
+                "git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet",
+                "--depth=2", tmp_path.as_uri(), str(checkout),
+            ],
+            check=True,
+        )
+        assert (checkout / ".git" / "shallow").is_file()
     event_path = tmp_path / "event.json"
     event_path.write_text(json.dumps(payload))
     output = tmp_path / "receipt.json"
@@ -313,24 +346,39 @@ def test_record_cli_uses_the_real_checkout_tree(tmp_path, event):
         "GITHUB_RUN_ID": "12",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_SHA": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+            ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
         ).strip(),
     }
     wrong = subprocess.run(
-        record, cwd=tmp_path, env={**env, "GITHUB_SHA": "0" * 40}, capture_output=True, text=True
+        record, cwd=checkout, env={**env, "GITHUB_SHA": "0" * 40}, capture_output=True, text=True
     )
     assert wrong.returncode != 0 and "actual checkout differs" in wrong.stderr
-    subprocess.run(record, cwd=tmp_path, env=env, check=True)
+    if event == "pull_request" and not advance_base:
+        wrong_payload = json.loads(json.dumps(payload))
+        wrong_payload["pull_request"]["head"]["sha"] = "0" * 40
+        event_path.write_text(json.dumps(wrong_payload))
+        wrong_head = subprocess.run(record, cwd=checkout, env=env, capture_output=True, text=True)
+        assert wrong_head.returncode != 0 and "PR merge parents" in wrong_head.stderr
+        assert not output.exists()
+        event_path.write_text(json.dumps(payload))
+    subprocess.run(record, cwd=checkout, env=env, check=True)
     receipt = json.loads(output.read_text())
     for key, expression in (("tested_commit", "HEAD"), ("tested_tree", "HEAD^{tree}")):
         expected = subprocess.check_output(
-            ["git", "rev-parse", expression], cwd=tmp_path, text=True
+            ["git", "rev-parse", expression], cwd=checkout, text=True
         ).strip()
         assert receipt[key] == expected
     assert receipt["scope"] == "full"
     if event == "pull_request":
         assert receipt["pull_request"]["head"]["sha"] == head
+        assert receipt["pull_request"]["base"]["sha"] == tested_base
         assert receipt["tested_commit"] != head
+        if not advance_base:
+            subprocess.run(["git", "checkout", "--quiet", "--detach", head], cwd=checkout, check=True)
+            non_merge = subprocess.run(
+                record, cwd=checkout, env={**env, "GITHUB_SHA": head}, capture_output=True, text=True
+            )
+            assert non_merge.returncode != 0 and "PR merge parents" in non_merge.stderr
 
 
 def test_merge_cli_stops_when_current_main_moved(tmp_path):

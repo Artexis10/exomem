@@ -2213,8 +2213,9 @@ def test_hidden_pending_withdrawal_preserves_redaction_with_equal_canonical_byte
     assert pending_packet["pointers"] == [] and pending_packet["missing"] == []
 
 
+@pytest.mark.parametrize("protection", ["governance", "excluded"])
 def test_new_hidden_pending_identity_does_not_change_an_absent_optional_reference(
-    tmp_path: Path,
+    tmp_path: Path, protection: str,
 ) -> None:
     """A hidden unreadable new page cannot reveal custody through blanket omission."""
     from test_derived_identifier_egress import _govern
@@ -2222,7 +2223,11 @@ def test_new_hidden_pending_identity_does_not_change_an_absent_optional_referenc
     from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal
 
-    _govern(tmp_path, "external")
+    if protection == "governance":
+        _govern(tmp_path, "external")
+    else:
+        (tmp_path / "Knowledge Base").mkdir()
+        (tmp_path / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Notes/Withheld\n")
     absent = memory_refs.memory_ref(memory_refs.new_id())
     who = RequestPrincipal("external", surface="mcp")
     text = f"Retain this material and {absent}."
@@ -2237,6 +2242,8 @@ def test_new_hidden_pending_identity_does_not_change_an_absent_optional_referenc
     _reset_overlay()
 
     assert egress.redact_withheld_references(tmp_path, text, principal=who) == before == text
+    with pytest.raises(memory_refs.ReferenceError, match="memory id not found"):
+        egress.resolve_visible_identifier(tmp_path, absent, principal=who)
 
 
 def test_optional_references_preserve_unknown_custody_and_error_input_exemptions(

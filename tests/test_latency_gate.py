@@ -716,7 +716,10 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
             vault, turn=WORKING_SET_TURN, include_timings=True
         )
 
-    call()  # startup warmup is outside the measured steady-state samples
+    # An unmanaged catalogue builds first, then stamps its freshness basis on
+    # the next activation. Complete both startup passes before warm samples.
+    call()
+    call()
     packets = [call() for _ in range(3)]
     # Retain the existing measurements after timing, so a failed gate names its cost.
     for sample, packet in enumerate(packets, 1):

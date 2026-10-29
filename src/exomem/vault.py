@@ -7823,11 +7823,18 @@ class WikilinkResolver:
 
 
 def _strip_wikilink_brackets(s: str) -> str:
-    """Strip `[[ ... ]]` wrappers and the trailing `|alias` if present."""
+    """Strip `[[ ... ]]` wrappers if present."""
     s = s.strip()
     if s.startswith("[[") and s.endswith("]]"):
         s = s[2:-2].strip()
     return s
+
+
+def split_wikilink_target(target: str) -> tuple[str, str]:
+    """Split a wikilink's page and anchor without resolving its identity."""
+    cleaned = _strip_wikilink_brackets(target).split("|", 1)[0].strip()
+    page, separator, anchor = cleaned.partition("#")
+    return page.rstrip(), separator + anchor
 
 
 def obsidian_uses_kb_root(vault_root: Path) -> bool:
@@ -7932,15 +7939,7 @@ def _normalize_wikilink(
 ) -> tuple[str, str | None, WikilinkCandidate | None]:
     """Normalize a link and retain the physical owner for internal consumers."""
 
-    cleaned = _strip_wikilink_brackets(target)
-    if "|" in cleaned:
-        cleaned = cleaned.split("|", 1)[0].strip()
-    # Preserve #anchor across normalization.
-    anchor = ""
-    if "#" in cleaned:
-        cleaned, anchor_part = cleaned.split("#", 1)
-        anchor = "#" + anchor_part
-        cleaned = cleaned.rstrip()
+    cleaned, anchor = split_wikilink_target(target)
     cleaned = cleaned.removesuffix(".md").strip().strip("/")
     if not cleaned:
         if strict:

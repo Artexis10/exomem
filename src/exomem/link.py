@@ -56,6 +56,7 @@ from .vault import (
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
+    split_wikilink_target,
     writer_link_visibility,
     yaml_scalar,
 )
@@ -452,9 +453,12 @@ def _normalize_connections(
     as `note._normalize_sources`: unresolved targets pass through with a
     warning so forward refs aren't blocked. With `bullet_kind`, each target
     must render as exactly one `## Relations` line, so no value can add one.
+    Canonical memory references must resolve to one currently visible page.
     """
     if not connections:
         return [], []
+    from .governance import egress
+
     visible = writer_link_visibility(vault_root)
     out: list[str] = []
     seen: set[str] = set()
@@ -463,6 +467,12 @@ def _normalize_connections(
         c = (c or "").strip()
         if not c:
             continue
+        target, anchor = split_wikilink_target(c)
+        if target.lower().startswith(memory_refs.REF_PREFIX):
+            try:
+                c = egress.resolve_visible_identifier(vault_root, target) + anchor
+            except memory_refs.ReferenceError as exc:
+                raise LinkError(exc.code, ["connections"], exc.reason) from exc
         canonical, warning = normalize_wikilink(
             c, vault_root, resolver=resolver, strict=False, visible=visible
         )
