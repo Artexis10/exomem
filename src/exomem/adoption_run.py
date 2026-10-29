@@ -465,11 +465,19 @@ def probe_staleness(root: Path, run: dict) -> list[str]:
     inv = {r["path"]: r for r in run.get("inventory") or []}
     selected = (run.get("selection") or {}).get("paths") or []
     stale: list[str] = []
+    reads = _CallReads()
+    outcomes = run.get("outcomes") or {}
+    items = {item["original_path"]: item for item in (run.get("plan") or {}).get("items") or []}
     for p in selected:
         fpath = root / p
         row = inv.get(p)
         if not fpath.exists():
-            stale.append(p)
+            # Adoption removes a staged copy after it files it; that copy is not missing, it is consumed.
+            # The flag settles it at once; the index is read only for a call that stopped before it saved.
+            if not (outcomes.get(p) or {}).get("consumed") and (
+                p not in items or _filed_and_gone(root, run, reads, items[p]) is None
+            ):
+                stale.append(p)
             continue
         st = fpath.stat()
         if row is None or st.st_size != row.get("bytes") or st.st_mtime != row.get("mtime"):
@@ -1617,6 +1625,18 @@ def _apply_chunk(
     for planned in chunk:
         path = planned["original_path"]
         text, failure = _read_original(root, planned, ceiling)
+        if failure is not None and failure["code"] == "NOT_FOUND":
+            # Not a failure when adoption already filed it and removed the staged copy.
+            earlier = _filed_and_gone(root, run, reads, planned)
+            if earlier is not None:
+                outcomes[path] = {
+                    **_already_applied(
+                        earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
+                    ),
+                    "consumed": True,
+                }
+                stats["consumed"] += 1
+                continue
         if failure is not None:
             outcomes[path] = failure
             continue
@@ -1818,11 +1838,31 @@ def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) 
     stats["verified_unchanged"] += int(unchanged)
 
 
+def _filed_and_gone(
+    root: Path, run: dict, reads: _CallReads, planned: dict
+) -> adoption_plan.EarlierImport | None:
+    """The committed Source of an artifact whose staged copy a recorded stage lists, or None.
+
+    The Source is the record that adoption filed the item: a copy that is gone from the stage was
+    removed by this run, by another run, or by a call that stopped before it saved. The caller has
+    already seen that the copy is missing.
+    """
+    stage = reads.recorded_stage(root, run)
+    if (
+        stage is None or planned["form"] != "artifact"
+        or adoption_consume.entry_of(stage, planned["original_path"]) is None
+    ):
+        return None
+    if reads.index is None:
+        reads.index = adoption_plan.read_import_index(root)
+    return _earlier_with_same_bytes(root, reads.index, (run.get("collection") or {}).get("label"), planned)
+
+
 def _settle_staged(
     root: Path, run: dict, reads: _CallReads, planned: dict, outcome: dict, stats: Counter, *,
     durable_verified: bool = False,
 ) -> None:
-    """Settle one filed item's staged copy: remove it when the run may, otherwise re-hash the original.
+    """Settle one filed item's staged copy: it is gone, removed now, or re-hashed in place.
 
     A removal needs an artifact item, a recorded stage that lists the file, and a run that did not opt out.
     The copy is hashed against the manifest and the plan as it goes, so a removed copy is already checked
@@ -1831,11 +1871,15 @@ def _settle_staged(
     if outcome.get("consumed"):
         return
     stage = reads.recorded_stage(root, run)
-    if (
-        stage is not None and run.get("consume", True) and planned["form"] == "artifact"
-        and (durable_verified or adoption_consume.durable_matches(root, outcome.get("artifact_path"), planned))
-        and adoption_consume.remove_staged(root, stage, planned) is adoption_consume.Removal.REMOVED
-    ):
+    if not os.path.lexists(root / planned["original_path"]):
+        consumed = _filed_and_gone(root, run, reads, planned) is not None
+    else:
+        consumed = (
+            stage is not None and run.get("consume", True) and planned["form"] == "artifact"
+            and (durable_verified or adoption_consume.durable_matches(root, outcome.get("artifact_path"), planned))
+            and adoption_consume.remove_staged(root, stage, planned)
+        )
+    if consumed:
         outcome["consumed"] = True
         outcome.pop("original_unchanged", None)
         stats["consumed"] += 1

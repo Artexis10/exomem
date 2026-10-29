@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from exomem import adoption_consume, adoption_run, cloud_import_job, held_fs, local_import, state_migration, state_paths
+from exomem import (
+    adoption_consume,
+    adoption_run,
+    cloud_import_job,
+    held_fs,
+    local_import,
+    state_migration,
+    state_paths,
+)
 from exomem.cli_progress import Progress
 
 TODAY = dt.date(2026, 10, 27)
@@ -111,19 +119,30 @@ def test_start_records_the_proof_of_a_cloud_import_that_has_a_receipt_manifest(t
     assert run["stage"] == {"stage": import_id, "proof": "cloud-receipt"}
 
 
-def _adopt(vault: Path, start_path: str, *, consume: bool = True) -> tuple[str, str, dict]:
-    """start, select everything, plan and apply to the end; returns the run id, its plan id and the last reply."""
+def _plan(vault: Path, start_path: str, *, consume: bool = True) -> tuple[str, str]:
+    """start, select everything and plan; returns the run id and its plan id."""
     run = adoption_run.start(vault, path=start_path, consume=consume, today=TODAY)
     run_id = run["run_id"]
     adoption_run.select(vault, run_id=run_id, include=[start_path])
     planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
     while planned.get("continuation"):
         planned = adoption_run.plan(vault, run_id=run_id, continuation=planned["continuation"], today=TODAY)
-    plan_id = planned["plan"]["plan_id"]
-    reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    return run_id, planned["plan"]["plan_id"]
+
+
+def _apply(vault: Path, run_id: str, plan_id: str, **options) -> dict:
+    """apply, following every continuation; returns the last reply."""
+    reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY, **options)
     while reply.get("continuation"):
-        reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=reply["continuation"], today=TODAY)
-    return run_id, plan_id, reply
+        reply = adoption_run.apply(
+            vault, run_id=run_id, plan_id=plan_id, continuation=reply["continuation"], today=TODAY)
+    return reply
+
+
+def _adopt(vault: Path, start_path: str, *, consume: bool = True) -> tuple[str, str, dict]:
+    """start, select everything, plan and apply to the end; returns the run id, its plan id and the last reply."""
+    run_id, plan_id = _plan(vault, start_path, consume=consume)
+    return run_id, plan_id, _apply(vault, run_id, plan_id)
 
 
 def _staged(vault: Path, staged: dict, rel: str) -> Path:
@@ -256,3 +275,95 @@ def test_a_removal_that_fails_leaves_the_item_applied_and_a_later_call_removes_t
 
     assert again["outcomes"][f"{staged['start_path']}/Field Notes/paper.pdf"]["consumed"] is True
     assert not _staged(vault, staged, "paper.pdf").exists()
+
+
+def _outcome(reply: dict, staged: dict, name: str) -> dict:
+    return reply["outcomes"][f"{staged['start_path']}/Field Notes/{name}"]
+
+
+def test_a_stop_after_the_commit_recovers_through_the_committed_source_with_no_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF, "pic.png": IMAGE})
+    run_id, plan_id = _plan(vault, staged["start_path"])
+
+    def stop(*_arguments):
+        raise KeyboardInterrupt
+
+    # The chunk has committed and removed its staged copies; the call dies before it returns.
+    with monkeypatch.context() as stopped:
+        stopped.setattr(adoption_run, "_request_extraction", stop)
+        with pytest.raises(KeyboardInterrupt):
+            adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert not _staged(vault, staged, "paper.pdf").exists() and not _staged(vault, staged, "pic.png").exists()
+
+    again = _apply(vault, run_id, plan_id)
+
+    assert again["phase"] == "applied" and again["progress"]["failed"] == 0
+    for name, data in (("paper.pdf", PDF), ("pic.png", IMAGE)):
+        outcome = _outcome(again, staged, name)
+        assert outcome["consumed"] is True and (vault / outcome["artifact_path"]).read_bytes() == data
+    assert again["verify"]["consumed"] == 2
+
+
+def test_a_run_object_that_never_recorded_the_commit_resolves_each_item_from_its_source(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF, "pic.png": IMAGE})
+    run_id, plan_id = _plan(vault, staged["start_path"])
+    run_file = vault / "Knowledge Base" / "_Adoption" / "runs" / run_id / "run.json"
+    planned_only = run_file.read_bytes()
+    _apply(vault, run_id, plan_id)
+    run_file.write_bytes(planned_only)
+
+    again = _apply(vault, run_id, plan_id)
+
+    assert again["phase"] == "applied" and again["progress"]["failed"] == 0
+    assert all(o["status"] == "already-applied" and o["consumed"] for o in again["outcomes"].values())
+    assert again["verify"]["consumed"] == 2
+
+
+def test_a_second_run_over_the_same_stage_resolves_what_the_first_run_consumed(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF})
+    second_id, second_plan = _plan(vault, staged["start_path"])
+    _adopt(vault, staged["start_path"])
+    assert not _staged(vault, staged, "paper.pdf").exists()
+
+    # The second run still sees the file as selected, and the probe must not call a consumed copy stale.
+    assert adoption_run.status(vault, run_id=second_id)["stale_paths"] == []
+    reply = _apply(vault, second_id, second_plan)
+
+    outcome = _outcome(reply, staged, "paper.pdf")
+    assert outcome["status"] == "already-applied" and outcome["consumed"] is True
+    assert reply["phase"] == "applied"
+
+
+def test_retry_failed_resolves_an_item_whose_copy_was_consumed_in_the_meantime(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF, "pic.png": IMAGE})
+    waiting_id, waiting_plan = _plan(vault, staged["start_path"])
+    path = _staged(vault, staged, "paper.pdf")
+    aside = tmp_path / "paper.pdf"
+    path.rename(aside)
+    failed = _apply(vault, waiting_id, waiting_plan)
+    assert _outcome(failed, staged, "paper.pdf")["code"] == "NOT_FOUND" and failed["phase"] == "partial"
+    aside.rename(path)
+    _adopt(vault, staged["start_path"])
+
+    retried = _apply(vault, waiting_id, waiting_plan, retry_failed=True)
+
+    outcome = _outcome(retried, staged, "paper.pdf")
+    assert outcome["status"] == "already-applied" and outcome["consumed"] is True
+
+
+def test_a_listed_copy_that_is_missing_with_no_source_still_fails_and_reads_as_stale(tmp_path: Path) -> None:
+    """Without a committed Source nothing says adoption removed it, so the loss is reported."""
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF, "pic.png": IMAGE})
+    run_id, plan_id = _plan(vault, staged["start_path"])
+    _staged(vault, staged, "paper.pdf").unlink()
+
+    assert adoption_run.status(vault, run_id=run_id)["stale_paths"] == [f"{staged['start_path']}/Field Notes/paper.pdf"]
+    reply = _apply(vault, run_id, plan_id)
+
+    assert _outcome(reply, staged, "paper.pdf")["code"] == "NOT_FOUND"

@@ -9,18 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-from enum import Enum
 from pathlib import Path
 
 from . import held_fs, import_stage
-
-
-class Removal(Enum):
-    """What happened to one staged copy: `MISSING` means it was already gone, `KEPT` that it stays."""
-
-    REMOVED = "removed"
-    MISSING = "missing"
-    KEPT = "kept"
 
 
 def recorded(root: Path, run: dict) -> import_stage.Stage | None:
@@ -69,29 +60,23 @@ def durable_matches(root: Path, artifact_path: str | None, planned: dict) -> boo
         return False
 
 
-def remove_staged(root: Path, stage: import_stage.Stage, planned: dict) -> Removal:
-    """Unlink the item's staged copy when it is the file the manifest and the plan describe.
+def remove_staged(root: Path, stage: import_stage.Stage, planned: dict) -> bool:
+    """Unlink the item's staged copy when it is the file the manifest and the plan describe; True when it went.
 
     The caller has already shown that the durable copy matches. A copy that does not match, is
-    unlisted, or cannot be unlinked stays and the item stays applied.
+    unlisted, is already gone or cannot be unlinked stays, and the item stays applied.
     """
     entry = entry_of(stage, planned["original_path"])
     if entry != (planned["original_bytes"], planned["original_sha256"]):
-        return Removal.KEPT
+        return False
     parent, _, leaf = planned["original_path"].rpartition("/")
     try:
         with held_fs.acquire(root).require() as filesystem:
-            found = filesystem.parent(parent, access="mutate")
-            if not found.ok:
-                return Removal.MISSING if found.error.code == "MISSING" else Removal.KEPT
-            with found.require() as directory:
-                opened = filesystem.file(directory, leaf, access="mutate")
-                if not opened.ok:
-                    return Removal.MISSING if opened.error.code == "MISSING" else Removal.KEPT
-                with opened.require() as staged:
+            with filesystem.parent(parent, access="mutate").require() as directory:
+                with filesystem.file(directory, leaf, access="mutate").require() as staged:
                     if not _matches(staged, *entry):
-                        return Removal.KEPT
+                        return False
                     filesystem.unlink(staged).require()
     except (held_fs.HeldFsError, OSError):
-        return Removal.KEPT
-    return Removal.REMOVED
+        return False
+    return True
