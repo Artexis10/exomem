@@ -178,7 +178,7 @@ primitive does not claim cross-file all-or-none power-loss atomicity.
 
 - **WHEN** a staged binary changes after its last witness check and before its bytes are copied into the destination
 - **THEN** the copy's digest does not match the planned digest and no destination is installed for that stage
-- **AND** every destination the batch already changed is rolled back and the operation reports the content failure rather than an incomplete rollback
+- **AND** every destination the batch already changed is rolled back, the changed stage is retained as private residue rather than deleted, and the operation reports a cleanup-incomplete outcome chained to the content failure rather than an incomplete rollback
 
 #### Scenario: Binary bytes are hashed at their two handoff points
 
