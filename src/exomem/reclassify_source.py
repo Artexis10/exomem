@@ -17,7 +17,8 @@ the body byte-identical before anything is written, and reuses `move_file` for
 the relocation and inbound-reference rewriting instead of reimplementing either.
 
 Every correction appends where the source was and how it was classified to
-`reclassified_from`, oldest first, so `revert` can restore it.
+`reclassified_from`, oldest first, so `revert` can restore it. The separate
+`classification_history` keeps events and reasons even after a reversal.
 
 It never decides a classification. `propose` reports what is deterministically
 observable and declines when the evidence supports nothing, because presenting a
@@ -32,13 +33,14 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import move_file as move_file_module
 from . import record_formats, semantic_writes, source_taxonomy, vocabulary_resolution
 from .kbdir import kb_dirname
 from .vault import (
     InboundLink,
+    PathGuard,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
@@ -53,10 +55,14 @@ log = logging.getLogger(__name__)
 #: Frontmatter keys this module is allowed to write. Anything else on a source
 #: is provenance and must survive a correction untouched.
 CLASSIFICATION_FIELDS = ("source_type", "domain")
-RECORD_FIELDS = ("reclassified", "reclassified_from", "reclassified_reason")
+RECORD_FIELDS = (
+    "reclassified", "reclassified_from", "reclassified_reason", "classification_history",
+)
 #: Each entry records `path`, `kind` and `domain`, oldest first. The field and
 #: its entry keys are fixed by the source page format, not by any vocabulary.
 HISTORY_FIELD = "reclassified_from"
+#: These fields and event actions are closed Source-format tokens, not vocabulary.
+EVENTS_FIELD = "classification_history"
 
 _MAX_REASON_CHARS = 400
 #: The preview judges references and the destination, not the semantic
@@ -247,12 +253,64 @@ def _restorable(entry: Any) -> tuple[str, str | None, str | None]:
     )
 
 
+def _classification_events(
+    front: Mapping[str, Any],
+    *,
+    path: str,
+    destination: str,
+    kind: str | None,
+    domain: str | None,
+    reason: str,
+    operation: Literal["reclassify", "revert"],
+) -> dict[str, Any]:
+    """Append a retained event without interpreting the legacy undo stack.
+
+    A legacy reason can describe a no-op or a reversal, so it cannot safely be
+    attributed to an undo entry. Keep the available fields together, once.
+    """
+    if EVENTS_FIELD in front:
+        record = front[EVENTS_FIELD]
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("events"), list)
+            or any(not isinstance(event, dict) for event in record["events"])
+        ):
+            raise ReclassifyError(
+                "INVALID_HISTORY", "classification_history must contain a list of event records."
+            )
+        record = dict(record)
+    else:
+        record = {"events": []}
+        # These are the existing correction fields; retain their values, not a reconstruction.
+        legacy = {
+            key: front[key]
+            for key in ("reclassified", HISTORY_FIELD, "reclassified_reason")
+            if key in front
+        }
+        if legacy:
+            record["legacy"] = legacy
+    event = {
+        "operation": operation,
+        # The declared transform runs twice; allocate time before constructing it.
+        "at": dt.datetime.now(dt.UTC).isoformat(),
+        "reason": reason,
+        "before": {
+            "path": path,
+            "kind": _recorded(front, "source_type"),
+            "domain": _recorded(front, "domain"),
+        },
+        "after": {"path": destination, "kind": kind, "domain": domain},
+    }
+    return {**record, "coverage": "retained-only", "events": [*record["events"], event]}
+
+
 def _rewrite_classification(
     text: str,
     *,
     kind: str | None,
     domain: str | None,
     history: list[Any] | None,
+    classification_events: dict[str, Any],
     reason: str,
     today: dt.date,
 ) -> str:
@@ -277,6 +335,7 @@ def _rewrite_classification(
     elif history is not None:
         deletes.append(HISTORY_FIELD)
     changes["reclassified_reason"] = reason
+    changes[EVENTS_FIELD] = classification_events
     try:
         updated = record_formats.splice_markdown_frontmatter(
             text, changes, delete_fields=tuple(deletes)
@@ -618,6 +677,7 @@ def _write_correction(
     destination: str,
     transform: Callable[[str], str],
     *,
+    source_guard: PathGuard,
     today: dt.date,
     extra_writes: tuple[PlannedWrite, ...] = (),
     _validate_prepared_bindings: Callable[[], None] | None = None,
@@ -630,7 +690,10 @@ def _write_correction(
     """
     if destination == rel:
         batch_atomic_write(
-            [PlannedWrite(path=absolute, content=transform(text)), *extra_writes],
+            [
+                PlannedWrite(path=absolute, content=transform(text), guard=source_guard),
+                *extra_writes,
+            ],
             vault_root=vault_root,
             _validate_prepared_bindings=_validate_prepared_bindings,
         )
@@ -641,6 +704,15 @@ def _write_correction(
     if outcome.refusals:
         refusal = outcome.refusals[0]
         raise ReclassifyError(refusal["code"], refusal["reason"])
+
+    def bound_transform(current: str) -> str:
+        # Refuse stale history instead of overwriting an external metadata edit.
+        if current != text:
+            raise ReclassifyError(
+                "SOURCE_CHANGED", "the source changed after it was read; read it again and retry."
+            )
+        return transform(current)
+
     try:
         result = move_file_module.move_file(
             vault_root,
@@ -648,7 +720,7 @@ def _write_correction(
             new_path=destination,
             update_wikilinks=True,
             today=today,
-            content_transform=transform,
+            content_transform=bound_transform,
             extra_writes=extra_writes,
             _validate_prepared_bindings=_validate_prepared_bindings,
         )
@@ -683,7 +755,7 @@ def reclassify(
     clean_reason = _clean_reason(reason)
     today = today or dt.date.today()
 
-    text, _ = read_guarded_text(vault_root, absolute)
+    text, source_guard = read_guarded_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
     history = _history(front)
@@ -723,6 +795,10 @@ def reclassify(
         kind_resolution.key,
         corrected_domain,
     )
+    events = _classification_events(
+        front, path=rel, destination=destination, kind=kind_resolution.key,
+        domain=corrected_domain, reason=clean_reason, operation="reclassify",
+    )
 
     def transform(current: str) -> str:
         return _rewrite_classification(
@@ -730,6 +806,7 @@ def reclassify(
             kind=kind_resolution.key,
             domain=corrected_domain,
             history=[*history, previous] if changed else None,
+            classification_events=events,
             reason=clean_reason,
             today=today,
         )
@@ -742,6 +819,7 @@ def reclassify(
         destination,
         transform,
         today=today,
+        source_guard=source_guard,
         extra_writes=tuple(plan.writes),
         _validate_prepared_bindings=lambda: plan.recheck_bindings(vault_root),
     )
@@ -798,7 +876,7 @@ def revert(
     clean_reason = _clean_reason(reason)
     today = today or dt.date.today()
 
-    text, _ = read_guarded_text(vault_root, absolute)
+    text, source_guard = read_guarded_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
     history = _history(front)
     if not history:
@@ -815,6 +893,10 @@ def revert(
             f"another page now occupies {destination}, so the source cannot "
             "return there; move that page or reclassify the source explicitly.",
         )
+    events = _classification_events(
+        front, path=rel, destination=destination, kind=kind,
+        domain=domain, reason=clean_reason, operation="revert",
+    )
 
     def transform(current: str) -> str:
         return _rewrite_classification(
@@ -822,12 +904,14 @@ def revert(
             kind=kind,
             domain=domain,
             history=history[:-1],
+            classification_events=events,
             reason=clean_reason,
             today=today,
         )
 
     final_path, references_updated = _write_correction(
-        vault_root, rel, absolute, text, destination, transform, today=today
+        vault_root, rel, absolute, text, destination, transform,
+        today=today, source_guard=source_guard,
     )
     return ReclassifyResult(
         old_path=rel,

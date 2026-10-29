@@ -26,6 +26,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,10 @@ def _compute(root: Path, monkeypatch: pytest.MonkeyPatch) -> Runs:
     index.close()
 
     base = ranking_config.DEFAULT_RANKING
+    # Compare every arm at one instant: crossing midnight must not change
+    # the recent-context date of a prior activation.
+    now_ns = time.time_ns()
+    monkeypatch.setattr(time, "time_ns", lambda: now_ns)
     packets: dict[str, dict[str, dict]] = {arm: {} for arm in ARMS}
     priors: dict[str, dict] = {}
     for arm in ARMS:
