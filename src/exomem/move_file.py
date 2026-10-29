@@ -39,6 +39,7 @@ from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
+    ContentHashMismatchError,
     FrontmatterError,
     InboundLink,
     LogWritePlan,
@@ -1021,7 +1022,12 @@ def _move_file_local(
                         reason=str(error),
                     ) from error
                 destination_writes = (
-                    [PlannedWrite(path=new_abs, content=moved_source)]
+                    # Rename preserves source bytes; bind the overwrite to that exact preimage.
+                    [PlannedWrite(
+                        path=new_abs,
+                        content=moved_source,
+                        expected_hash=content_hash(source),
+                    )]
                     if moved_source != source
                     else []
                 )
@@ -1120,6 +1126,11 @@ def _move_file_local(
             raise MoveFileError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
+        except ContentHashMismatchError as error:
+            raise MoveFileError(
+                code="SOURCE_CHANGED",
+                reason="the source changed before publication; read it again and retry.",
+            ) from error
         if catalog_target is not None:
             try:
                 catalog_publication.publish_markdown_batch(catalog_target)

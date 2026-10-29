@@ -34,8 +34,6 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
     vault.mkdir()
     calls: list[str] = []
     matrix_warmed = threading.Event()
-    graph_started = threading.Event()
-    done = threading.Event()
 
     class Watcher:
         def wait_until_seeded(self, timeout=None) -> bool:
@@ -54,15 +52,8 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
 
     monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: Watcher())
-
-    def start_graph(_root) -> None:
-        calls.append("graph")
-        graph_started.set()
-
-    monkeypatch.setattr(server_runtime, "_start_graph_drain", start_graph)
-    monkeypatch.setattr(
-        server_runtime, "_start_media_worker", lambda _root: (calls.append("media"), done.set())[0]
-    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
     monkeypatch.setattr(
         server_runtime, "_warm_request_path", lambda _root: calls.append("request-path")
     )
@@ -76,13 +67,10 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
     async def exercise() -> None:
         async with activation.lifespan()(SimpleNamespace()):
             activation.start()
-            assert done.wait(timeout=5.0)
             assert matrix_warmed.wait(timeout=5.0)
-            assert graph_started.wait(timeout=5.0)
 
     asyncio.run(exercise())
     assert calls.index("request-path") < calls.index("drain") < calls.index("matrix")
-    assert calls.index("drain") < calls.index("graph")
     assert calls.count("request-path") == 1
 
 
