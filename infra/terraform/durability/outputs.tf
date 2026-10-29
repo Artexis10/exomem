@@ -128,6 +128,24 @@ output "cloud_backup_bucket_name" {
   value = one(b2_bucket.cloud_backups[*].bucket_name)
 }
 
+output "cloud_media_bucket_name" {
+  value = one(b2_bucket.cloud_media[*].bucket_name)
+}
+
+output "cloud_media_bucket_id" {
+  value = one(b2_bucket.cloud_media[*].bucket_id)
+}
+
+output "cloud_media_edge_application_key_id" {
+  value     = one(b2_application_key.cloud_media_edge[*].application_key_id)
+  sensitive = true
+}
+
+output "cloud_media_edge_application_key" {
+  value     = one(b2_application_key.cloud_media_edge[*].application_key)
+  sensitive = true
+}
+
 output "cloud_backup_bucket_id" {
   value = one(b2_bucket.cloud_backups[*].bucket_id)
 }

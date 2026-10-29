@@ -139,6 +139,11 @@ A media edge service SHALL move ciphertext between cells and the media bucket. I
 
 The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
+The edge SHALL persist provider write intent before dispatch and retain unresolved intents across restart.
+It SHALL distinguish the loaded generation from the drained generation and SHALL NOT acknowledge a drain while an earlier write remains uncertain.
+Timeout, cancellation or a missing object response SHALL NOT prove that a provider write cannot finish.
+Uncertain uploads SHALL remain visible by cell without preventing unrelated requests under the loaded active set.
+
 A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no other egress.
 
 #### Scenario: A cell asks for another cell's object
@@ -150,6 +155,14 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 - **WHEN** a captured credential of a deleted or rotated cell is presented with a valid signature
 - **THEN** the edge refuses it, because that cell and version are no longer in the loaded active set
+
+#### Scenario: The edge restarts after an upload reply is lost
+
+- **WHEN** the edge restarts with an earlier provider write whose result is unknown
+- **THEN** it retains that write's drain obligation and reports its pending cell
+- **AND** it acknowledges the generation only after the write settles
+- **AND** a missing HEAD does not release the obligation
+- **AND** unrelated requests continue under the loaded active set
 
 #### Scenario: A compromised cell tries to destroy history
 

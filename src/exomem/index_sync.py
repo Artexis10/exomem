@@ -2064,6 +2064,10 @@ def delete_after_remove(
         for item in removed_rel_paths
         if (normalized := _safe_relative_path(str(item))) is not None
     ]
+    from .originals import evicted
+
+    # Eviction publishes no deletion: an evicted original keeps its index rows.
+    safe_paths = [rel for rel in safe_paths if not evicted(vault_root, rel)]
     requested_report, paths_truncated = _bounded_paths(safe_paths)
     if not safe_paths:
         return IndexSyncReport("delete", requested_report, requested_report, ())

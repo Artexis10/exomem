@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import audit as audit_module
-from . import indexes, relation_review, semantic_index, semantic_writes
+from . import indexes, originals, relation_review, semantic_index, semantic_writes
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 log = logging.getLogger(__name__)
@@ -286,7 +286,7 @@ def _dangling_frame_dirs(vault_root: Path) -> list[tuple[Path, Path]]:
         video_path = frame_dir.with_name(
             frame_dir.name[: -len(scene_frames.FRAMES_DIR_SUFFIX)]
         )
-        if not video_path.exists():
+        if not (video_path.exists() or originals.evicted(vault_root, video_path)):
             out.append((frame_dir, video_path))
     return out
 
@@ -343,7 +343,8 @@ def reconcile(
         for row in suppression_census.missing_rows
         if row.component == "clip"
         and row.path is not None
-        and not (vault_root / row.path.removesuffix(".md")).exists()
+        and not ((vault_root / row.path.removesuffix(".md")).exists()
+                 or originals.evicted(vault_root, row.path.removesuffix(".md")))
     }
     report.semantic_missing_drift = missing_paths
     repair_succeeded = not suppression_census.incomplete
@@ -684,7 +685,7 @@ def reconcile(
         clip_paths, _frame_ts, _matrix = clip_index.all_vectors()
         clip_orphans = sorted(
             missing_clip_orphans
-            | {p for p in clip_paths if not (vault_root / p).exists()}
+            | {p for p in clip_paths if not ((vault_root / p).exists() or originals.evicted(vault_root, p))}
         )
         if clip_orphans and not dry_run:
             embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)

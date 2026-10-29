@@ -130,12 +130,74 @@ A new in-cluster service, the media edge, moves ciphertext between cells and the
 - **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge cannot hide, list or delete. Its bucket key cannot delete file versions. Only cellctl's key-management authority destroys versions (D9).
 - **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing and alerts when a cell exceeds its allowance plus retained-version headroom. The alert detects abuse; it does not prevent it. Until the operator revokes it, an active cell credential can upload unreferenced objects below the per-object bound. Each such object costs storage, and the operator carries that exposure.
 
+Refinements from the build (2026-10-27):
+- **Prefix.** The provider name is `cells/<cell>/<name>`, with the cell ID taken from the credential and checked against the canonical cell ID shape. A prefix in a path, header or query is ignored. A version ID of another cell reads as absent, because the edge compares the provider's file name with the cell's own name.
+- **Admit preflight.** Before it sends any byte, the cell store posts the declared size and digest to an `admit` action. The edge answers 413 above the per-object bound, or 409 while an earlier write to the same name is unsettled, so a refusal costs no upload.
+- **Settled generation.** The reported generation is the lowest of the loaded set, every request still in flight and every write intent that is still unsettled. The edge records an intent durably before it sends a provider write. A lost reply, an absent HEAD or a restart therefore keeps the generation open until the provider shows the write or the file ID is gone.
+- **Large files.** A large upload is found again by its file ID: a finished file is the version, an unfinished one is finished or cancelled, and a missing one never became a version. A small upload is found again by a nonce that it carries in its file info.
+
 Alternatives:
 - **Projected ServiceAccount tokens.** These would break the cell's no-token rule.
 - **A forwarding proxy to the provider.** Its endpoint is shared by all of the provider's customers, so it would be an exfiltration channel.
 - **Folding this into the artifact broker.** The broker fetches arbitrary public URLs; storage credentials do not belong behind that surface.
 
-Whether the edge is custom code or a maintained S3 gateway with per-caller prefixes (versitygw, `rclone serve s3`) is settled by the spike in task 2.1.
+Decision, 2026-10-26: build a narrow custom edge. Neither gateway can enforce the two controls that decide the choice:
+- a per-object bound on the declared upload size, refused before the store accepts any byte;
+- a set generation that the edge reports only after every request accepted under an earlier set has drained, so cellctl can observe when a revocation takes effect.
+
+rclone has two further gaps. A delete through it becomes a provider hide, which the edge must refuse, and it cannot read a named version.
+
+The 1 GB in-cluster hydration measurement is pending a live run. Task 2.1 stays open until design.md records it; this decision claims no live transfer performance.
+
+#### Source comparison, 2026-10-26
+
+This comparison covers versitygw 1.10.0 and rclone 1.75.2. Neither dependency is added to the build.
+
+| Option | Reusable capability | Remaining work |
+|---|---|---|
+| versitygw 1.10.0 | Its S3 proxy forwards an exact version ID and byte range to the provider. Since 1.8 it issues STS credentials with role policies. | It cannot bound a declared upload size or report a drained generation. Its web-identity verifier does not accept Ed25519 tokens, which the artifact broker's credential shape uses. |
+| rclone 1.75.2 | Its authentication proxy can select a caller-specific backend root. | The same two gaps, plus hide-on-delete and no version reads: its S3 server does not support versioning and returns no version ID after multipart completion. |
+| A narrow custom edge | Reuse maintained HTTP, JWT and provider clients. | Maintain the media protocol, provider adapter, bounded upload sessions and generation accounting. Avoid a general S3 server or custom cryptography. |
+
+The source evidence is the tagged [versitygw version/range forwarding](https://github.com/versity/versitygw/blob/v1.10.0/backend/s3proxy/s3.go#L1085-L1206),
+[rclone authentication proxy](https://github.com/rclone/rclone/blob/v1.75.2/cmd/serve/proxy/proxy.go#L88-L154),
+[rclone versioning limitation](https://github.com/rclone/rclone/blob/v1.75.2/cmd/serve/s3/serve_s3.md#L449)
+and [multipart completion](https://github.com/rclone/rclone/blob/v1.75.2/cmd/serve/s3/multipart.go#L866-L907).
+
+The provider's `writeFiles` capability also permits hiding an object. A key without `deleteFiles` prevents permanent version deletion, but the edge must still filter operations.
+See [B2 application-key capabilities](https://www.backblaze.com/docs/cloud-storage-application-key-capabilities).
+
+The custom edge reuses the existing HTTP and JWT dependencies and the controller's native B2 integration pattern.
+Both gateways still need the same credential, prefix, size and recovery controls; their wider S3 surface adds no required capability.
+The added maintenance is a small media protocol, provider adapter and durable upload records.
+Task 2.1 remains incomplete until the 1 GB cluster hydration measurement is recorded.
+
+#### Revocation across an edge restart
+
+The edge records provider write intent with a full sync before dispatch and retains unresolved records on persistent storage across replacement.
+These records track admitted uploads, not another offload queue.
+The edge distinguishes the loaded active-set generation from the generation whose earlier requests and writes have settled.
+A timeout, disconnect, process exit or absent HEAD cannot turn an uncertain write into a completed drain.
+Unrelated requests continue under the loaded active set; pending records are visible by cell and do not fail fleet readiness.
+The existing global drain acknowledgement still waits for every earlier unresolved write.
+
+For native multipart upload, the edge records the provider file ID and ordered part hashes before finishing the file.
+It recovers a lost completion reply by inspecting that exact file ID.
+The provider documents [successful completion after a timeout](https://www.backblaze.com/apidocs/b2-finish-large-file).
+
+Small ciphertext uses one upload attempt with a unique opaque nonce in provider metadata.
+The edge records its intent first, sends it once, and serializes writes to that object name until the result settles.
+A HEAD that matches the nonce, size and digest supplies the completed version ID.
+Missing or different metadata leaves the attempt unknown; it does not authorize automatic retransmission.
+See the provider's [upload metadata](https://www.backblaze.com/apidocs/b2-upload-file) and [HEAD response](https://www.backblaze.com/apidocs/b2-download-file-by-name).
+
+Native multipart requires [at least two parts, with a 5 MB minimum except for the final part](https://www.backblaze.com/docs/cloud-storage-large-files).
+It therefore does not cover small ciphertext without changing its format.
+No documented small-write fence proves that an unseen attempt will never complete.
+A crash before dispatch can consequently leave an unknown record indefinitely and delay global drain acknowledgement.
+This prevents a false deletion proof, at the cost of a pending cleanup for the affected operator.
+The smallest provider check drops one successful upload reply, restarts the edge, and proves recovery by nonce and exact version.
+It proves positive recovery, not a finite negative fence; neither new padding nor a storage-format change is selected.
 
 ### D7. A separate, versioned bucket on the backup provider
 
@@ -158,6 +220,8 @@ The same provider holds backups and media. A second copy at another provider was
 - **Live capture.** The gateway proxies resumable (tus) uploads to the cell's existing upload sessions. This lifts the Cloud exclusion of those routes by its recorded condition.
 - **Processing.** Extraction runs at ingest while the original is local. Eviction never selects an original with pending work. Re-processing and CLIP re-encoding hydrate first.
 - **Playback and download.** The gateway serves a download route behind the owner's signed-in session. It forwards to the cell, which hydrates if needed and streams the original with range support. A tool result may carry this link, because it grants nothing without the owner's session. Local agents use `exomem cloud download` over OAuth, which verifies size and SHA-256 before it renames the file into place. No tool result carries a bearer link.
+  - *Agent download.* The agent's route is `GET /download?path=<vault path>` on the gateway with the owner's OAuth access token, and it needs no ticket. The gateway validates the token, resolves the owner's cell, and signs a fresh gateway origin proof for each request, range requests included. The proof carries `purpose: "download"` and `target_sha256`, the SHA-256 of the requested path. The cell route checks the cell bearer, then the proof, and refuses with `DOWNLOAD_UNAVAILABLE` before it resolves anything. It then serves through the same artifact recovery as a local recovery, with its governance, custody page, size and SHA-256 checks. `transfer_artifact` download on Cloud returns the descriptor and a `next_step` command (`exomem cloud download '<path>'`), never a URL.
+  - *Browser link.* The signed-in browser link stays open as task 5.1.
 - **Export.** Export runs in two steps, so the media key never shares a pod with public egress:
   - A *packing* step mounts the media key. It reaches only the media edge and builds the archive on the export staging volume, writing evicted originals byte-identical. Each manifest SHA-256 must equal the sidecar's.
   - A separate *upload* step without the media key transfers the archive as today's export does.
@@ -264,7 +328,7 @@ Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change
 Each question below names what settles it.
 
 - **Eviction target, margin and minimum idle age.** Settled by two to four weeks of hydration records on the canary cell.
-- **Edge implementation:** custom service or maintained S3 gateway with per-caller prefixes and version-pinned reads. Settled by the task 2.1 spike, which also measures hydration of a 1 GB object.
+- **Edge integration:** the custom service is selected above. Task 2.1 still measures 1 GB hydration; sandbox provider checks verify exact-version recovery after lost replies.
 - **Export of more media than the export staging volume can hold.** This covers staging, part limits and deadlines; Cloud export today sizes its total from the cell. It is settled with the owners of `add-cloud-owner-export` and gates the fleet switch (D11).
 - **Direct presigned upload to the store for files above the 2 GiB upload-session limit.** Settled by the first such file.
 - **Unbound binaries.** A file that was neither preserved nor matched by the extraction registry has no sidecar and stays on the volume. Whether discovery should give large unbound files a sidecar is settled by their byte share in canary vaults.

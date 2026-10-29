@@ -15,6 +15,42 @@ from cloud_rehearsal.mcp_client import _HiddenInputs
 from cloud_rehearsal.shell import wait_for
 
 
+@pytest.mark.parametrize("surface", ["valid", "excluded", "missing-adoption"])
+def test_cloud_discovery_checks_public_renderings_and_keeps_its_denials(monkeypatch, surface):
+    """An admitted status rendering must pass without admitting an excluded operation or losing imports."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import scenarios
+
+    discovery = {"excluded": ["transfer_artifact"], "adoption": ["read_import", "import_memory"]}
+    policy = json.dumps(discovery)
+    tools = ["read_media", "read_import", "import_memory"]
+    if surface == "excluded":
+        tools.append(discovery["excluded"][0])
+    elif surface == "missing-adoption":
+        tools.remove(discovery["adoption"][0])
+    client = SimpleNamespace(authorizations=1, access_token="synthetic-token", verifier_seen="synthetic-verifier",
+                             redirect_uri="http://127.0.0.1/callback")
+
+    async def first_session(*args):
+        return tools
+
+    monkeypatch.setattr(scenarios, "TenantClient", lambda *args: client)
+    monkeypatch.setattr(scenarios, "first_session", first_session)
+    monkeypatch.setattr(scenarios, "WARM_ITERATIONS", 0)
+    ctx = SimpleNamespace(a=SimpleNamespace(session=object(), cell_id="a" * 26), resolver=None, browser=None,
+                          substrate=SimpleNamespace(redirect_uri=client.redirect_uri),
+                          exec_in=lambda *args: SimpleNamespace(stdout=policy))
+    record = report.StepRecord(number=3, name="oauth_mcp_tools_list")
+    if surface == "valid":
+        asyncio.run(scenarios.step_3_oauth_mcp(ctx, record))
+        assert record.evidence["cloud_exclusions_absent"] and record.evidence["staged_adoption_present"]
+    else:
+        with pytest.raises(report.StepFailure):
+            asyncio.run(scenarios.step_3_oauth_mcp(ctx, record))
+
+
 def test_wait_for_propagates_error_when_retries_are_disabled() -> None:
     calls = 0
 
@@ -372,6 +408,45 @@ def test_the_token_request_observer_records_the_verifier_shape_not_the_verifier(
     asyncio.run(client._observe_token_request(request))
     assert client.verifier_seen == {"length": len(verifier), "uses_dot_or_tilde": True}
     assert verifier not in str(client.verifier_seen)
+
+
+def test_denial_transport_failure_keeps_response_evidence_and_caller() -> None:
+    """A truncated denial must fail with framing evidence, without recording credentials."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import httpx
+
+    from cloud_rehearsal.mcp_client import raw_mcp_post
+
+    class TruncatedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"part"
+            raise httpx.RemoteProtocolError("truncated response")
+
+    def handle(request):
+        return httpx.Response(400, headers={"transfer-encoding": "chunked", "set-cookie": "private-cookie"},
+                              stream=TruncatedBody())
+
+    resolver = SimpleNamespace(async_client=lambda **kwargs: httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), **kwargs,
+    ))
+    observation = {}
+
+    async def exercise():
+        try:
+            await raw_mcp_post(resolver, token=None, observation=observation)
+        except httpx.RemoteProtocolError as error:
+            failure = report.failure_record(error)
+            assert failure["type"] == "RemoteProtocolError"
+            assert "raw_mcp_post" in "".join(failure["traceback"])
+            return
+        pytest.fail("a truncated response cannot establish a denial")
+
+    asyncio.run(exercise())
+    assert observation == {"status": 400, "http_version": "HTTP/1.1",
+                           "framing": {"transfer-encoding": "chunked"}, "received_bytes": 4}
+    assert "private-cookie" not in str(observation)
 
 
 def test_operator_abort_is_opt_in_and_accepts_provision_only() -> None:

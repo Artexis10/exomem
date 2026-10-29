@@ -3,6 +3,9 @@
 {{- fail "cloudIngress.hostname must equal cloudGateway.hostname" }}
 {{- end }}
 {{- $edge := required "traefik.namespaceOverride names the edge namespace" .Values.traefik.namespaceOverride }}
+{{- if .Values.cloudGateway.uploadCellIds }}
+{{- include "exomem.requireUploadReadTimeout" . }}
+{{- end }}
 {{- $certManager := index .Values "cert-manager" }}
 {{- if and $certManager.enabled (ne $certManager.clusterResourceNamespace .Values.cellctl.namespace) }}
 {{- fail "cert-manager.clusterResourceNamespace must equal cellctl.namespace, where the ClusterIssuer's DNS-01 token is delivered" }}
@@ -158,6 +161,29 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+{{- if .Values.cloudGateway.uploadCellIds }}
+    # The gateway's fixed upload route (CLOUD_UPLOAD_PATH). It checks the signed handoff
+    # before it reads a body byte, so the route adds no buffering or body-size middleware:
+    # buffering would write unauthenticated bytes to the edge pod before that check.
+    # The gateway rejects a declared body over 101 MiB, and the cell enforces the ticket's
+    # limit on a streamed one.
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/upload`) && Method(`POST`)
+      middlewares:
+        - name: exomem-cloud-trusted-ingress
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
+    # The gateway's original download route. It checks the caller's access token and signs a
+    # per-request proof before it contacts the cell, and it streams the body back unbuffered.
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/download`) && Method(`GET`)
+      middlewares:
+        - name: exomem-cloud-trusted-ingress
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
+{{- end }}
 {{- if .Values.cloudIngress.functionalHealthEnabled }}
     - kind: Rule
       match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/healthz`) && Method(`GET`)

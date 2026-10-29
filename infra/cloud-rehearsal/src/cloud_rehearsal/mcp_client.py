@@ -308,20 +308,40 @@ class MeasuredSession:
             await asyncio.sleep(max(0.1, wait_ms / 1000))
 
 
-async def raw_mcp_post(resolver: Resolver, *, token: str | None, headers: dict[str, str] | None = None) -> httpx.Response:
+async def raw_mcp_post(
+    resolver: Resolver, *, token: str | None, headers: dict[str, str] | None = None,
+    observation: dict[str, Any] | None = None,
+) -> httpx.Response:
     """One raw initialize POST to the gateway, for denial checks."""
 
     request_headers = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
     if token:
         request_headers["authorization"] = f"Bearer {token}"
     request_headers.update(headers or {})
-    async with resolver.async_client() as client:
-        return await client.post(
-            MCP_URL,
-            headers=request_headers,
-            json={
-                "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                           "clientInfo": {"name": "rehearsal-denial-probe", "version": "1"}},
-            },
-        )
+    received: httpx.Response | None = None
+
+    async def observe(response: httpx.Response) -> None:
+        nonlocal received
+        received = response
+        if observation is not None:
+            observation.update(status=response.status_code, http_version=response.http_version)
+            # Only fixed HTTP framing fields are safe; response headers can also contain credentials.
+            observation["framing"] = {
+                name: response.headers[name] for name in ("content-length", "transfer-encoding", "connection")
+                if name in response.headers
+            }
+
+    try:
+        async with resolver.async_client(event_hooks={"response": [observe]} if observation is not None else {}) as client:
+            return await client.post(
+                MCP_URL,
+                headers=request_headers,
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": "rehearsal-denial-probe", "version": "1"}},
+                },
+            )
+    finally:
+        if observation is not None and received is not None:
+            observation["received_bytes"] = received.num_bytes_downloaded
