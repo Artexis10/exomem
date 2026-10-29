@@ -352,6 +352,14 @@ def _count_files(folder: Path) -> int:
     return sum(len(files) for _dirpath, _dirs, files in os.walk(folder))
 
 
+def _order_key(row: dict) -> tuple[int, str]:
+    """A file row's place in the scan: artifacts first, then text, then rows that never import; each by path.
+
+    Artifacts go first so that a note's embeds resolve against imports that already exist.
+    """
+    return (0 if row["form"] == "artifact" else 1 if row["form"] == "text" else 2, row["path"])
+
+
 def build_inventory(
     root: Path,
     *,
@@ -359,17 +367,38 @@ def build_inventory(
     include_hidden: bool = False,
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
     ceiling: int | None = None,
+    after: tuple[int, str] | None = None,
 ) -> tuple[list[dict], int, int]:
-    """Return ``(rows, truncated, hidden_files)`` — every adoption candidate outside the KB.
+    """Return ``(rows, remaining, hidden_files)`` — one page of the adoption candidates outside the KB.
+
+    The page holds at most ``max_candidates`` file rows that follow ``after`` in the scan's order
+    (``_order_key``); ``remaining`` counts the file rows that follow the page. The first page, which has
+    no ``after``, also carries the hidden-folder rows; a later page repeats none of them.
+    ``hidden_files`` counts every hidden file the scan skipped, whatever the page.
+    """
+    files, folders, hidden_files = walk_inventory(
+        root, path=path, include_hidden=include_hidden, ceiling=ceiling
+    )
+    if after is not None:
+        files, folders = [row for row in files if _order_key(row) > after], []
+    return files[:max_candidates] + folders, max(len(files) - max_candidates, 0), hidden_files
+
+
+def walk_inventory(
+    root: Path,
+    *,
+    path: str = "",
+    include_hidden: bool = False,
+    ceiling: int | None = None,
+) -> tuple[list[dict], list[dict], int]:
+    """Return ``(files, folders, hidden_files)`` — every adoption candidate outside the KB, in scan order.
 
     Each file row carries the vault-relative path, byte size, mtime, import
     ``form`` (``text`` for a text-like suffix, ``artifact`` for any other file),
     an ``eligible`` flag, and a machine-readable ``reason`` when ineligible
     (never silently dropped). A skipped hidden folder is one ``kind: folder`` row
-    with its file count, kept outside the cap; ``hidden_files`` counts skipped
-    hidden files. Rows are stat-only (no file reads); per-source sha256 is
-    deferred to ``plan``. File rows are capped at ``max_candidates`` with the
-    overflow reported in ``truncated``.
+    with its file count; ``hidden_files`` counts skipped hidden files. Rows are
+    stat-only (no file reads); per-source sha256 is deferred to ``plan``.
     """
     from . import client_artifacts
 
@@ -437,13 +466,9 @@ def build_inventory(
                     _row(rel, st.st_size, st.st_mtime, eligible=reason is None, reason=reason,
                          junk=junk, suffix=fpath.suffix.lower())
                 )
-    rows.sort(key=lambda r: r["path"])
-    truncated = 0
-    if len(rows) > max_candidates:
-        truncated = len(rows) - max_candidates
-        rows = rows[:max_candidates]
+    rows.sort(key=_order_key)
     folders.sort(key=lambda r: r["path"])
-    return rows + folders, truncated, hidden_files
+    return rows, folders, hidden_files
 
 
 def _row(
@@ -757,6 +782,9 @@ def _present(root: Path, run: dict, **extra) -> dict:
         # The run stores the spelling of the surface that started it; serve this surface's.
         out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
+    cursor = _open_cursor(run, "after")
+    if cursor:
+        out["next_after"] = f"{run['run_id']}:{cursor}"
     # Whenever the run carries a persisted `verify` block (kept current by `apply`
     # from the per-item re-hash of the originals), surface the SAME recorded counts
     # at the top level of every presented document — never a live re-hash. This is
@@ -978,6 +1006,39 @@ def _vault_relative(root: Path, raw: str) -> str | None:
     return relative.as_posix() if relative.parts else None
 
 
+def _page_cursor(root: Path, after: str) -> tuple[dict, str, dict]:
+    """The run that issued the `after` cursor, the cursor's token and its entry.
+
+    The cursor is `<run id>:<token>`. The token is one the run object holds, so a guessed or altered
+    cursor finds nothing and is refused, the same way a continuation cursor is.
+    """
+    run_id, _, token = after.partition(":")
+    try:
+        if not run_id or Path(run_id).name != run_id:
+            raise AdoptionRunError("RUN_NOT_FOUND", "not a run id")
+        source = AdoptionRunStore(root).load(run_id)
+        return source, token, _cursor_entry(source, "after", token)
+    except AdoptionRunError as exc:
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            "no start issued that after cursor; call start without after to scan from the first page",
+        ) from exc
+
+
+def _pinned_scan(entry: dict, path: str, collection: str | None) -> dict:
+    """What the first page fixed for every later page, refusing a call that names something else."""
+    pinned = entry["after"]
+    if _clean(path) not in ("", pinned["path"]) or (
+        (collection or "").strip() and adoption_plan.nfc(collection.strip()) != pinned["collection"]["label"]
+    ):
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            f"that after cursor belongs to the scan of {pinned['path']!r} as collection "
+            f"{pinned['collection']['label']!r}; pass the same path and collection, or neither",
+        )
+    return pinned
+
+
 def start(
     root: Path,
     *,
@@ -986,9 +1047,23 @@ def start(
     initialize_kb: bool = False,
     collection: str | None = None,
     consume: bool = True,
+    after: str | None = None,
+    max_candidates: int = MAX_CANDIDATES_DEFAULT,
     today: dt.date | None = None,
 ) -> dict:
+    """Scan a folder into a run holding one page of candidates; `after` starts the page that follows a cursor.
+
+    While file rows remain beyond `max_candidates`, the reply carries `next_after`. A later page keeps the
+    path, hidden-file choice, `consume` choice, collection root and collection label that the first page
+    fixed, whatever consuming has since done to the stage.
+    """
     root = Path(root)
+    source_run = entry = pinned = None
+    if after:
+        source_run, token, entry = _page_cursor(root, after)
+        pinned = _pinned_scan(entry, path, collection)
+        path, include_hidden = pinned["path"], pinned["include_hidden"]
+        consume, max_candidates = pinned["consume"], pinned["max_candidates"]
     _refuse_outside_vault(root, path)
     run_date = _today(today)
     kb = root / kb_dirname()
@@ -1010,8 +1085,9 @@ def start(
     except overview_module.OverviewError as exc:
         raise AdoptionRunError(exc.code, exc.reason) from exc
 
-    rows, truncated, hidden_files = build_inventory(
-        root, path=path, include_hidden=include_hidden
+    rows, remaining, hidden_files = build_inventory(
+        root, path=path, include_hidden=include_hidden, max_candidates=max_candidates,
+        after=None if pinned is None else tuple(pinned["after"]),
     )
     inv_fp = inventory_fingerprint(rows)
     created_iso = _now_iso()
@@ -1028,7 +1104,7 @@ def start(
         "updated": created_iso,
         "phase": "selecting",
         "source_root": source_root,
-        "collection": _collection_of(root, source_root, collection),
+        "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection),
         "stage": _recorded_stage(root, source_root),
         "consume": consume,
         "scan_summary": {
@@ -1040,7 +1116,7 @@ def start(
         },
         "pack_suggestions": knowledge_packs.suggest_packs(scan, limit=6),
         "inventory": rows,
-        "inventory_truncated": truncated,
+        "inventory_truncated": remaining,
         "hidden_files_skipped": hidden_files,
         "inventory_fingerprint": inv_fp,
         "selection": {
@@ -1057,9 +1133,33 @@ def start(
         "cancel": None,
         "errors": [],
     }
+    if remaining or pinned:
+        run["paging"] = {
+            "page": 1 if source_run is None else source_run["paging"]["page"] + 1,
+            "previous": None if source_run is None else source_run["run_id"],
+            "more": bool(remaining), "include_hidden": include_hidden,
+        }
+    if remaining:
+        last = max((row for row in rows if row.get("kind") != "folder"), key=_order_key)
+        issued = _issue_cursor(run, "after")
+        run["cursors"][issued]["after"] = {
+            "after": list(_order_key(last)), "path": source_root, "include_hidden": include_hidden,
+            "consume": consume, "max_candidates": max_candidates, "collection": run["collection"],
+        }
     store = AdoptionRunStore(root)
     with _LOCK:
-        store.save(run)
+        if source_run is None:
+            store.save(run)
+        else:
+            # The cursor turns `used` in the same atomic write that saves the page it opened.
+            source_run = store.load(source_run["run_id"])
+            current = _cursor_entry(source_run, "after", token)
+            if current["state"] == "used":
+                return _present(root, store.load(current["reply"]["run_id"]))
+            current["state"], current["reply"] = "used", {"run_id": run_id}
+            batch_atomic_write(
+                [store.planned_write(run), store.planned_write(source_run)], vault_root=root
+            )
     return _present(root, run)
 
 
@@ -1162,6 +1262,53 @@ def select(
     return _present(root, run, rejected=rejected)
 
 
+def _unapplied(run: dict) -> bool:
+    """Whether the run still has an item to apply: a planned item, or a selected one before a plan, without an applied outcome."""
+    plan = run.get("plan")
+    paths = (
+        [item["original_path"] for item in plan["items"]] if plan
+        else (run.get("selection") or {}).get("paths") or []
+    )
+    outcomes = run.get("outcomes") or {}
+    return any((outcomes.get(path) or {}).get("status") not in _APPLIED_STATUSES for path in paths)
+
+
+def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
+    """The id of the nearest earlier page of this run's collection that still has work to apply, or None.
+
+    A page holds destinations in its plan until it applies them, and a later plan reads the disk, so
+    a later page may plan only after the earlier ones have applied. A finished or cancelled page
+    holds none.
+    """
+    previous = (run.get("paging") or {}).get("previous")
+    while previous:
+        try:
+            earlier = store.load(previous)
+        except AdoptionRunError:
+            return None  # a page whose record is gone holds no work
+        if earlier["phase"] not in ("done", "cancelled") and _unapplied(earlier):
+            return previous
+        previous = (earlier.get("paging") or {}).get("previous")
+    return None
+
+
+def _whole_scan(root: Path, run: dict) -> list[str] | None:
+    """The collection path of every eligible file the scan holds, for a paged run; None for any other.
+
+    Consumed files of earlier pages are no longer on disk, but their Sources are in the import index.
+    """
+    paging = run.get("paging")
+    if not paging:
+        return None
+    files, _folders, _hidden = walk_inventory(
+        root, path=run["source_root"], include_hidden=paging["include_hidden"]
+    )
+    collection_root = (run.get("collection") or {}).get("root", "")
+    return [
+        adoption_plan.collection_path_of(row["path"], collection_root) for row in files if row["eligible"]
+    ]
+
+
 def plan(
     root: Path,
     *,
@@ -1204,6 +1351,13 @@ def plan(
                     "the selection changed or the plan is finished; call plan without a continuation",
                 )
         else:
+            earlier = _earlier_page_unapplied(store, run)
+            if earlier is not None:
+                raise AdoptionRunError(
+                    "EARLIER_PAGE_UNAPPLIED",
+                    f"run {earlier} holds an earlier page of this collection with work still to apply; "
+                    "apply it, or finish or cancel it, before planning this page",
+                )
             entry = None
             _supersede_cursors(run, "plan")
             draft = {
@@ -1268,7 +1422,9 @@ def plan(
             return _present(root, run, **reply)
 
         items = draft["items"]
-        adoption_plan.resolve_links(items, index, collection=collection["label"])
+        adoption_plan.resolve_links(
+            items, index, collection=collection["label"], whole_scan=_whole_scan(root, run)
+        )
         skipped = list(draft["skipped"])
         for planned in items:
             if planned["action"] == "copy-as-source":

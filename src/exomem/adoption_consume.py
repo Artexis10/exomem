@@ -87,9 +87,11 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
 
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. The reasons are a
     closed set of result keys that this report defines, not vocabulary: `failed`, `text`, `kept`, `pending`,
-    `unselected`, `ineligible` and `outside_run` (hidden or added after the scan). The Cloud route
-    discards a stage with `transfer_memory`; a local import has no Exomem command, so its stage goes by hand.
-    Both name the whole stage folder, which holds the residual and nothing else.
+    `unselected`, `ineligible` and `outside_run` (hidden or added after the scan, or on another page of a
+    paged scan). The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem
+    command, so its stage goes by hand. Both name the whole stage folder, which holds the residual and
+    nothing else. A page that later pages follow names no discard route, because the folder still holds
+    their files: `more_pages` says so.
     """
     recorded_stage = run.get("stage")
     if not isinstance(recorded_stage, dict):
@@ -140,9 +142,10 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
         if recorded_stage.get("proof") == import_stage.CLOUD_PROOF
         else f"delete the folder {folder} by hand; no Exomem command discards a local import"
     )
+    more_pages = bool((run.get("paging") or {}).get("more"))
     return {
         "folder": folder, "files": files, "bytes": sum(entry["bytes"] for entry in by_reason.values()),
-        "by_reason": by_reason, "discard": route if files else None,
+        "by_reason": by_reason, "more_pages": more_pages, "discard": route if files and not more_pages else None,
     }
 
 
