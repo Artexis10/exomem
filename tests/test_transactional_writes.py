@@ -1887,7 +1887,7 @@ def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
     with vault_module.held_fs.acquire(tmp_path).require() as filesystem:
         filesystem_type = type(filesystem)
     real_file = filesystem_type.file
-    real_read = filesystem_type.read
+    real_hash = vault_module._descriptor_hash
     edited = False
     rolling_back = False
 
@@ -1908,16 +1908,19 @@ def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
             edited = True
         return current
 
-    def edit_during_read(self, file):  # noqa: ANN001
+    def edit_during_read(descriptor, expected):  # noqa: ANN001
         nonlocal edited
-        if intervention == "read" and rolling_back and file.name == created.name:
+        if (
+            intervention == "read" and rolling_back
+            and os.fstat(descriptor).st_ino == created.stat().st_ino
+        ):
             created.write_bytes(b"concurrent-owned")
             edited = True
-        return real_read(self, file)
+        return real_hash(descriptor, expected)
 
     monkeypatch.setattr(vault_module, "_before_batch_destination_published", fail_pending)
     monkeypatch.setattr(filesystem_type, "file", edit_reopened)
-    monkeypatch.setattr(filesystem_type, "read", edit_during_read)
+    monkeypatch.setattr(vault_module, "_descriptor_hash", edit_during_read)
     with pytest.raises(vault_module.BatchWriteError) as incomplete:
         vault_module.batch_atomic_write(
             [vault_module.PlannedWrite(created, "installed"), vault_module.PlannedWrite(pending, "pending-new")],

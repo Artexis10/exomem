@@ -294,7 +294,7 @@ def test_batch_write_refuses_binary_stage_rewritten_between_last_check_and_copy(
 
     monkeypatch.setattr(vault, "_before_batch_destination_published", rewrite_stage_in_place)
 
-    with pytest.raises(vault.PathGuardError) as changed:
+    with pytest.raises(vault.BatchWriteError) as changed:
         vault.batch_atomic_write(
             [
                 vault.PlannedWrite(
@@ -317,11 +317,15 @@ def test_batch_write_refuses_binary_stage_rewritten_between_last_check_and_copy(
             vault_root=tmp_path,
         )
 
+    # The companion is rolled back and the rewritten bytes never reach the destination. Cleanup
+    # keeps the changed stage in its workspace rather than delete bytes it cannot account for.
     assert rewrites == 1
-    assert changed.value.code == "PATH_GUARD_CONTENT"
+    assert isinstance(changed.value.__cause__, vault.PathGuardError)
+    assert changed.value.__cause__.code == "PATH_GUARD_CONTENT"
+    assert changed.value.code == "BATCH_CLEANUP_INCOMPLETE"
     assert not binary.exists()
     assert not companion.exists()
-    assert not list(tmp_path.rglob(".exomem-*"))
+    assert not list(tmp_path.rglob(f"{held_fs.PUBLISH_TEMP_PREFIX}*"))
 
 
 @pytest.mark.parametrize("generation_trusted", [True, False])

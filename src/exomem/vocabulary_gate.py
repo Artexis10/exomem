@@ -161,8 +161,16 @@ class _BatchAuthority:
             self.closed = True
 
 
-def _stage_bytes(artifact) -> bytes:
+def _stage_bytes(artifact, snapshot) -> bytes:
     artifact.recheck()
+    # The classifier refuses a changed image above this bound whatever it holds, so refuse
+    # before reading a large binary whole; an unchanged image is never classified.
+    if os.fstat(artifact.descriptor).st_size > vocabulary_effects._MAX_IMAGE_BYTES and (
+        snapshot is None or snapshot.content_hash != artifact.content_hash
+    ):
+        raise vocabulary_authority.VocabularyAuthorityDenied(
+            "complete structural effects require current supported evidence"
+        )
     previous = os.lseek(artifact.descriptor, 0, os.SEEK_CUR)
     try:
         os.lseek(artifact.descriptor, 0, os.SEEK_SET)
@@ -220,7 +228,7 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         return None
     images = tuple(
         vocabulary_effects.CanonicalWriteImage(
-            relative, snapshot.content if snapshot is not None else None, _stage_bytes(artifact),
+            relative, snapshot.content if snapshot is not None else None, _stage_bytes(artifact, snapshot),
             before_sha256=snapshot.content_hash if snapshot is not None else None,
             after_sha256=artifact.content_hash,
         )
