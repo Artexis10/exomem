@@ -103,7 +103,7 @@ Pending content hydration SHALL remain bounded. A legitimate pending burst beyon
 - **AND** a page with no well-formed identifier owns none, so an ordinary write by reference proceeds
 - **AND** a page holding the requested identifier beside another owner refuses as ambiguous
 - **AND** more such pages than one hydration holds refuse the lookup with the warming outcome
-- **AND** recall keeps suppressing that page's persistent evidence and performs no identity reads
+- **AND** recall keeps suppressing that page's persistent evidence; only exact reference lookups, including the response gate that checks memory references in governed output, read identities
 
 #### Scenario: Concurrent writes invalidate body hydration
 

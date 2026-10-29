@@ -1042,11 +1042,7 @@ def _settled_projection(
     refs_by_path = dict(projection.refs_by_path)
     unreadable: set[str] = set()
     for rel in sorted(projection.blocked_paths):
-        try:
-            row = _identity_or_unreadable(root, root.joinpath(*rel.split("/")))
-        except OSError:  # `exists()` raises past a directory the process cannot enter
-            unreadable.add(rel)
-            continue
+        row = _identity_or_unreadable(root, root.joinpath(*rel.split("/")))
         if row is not None and row[4] == _UNREADABLE:
             unreadable.add(rel)
             continue
@@ -1492,10 +1488,15 @@ def _identity_or_unreadable(
     here: the page is not a member, or it is gone.
     """
     rel = _relative_markdown(vault_root, path)
-    if rel is None or not path.exists():
+    if rel is None:
         return None
+    # Read first instead of checking `exists()`: from Python 3.14 `exists()`
+    # returns False on PermissionError, which would turn an unreadable page
+    # into a gone one.
     try:
         raw = path.read_bytes().decode("utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
     except (OSError, UnicodeDecodeError):
         return rel, None, "", "", _UNREADABLE
     # Parse what text mode reads (universal newlines) but hash the bytes as

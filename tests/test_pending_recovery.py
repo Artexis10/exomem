@@ -670,32 +670,26 @@ def test_governed_identity_uncertainty_obeys_the_callers_release_floor(
                 ),
             ),
         )
-        (tmp_path / pending).write_bytes(
-            b"unprovable pending bytes" if ceiling is not None else b"\xff"
-        )
+        # Undecodable bytes stay unprovable, so only the caller's release floor
+        # decides whether the pending page is admitted and refuses.
+        (tmp_path / pending).write_bytes(b"\xff")
         pending_recall.reset()
-    # Only the undecodable page (`ceiling is None`) stays unreadable, so it alone
-    # still refuses. Readable pending bytes settle from the page itself.
     with principal.request_scope(guest):
-        if ceiling is None:
+        if ceiling == egress.LEVEL_NONE:
+            assert writer_lease.invoke_command(command, tmp_path, path=ref) == before
+            assert egress.visible_memory_ref_paths(tmp_path, [ref]) == {ref: visible}
+        else:
             with pytest.raises(find.RetrievalIndexWarming):
                 writer_lease.invoke_command(command, tmp_path, path=ref)
             with pytest.raises(find.RetrievalIndexWarming):
                 egress.visible_memory_ref_paths(tmp_path, [ref])
+        if ceiling is not None:
+            assert plan_progress._supersession(tmp_path, [identity]) == supersession
+        else:
             with pytest.raises(find.RetrievalIndexWarming):
                 plan_progress._supersession(tmp_path, [identity])
-        else:
-            assert writer_lease.invoke_command(command, tmp_path, path=ref) == before
-            assert egress.visible_memory_ref_paths(tmp_path, [ref]) == {ref: visible}
-            assert plan_progress._supersession(tmp_path, [identity]) == supersession
-    with principal.library_scope():
-        if ceiling is None:
-            with pytest.raises(find.RetrievalIndexWarming):
-                memory_refs.paths_for_ids_read_only(tmp_path, [identity])
-        else:
-            assert memory_refs.paths_for_ids_read_only(tmp_path, [identity]) == {
-                identity: (visible,)
-            }
+    with principal.library_scope(), pytest.raises(find.RetrievalIndexWarming):
+        memory_refs.paths_for_ids_read_only(tmp_path, [identity])
 
 
 @pytest.mark.usefixtures("managed_runtime")
