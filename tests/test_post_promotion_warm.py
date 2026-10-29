@@ -34,6 +34,7 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
     vault.mkdir()
     calls: list[str] = []
     matrix_warmed = threading.Event()
+    graph_started = threading.Event()
     done = threading.Event()
 
     class Watcher:
@@ -43,6 +44,9 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
         def finish_startup_recovery(self) -> None:
             calls.append("drain")
 
+        def arm_optional_recovery(self) -> None:
+            pass
+
     def start_compute(_root, **_kwargs) -> None:
         readiness.begin_warm()
         readiness.mark_ready("retrieval_catalog")
@@ -50,7 +54,12 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
 
     monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: Watcher())
-    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: calls.append("graph"))
+
+    def start_graph(_root) -> None:
+        calls.append("graph")
+        graph_started.set()
+
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", start_graph)
     monkeypatch.setattr(
         server_runtime, "_start_media_worker", lambda _root: (calls.append("media"), done.set())[0]
     )
@@ -69,6 +78,7 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
             activation.start()
             assert done.wait(timeout=5.0)
             assert matrix_warmed.wait(timeout=5.0)
+            assert graph_started.wait(timeout=5.0)
 
     asyncio.run(exercise())
     assert calls.index("request-path") < calls.index("drain") < calls.index("matrix")
