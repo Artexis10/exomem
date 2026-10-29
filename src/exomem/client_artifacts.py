@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
+import logging
 import mimetypes
 import os
 import re
@@ -61,11 +62,16 @@ _BATCH_DEADLINE_SECONDS = 60.0
 #: The slowest average rate a standalone server's pull may keep beyond its fixed allowance:
 #: 2 Mbit/s, below any broadband link, so only a pull that trickles or stalls runs out.
 _MIN_BYTES_PER_SECOND = 256 * 1024
+#: A Cloud cell's default staged-file ceiling: 200 MiB is about 17 s of the 25 s that one 50 s call leaves for a
+#: commit, at the ~12 MiB/s that apply measured (the batch re-reads its copy 15 times); a measured volume replaces it.
+_CLOUD_ADOPTION_CEILING = 200 * 1024 * 1024
+ADOPTION_CEILING_ENV = "EXOMEM_ADOPTION_MAX_FILE_BYTES"
 _MAX_FILE_ID_CHARS = 256
 _MAX_CONTENT_TYPE_CHARS = 255
 _MAX_ADOPTION_KEY_CHARS = 512
 _MAX_ADOPTION_TRIGGER_CHARS = 64
 _monotonic = time.monotonic
+_log = logging.getLogger(__name__)
 _DNS_WORKERS = threading.BoundedSemaphore(4)
 _RETRIEVAL_WORKERS = threading.BoundedSemaphore(4)
 
@@ -122,6 +128,27 @@ def fetch_budget() -> FetchBudget:
     return FetchBudget(
         max_file_bytes=cap, max_total_bytes=cap, min_bytes_per_second=_MIN_BYTES_PER_SECOND
     )
+
+
+def adoption_ceiling() -> int:
+    """The largest staged file one adoption copies, on every runtime.
+
+    A staged file is already on the volume, so the gateway's client-pull cap does not apply to it.
+    `EXOMEM_ADOPTION_MAX_FILE_BYTES` sets it. Without that, a Cloud cell takes `_CLOUD_ADOPTION_CEILING`
+    and any other server keeps the largest upload session, as before.
+    """
+    raw = os.environ.get(ADOPTION_CEILING_ENV, "").strip()
+    if raw.isascii() and raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    if raw:
+        _log.warning("%s is not a positive integer; using the default", ADOPTION_CEILING_ENV)
+    from .cloud_cell import cloud_mode_enabled
+
+    if cloud_mode_enabled():
+        return _CLOUD_ADOPTION_CEILING
+    from .upload_sessions import max_bytes_from_env
+
+    return max_bytes_from_env()
 
 
 def adoption_budget() -> FetchBudget:

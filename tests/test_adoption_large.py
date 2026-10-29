@@ -1,0 +1,158 @@
+"""A large staged artifact adopts in one streamed pass; a file over the ceiling stays in the residual."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import tracemalloc
+import uuid
+from pathlib import Path
+
+import pytest
+
+from exomem import adoption_run, client_artifacts, cloud_import_job, state_migration, state_paths
+
+TODAY = dt.date(2026, 10, 27)
+MIB = 1024 * 1024
+CEILING_ENV = "EXOMEM_ADOPTION_MAX_FILE_BYTES"
+
+
+def _vault(tmp_path: Path) -> Path:
+    """A vault with a Knowledge Base whose state placement is settled, as after its first start."""
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base"
+    (kb / "Notes").mkdir(parents=True)
+    (kb / "Sources").mkdir()
+    (kb / "Sources" / "index.md").write_text("# Sources - Index\n\n## By type\n\n## Recent captures\n\n", encoding="utf-8")
+    (kb / "index.md").write_text("# Knowledge Base\n\n## Counts\n\n- Sources: 0\n\n## Recent activity\n\n", encoding="utf-8")
+    (kb / "log.md").write_text("# Log\n\n---\n", encoding="utf-8")
+    assert state_migration.bootstrap_fresh_state(vault)
+    return vault
+
+
+def _sparse(path: Path, size: int, mark: bytes) -> None:
+    """A file of `size` bytes that takes no memory to build: a marked head and tail, a hole between."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(mark)
+        handle.seek(size - len(mark))
+        handle.write(mark)
+
+
+def _digest(path: Path) -> str:
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _stage(vault: Path, files: dict[str, int | bytes]) -> str:
+    """A stage laid out as the Cloud import Job leaves it; an int value is a sparse file of that size."""
+    import_id = str(uuid.uuid4())
+    members = []
+    for rel, content in files.items():
+        path = vault / "_Imports" / import_id / rel
+        if isinstance(content, int):
+            _sparse(path, content, rel.encode())
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        members.append({"path": rel, "size": path.stat().st_size, "sha256": _digest(path)})
+    request = cloud_import_job.CloudImportRequest(
+        import_id=import_id, cell_id="abcdefghijklmnop", kind="adopt", declared_files=len(files),
+        declared_bytes=sum(member["size"] for member in members), ciphertext_bytes=1, ciphertext_sha256="0" * 64)
+    receipts = state_paths.ensure_vault_state_dir(vault) / "cloud-imports"
+    receipts.mkdir(exist_ok=True)
+    (receipts / f"{import_id}.json").write_text(json.dumps({
+        "request": request.model_dump(), "result": {"ok": True, "files": len(files)}, "members": members}))
+    return f"_Imports/{import_id}"
+
+
+def _plan(vault: Path, run: dict, stage: str) -> str:
+    adoption_run.select(vault, run_id=run["run_id"], include=[stage])
+    return adoption_run.plan(vault, run_id=run["run_id"], today=TODAY)["plan"]["plan_id"]
+
+
+def _apply_all(vault: Path, run: dict, plan_id: str) -> dict:
+    reply = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)
+    while reply.get("continuation"):
+        reply = adoption_run.apply(
+            vault, run_id=run["run_id"], plan_id=plan_id, continuation=reply["continuation"], today=TODAY)
+    return reply
+
+
+def test_the_ceiling_clears_the_client_pull_cap_on_a_cloud_cell_and_an_operator_can_set_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv(CEILING_ENV, raising=False)
+    default = client_artifacts.adoption_ceiling()
+    assert default > client_artifacts.fetch_budget().max_file_bytes
+    monkeypatch.setenv(CEILING_ENV, str(3 * MIB))
+    assert client_artifacts.adoption_ceiling() == 3 * MIB
+    monkeypatch.setenv(CEILING_ENV, "plenty")
+    assert client_artifacts.adoption_ceiling() == default
+
+
+def test_a_cloud_cell_adopts_a_staged_artifact_over_the_client_pull_cap_without_holding_it_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    vault = _vault(tmp_path)
+    size = client_artifacts.fetch_budget().max_file_bytes + 5 * MIB
+    stage = _stage(vault, {"Recordings/long-take.bin": size})
+    staged = next((vault / stage).rglob("long-take.bin"))
+    expected = _digest(staged)
+    run = adoption_run.start(vault, path=stage, today=TODAY)
+    assert [(row["path"], row["eligible"]) for row in run["inventory"]] == [(f"{stage}/Recordings/long-take.bin", True)]
+    plan_id = _plan(vault, run, stage)
+
+    tracemalloc.start()
+    try:
+        reply = _apply_all(vault, run, plan_id)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    outcome = next(iter(reply["outcomes"].values()))
+    assert outcome["status"] == "applied"
+    assert _digest(vault / outcome["artifact_path"]) == expected and not staged.exists()
+    assert peak < size // 4, f"apply held {peak} bytes while filing a {size} byte file"
+
+
+def test_an_artifact_that_changed_after_the_plan_is_refused_at_the_copy_and_its_neighbour_still_lands(
+    tmp_path: Path,
+) -> None:
+    """The copy hashes the bytes it reads, so an edit that keeps the size is caught there, not after publication."""
+    vault = _vault(tmp_path)
+    stage = _stage(vault, {"scans/edited.bin": b"E" * 4096, "scans/intact.bin": b"I" * 4096})
+    run = adoption_run.start(vault, path=stage, today=TODAY)
+    plan_id = _plan(vault, run, stage)
+    edited, intact = (next((vault / stage).rglob(name)) for name in ("edited.bin", "intact.bin"))
+    edited.write_bytes(b"X" * 4096)
+
+    reply = _apply_all(vault, run, plan_id)
+
+    outcomes = {Path(path).name: outcome for path, outcome in reply["outcomes"].items()}
+    assert outcomes["edited.bin"]["status"] == "failed" and outcomes["edited.bin"]["code"] == "SOURCE_CHANGED"
+    assert outcomes["intact.bin"]["status"] == "applied" and not intact.exists()
+    assert edited.read_bytes() == b"X" * 4096
+    kept = [path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*.bin")]
+    assert kept == [Path(outcomes["intact.bin"]["artifact_path"]).name]
+
+
+def test_a_staged_file_over_the_ceiling_stays_in_the_residual_with_a_code_that_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(CEILING_ENV, str(2 * MIB))
+    vault = _vault(tmp_path)
+    stage = _stage(vault, {"clips/short.bin": b"S" * 4096, "clips/long.bin": 3 * MIB})
+    run = adoption_run.start(vault, path=stage, today=TODAY)
+    rows = {Path(row["path"]).name: row for row in run["inventory"]}
+    assert (rows["long.bin"]["eligible"], rows["long.bin"]["reason"]) == (False, "OVER_ADOPTION_CEILING")
+    plan_id = _plan(vault, run, stage)
+    _apply_all(vault, run, plan_id)
+
+    residual = adoption_run.finish(vault, run_id=run["run_id"], today=TODAY)["finish"]["residual"]
+
+    assert residual["by_reason"] == {"over_ceiling": {"files": 1, "bytes": 3 * MIB}}
+    assert residual["ceiling_bytes"] == 2 * MIB
+    assert next((vault / stage).rglob("long.bin")).stat().st_size == 3 * MIB

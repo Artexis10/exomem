@@ -115,7 +115,7 @@ _REASONS = {
     "NOT_IN_INVENTORY": "path is not among the scanned adoption candidates",
     "UNSUPPORTED_IMPORT_TYPE": "the scan did not mark this file importable",
     "ALREADY_GOVERNED": f"path is already inside {kb_dirname()}/",
-    "TOO_LARGE": "file is larger than the artifact ceiling",
+    adoption_plan.OVER_CEILING: "file is larger than the adoption ceiling",
     "NOT_REGULAR_FILE": "only regular files import; links and special files do not",
     "HIDDEN_FOLDER": "hidden folders are not scanned unless include_hidden=true",
     "JUNK": "sync-conflict or zero-byte file; pass include_junk=true or list it in overrides",
@@ -404,7 +404,7 @@ def walk_inventory(
 
     root = Path(root)
     kb_name = kb_dirname()
-    limit = client_artifacts.fetch_budget().max_file_bytes if ceiling is None else ceiling
+    limit = client_artifacts.adoption_ceiling() if ceiling is None else ceiling
     scan_root = root if not _clean(path) else (root / _clean(path))
     rows: list[dict] = []
     folders: list[dict] = []
@@ -453,7 +453,7 @@ def walk_inventory(
                 if not stat.S_ISREG(st.st_mode):
                     reason = "NOT_REGULAR_FILE"
                 elif st.st_size > limit:
-                    reason = "TOO_LARGE"
+                    reason = adoption_plan.OVER_CEILING
                 # Stat-level junk classification (no reads), mirroring overview's
                 # categories. Rows are the UNCAPPED source of truth for the
                 # selection junk filter; overview's junk path lists are
@@ -1374,7 +1374,7 @@ def plan(
         classification = selection.get("classification") or {}
         taxonomy = source_taxonomy.load_taxonomy(root) if classification else None
         inventory = {row["path"]: row for row in run.get("inventory") or []}
-        ceiling = client_artifacts.fetch_budget().max_file_bytes
+        ceiling = client_artifacts.adoption_ceiling()
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
@@ -1517,20 +1517,24 @@ def _source_status(outcome: dict) -> str:
 
 
 def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
-    """The original's text (None for an artifact), or a failed outcome when it drifted."""
+    """The original's text (None for an artifact), or a failed outcome when it drifted.
+
+    An artifact is only sized here: the batch hashes its bytes once, as it copies them, and refuses
+    them when they differ from the plan (`_commit_chunk` then finds which item drifted).
+    """
     read = adoption_plan.read_facts(
-        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text"
+        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text",
+        hash_artifact=False,
     )
     if isinstance(read, dict):
         code = "SOURCE_CHANGED" if read["code"] == "TOO_LARGE" else read["code"]
         return None, _failed(code, read["reason"])
     facts, text = read
-    if (
-        facts["original_sha256"] != planned["original_sha256"]
-        or facts["original_bytes"] != planned["original_bytes"]
-        or (planned["form"] == "text" and text is None)
+    if facts["original_bytes"] != planned["original_bytes"] or (
+        planned["form"] == "text"
+        and (text is None or facts["original_sha256"] != planned["original_sha256"])
     ):
-        return None, _failed("SOURCE_CHANGED", "sha256 mismatch at apply time")
+        return None, _failed("SOURCE_CHANGED", "the original differs from the plan at apply time")
     return text, None
 
 
@@ -1739,7 +1743,8 @@ def _commit_chunk(
         reads.source_counts = None
         reads.index = adoption_plan.read_import_index(root)
         landed: list[dict] = []
-        for planned, _item in survivors:
+        unlanded: list[tuple[dict, adopt_module.ImportItem]] = []
+        for planned, item in survivors:
             earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
@@ -1749,15 +1754,33 @@ def _commit_chunk(
                 _hold_for_note(outcomes[planned["original_path"]], planned)
                 landed.append(planned)
             else:
-                if isinstance(error, adopt_module.AdoptError):
-                    failure = {"code": error.code, "reason": error.reason}
-                elif isinstance(
-                    error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
-                ) or getattr(error, "code", None) == "PATH_GUARD_CONTENT":
-                    failure = adoption_plan.source_failure(error)
-                else:
-                    failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
-                outcomes[planned["original_path"]] = _failed(**failure)
+                unlanded.append((planned, item))
+        if getattr(error, "code", None) == "PATH_GUARD_CONTENT":
+            # The batch hashes each artifact as it copies it and names none when one differs from the
+            # plan. Only now are the artifacts re-hashed, to fail the one that drifted and commit the rest.
+            drifted = [
+                planned for planned, _item in unlanded
+                if planned["form"] == "artifact" and not _original_unchanged(root, planned)
+            ]
+            if drifted and len(drifted) < len(unlanded):
+                for planned in drifted:
+                    outcomes[planned["original_path"]] = _failed(
+                        "SOURCE_CHANGED", "the original differs from the plan at apply time"
+                    )
+                rest = [(planned, item) for planned, item in unlanded if planned not in drifted]
+                return landed + _commit_chunk(
+                    root, store, run, rest, run_date=run_date, label=label, reads=reads
+                )
+        if isinstance(error, adopt_module.AdoptError):
+            failure = {"code": error.code, "reason": error.reason}
+        elif isinstance(
+            error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+        ) or getattr(error, "code", None) == "PATH_GUARD_CONTENT":
+            failure = adoption_plan.source_failure(error)
+        else:
+            failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
+        for planned, _item in unlanded:
+            outcomes[planned["original_path"]] = _failed(**failure)
         return landed
     reads.source_counts = committed["source_counts"]
     return [planned for planned, _item in survivors]
@@ -2147,7 +2170,7 @@ def apply(
         run["outcomes"] = outcomes
 
         budget = _call_budget()
-        ceiling = client_artifacts.fetch_budget().max_file_bytes
+        ceiling = client_artifacts.adoption_ceiling()
         written: list[str] = []
         pending = _pending(run)
         if pending:

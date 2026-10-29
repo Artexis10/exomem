@@ -38,6 +38,8 @@ from .vault import (
 )
 
 IMPORTED_FOLDER = source_taxonomy.IMPORTED_PATH_LABEL
+# The code of a file above `client_artifacts.adoption_ceiling()`, on an inventory row, a skipped item and the residual.
+OVER_CEILING = "OVER_ADOPTION_CEILING"
 # A text file past this size plans as an artifact: its bytes are kept, but the
 # page never holds them in memory. A resource bound, not a vocabulary.
 INLINE_TEXT_MAX_BYTES = 4 * 1024 * 1024
@@ -462,13 +464,14 @@ def source_failure(error: Exception) -> dict[str, str]:
 
 
 def read_facts(
-    root: Path, original_path: str, *, ceiling: int, text_hint: bool
+    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Hash one original and decide how it imports.
 
     Returns ``(facts, text)`` (``text`` is None for an artifact) or a refusal dict
     ``{"code", "reason"}``. A text-like file that is not valid UTF-8, or is too big
-    to hold, imports as an artifact so its bytes survive.
+    to hold, imports as an artifact so its bytes survive. With ``hash_artifact`` false an
+    artifact is only sized and its ``original_sha256`` is None, for a caller whose copy hashes it.
     """
     from .add import AddError, artifact_identity
 
@@ -477,15 +480,17 @@ def read_facts(
         with reserved_paths.open_generic_binary(root, original_path, physical=True) as source:
             size = source.version.size
             if size > ceiling:
-                return {"code": "TOO_LARGE", "reason": f"original exceeds the {ceiling:,} byte artifact ceiling"}
+                return {"code": OVER_CEILING, "reason": f"original exceeds the {ceiling:,} byte adoption ceiling"}
             if text_hint and size <= INLINE_TEXT_MAX_BYTES:
                 data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
                 if len(data) != size:
                     return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
                 text = decode_text(data)
                 digest, length = hashlib.sha256(data).hexdigest(), len(data)
-            else:
+            elif hash_artifact:
                 digest, length = artifact_identity(source.stream, ceiling=ceiling)
+            else:
+                digest, length = None, size
     except AddError as error:
         return {"code": error.code, "reason": error.reason}
     except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
@@ -1009,6 +1014,7 @@ __all__ = [
     "EarlierImport",
     "LinkResolver",
     "NoteIndex",
+    "OVER_CEILING",
     "item_digest",
     "artifact_of",
     "collection_path_of",

@@ -214,12 +214,12 @@ def _advice(selection: import_selection.Selection, name: str, free_after: int, p
         progress.say(f"Note: adoption lists up to {adoption_run.MAX_CANDIDATES_DEFAULT:,} files per start; "
                      f"this folder has {len(selection.kept):,}. Start on subfolders of the printed path to cover the rest, "
                      f'and pass collection="{name}" to each start so that they stay one collection.')
-    ceiling = client_artifacts.fetch_budget().max_file_bytes
+    ceiling = client_artifacts.adoption_ceiling()
     large = sum(1 for item in selection.kept if item.size > ceiling)
     if large:
         progress.say(f"Note: {files_are(large)} over {human_bytes(ceiling)}; "
                      f"{'it stages' if large == 1 else 'they stage'} here, "
-                     f"and adoption refuses {'it' if large == 1 else 'them'} with TOO_LARGE.")
+                     f"and adoption leaves {'it' if large == 1 else 'them'} out as OVER_ADOPTION_CEILING.")
     progress.say(f"Note: adoption copies each file again into Sources, which needs about "
                  f"{human_bytes(selection.kept_bytes)} more; {human_bytes(free_after)} will be free after staging.")
 

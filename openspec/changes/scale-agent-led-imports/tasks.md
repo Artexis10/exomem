@@ -19,7 +19,7 @@
 
 - [x] 3.1 Add the opaque `after` cursor and `next_after`, pin the collection root and label from the first page, and order artifacts before text. Verify: a test pages a flat folder of more than `max_candidates` files and covers each exactly once under one identity, also after consuming changed the stage's top level.
 - [x] 3.2 On a paged collection, resolve links by path or by a bare name unique across the whole scan, leave alias-only matches unresolved, and refuse to plan a page while an earlier page has unapplied items. Verify: tests show an ambiguous name left unresolved, a unique one resolved, and the refusal naming the earlier run.
-- [ ] 3.3 Add `adoption_ceiling()` for staged files on every runtime, leaving `fetch_budget()` alone. Copy each artifact in one streamed pass that hashes while it copies and rolls back on a mismatch. Size the default to one call's time budget, and leave a larger file in the residual with a code. Verify: a Cloud-mode test applies a staged artifact over 100 MiB with memory bounded by the chunk size, and a mismatch rolls back.
+- [x] 3.3 Add `adoption_ceiling()` for staged files on every runtime, leaving `fetch_budget()` alone. Copy each artifact in one streamed pass that hashes while it copies and rolls back on a mismatch. Size the default to one call's time budget, and leave a larger file in the residual with a code. Verify: a Cloud-mode test applies a staged artifact over 100 MiB with memory bounded by the chunk size, and a mismatch rolls back.
 - [ ] 3.4 Check free space plus a reserve that covers derived state before each chunk, and stop with a resumable `INSUFFICIENT_SPACE`. Verify: a test with a constrained free-space reading stops before the chunk and resumes.
 
 ## 4. Agent guidance

@@ -11,7 +11,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from . import held_fs, import_stage
+from . import adoption_plan, held_fs, import_stage
 
 
 def recorded(root: Path, run: dict) -> import_stage.Stage | None:
@@ -87,8 +87,8 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
 
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. The reasons are a
     closed set of result keys that this report defines, not vocabulary: `failed`, `text`, `kept`, `pending`,
-    `unselected`, `ineligible` and `outside_run` (hidden or added after the scan, or on another page of a
-    paged scan). The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem
+    `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then
+    reports) and `outside_run` (hidden or added after the scan, or on another page of a paged scan). The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem
     command, so its stage goes by hand. Both name the whole stage folder, which holds the residual and
     nothing else. A page that later pages follow names no discard route, because the folder still holds
     their files: `more_pages` says so.
@@ -100,7 +100,7 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
     inventory = {row["path"]: row for row in run.get("inventory") or []}
     plan = run.get("plan") or {}
     items = {item["original_path"]: item for item in plan.get("items") or []}
-    skipped = {row.get("path") for row in plan.get("skipped") or []}
+    skipped = {row.get("path"): row.get("code") for row in plan.get("skipped") or []}
     selected = set((run.get("selection") or {}).get("paths") or [])
     outcomes = run.get("outcomes") or {}
 
@@ -114,11 +114,11 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
         if path in skipped:
-            return "ineligible"
+            return "over_ceiling" if skipped[path] == adoption_plan.OVER_CEILING else "ineligible"
         row = inventory.get(path)
         if row is not None:
             if not row.get("eligible"):
-                return "ineligible"
+                return "over_ceiling" if row.get("reason") == adoption_plan.OVER_CEILING else "ineligible"
             return "pending" if path in selected else "unselected"
         ancestors = (path.rsplit("/", depth)[0] for depth in range(1, path.count("/") + 1))
         if any((inventory.get(ancestor) or {}).get("kind") == "folder" for ancestor in ancestors):
@@ -143,10 +143,15 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | N
         else f"delete the folder {folder} by hand; no Exomem command discards a local import"
     )
     more_pages = bool((run.get("paging") or {}).get("more"))
-    return {
+    report = {
         "folder": folder, "files": files, "bytes": sum(entry["bytes"] for entry in by_reason.values()),
         "by_reason": by_reason, "more_pages": more_pages, "discard": route if files and not more_pages else None,
     }
+    if "over_ceiling" in by_reason:
+        from . import client_artifacts
+
+        report["ceiling_bytes"] = client_artifacts.adoption_ceiling()
+    return report
 
 
 def remove_empty_folders(root: Path, run: dict) -> int:
