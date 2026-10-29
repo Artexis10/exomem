@@ -110,10 +110,12 @@ class _RecordingEvent(threading.Event):
         super().__init__()
         self.wait_calls: list[float | None] = []
         self.wait_started = threading.Event()
+        self.wait_started_at: float | None = None
 
     def wait(self, timeout: float | None = None) -> bool:
         self.wait_calls.append(timeout)
         self.wait_started.set()
+        self.wait_started_at = time.monotonic()
         return super().wait(timeout)
 
 
@@ -383,10 +385,15 @@ def test_slow_corpus_flight_returns_mutation_warming_before_commit(vault: Path) 
         started = time.monotonic()
         with pytest.raises(Exception) as raised:
             _invoke_joining_mutation(vault, vault / ".state", request_id="slow-corpus")
-        elapsed = time.monotonic() - started
+        finished = time.monotonic()
 
         assert getattr(raised.value, "code", None) == "MUTATION_WARMING"
-        assert _JOIN_SECONDS <= elapsed < _JOIN_SECONDS + 0.75
+        assert done.wait_started_at is not None
+        # The join budget starts at the wait, after lease and admission setup.
+        join_elapsed = finished - done.wait_started_at
+        assert _JOIN_SECONDS <= join_elapsed < _JOIN_SECONDS + 0.75, {
+            "join_seconds": join_elapsed, "mutation_seconds": finished - started,
+        }
         assert not owner_completed.is_set()
         assert target.read_bytes() == before
         assert done.wait_calls == [_JOIN_SECONDS]
