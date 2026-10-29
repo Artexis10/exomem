@@ -246,7 +246,8 @@ if [[ "$MODE" == "release" ]]; then
     if [[ "$MANAGED_BOOTSTRAP_RESUME" == 1 && ! -x "$VENV_PYTHON" ]]; then
         die "failed-bootstrap resume requires the existing launcher interpreter; refusing venv recreation"
     fi
-    mkdir -p "$SERVICE_ROOT" "$LOG_DIR" "$CONFIG_ROOT"
+    # Keep new runtime ancestors private, independent of the caller's umask.
+    (umask 077; mkdir -p "$SERVICE_ROOT" "$LOG_DIR" "$CONFIG_ROOT")
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
         echo "Creating release service venv at $VENV_DIR..."
