@@ -264,14 +264,21 @@ def _page(path: str, wikilinks: tuple[tuple[str, int], ...]) -> SimpleNamespace:
     return SimpleNamespace(path=path, frontmatter={}, body_wikilinks=wikilinks)
 
 
-def _corpus(tmp_path: Path, *, titles: dict[str, tuple[str, ...]] | None = None) -> SimpleNamespace:
+def _corpus(
+    tmp_path: Path, *, entries: tuple[tuple[str, str | None], ...] = ()
+) -> SimpleNamespace:
+    from exomem.vault import WikilinkResolver
+
+    resolver = WikilinkResolver.from_entries(tmp_path, entries)
     return SimpleNamespace(
         vault_root=tmp_path,
         pages={},
-        resolver_full_paths=frozenset(),
-        resolver_kb_stripped=frozenset(),
-        resolver_stems={},
-        resolver_titles=titles or {},
+        resolver_entries=entries,
+        resolver_full_paths=resolver.full_paths,
+        resolver_kb_stripped=resolver.kb_stripped,
+        resolver_stems=resolver.stems,
+        resolver_titles=resolver.titles,
+        resolver_candidates_by_key=resolver.candidates_by_key,
     )
 
 
@@ -293,12 +300,58 @@ def test_a_resolved_wikilink_is_not_an_unpaged_mention(tmp_path: Path) -> None:
     )
     corpus = _corpus(
         tmp_path,
-        titles={"client meeting": ("Knowledge Base/Entities/organization/Client meeting",)},
+        entries=(("Knowledge Base/Entities/organization/Client meeting.md", "Client meeting"),),
     )
 
     found = capture_sweep.hints(page, corpus)
 
     assert found["unpaged_mentions"] == ["Venue booking system"]
+
+
+def test_a_withheld_uppercase_extension_page_cannot_suppress_an_unpaged_mention(
+    tmp_path: Path,
+) -> None:
+    """A hidden page's existence must not change the writer's capture hints."""
+    page = _page("Knowledge Base/Notes/visible.md", (("Hidden note", 1),))
+    hidden = "Knowledge Base/Private/hidden.MD"
+    absent = _corpus(tmp_path)
+    present = _corpus(tmp_path, entries=((hidden, "Hidden note"),))
+
+    def visible(path: str) -> bool:
+        return path != hidden
+
+    expected = {"unpaged_mentions": ["Hidden note"]}
+    assert capture_sweep.hints(page, absent, visible) == expected
+    assert capture_sweep.hints(page, present, visible) == expected
+
+
+def test_a_hidden_single_extension_page_cannot_hide_a_visible_double_extension_title(
+    tmp_path: Path,
+) -> None:
+    """Visibility must belong to the indexed page, not another spelling of its key."""
+    from exomem import vault
+    from exomem.governance import egress
+
+    visible_path = "Knowledge Base/Notes/plan.md.md"
+    hidden_path = "Knowledge Base/Notes/plan.md"
+    for hidden_present in (False, True):
+        root = tmp_path / str(hidden_present)
+        page = root / visible_path
+        page.parent.mkdir(parents=True)
+        page.write_text("---\ntitle: Shared\n---\nVisible content\n")
+        if hidden_present:
+            (root / hidden_path).write_text("---\ntitle: Private\n---\nHidden content\n")
+        resolver = vault.WikilinkResolver(root)
+        visible = egress.page_filter_over(root, lambda path: path != hidden_path)
+        assert vault.normalize_wikilink("[[Shared]]", root, resolver=resolver, visible=visible) == (
+            "Knowledge Base/Notes/plan.md", None
+        )
+        entries = ((visible_path, "Shared"),)
+        if hidden_present:
+            entries += ((hidden_path, "Private"),)
+        corpus = _corpus(root, entries=entries)
+        source = _page("Knowledge Base/Notes/source.md", (("Shared", 1),))
+        assert capture_sweep.hints(source, corpus, visible) == {}
 
 
 def test_unpaged_mentions_dedupe_and_cap(tmp_path: Path) -> None:
@@ -606,14 +659,8 @@ def test_a_registry_alias_is_not_an_unpaged_mention(tmp_path: Path) -> None:
         },
         body_wikilinks=(),
     )
-    corpus = SimpleNamespace(
-        vault_root=tmp_path,
-        pages={entity.path: entity},
-        resolver_full_paths=frozenset(),
-        resolver_kb_stripped=frozenset(),
-        resolver_stems={},
-        resolver_titles={},
-    )
+    corpus = _corpus(tmp_path, entries=((entity.path, "Client Organisation"),))
+    corpus.pages = {entity.path: entity}
     page = _page(
         "Knowledge Base/Notes/Insights/client-meeting.md",
         (("Client Org", 4), ("Venue booking system", 5)),
@@ -637,14 +684,8 @@ def test_an_unmatched_name_survives_the_registry_filter(tmp_path: Path) -> None:
         },
         body_wikilinks=(),
     )
-    corpus = SimpleNamespace(
-        vault_root=tmp_path,
-        pages={entity.path: entity},
-        resolver_full_paths=frozenset(),
-        resolver_kb_stripped=frozenset(),
-        resolver_stems={},
-        resolver_titles={},
-    )
+    corpus = _corpus(tmp_path, entries=((entity.path, "Client Organisation"),))
+    corpus.pages = {entity.path: entity}
     page = _page("Knowledge Base/Notes/Insights/a.md", (("Client Organisations Ltd", 4),))
 
     found = capture_sweep.hints(page, corpus)

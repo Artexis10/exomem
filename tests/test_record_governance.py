@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import inspect
 import json
 import threading
@@ -3696,15 +3697,50 @@ def test_a_restricted_writers_title_link_ignores_a_hidden_double_extension_page(
     assert normalized(with_page) == normalized(without_page) == ("See [[Secret Plan]].", 1)
 
 
-def test_a_title_link_query_answers_while_pending_custody_is_unreadable(
-    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("memory_reference", [False, True], ids=["title", "memory-reference"])
+def test_a_link_query_answers_while_pending_custody_is_unreadable(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch,
+    memory_reference: bool,
 ) -> None:
-    """A deferred-store read error must not turn a Records query into a warming error.
+    """Unreadable custody withholds optional identities without cancelling a query.
 
-    A bare title never needs pending identity custody, so the query must not read it.
+    A title needs no identity lookup; a memory reference needs provable custody.
     """
     from exomem import pending_recall
 
+    identity = "11111111-1111-4111-8111-111111111111"
+    value = memory_refs.memory_ref(identity) if memory_reference else "[[Target]]"
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    record = fixture / "Events" / "released" / "2026-06-01-oil.md"
+    record.write_text(
+        record.read_text(encoding="utf-8").replace(
+            'asset: "[[Assets/Vehicle]]"', f'asset: "{value}"'
+        ),
+        encoding="utf-8",
+    )
+    _write_md(
+        tmp_path, "Knowledge Base/Notes/Public/Target.md",
+        f"---\nexomem_id: {identity}\n---\n# Target\n",
+    )
+    _publish_corpus(tmp_path)
+    monkeypatch.setattr(
+        pending_recall, "overlay",
+        lambda _root: pending_recall._warming("pending_visibility_unprovable"),
+    )
+
+    result = record_governance.query_collection(tmp_path, manifest, limit=10)
+
+    assert result.rows
+    values = [row.get("asset") for row in result.rows]
+    if memory_reference:
+        assert value not in values
+    else:
+        assert value in values
+
+
+def test_a_cold_link_query_receipts_only_released_targets(tmp_path: Path) -> None:
+    """A receipt must not claim pages consulted only to resolve a title link."""
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     record = fixture / "Events" / "released" / "2026-06-01-oil.md"
@@ -3714,16 +3750,24 @@ def test_a_title_link_query_answers_while_pending_custody_is_unreadable(
         ),
         encoding="utf-8",
     )
-    _write_md(tmp_path, "Knowledge Base/Notes/Public/Target.md", "# Target\n")
-    _publish_corpus(tmp_path)
-    monkeypatch.setattr(
-        pending_recall, "overlay",
-        lambda _root: pending_recall._warming("pending_visibility_unprovable"),
-    )
+    target = "# Target\nReleased link target.\n"
+    consulted = "# Other\nOnly consulted by the title index.\n"
+    _write_md(tmp_path, "Knowledge Base/Notes/Target.md", target)
+    _write_md(tmp_path, "Knowledge Base/Notes/Other.md", consulted)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
 
-    result = record_governance.query_collection(tmp_path, manifest, limit=10)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        result = record_governance.query_collection(tmp_path, manifest, limit=10)
 
     assert "[[Target]]" in [row.get("asset") for row in result.rows]
+    hashes = {
+        outcome.get("content_hash")
+        for event in (tmp_path / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
+        for line in event.read_text(encoding="utf-8").splitlines()
+        for outcome in json.loads(line).get("outcomes", [])
+    }
+    assert hashlib.sha256(target.encode()).hexdigest() in hashes
+    assert hashlib.sha256(consulted.encode()).hexdigest() not in hashes
 
 
 def test_a_hidden_uppercase_extension_title_twin_does_not_change_a_link(
