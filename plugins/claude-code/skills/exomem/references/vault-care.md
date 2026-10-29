@@ -146,11 +146,12 @@ is in **`audit-checks.md`**.
 
 ## Maintenance modes (`check_memory/repair_memory`)
 
-Remote `repair_memory` publishes only structured-file and tag-variant writes.
-`check_memory` publishes the admitted read-only maintenance variants, including
-curation work items, previews and status. Other repairs and curation writes
-require the host CLI. A proposal persists workflow state and remains a write.
-Follow the active schema; a descriptive mode name never grants remote admission.
+Remote `repair_memory` publishes structured-file, tag-variant and curation
+writes. `check_memory` publishes the admitted read-only maintenance variants,
+including curation work items, previews and status. A remote client runs the
+whole curation workflow: work item, proposal, preview, one exact-plan approval
+and apply. Other repairs require the host CLI. Follow the active schema; a
+descriptive mode name never grants remote admission.
 
 
 Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontmatter, stable IDs) and dry-run by default. `reconcile` heals index-count and sidecar drift from out-of-band edits, is idempotent and non-destructive, and writes by default (`dry_run=true` previews). Remote callers may audit or preview; write modes are operator-only and return `MAINTENANCE_REQUIRES_CLI` before taking the mutation boundary.
