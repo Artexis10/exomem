@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from exomem import capture_sweep, epistemic_graph
+from exomem.vault import WikilinkResolver
 
 A = "Knowledge Base/Notes/a.md"
 B = "Knowledge Base/Notes/b.md"
@@ -62,16 +63,19 @@ def _page_state(path: str, *, title: str = "", status: str | None = "active") ->
 def _corpus(
     tmp_path: Path,
     *,
-    titles: dict[str, tuple[str, ...]] | None = None,
+    entries: tuple[tuple[str, str | None], ...] = (),
     pages: dict[str, SimpleNamespace] | None = None,
 ) -> SimpleNamespace:
+    resolver = WikilinkResolver.from_entries(tmp_path, entries)
     return SimpleNamespace(
         vault_root=tmp_path,
         pages=pages or {},
-        resolver_full_paths=frozenset(),
-        resolver_kb_stripped=frozenset(),
-        resolver_stems={},
-        resolver_titles=titles or {},
+        resolver_entries=entries,
+        resolver_full_paths=resolver.full_paths,
+        resolver_kb_stripped=resolver.kb_stripped,
+        resolver_stems=resolver.stems,
+        resolver_titles=resolver.titles,
+        resolver_candidates_by_key=resolver.candidates_by_key,
     )
 
 

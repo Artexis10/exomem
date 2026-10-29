@@ -129,9 +129,9 @@ root = Path(sys.argv[1])
 os.setsid()
 if os.fork() == 0:
     os.setsid()
-    # Publish the readiness signal only after the PID is readable.
-    (root / 'orphan.pid.tmp').write_text(str(os.getpid()))
-    os.replace(root / 'orphan.pid.tmp', root / 'orphan.pid')
+    pid_path = root / 'orphan.pid.tmp'
+    pid_path.write_text(str(os.getpid()))
+    pid_path.replace(root / 'orphan.pid')
     time.sleep(120)
 else:
     deadline = time.monotonic() + 20

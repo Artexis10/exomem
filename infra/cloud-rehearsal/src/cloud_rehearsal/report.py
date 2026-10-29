@@ -201,8 +201,9 @@ def failure_record(error: BaseException) -> dict[str, Any]:
         record.update({"cross_lane": True, "component": error.component, "owner": error.owner, "evidence": error.evidence})
     elif not isinstance(error, StepFailure):
         # A rehearsal bug or an environment failure, not a product finding:
-        # keep the frame so it can be fixed.
-        record["traceback"] = traceback.format_exception(error)[-6:]
+        # keep the caller and failure frames within a bounded report.
+        frames = traceback.format_tb(error.__traceback__)
+        record["traceback"] = frames if len(frames) <= 10 else frames[:4] + frames[-6:]
     return record
 
 

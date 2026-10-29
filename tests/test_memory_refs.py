@@ -900,6 +900,28 @@ def test_through_the_projection_a_hidden_only_id_reads_as_an_absent_one(
     }
 
 
+def test_excluded_owners_do_not_change_visible_reference_resolution(tmp_path: Path) -> None:
+    from exomem.governance import egress
+
+    shared, hidden_only = memory_refs.new_id(), memory_refs.new_id()
+    visible = "Knowledge Base/Notes/Open/shown.md"
+    _write_page(tmp_path, visible, _page(shared))
+    _write_page(tmp_path, "Knowledge Base/Notes/Hidden/twin.md", _page(shared))
+    _write_page(tmp_path, "Knowledge Base/Notes/Hidden/only.md", _page(hidden_only))
+    (tmp_path / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Notes/Hidden\n")
+    ref = memory_refs.memory_ref(shared)
+    hidden_ref = memory_refs.memory_ref(hidden_only)
+
+    assert egress.resolve_visible_identifier(tmp_path, ref) == visible
+    assert egress.visible_memory_ref_paths(tmp_path, [ref, hidden_ref]) == {ref: visible}
+    with pytest.raises(memory_refs.ReferenceError) as caught:
+        egress.resolve_visible_identifier(tmp_path, hidden_ref)
+    assert caught.value.as_dict() == {
+        "code": "REFERENCE_NOT_FOUND",
+        "reason": f"memory id not found: {hidden_only}",
+    }
+
+
 def test_a_projection_behind_an_external_edit_falls_back_to_the_scan(
     tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

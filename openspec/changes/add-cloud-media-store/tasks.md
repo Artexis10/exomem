@@ -37,7 +37,7 @@
   - The bucket and bucket-restricted read/write key are implemented, disabled by default. All five mocked durability plans pass, including two media cases. The provider plan and live key listing remain unverified; no provider resources were created.
 - [x] 4.2 In cellctl, mint the media bundle, wrap it under the cell root, and sign the per-cell edge credential. Render the standard-mode bundle and edge credential into selected cells' Secrets. Tenant-lock enablement stays with `cloud-cell-key-custody`; this task adds no unlock channel. Verify: tests show the cell-root wrap and additional data, standard-mode re-rendering, and an edge render that holds neither key.
 - [x] 4.3 In the chart, add the edge Deployment and Service (literal ClusterIP, Recreate rollout), the canary list, the fleet switch, and the network and admission rules for selected runtimes. Verify: chart tests show an unchanged default render, only the edge peer added for a selected cell, and nothing added for an unselected cell.
-- [x] 4.4 Build the edge as decided in 2.1, with the active set that cellctl publishes and the generation the edge reports. Verify these with tests:
+- [ ] 4.4 Build the edge as decided in 2.1, with the active set that cellctl publishes and the generation the edge reports. Verify these with tests:
   - the prefix is taken from the credential;
   - another cell's object is refused;
   - a rotated or deleted cell's validly signed credential is refused;
@@ -45,6 +45,7 @@
   - no hide, list or delete operation exists.
   - a restart retains uncertain write intent, and missing HEAD does not produce a drained-generation acknowledgement;
   - a lost successful upload reply recovers its exact version, while unrelated cells continue to work.
+  - Multipart initiation recovery and retained edge-state drain evidence remain incomplete. Complete them before enabling media cleanup.
 - [ ] 4.5 Meter media storage in the cell from referenced versions, meter physical bytes in cellctl, and refuse uploads above the allowance with `MEDIA_ALLOWANCE_EXCEEDED`. Verify: tests show refusal before any byte, status for an original left local, and no charge for versions kept only for backups.
 - [ ] 4.6 Write a reference manifest from each backup's clone. Add cellctl's version destruction in the backup hold after prune, under the three conditions. Verify these with tests using the fake provider:
   - a version stays while a months-old retained snapshot names it;

@@ -189,7 +189,8 @@ def plan_active_set(published: ActiveSet, selected: Mapping[str, int], now_ms: i
     takes the new generation as its version, which no earlier credential carries. A cell that leaves the set
     loses its version, and a later return starts afresh, so a revoked credential stays revoked.
     """
-    if published.cells.keys() == selected.keys() and all(
+    # Zero is unpublished state; an empty revocation must still advance the generation.
+    if published.generation > 0 and published.cells.keys() == selected.keys() and all(
         published.epochs.get(cell, 0) == epoch for cell, epoch in selected.items()
     ):
         return published

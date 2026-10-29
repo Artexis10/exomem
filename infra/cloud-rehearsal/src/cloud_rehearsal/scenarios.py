@@ -872,8 +872,11 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
         # Which session failed, and what the gateway says to each tenant now.
         for tenant in (ctx.a, ctx.b):
             if tenant.client and tenant.client.access_token:
-                probe = await raw_mcp_post(ctx.resolver, token=tenant.client.access_token)
-                record.evidence[f"gateway_now_{tenant.label}"] = {"status": probe.status_code, "body": _safe_body(probe)}
+                try:
+                    probe = await raw_mcp_post(ctx.resolver, token=tenant.client.access_token)
+                    record.evidence[f"gateway_now_{tenant.label}"] = {"status": probe.status_code, "body": _safe_body(probe)}
+                except Exception as diagnostic_error:  # noqa: BLE001 -- diagnostics must not replace the original failure
+                    record.evidence[f"gateway_now_{tenant.label}"] = {"error_type": type(diagnostic_error).__name__}
         raise
 
 
@@ -905,10 +908,16 @@ async def _step_10(ctx: Context, record: StepRecord) -> None:
     else:
         async with ctx.a.client.mcp() as session:
             a_sees_b = await session.call("ask_memory", {"query": ctx.b.phrase})
-    record.evidence["phase"] = "denial probes"
-    selector = await raw_mcp_post(ctx.resolver, token=ctx.b.client.access_token, headers={"x-cell-id": ctx.a.cell_id})
-    forged = await raw_mcp_post(ctx.resolver, token=secrets.token_urlsafe(32))
-    anonymous = await raw_mcp_post(ctx.resolver, token=None)
+    denials: dict[str, Any] = {"selector": {}, "forged": {}, "anonymous": {}}
+    record.evidence["denial_probes"] = denials
+    record.evidence["phase"] = "selector header denial"
+    selector = await raw_mcp_post(ctx.resolver, token=ctx.b.client.access_token,
+                                  headers={"x-cell-id": ctx.a.cell_id}, observation=denials["selector"])
+    record.evidence["phase"] = "forged bearer denial"
+    forged = await raw_mcp_post(ctx.resolver, token=secrets.token_urlsafe(32), observation=denials["forged"])
+    record.evidence["phase"] = "anonymous bearer denial"
+    anonymous = await raw_mcp_post(ctx.resolver, token=None, observation=denials["anonymous"])
+    record.evidence["phase"] = "cross-cell network denial"
     # Network: B's cell pod cannot open A's Service (NetworkPolicy, D5).
     a_service_ip = ctx.kube_json("get", "service", "cell", "--namespace", namespace_name(ctx.a.cell_id))["spec"]["clusterIP"]
     b_pod = ctx.runtime_pod(ctx.b.cell_id)

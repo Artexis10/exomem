@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "seed": 4207,
-  "shards": 1,
+  "shards": 8,
   "reference_profile": "../recall-latency/profile.json",
   "records": {
     "collections": 30,

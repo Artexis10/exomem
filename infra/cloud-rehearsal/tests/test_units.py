@@ -410,6 +410,45 @@ def test_the_token_request_observer_records_the_verifier_shape_not_the_verifier(
     assert verifier not in str(client.verifier_seen)
 
 
+def test_denial_transport_failure_keeps_response_evidence_and_caller() -> None:
+    """A truncated denial must fail with framing evidence, without recording credentials."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import httpx
+
+    from cloud_rehearsal.mcp_client import raw_mcp_post
+
+    class TruncatedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"part"
+            raise httpx.RemoteProtocolError("truncated response")
+
+    def handle(request):
+        return httpx.Response(400, headers={"transfer-encoding": "chunked", "set-cookie": "private-cookie"},
+                              stream=TruncatedBody())
+
+    resolver = SimpleNamespace(async_client=lambda **kwargs: httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), **kwargs,
+    ))
+    observation = {}
+
+    async def exercise():
+        try:
+            await raw_mcp_post(resolver, token=None, observation=observation)
+        except httpx.RemoteProtocolError as error:
+            failure = report.failure_record(error)
+            assert failure["type"] == "RemoteProtocolError"
+            assert "raw_mcp_post" in "".join(failure["traceback"])
+            return
+        pytest.fail("a truncated response cannot establish a denial")
+
+    asyncio.run(exercise())
+    assert observation == {"status": 400, "http_version": "HTTP/1.1",
+                           "framing": {"transfer-encoding": "chunked"}, "received_bytes": 4}
+    assert "private-cookie" not in str(observation)
+
+
 def test_operator_abort_is_opt_in_and_accepts_provision_only() -> None:
     """The ordinary rehearsal must not acquire the interrupted restore stage."""
     from cloud_rehearsal.__main__ import _parser
