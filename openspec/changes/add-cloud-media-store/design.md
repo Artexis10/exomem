@@ -310,6 +310,8 @@ The cache ledger and provider listings cannot prove the owner's current referenc
 A strict census extends the existing reserved-path boundary; it adds no inventory database or second exclusion list.
 Registry-owned private state stays excluded.
 Ordinary aliases, incomplete enumeration, invalid placement or malformed potential companions make usage unknown.
+Closing checks compare the complete namespace and the versions of selected headers and used placement files.
+These witnesses detect changes across the census; they do not create an atomic snapshot against external writers.
 The shared frontmatter reader distinguishes absent frontmatter from an unterminated block and rejects non-mapping roots in strict mode.
 Unknown usage defers offload, while local bytes and core operations remain available.
 This prevents unmetered uploads; its cost is a retry after reference custody is repaired.

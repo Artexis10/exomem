@@ -527,12 +527,14 @@ def _delete_file_local(
         "frontmatter_snapshot": _make_json_safe(fm),
     }
     metadata_bytes = json.dumps(meta, indent=2, default=str).encode("utf-8")
-    placement_required = stored_original is not None and any(
+    binary_placement_required = stored_original is not None and any(
         item.source_path == rel_path and item.content_hash == stored_original.binary_sha256
         and item.size == stored_original.binary_size for item in lifecycle_operation.manifest
     )
-    placement_files: list[tuple[str, bytes]] = []
-    if placement_required:
+    # A stored companion needs durable placement to resolve its historical binary path in Trash.
+    placement_required = binary_placement_required or "stored_object" in fm
+    placement_files: list[tuple[str, bytes]] = [(meta_rel, metadata_bytes)] if placement_required else []
+    if binary_placement_required:
         assert stored_original is not None and stored_original.reference is not None
         assert stored_original.binary_sha256 is not None and stored_original.binary_size is not None
         from .vault import render_frontmatter_document, serialize_frontmatter
@@ -542,7 +544,7 @@ def _delete_file_local(
         fields = originals.reference_companion_fields(binding, stored_original.reference)
         companion = originals.sidecar_path(Path(trash_rel)).as_posix()
         companion_bytes = render_frontmatter_document(serialize_frontmatter(fields), "").encode("utf-8")
-        placement_files = [(meta_rel, metadata_bytes), (companion, companion_bytes)]
+        placement_files.append((companion, companion_bytes))
     try:
         with trash_metadata.preserve_placement(vault_root, transition, placement_files):
             try:

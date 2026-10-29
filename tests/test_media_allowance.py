@@ -169,6 +169,31 @@ def test_replaced_header_cannot_publish_an_earlier_total(custody, monkeypatch):
     assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
 
 
+@pytest.mark.parametrize("existing", [False, True], ids=["new-name", "earlier-plain-header"])
+def test_reference_added_while_a_later_header_is_read_makes_usage_unknown(custody, monkeypatch, existing):
+    vault, page, header = custody
+    page.unlink()
+    if existing:
+        page.write_text("An ordinary note.\n")
+    marker = page.with_name("z-marker.md")
+    marker.write_text("---\ncensus_marker: true\n---\n")
+    parse = media_allowance.parse_frontmatter
+    changed = []
+
+    def add_reference(text, **kwargs):
+        parsed = parse(text, **kwargs)
+        if parsed[0].get("census_marker") and not changed:
+            page.write_bytes(header)
+            changed.append(True)
+        return parsed
+
+    monkeypatch.setattr(media_allowance, "parse_frontmatter", add_reference)
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    assert changed
+    assert media_allowance.reference_usage(vault).used_bytes == 23
+    assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
+
+
 def test_yaml_expansion_and_capacity_failures_leave_the_allowance_unknown(custody, monkeypatch):
     vault, page, header = custody
     nodes = ["base: &a0 {x: y}"]

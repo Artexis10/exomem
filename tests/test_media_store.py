@@ -1493,6 +1493,83 @@ def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(
         assert connection.execute("SELECT ciphertext_size FROM media_offload_refusals").fetchone()[0] is None
 
 
+def test_stored_companion_stays_live_when_trash_placement_cannot_be_written(vault: Path, selected_store, monkeypatch):
+    from exomem import (
+        delete_file,
+        media_allowance,
+        media_jobs,
+        media_processing,
+        preserve,
+        reserved_paths,
+    )
+
+    path = vault / "Knowledge Base/Notes/Media/clip.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"original bytes")
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, originals.sidecar_path(path), text="searchable text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    companion = originals.sidecar_path(path)
+    before = companion.read_bytes()
+    publish = reserved_paths.publish_generic_bytes
+
+    def fail_placement(root, name, data, **kwargs):
+        if str(name).endswith(".meta.json"):
+            raise OSError("placement write failed")
+        return publish(root, name, data, **kwargs)
+
+    monkeypatch.setattr(reserved_paths, "publish_generic_bytes", fail_placement)
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(vault, path=companion.relative_to(vault).as_posix(), confirm=True)
+    assert refused.value.code == "DELETE_FAILED"
+    assert companion.read_bytes() == before
+    assert media_allowance.reference_usage(vault).used_bytes == len(path.read_bytes())
+
+
+def test_reference_restored_during_final_census_cannot_publish_over_quota(vault: Path, selected_store, monkeypatch):
+    from exomem import media_allowance, media_jobs, media_store
+
+    values, config = selected_store
+    retained = _preserved(vault, category="retained-version")
+    _offload(vault, retained)
+    companion = originals.sidecar_path(retained)
+    saved = companion.read_bytes()
+    companion.unlink()
+    candidate = _preserved(vault, category="new-version")
+    expected = candidate.read_bytes()
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": len(expected)}}}))
+    marker = candidate.parent / "z-marker.md"
+    marker.write_text("---\ncensus_marker: true\n---\n")
+    upload = media_store.FilesystemStore.upload
+    uploaded, restored = [], []
+
+    def record_upload(*args, **kwargs):
+        version = upload(*args, **kwargs)
+        uploaded.append(version)
+        return version
+
+    parse = media_allowance.parse_frontmatter
+
+    def restore_reference(text, **kwargs):
+        parsed = parse(text, **kwargs)
+        if uploaded and parsed[0].get("census_marker") and not restored:
+            companion.write_bytes(saved)
+            restored.append(True)
+        return parsed
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", record_upload)
+    monkeypatch.setattr(media_allowance, "parse_frontmatter", restore_reference)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, candidate)
+    assert restored and refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert candidate.read_bytes() == expected
+    assert originals.original_state(vault, candidate).reference is None
+    assert media_allowance.reference_usage(vault).used_bytes == len(retained.read_bytes())
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+
+
 def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Path, selected_store, monkeypatch):
     from dataclasses import replace
 

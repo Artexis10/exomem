@@ -397,6 +397,10 @@ def processing_status(vault: Path, *, path: str | None = None) -> tuple[list[dic
 
 
 def enqueue_offload(vault: Path, path: Path) -> int:
+    return _enqueue_offload(vault, path)
+
+
+def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.ReferenceUsage | None = None) -> int:
     config = originals.configuration(vault)
     if config is None:
         return 0
@@ -404,7 +408,7 @@ def enqueue_offload(vault: Path, path: Path) -> int:
     if snapshot.state != "local" or snapshot.binary_sha256 is None or not snapshot.offloadable:
         return 0
     store = MediaJobStore(vault)
-    if _refused(store, snapshot, config):
+    if _refused(store, snapshot, config, usage=usage):
         return 0
     current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
@@ -419,9 +423,17 @@ def enqueue_offload(vault: Path, path: Path) -> int:
 
 
 def enqueue_offloads(vault: Path) -> int:
+    from .writer_lease import get_manager
+
     if originals.binding_for(vault) is None:
         return 0
-    return sum(enqueue_offload(vault, item.path) for item in bound_originals(vault))
+    with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
+        placeholders = ",".join("?" for _code in media_allowance.ALLOWANCE_REFUSAL_CODES)
+        rows, _coverage = _status_candidates(vault, "media_offload_refusals",
+            f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
+            media_allowance.ALLOWANCE_REFUSAL_CODES)
+        usage = media_allowance.reference_usage(vault) if rows else None
+        return sum(_enqueue_offload(vault, item.path, usage=usage) for item in bound_originals(vault))
 
 
 def _guard(vault: Path, operation: str):
@@ -551,7 +563,10 @@ def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStor
         conn.close()
 
 
-def _refused(store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object]) -> str | None:
+def _refused(
+    store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object], *,
+    usage: media_allowance.ReferenceUsage | None = None,
+) -> str | None:
     conn = store._connect(readonly=True)
     try:
         row = conn.execute("SELECT sha256, code, ciphertext_size FROM media_offload_refusals "
@@ -559,7 +574,7 @@ def _refused(store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str,
                            (store._relative(snapshot.path), snapshot.binary_sha256)).fetchone()
     finally:
         conn.close()
-    return _refusal_code(store.vault_root, row, snapshot, config) if row is not None else None
+    return _refusal_code(store.vault_root, row, snapshot, config, usage=usage) if row is not None else None
 
 
 def _refusal_code(

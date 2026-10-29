@@ -2342,6 +2342,7 @@ def _iter_generic_tree_held(
             chosen = None if select is None else frozenset(
                 select([(record.relative_path, record.identity.kind) for record, _ in candidates])
             )
+            selected_versions: dict[str, held_fs.FileVersion] = {}
             for record, child in candidates:
                 if chosen is not None and record.relative_path not in chosen:
                     continue
@@ -2398,6 +2399,8 @@ def _iter_generic_tree_held(
                         if not isinstance(descriptor, int):
                             raise ReservedPathLeafError("IO_REFUSED")
                         version = file.version()
+                        if require_complete:
+                            selected_versions[child] = version
 
                         def require_current(*, version=version, leaf=leaf) -> None:
                             if file.version() != version:
@@ -2453,6 +2456,22 @@ def _iter_generic_tree_held(
                             markdown,
                         )
                         require_current()
+            if require_complete:
+                current_records = _list_candidate_records(
+                    filesystem, source_directory, relative, identities=identities,
+                    require_complete=True, recursive=recursive,
+                )
+                if current_records != records:
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+                for child, version in selected_versions.items():
+                    parent_path, leaf = _leaf_spelling(child)
+                    with filesystem.parent(parent_path).require() as parent:
+                        _refuse_private_identity(parent.identity, identities)
+                        _require_current_generic_directory(filesystem, parent)
+                        with filesystem.file(parent, leaf).require() as current_file:
+                            _refuse_private_identity(current_file.identity, identities)
+                            if current_file.version() != version:
+                                raise ReservedPathLeafError("IDENTITY_CHANGED")
             _require_current_generic_directory(filesystem, source_directory)
 
 

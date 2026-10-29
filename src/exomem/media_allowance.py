@@ -86,6 +86,7 @@ def admission(
 def _binding(
     fields: dict[str, object], path: str, store: originals.StoreBinding,
     metadata: dict[str, str], vault: Path, placements: dict[str, dict[str, object]],
+    placement_versions: dict[str, held_fs.FileVersion],
 ) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
     try:
         return originals.referenced_binding(fields, sidecar_path=path, store=store)
@@ -117,6 +118,7 @@ def _binding(
                     placement = {"original_path": parsed.get("original_path")}
                     trash_metadata.original_path(placement, trash_root=key, current_path=path)
                     source.require_current()
+                    placement_versions[metadata_path] = source.version
                     placements[key] = placement
                     del parsed, text, raw
         try:
@@ -142,6 +144,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
         with get_manager().consistency_guard(vault, operation="media_reference_usage", holder_kind="background"):
             metadata: dict[str, str] = {}
             placements: dict[str, dict[str, object]] = {}
+            placement_versions: dict[str, held_fs.FileVersion] = {}
 
             def select(candidates: list[tuple[str, str]]):
                 for relative, kind in candidates:
@@ -164,7 +167,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                     path = f"{kb_dirname()}/{entry.relative_path}"
                     bound = _binding(
                         parse_frontmatter(entry.markdown.decode("utf-8"), strict=True)[0],
-                        path, store, metadata, vault, placements,
+                        path, store, metadata, vault, placements, placement_versions,
                     )
                     del entry
                     if bound is None:
@@ -176,6 +179,11 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                     versions[key] = (binary, reference)
                     if not trash_metadata.is_trash_path(path):
                         live_paths.setdefault(key, binary.path)
+            for metadata_path, version in placement_versions.items():
+                with reserved_paths.open_generic_binary(vault, metadata_path) as source:
+                    if source.version != version:
+                        raise ValueError("Trash placement changed during the census")
+                    source.require_current()
     except (
         OSError, ValueError, MemoryError, RecursionError, held_fs.HeldFsError,
         reserved_paths.ReservedPathLeafError, runtime_resources.PreparationBudgetExceeded,
