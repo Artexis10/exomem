@@ -449,7 +449,8 @@ class Arm:
                 raise MeasurementRefused("startup-timeout", phase=phase)
             await asyncio.sleep(0.25)
 
-    async def quiesce(self, *, limit: float, window: float = 10.0, share: float = 0.2) -> float:
+    async def quiesce(self, *, limit: float, window: float = 10.0, share: float = 0.2,
+                      phase: str = "startup") -> float:
         """Wait until the worker used under `share` of one CPU for `window` seconds.
 
         A worker that re-embeds or rebuilds after startup stays busy and is refused here.
@@ -459,6 +460,7 @@ class Arm:
             return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
         started = time.perf_counter()
+        reported = started
         history = [(started, cpu_seconds())]
         while time.perf_counter() - started < limit:
             await asyncio.sleep(1)
@@ -466,7 +468,12 @@ class Arm:
             history.append((now, cpu_seconds()))
             history = [entry for entry in history if now - entry[0] <= window + 0.5]
             span = history[-1][0] - history[0][0]
-            if span >= window and (history[-1][1] - history[0][1]) / span < share:
+            used = history[-1][1] - history[0][1]
+            if now - reported >= window:
+                progress(f"quiesce-window arm={self.name} phase={phase} elapsed_s={now - started:.1f} "
+                         f"window_s={span:.1f} worker_cpu_s={used:.3f} cpu_psi_avg60={cpu_pressure()}")
+                reported = now
+            if span >= window and used / span < share:
                 return now - started
         raise MeasurementRefused("arm-not-quiescent", phase="quiescence")
 
@@ -560,18 +567,26 @@ async def time_cases(arms: dict[str, Arm], cases: list, *, repeats: int, timeout
 
     samples = []
     for index, case in enumerate(cases):
+        started = time.monotonic()
+        progress(f"case-start index={index + 1}/{len(cases)}")
         for repeat in range(repeats + 1):
             first = "base" if (index + repeat) % 2 == 0 else "head"
             for name in (first, "head" if first == "base" else "base"):
+                progress(f"sample-start case_index={index + 1} arm={name} repeat={repeat} warmup={repeat == 0}")
                 arms[name].resume()
                 try:
                     measurement = await measure_call(arms[name].client, case, timeout)
                 finally:
                     arms[name].pause()
+                progress(f"sample-complete case_index={index + 1} arm={name} repeat={repeat} "
+                         f"warmup={repeat == 0} elapsed_ms={measurement.elapsed_ms:.3f} outcome={measurement.outcome}")
+                if measurement.failure:
+                    progress(f"sample-failed case_index={index + 1} arm={name} repeat={repeat} outcome={measurement.outcome}")
                 if repeat:
                     samples.append({"case": case.id, "group": case.group, "arm": name, "repeat": repeat - 1,
                                     "first": first, "elapsed_ms": measurement.elapsed_ms,
                                     "outcome": measurement.outcome, "failure": measurement.failure})
+        progress(f"case-complete index={index + 1}/{len(cases)} elapsed_s={time.monotonic() - started:.1f}")
     return samples
 
 
@@ -583,7 +598,7 @@ async def stop_arms(arms: dict[str, Arm]) -> None:
 
 
 def progress(line: str) -> None:
-    """One stderr line per preparation step: a run that overruns its step budget still shows where the time went."""
+    """Log phase and case progress without request or response content."""
     print(line, file=sys.stderr, flush=True)
 
 
@@ -591,34 +606,39 @@ async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
     started = time.monotonic()
     await arm.load_collections(fixture)
     loaded = time.monotonic()
-    await arm.quiesce(limit=1800)
+    progress(f"fixture-loaded arm={arm.name} load_s={loaded - started:.0f}")
+    await arm.quiesce(limit=1800, phase="fixture")
     # Fixture preparation is not part of the summary; one stderr line keeps its cost visible to the operator.
     progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}")
 
 
 async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, repeats: int) -> dict[str, Any]:
-    """Prepare each arm, restart it and time the cases; returns the samples and arm timings.
+    """Prepare quiet arms and time the cases; returns samples and initial startup timings.
 
-    The first start may build state and loads the fixture. The second start is the one that is
-    timed: it must find existing state and a derived store that is ready, or the arm is refused.
+    Fixture workers stay running after loading and quiescence. Private workers start on their
+    prepared state. Both modes require existing state and ready derived collections before timing.
     """
     try:
         if fixture is not None:
-            await asyncio.gather(*(arm.start(quiescence_limit=1800) for arm in arms.values()))
+            started = await asyncio.gather(*(arm.start(quiescence_limit=1800) for arm in arms.values()))
             await asyncio.gather(*(load_and_quiesce(arm, fixture) for arm in arms.values()))
-            await asyncio.gather(*(arm.stop() for arm in arms.values()))
-        started = await asyncio.gather(*(arm.start(quiescence_limit=900) for arm in arms.values()))
+        else:
+            started = await asyncio.gather(*(arm.start(quiescence_limit=900) for arm in arms.values()))
         timings = dict(zip(arms, started, strict=True))
+        progress("timeability-check-start")
         for arm in arms.values():
             arm.require_timeable()
+        progress("timeability-check-complete")
         for arm in arms.values():
             arm.pause()
         pressure_start = cpu_pressure()
         samples = await time_cases(arms, cases, repeats=repeats)
+        progress(f"measurement-complete samples={len(samples)}")
         return {"samples": samples, "timings": timings,
                 "environment": {"cpu_pressure_start": pressure_start, "cpu_pressure_end": cpu_pressure()}}
     finally:
         await stop_arms(arms)
+        progress("cleanup-complete")
 
 
 # --- Public fixture runs and the private sandbox ------------------------------
@@ -792,7 +812,7 @@ def run_paired(args: argparse.Namespace) -> dict:
         rels = prepare_notes(arms, base_src, base_python, notes_pages=args.notes_pages)
         progress(f"notes-prepared elapsed_s={time.monotonic() - began:.0f}")
         fixture = gen_collection_fixture(profile)
-        everything = gen_collection_cases(fixture, profile) + gen_note_cases(arms["head"].vault, rels, profile)
+        everything = gen_collection_cases(fixture, profile) + gen_note_cases(arms["head"].vault, rels, profile, fixture)
         cases, total = select_cases(everything, per_group=args.max_cases, shard=args.shard, shards=profile["shards"])
         loaded = load_cases(json.dumps(cases).encode())
         for arm in arms.values():

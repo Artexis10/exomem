@@ -1901,6 +1901,12 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
     (a Records-layer artifact) differ.
     """
     root = Path(vault_root)
+    with authorization_pass(root):
+        return _inventory_collections(root, semantic_profile=semantic_profile)
+
+
+def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, Any]:
+    """Read every inventory path under the caller's single authorization pass."""
 
     def authorize(path: str) -> bool:
         return _authorize(root, path, receipt=True)
