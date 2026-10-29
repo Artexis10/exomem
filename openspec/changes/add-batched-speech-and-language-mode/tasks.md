@@ -19,9 +19,12 @@
 ## 4. Proof and rollout
 
 - [x] 4.1 Run the branch's `extract_text` on the desktop GPU, both arms, on a long single-language lecture, an English call and a looping lecture; record time, lines, median line duration, word overlap and the longest identical run.
-  Result (29 Oct 2026, RTX 5080, large-v3 fp16, batch 16, branch 391a5de16; sequential arm from the same policy):
-  - Long lecture, `et`: batched 110 s against 355 s (3.2x); 342 lines against 364; median line start gap 6 s against 5 s; word overlap 0.83; longest identical run 4 against 2, in pre-lecture hall murmur.
-  - English call, no language: detected `en` at 0.69; batched 5 s; 17 lines against 31; median start gap 19 s, because the call is mostly silence between turns; word overlap 0.84.
-  - Looping lecture, `et`: batched 104 s; longest identical run 6 against 20; most-repeated line 9 against 30; word overlap 0.55 (low-intelligibility audio in both arms).
-  - The sidecar facts named `batched`, `single` and `fw-policy-2` correctly. Batched ships: lines on the lectures are citable, and loops fell on the worst file.
+  Result (29 Oct 2026, RTX 5080, large-v3 fp16, batch 16, branch 391a5de16). The sequential arm used the same policy, from the earlier sequential run of each file. Run files: `result.json` and `metrics.py` from the acceptance run, kept privately with the recordings.
+  - Long lecture, `et`: batched 110 s against 355 s sequential (3.2x). 342 lines against 364. Median words per line 11.5 against 9. Median start gap 6 s against 5 s. Word overlap 0.83. Longest identical run 4 against 2, in pre-lecture hall murmur.
+  - English call, no language: detected `en` at 0.69. Batched took 5 s. 17 lines against 31. Median words per line 13 against 3. Median start gap 19 s against 3.5 s, because the call is mostly silence between turns. Word overlap 0.84.
+  - Looping lecture, `et`: batched 104 s. 614 lines against 565. Median words per line 5 against 5. Longest identical run 6 against 20. Most-repeated line 9 against 30. Word overlap 0.55, from low-intelligibility audio in both arms.
+  - The sidecar facts named `batched`, `single` and `fw-policy-2` correctly.
+  - The transcript text carries line starts only, so the run measured words per line instead of line duration (see design.md). Every batched arm stays at a median of 15 words or fewer. Loops fell on the worst file and rose only in murmur on one other. Batched ships.
+  - Word accuracy has no listened reference, so it is unverified in both arms.
 - [x] 4.2 Regenerate the tool surface and record the new digest as pending in the connector contract.
+- [ ] 4.3 After the release is installed, refresh the ChatGPT plugin so that it sends `multilingual`, then process one recording in each language mode on the installed service and record the sidecar facts here.

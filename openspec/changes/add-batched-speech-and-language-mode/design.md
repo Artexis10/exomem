@@ -51,4 +51,4 @@ Run the branch's `extract_text` on the desktop GPU on three recordings: a long s
 - the longest run of identical lines;
 - the recorded `asr_*` facts.
 
-Batched ships when its lines are citable (a median of 15 s or less) and its loop count is no worse than sequential.
+Batched ships when its lines are citable and its loop count is no worse than sequential. The transcript text carries line starts only, and a start gap counts silence between turns. So citable means a median of 15 words per line or fewer. This criterion replaced the first draft's 15-second line duration on 29 October 2026, after the first run showed that a start gap counts silence. By the old criterion, the English call fails at 19 s.
