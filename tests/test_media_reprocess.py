@@ -221,6 +221,27 @@ def test_a_recording_can_be_declared_multilingual_before_the_pipeline_reads_it(
     assert _frontmatter(sidecar)["asr_language_mode"] == "multilingual"
 
 
+def test_a_declaration_is_not_refused_when_the_worker_claims_the_job_right_after_it_is_attached(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="audio", filename="rec.mp3", data=b"FAKEBYTES"
+    )
+    attach = media_jobs.MediaJobStore.request_extraction
+
+    def attach_then_claim(self, *args, **kwargs):
+        row_id = attach(self, *args, **kwargs)
+        if row_id:  # a refusal has no row to claim
+            assert self.claim_next() is not None  # the worker wins the race for the attached row
+        return row_id
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "request_extraction", attach_then_claim)
+
+    result = media_processing.process_declared_media(vault, vault / stub.path, multilingual=True)
+
+    assert (result.state, result.requeued) == (media_jobs.RUNNING, 1)  # applied, so no second reprocess
+
+
 def test_a_language_and_the_multilingual_mode_together_are_refused_before_any_work(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

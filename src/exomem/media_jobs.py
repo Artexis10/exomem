@@ -1029,8 +1029,10 @@ class MediaJobStore:
 
     def request_extraction(
         self, job: MediaJob, language: str | None, language_mode: str | None, *, reprocess: bool
-    ) -> bool:
+    ) -> int | None:
         """Queue a speech extraction that carries the language or mode a caller declared.
+
+        Returns the id of the row that now carries the request, or None when the row refuses it.
 
         With `reprocess`, the transcript is already complete: the row carries the request, so
         the worker may extract over the completed text for this run only. Without it, the
@@ -1051,9 +1053,9 @@ class MediaJobStore:
             ).fetchone()
             if row is not None and (row["state"] == RUNNING or row["has_result"]):
                 conn.rollback()
-                return False
+                return None
             if row is None:
-                conn.execute(
+                row_id = conn.execute(
                     """
                     INSERT INTO jobs (
                         job_key, binary_rel, sidecar_rel, media_type, do_ocr, state, attempts,
@@ -1071,8 +1073,9 @@ class MediaJobStore:
                         now,
                         now,
                     ),
-                )
+                ).lastrowid
             else:
+                row_id = row["id"]
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
@@ -1081,10 +1084,10 @@ class MediaJobStore:
                         memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
                     WHERE id = ?
                     """,
-                    (int(reprocess), language, language_mode, now, row["id"]),
+                    (int(reprocess), language, language_mode, now, row_id),
                 )
             conn.commit()
-            return True
+            return row_id
         except Exception:
             conn.rollback()
             raise

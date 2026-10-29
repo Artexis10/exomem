@@ -127,6 +127,7 @@ class ReconcileResult:
     sidecar_path: Path
     job_id: int | None
     requeued: int = 0
+    attached: bool = False  # the job row carries the request that reconcile_media was given
 
 
 @dataclass(frozen=True)
@@ -320,10 +321,19 @@ def reconcile_media(
                 return ReconcileResult(media_type, "completed", stored.sidecar_path, None)
             store = media_jobs.MediaJobStore(vault)
             job = store.get_by_binary(binary)
-            if job is None and media_engines.stage_enabled(media_type):
-                job_id = _enqueue(store, media_jobs.MediaJob(binary, stored.sidecar_path, media_type), request)
+            attached = False
+            if (job is None or request is not None) and media_engines.stage_enabled(media_type):
+                job_id, attached = _enqueue(
+                    store, media_jobs.MediaJob(binary, stored.sidecar_path, media_type), request
+                )
                 job = store.get(job_id)
-            return ReconcileResult(media_type, job.state if job else "pending", stored.sidecar_path, job.id if job else None)
+            return ReconcileResult(
+                media_type,
+                job.state if job else "pending",
+                stored.sidecar_path,
+                job.id if job else None,
+                attached=attached,
+            )
     try:
         retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
     except reserved_paths.ReservedPathLeafError as error:
@@ -522,6 +532,7 @@ def reconcile_media(
             _verify_binary_identity(binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
+            attached = False
             requested_clip = media_type in {"image", "video"} and not os.environ.get(
                 "EXOMEM_DISABLE_CLIP"
             )
@@ -533,7 +544,7 @@ def reconcile_media(
             do_ocr = extraction_on and (original != pending or needs_ocr)
             do_clip = requested_clip if original != pending else needs_clip
             if do_ocr or do_clip or (request is not None and extraction_on):
-                job_id = _enqueue(
+                job_id, attached = _enqueue(
                     store,
                     media_jobs.MediaJob(
                         binary_path=binary,
@@ -553,7 +564,7 @@ def reconcile_media(
                 if durable_job is None or not store.mark(
                     durable_job, media_jobs.BLOCKED, reason
                 ):
-                    result = ReconcileResult(media_type, state, sidecar, job_id)
+                    result = ReconcileResult(media_type, state, sidecar, job_id, attached=attached)
                 else:
                     current_sidecar = _read_sidecar_text(vault, sidecar)
                     if current_sidecar is None:
@@ -580,7 +591,7 @@ def reconcile_media(
                             )
                         )
                     state = media_jobs.BLOCKED
-            result = ReconcileResult(media_type, state, sidecar, job_id)
+            result = ReconcileResult(media_type, state, sidecar, job_id, attached=attached)
 
     assert result is not None
     if originals.binding_for(vault) is not None:
@@ -1187,19 +1198,22 @@ def retry_all_media(
 
 def _enqueue(
     store: media_jobs.MediaJobStore, job: media_jobs.MediaJob, request: ExtractionRequest | None
-) -> int:
-    """Queue the job; a declared request goes in with the row, so no worker claim can precede it."""
+) -> tuple[int, bool]:
+    """Queue the job: `(row id, whether the row carries the request)`.
+
+    A declared request goes in with the row, so no worker claim can precede it. A row that
+    refuses the request raises, so an attached request is never reported as refused.
+    """
     if request is None:
-        return store.enqueue(job)
-    if not store.request_extraction(job, request.language, request.mode, reprocess=request.reprocess):
+        return store.enqueue(job), False
+    row_id = store.request_extraction(job, request.language, request.mode, reprocess=request.reprocess)
+    if row_id is None:
         raise MediaProcessingError(
             "MEDIA_BUSY", "the file is being processed now; ask again when that run ends"
         )
     if job.do_clip:  # the request row carries the extraction stage only
         store.enqueue(replace(job, do_ocr=False))
-    queued = store.get_by_binary(job.binary_path, media_type=job.media_type)
-    assert queued is not None and queued.id is not None  # request_extraction just wrote the row
-    return queued.id
+    return row_id, True
 
 
 #: The shape of a language code, not a list of languages: whether the speech model supports a
@@ -1305,16 +1319,13 @@ def _queue_extraction(
             "TRANSCRIPT_COMPLETE",
             "the transcript is already complete; reprocess replaces it with the declared language",
         )
+    if result.attached:  # reconcile_media wrote the request into the job row as it queued the job
+        return replace(result, requeued=1)
+    # Only a completed transcript reaches here: reprocess replaces it, and reconcile queued nothing.
     store = media_jobs.MediaJobStore(vault)
-    job = store.get_by_binary(binary)
-    if result.state != "completed" and job is not None and job.state == media_jobs.PENDING and (
-        (job.language, job.language_mode, job.reprocess) == (hint, mode, reprocess)
-    ):
-        # reconcile_media queued the job with the request already in its row.
-        return ReconcileResult(result.media_type, job.state, result.sidecar_path, job.id, requeued=1)
     boundary = commit_guard() if commit_guard is not None else nullcontext()
     with boundary:
-        queued = store.request_extraction(
+        job_id = store.request_extraction(
             media_jobs.MediaJob(
                 binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type
             ),
@@ -1322,8 +1333,8 @@ def _queue_extraction(
             mode,
             reprocess=reprocess,
         )
-        job = store.get_by_binary(binary)
-    if not queued:
+        job = store.get(job_id) if job_id is not None else None
+    if job_id is None:
         raise MediaProcessingError(
             "MEDIA_BUSY",
             "the file is being processed now; ask again when that run ends",
@@ -1332,8 +1343,9 @@ def _queue_extraction(
         result.media_type,
         job.state if job is not None else media_jobs.PENDING,
         result.sidecar_path,
-        job.id if job is not None else None,
+        job_id,
         requeued=1,
+        attached=True,
     )
 
 
