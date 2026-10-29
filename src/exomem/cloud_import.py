@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -117,12 +118,17 @@ def unpack_stream(
     expect_files: int | None = None,
     expect_bytes: int | None = None,
     free_space: Callable[[Path], int] = free_bytes,
+    on_file: Callable[[str, int, str], None] | None = None,
 ) -> UnpackResult:
     """Unpack a tar stream into `staging`, which must not exist yet.
 
     With `staging=None` nothing is written: every member is read and checked
     exactly as an unpack would, so an archive can be proven before anything
     is stopped or changed.
+
+    `on_file` is called with each file's staging-relative path, size and
+    SHA-256, hashed as the file's bytes are read, so a caller can list the
+    staged files without a second pass.
 
     Success means every member followed the previous one with no gap, the
     end-of-archive block came right after the last member, only zero padding
@@ -151,6 +157,7 @@ def unpack_stream(
             max_members=max_members,
             reserve_bytes=reserve_bytes,
             free_space=free_space,
+            on_file=on_file,
         )
         if expect_files is not None and result.files != expect_files:
             raise ArchiveRefused(ARCHIVE_UNREADABLE, "count", result.members)
@@ -179,6 +186,7 @@ def _unpack_into(
     max_members: int,
     reserve_bytes: int,
     free_space: Callable[[Path], int],
+    on_file: Callable[[str, int, str], None] | None,
 ) -> UnpackResult:
     kinds: dict[tuple[str, ...], bool] = {(): True}  # path -> is a directory
     directory_times: list[tuple[tuple[str, ...], float]] = []
@@ -238,11 +246,14 @@ def _unpack_into(
                 if source is None:
                     raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members)
                 target = None if staging is None else staging.joinpath(*parts)
-                _write_file(source, target, member.size, members)
+                digest = hashlib.sha256() if on_file is not None else None
+                _write_file(source, target, member.size, members, None if digest is None else digest.update)
             if target is not None:
                 _set_mtime(target, member.mtime)
             kinds[parts] = False
             files += 1
+            if on_file is not None:
+                on_file("/".join(parts), member.size, digest.hexdigest())
 
         if not header.end_seen or header.end_offset != expected_offset:
             # `tarfile` reads a stream that stops between members as a clean
@@ -354,8 +365,11 @@ def _ensure_directory(
         kinds[prefix] = True
 
 
-def _write_file(source: BinaryIO, target: Path | None, size: int, index: int) -> None:
-    """Copy exactly `size` bytes, or read and discard them when `target` is None."""
+def _write_file(
+    source: BinaryIO, target: Path | None, size: int, index: int,
+    hash_update: Callable[[bytes], object] | None = None,
+) -> None:
+    """Copy exactly `size` bytes, or read and discard them when `target` is None; `hash_update` sees each chunk."""
 
     sink: BinaryIO | None = None
     if target is not None:
@@ -371,6 +385,8 @@ def _write_file(source: BinaryIO, target: Path | None, size: int, index: int) ->
                 raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", index)
             if sink is not None:
                 sink.write(chunk)
+            if hash_update is not None:
+                hash_update(chunk)
             remaining -= len(chunk)
     finally:
         if sink is not None:

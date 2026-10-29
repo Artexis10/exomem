@@ -4,7 +4,7 @@
 
 ## 2. Stage manifests and consuming
 
-- [ ] 2.1 Add a member manifest (stage-relative path, size, SHA-256, hashed while unpacking) to the Cloud import receipt for an `adopt` import, and remove it on discard. Verify: tests show the receipt lists exactly the staged files and a discard removes it.
+- [x] 2.1 Add a member manifest (stage-relative path, size, SHA-256, hashed while unpacking) to the Cloud import receipt for an `adopt` import, and remove it on discard. Verify: tests show the receipt lists exactly the staged files and a discard removes it.
 - [ ] 2.2 Write the local stage record from the journal when `exomem import` finishes; write none for an open import or an unsettled state placement, and report that. Verify: tests show the record after finish, none while open, and a rerun of an open import copies only missing files.
 - [ ] 2.3 Record the stage and its proof at `start`, and add `consume=false`. Verify: tests show a manifest-backed stage recorded and a hand-made `_Imports/<id>/` folder not recorded.
 - [ ] 2.4 After a chunk commits, remove each applied artifact's staged copy through `held_fs.unlink` with an identity check, when the durable copy and the manifest entry both match. Report `consumed`. Verify these with tests:

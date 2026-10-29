@@ -24,7 +24,7 @@ from urllib.request import urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import archive_members, state_paths
+from . import archive_members, import_stage, state_paths
 from .cell_init import _ensure_private_directory
 from .cloud_import import DEFAULT_MAX_MEMBERS, DEFAULT_RESERVE_BYTES, ArchiveRefused, unpack_stream
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
@@ -100,7 +100,7 @@ def prepare(data_root: Path, import_id: str, cell_id: str) -> str:
 
 
 def receipt_directory(vault_root: Path) -> Path:
-    directory = state_paths.ensure_vault_state_dir(vault_root) / "cloud-imports"
+    directory = state_paths.ensure_vault_state_dir(vault_root) / import_stage.CLOUD_RECEIPTS
     _ensure_private_directory(directory)
     return directory
 
@@ -161,6 +161,8 @@ def run_import(
         staging = vault_root.parent / f".import-{request.import_id}"
         shutil.rmtree(staging, ignore_errors=True)
         errors: list[BaseException] = []
+        # An adopt import lists the staged files in its receipt, hashed as they are unpacked.
+        members: list[dict] = []
         process = subprocess.Popen(
             ["age", "-d", "-i", str(identity)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -184,6 +186,10 @@ def run_import(
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
                         max_members=int(os.environ.get("EXOMEM_IMPORT_MAX_MEMBERS", DEFAULT_MAX_MEMBERS)),
                         reserve_bytes=int(os.environ.get("EXOMEM_IMPORT_RESERVE_BYTES", DEFAULT_RESERVE_BYTES)),
+                        on_file=(
+                            (lambda path, size, digest: members.append(import_stage.member(path, size, digest)))
+                            if request.kind == "adopt" else None
+                        ),
                     )
             except ArchiveRefused:
                 # age can close its output before it exits, so one poll races a wrong key. Its output is
@@ -238,6 +244,7 @@ def run_import(
                         raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "committed")
                 else:
                     os.rename(staging, destination)
+                receipt[import_stage.MEMBERS_KEY] = members
             else:
                 _restore(vault_root, staging, request)
             os.sync()
@@ -328,6 +335,9 @@ def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) ->
     _id(import_id)
     if (vault_root / "_Imports").is_symlink() or (vault_root.parent / ".import-keys").is_symlink():
         raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "symlink")
+    if not keep_adoption:
+        # First, so that a stop between the two steps leaves a stage with no manifest, which nothing consumes.
+        _drop_members(vault_root, import_id)
     for path in [
         vault_root.parent / ".import-keys" / import_id,
         vault_root.parent / f".import-{import_id}",
@@ -336,6 +346,17 @@ def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) ->
             path.unlink()
         elif path.exists():
             shutil.rmtree(path)
+
+
+def _drop_members(vault_root: Path, import_id: str) -> None:
+    """Remove the member manifest from the import's receipt; the receipt itself still answers a replay."""
+    receipt_path = state_paths.vault_state_dir(vault_root) / import_stage.CLOUD_RECEIPTS / f"{import_id}.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(receipt, dict) and receipt.pop(import_stage.MEMBERS_KEY, None) is not None:
+        _private_json(receipt_path, receipt)
 
 
 def main(argv: list[str] | None = None) -> int:
