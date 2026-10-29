@@ -1289,6 +1289,7 @@ def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
             earlier = store.load(previous)
         except AdoptionRunError:
             return None  # a page whose record is gone holds no work
+        # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
         if earlier["phase"] not in ("done", "cancelled") and _unapplied(earlier):
             return previous
         previous = (earlier.get("paging") or {}).get("previous")
