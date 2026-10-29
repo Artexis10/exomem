@@ -344,7 +344,7 @@ Raw capture remains valid without compilation.
 
 When the sources are a set of recordings and documents, such as a seminar series or a case file, run the pass above with these additions:
 
-1. Inventory every source and check its extraction before reading it: processing state, `asr_language`, `asr_language_probability` and `asr_language_source` in the sidecar, and faults such as a wrong language or one line repeated. Reprocess a faulty extraction with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` before relying on it.
+1. Inventory every source and check its extraction before reading it: processing state, `asr_language`, `asr_language_probability`, `asr_language_source` and `asr_language_mode` in the sidecar, and faults such as a wrong language or one line repeated. A `multilingual` mode means the engine read the recording in several languages, so `asr_language` is not a wrong-language fault. Reprocess a faulty extraction with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` before relying on it.
 2. Build a timeline. Order recordings by capture time, and mark recorder splits (one session in several files), overlaps and duplicates, so each session counts once.
 3. Read transcripts by time range and documents by page. Cite `[m:ss]` ranges and `[page N]` markers, not whole files.
 4. Give each claim one attribution class. The open observation category names the class, such as `source_asserted`, `verified`, `user_position` or `question`, and the `(context)` slot holds the citation, as in `- [verified] <claim> (<primary source and section>)`.
