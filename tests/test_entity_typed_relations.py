@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, graph_sync
+from exomem import commands, graph_sync, memory_refs
 from exomem.__main__ import main as cli_main
 
 ENTITIES = "Knowledge Base/Entities/Concepts"
@@ -37,6 +37,7 @@ def _create_target(vault: Path) -> str:
 
 def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(vault: Path) -> None:
     target = _create_target(vault)
+    target_ref = memory_refs.ref_from_markdown((vault / f"{target}.md").read_text())
 
     created = commands.op_connect_memory(
         vault,
@@ -45,11 +46,11 @@ def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(vault
         name="Harbour Reconciliation",
         summary="A synthetic method that checks and belongs to the tidal ledger.",
         relations=[
-            {"kind": "supports", "target": target},
+            {"kind": "supports", "target": target_ref},
             {"kind": "part_of", "target": target},
             {"kind": "supports", "target": target},
         ],
-        connections=[target],
+        connections=[target_ref],
     )
 
     page = vault / created["path"]
@@ -162,6 +163,38 @@ def test_bare_title_target_resolves_and_collapses_like_connections(vault: Path) 
     )
 
     assert _relations_section(vault / created["path"]) == [f"- supports [[{target}]]"]
+
+
+@pytest.mark.parametrize("failure", ["invalid", "missing", "ambiguous", "excluded"])
+def test_unavailable_reference_refuses_before_creating_an_entity(vault: Path, failure: str) -> None:
+    target = _create_target(vault)
+    page = vault / f"{target}.md"
+    ref = memory_refs.ref_from_markdown(page.read_text())
+    expected = "REFERENCE_NOT_FOUND"
+    if failure == "invalid":
+        ref = memory_refs.REF_PREFIX + "invalid"
+        expected = "INVALID_REFERENCE"
+    elif failure == "missing":
+        ref = memory_refs.memory_ref(memory_refs.new_id())
+    elif failure == "ambiguous":
+        page.with_name("Second Ledger.md").write_text(page.read_text())
+        expected = "AMBIGUOUS_REFERENCE"
+    else:
+        relative = target.removeprefix("Knowledge Base/")
+        (vault / "Knowledge Base/_access.yaml").write_text(f"excluded:\n  - {relative}.md\n")
+    before = {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*.md")}
+
+    with pytest.raises(ValueError, match=expected):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Quay Inventory",
+            summary="A synthetic inventory with an unavailable relation target.",
+            relations=[{"kind": "supports", "target": ref}],
+        )
+
+    assert {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*.md")} == before
 
 
 def test_an_unclosed_fence_in_the_summary_cannot_hide_authored_edges(vault: Path) -> None:

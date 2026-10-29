@@ -49,6 +49,7 @@ from typing import Any, Literal, overload
 from urllib.parse import unquote
 
 from .. import (
+    access,
     activation_result,
     call_spans,
     find_corpus,
@@ -2402,6 +2403,19 @@ def resolve_visible_identifier(
     return visible[0]
 
 
+def _identity_path_accessible(vault_root: Path, path: str) -> bool:
+    # Excluded owners cannot affect visible uniqueness or pending uncertainty.
+    try:
+        resolution = vault.resolve_under_vault(vault_root, path, return_details=True)
+    except vault.VaultPathError:
+        return False
+    assert isinstance(resolution, vault.VaultPathResolution)
+    return not (
+        access.refuse_if_excluded(vault_root, resolution.relative)
+        or access.refuse_if_excluded(vault_root, resolution.resolved_relative)
+    )
+
+
 def _visible_candidates(
     vault_root: Path,
     paths: Iterable[str],
@@ -2415,6 +2429,7 @@ def _visible_candidates(
         for rel_path in paths
         if not reserved_paths.classify_logical(rel_path).blocked
         if not lifecycle.is_tombstoned(vault_root, rel_path)
+        if _identity_path_accessible(vault_root, rel_path)
     )
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
@@ -2464,6 +2479,7 @@ def pending_identity_candidates(
         for path in paths
         if not reserved_paths.classify_logical(path).blocked
         if not lifecycle.is_tombstoned_in(tombstones, path)
+        if _identity_path_accessible(root, path)
     )
     policy = policy_module.load(root)
     who = principal if principal is not None else effective_principal()
