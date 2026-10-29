@@ -87,6 +87,12 @@ generation, different bytes raise `PATH_GUARD_CONTENT`. Identity, ancestry and
 type failures stay fatal.
 Elsewhere, and in the post-error binding path, it keeps the content policy.
 
+Cost when these checks fire wrongly: a withheld generation binding never
+refuses a batch; that one file keeps a content guard, which costs one hash at
+capture, one before each later replacement and one after the loop, the cost
+before this change. A moved witness on a stage or an installed binary costs one
+hash and rebinds when the bytes are unchanged. The caller pays in call latency.
+
 ### 4. Remove duplicate rechecks
 
 `_BatchArtifactGuard.capture` rechecked its guard immediately after

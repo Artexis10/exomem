@@ -16,4 +16,7 @@
 
 - [x] 3.1 Run the scoped writer, held-filesystem, binary-producer, adoption and vocabulary-gate tests and compare failure names with the `origin/main` baseline; run Ruff, the privacy gate, the scaffold leak test and `openspec validate --all --strict`.
 - [x] 3.2 Measure bytes hashed, wall time and traced peak for a 105 MiB binary in an 8-write batch before and after, with the same probe.
-- [ ] 3.3 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
+- [x] 3.3 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
+
+Delivery: PR #2201 merged as `c3768f5b96e8a9d4cba73ee74eaf61d089e33269` after an independent security-lensed review (two rounds, blocking findings 0 and 0) and green CI.
+The release owner coordinates the containing release. No live change was made.
