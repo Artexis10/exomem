@@ -54,11 +54,15 @@ copy. That route keeps the full content check immediately before the rename.
 ### 2. A trusted change witness for stream stages
 
 After `create_stream_artifact` has hashed the stream while copying it into the
-stage, it records the stage's version: `HeldFile.version()` for a held stage
-(Windows reads ChangeTime through the handle), or `stat_generation(fstat)` for
-an unheld stage when `STAT_GENERATION_TRUSTED`. Otherwise it records nothing.
-`_WorkspaceArtifact.recheck` compares the recorded version instead of hashing
-when one exists. Text stages record no version.
+stage, it records the stage's generation (size, modification time and change
+time): `HeldFile.version()` for a held stage (Windows reads ChangeTime through
+the handle), or `stat_generation(fstat)` for an unheld stage when
+`STAT_GENERATION_TRUSTED`. Otherwise it records nothing.
+`_WorkspaceArtifact.recheck` compares the recorded generation instead of
+hashing when one exists. Text stages record no generation. When the generation
+differs, `recheck` hashes the stage once: equal bytes rebind the recorded
+generation, so a timestamp reset or an xattr write that leaves the bytes alone
+does not fail the batch, and different bytes raise `PATH_GUARD_CONTENT`.
 
 Alternative rejected: the `generation` leaf policy for everything. It works by
 path lstat, Windows `st_ctime` is not a change time, a fresh stage is never
@@ -73,6 +77,14 @@ reads that handle's version and hands it to the batch. When
 `STAT_GENERATION_TRUSTED`, `_BatchArtifactGuard` binds that destination with a
 `generation` `PathGuard` built from the handle's size, modification time and
 change time, and keeps the planned digest as its own field for rollback.
+The batch trusts that generation only when the installed file still shows the
+size and modification time that the publication temporary showed after the
+verified copy; link and rename keep both, so a rewrite after the copy leaves
+`installed_generation` unset and the batch hashes the installed file instead.
+When a later recheck finds the generation moved, the guard hashes the file once
+against the planned digest: equal bytes rebind the guard to the current
+generation, different bytes raise `PATH_GUARD_CONTENT`. Identity, ancestry and
+type failures stay fatal.
 Elsewhere, and in the post-error binding path, it keeps the content policy.
 
 ### 4. Remove duplicate rechecks

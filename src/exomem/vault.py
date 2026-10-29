@@ -1535,7 +1535,24 @@ class _BatchArtifactGuard:
         )
 
     def recheck(self) -> None:
-        self.guard.recheck(self.root)
+        try:
+            self.guard.recheck(self.root)
+            return
+        except PathGuardError as error:
+            # Only a moved generation is retried: identity, ancestry and type failures stay fatal.
+            if self.guard.leaf_policy != "generation" or error.code != "PATH_GUARD_CONTENT":
+                raise
+        # A touch that leaves the bytes alone (an xattr write, a timestamp reset by a sync
+        # client) moves the generation too, so hash once and rebind if the bytes held still.
+        try:
+            moved = stat_generation(os.lstat(self.path))
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf changed") from error
+        if _leaf_hash(self.path, self.identity) != self.planned_hash:
+            raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+        if stat_generation(os.lstat(self.path)) != moved:
+            raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+        object.__setattr__(self.guard, "expected_generation", moved)
 
 
 def _same_file_object(first: PathIdentity, second: PathIdentity) -> bool:
@@ -1718,17 +1735,17 @@ class _WorkspaceArtifact:
     closed: bool = False
     #: A binary stage's (size, mtime, ctime) after its bytes were hashed on the way in. While
     #: it still matches, the bytes have not changed and the stage is not hashed again.
-    version: tuple[int, int, int] | None = None
+    generation: tuple[int, int, int] | None = None
     #: The same triple for the destination this stage was copied to, read from the handle
-    #: that proved the published identity; `None` when that handle was not used.
+    #: that proved the published identity; `None` when the copy cannot vouch for it.
     installed_generation: tuple[int, int, int] | None = None
 
     @property
     def path(self) -> Path:
         return self.workspace.path / self.name
 
-    def current_version(self, info: os.stat_result) -> tuple[int, int, int] | None:
-        """The change witness for this stage now, from the same source `version` came from."""
+    def current_generation(self, info: os.stat_result) -> tuple[int, int, int] | None:
+        """The change witness for this stage now, from the same source `generation` came from."""
         if self.held_file is None:
             return stat_generation(info) if STAT_GENERATION_TRUSTED else None
         try:
@@ -1758,11 +1775,21 @@ class _WorkspaceArtifact:
             raise PathGuardError("PATH_GUARD_CHANGED", "batch stage changed")
         if not verify_content:
             return
-        if self.version is not None:
-            if self.current_version(descriptor_info) != self.version:
+        if self.generation is None:
+            if _descriptor_hash(self.descriptor, self.identity) != self.content_hash:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
-        elif _descriptor_hash(self.descriptor, self.identity) != self.content_hash:
+            return
+        current = self.current_generation(descriptor_info)
+        if current == self.generation:
+            return
+        # A touch that leaves the bytes alone (an xattr write, a timestamp reset by a sync
+        # client) moves the generation too, so hash once and rebind if the bytes held still.
+        if (
+            _descriptor_hash(self.descriptor, self.identity) != self.content_hash
+            or self.current_generation(os.fstat(self.descriptor)) != current
+        ):
             raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
+        self.generation = current
 
     def refresh_identity(self) -> None:
         info = os.fstat(self.descriptor)
@@ -2438,7 +2465,7 @@ class _BatchWorkspace:
                 )
             # The copy above hashed every byte written; later rechecks compare this witness.
             artifact.recheck(verify_content=False)
-            artifact.version = artifact.current_version(os.fstat(descriptor))
+            artifact.generation = artifact.current_generation(os.fstat(descriptor))
             artifact.content_bound = True
             self.recheck()
             return artifact
@@ -2540,6 +2567,8 @@ class _BatchWorkspace:
                                 )
                             expected_stable = existing.identity
                     published: held_fs.HeldResult[held_fs.StableIdentity] | None = None
+                    witnessed = artifact.generation is not None and STAT_GENERATION_TRUSTED
+                    temporary_witness: tuple[int, int] | None = None
 
                     def recheck_publish_precondition() -> None:
                         if inverse_recheck is not None:
@@ -2572,13 +2601,20 @@ class _BatchWorkspace:
                                 )
 
                     def publish_once() -> None:
-                        nonlocal published
+                        nonlocal published, temporary_witness
+                        temporary_witness = None
                         if inverse_recheck is not None:
                             inverse_recheck()
 
                         def prepare_published(file: held_fs.HeldFile) -> None:
+                            nonlocal temporary_witness
                             if published_metadata is not None:
                                 _apply_held_snapshot_metadata(file, published_metadata)
+                            if witnessed:
+                                # Link and rename keep size and mtime, so the installed file
+                                # must still show what the verified copy left in the temporary.
+                                temporary = file.version()
+                                temporary_witness = (temporary.size, temporary.mtime_ns)
 
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
@@ -2645,20 +2681,30 @@ class _BatchWorkspace:
                             raise PathGuardError(
                                 "PATH_GUARD_CHANGED", "batch destination changed"
                             )
-                        if artifact.version is not None and STAT_GENERATION_TRUSTED:
-                            # The batch binds a binary by this generation instead of hashing it.
+                        if witnessed:
+                            # The batch binds a binary by this generation instead of hashing it,
+                            # so vouch for it only when the copy shows no change since the
+                            # verified copy; otherwise the batch hashes the installed file.
                             installed_version = installed.version()
-                            artifact.installed_generation = (
-                                installed_version.size,
-                                installed_version.mtime_ns,
-                                installed_version.change_time_ns,
-                            )
+                            if (
+                                installed_version.size == artifact.generation[0]
+                                and (installed_version.size, installed_version.mtime_ns)
+                                == temporary_witness
+                            ):
+                                artifact.installed_generation = (
+                                    installed_version.size,
+                                    installed_version.mtime_ns,
+                                    installed_version.change_time_ns,
+                                )
                         return _identity(relative.as_posix(), installed_info)
 
         identity = artifact.identity
         # This route renames the stage itself, so nothing is read on the way: prove the bytes
-        # now, even for a stage that otherwise carries only a change witness.
-        if _descriptor_hash(artifact.descriptor, identity) != artifact.content_hash:
+        # of a stage that otherwise carries only a change witness (others were hashed above).
+        if (
+            artifact.generation is not None
+            and _descriptor_hash(artifact.descriptor, identity) != artifact.content_hash
+        ):
             raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
         if os.name == "nt":  # pragma: no cover - Windows does not replace open CRT files
             artifact.close()

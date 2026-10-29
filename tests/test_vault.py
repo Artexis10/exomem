@@ -392,6 +392,116 @@ def test_batch_write_detects_installed_binary_rewritten_before_a_later_replaceme
     assert binary.read_bytes() == rewritten
 
 
+def test_batch_write_does_not_vouch_for_a_binary_extended_after_its_verified_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"reviewed payload"
+    extra = b" plus appended bytes"
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    companion = tmp_path / "Evidence" / "artifact.bin.md"
+    real_publish = held_fs.publish_bytes
+
+    def append_after_install(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
+        published = real_publish(filesystem, parent, leaf, data, **kwargs)
+        if leaf == binary.name and published.ok:
+            with binary.open("ab") as handle:
+                handle.write(extra)
+        return published
+
+    monkeypatch.setattr(vault.held_fs, "publish_bytes", append_after_install)
+
+    with pytest.raises(vault.BatchWriteError) as failed:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    companion,
+                    "companion",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(payload),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+        )
+
+    # The batch refuses to bind bytes it did not copy, and rollback leaves them in place.
+    assert failed.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert binary.read_bytes() == payload + extra
+    assert not companion.exists()
+
+
+@pytest.mark.parametrize("touched", ["stage", "installed"])
+def test_batch_write_survives_a_timestamp_reset_that_leaves_the_binary_bytes_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    touched: str,
+) -> None:
+    payload = b"reviewed payload"
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    first_note = tmp_path / "Evidence" / "first.md"
+    last_note = tmp_path / "Evidence" / "last.md"
+    real_hook = vault._before_batch_destination_published
+    touches = 0
+
+    def reset_timestamp(path: Path) -> None:
+        nonlocal touches
+        touches += 1
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+
+    def touch_binary(path: Path, *, restoring: bool) -> None:
+        real_hook(path, restoring=restoring)
+        if touched == "stage" and path == first_note:
+            (stage,) = binary.parent.glob(".exomem-batch-*/stage-1.tmp")
+            reset_timestamp(stage)
+        if touched == "installed" and path == last_note:
+            reset_timestamp(binary)
+
+    monkeypatch.setattr(vault, "_before_batch_destination_published", touch_binary)
+
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                first_note,
+                "first",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+            vault.PlannedWrite(
+                binary,
+                vault.PreparedBinaryContent(
+                    io.BytesIO(payload),
+                    len(payload),
+                    hashlib.sha256(payload).hexdigest(),
+                ),
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+            vault.PlannedWrite(
+                last_note,
+                "last",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+        ],
+        vault_root=tmp_path,
+    )
+
+    assert touches == 1
+    assert binary.read_bytes() == payload
+    assert first_note.exists() and last_note.exists()
+
+
 def test_batch_write_rolls_back_binary_when_later_publication_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

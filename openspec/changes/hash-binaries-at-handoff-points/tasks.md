@@ -15,5 +15,5 @@
 ## 3. Verification and delivery
 
 - [x] 3.1 Run the scoped writer, held-filesystem, binary-producer, adoption and vocabulary-gate tests and compare failure names with the `origin/main` baseline; run Ruff, the privacy gate, the scaffold leak test and `openspec validate --all --strict`.
-- [ ] 3.2 Measure bytes hashed, wall time and traced peak for a 105 MiB binary in an 8-write batch before and after, with the same probe.
+- [x] 3.2 Measure bytes hashed, wall time and traced peak for a 105 MiB binary in an 8-write batch before and after, with the same probe.
 - [ ] 3.3 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
