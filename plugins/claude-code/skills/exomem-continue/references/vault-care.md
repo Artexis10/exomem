@@ -149,8 +149,8 @@ is in **`audit-checks.md`**.
 Remote `repair_memory` publishes structured-file, tag-variant and curation
 writes. `check_memory` publishes the admitted read-only maintenance variants,
 including curation work items, previews and status. A remote client runs the
-whole curation workflow: work item, proposal, preview, one exact-plan approval
-and apply. Other repairs require the host CLI. Follow the active schema; a
+whole curation workflow: work item, proposal, preview, one exact-plan approval,
+apply, resume and compensation. Other repairs require the host CLI. Follow the active schema; a
 descriptive mode name never grants remote admission.
 
 

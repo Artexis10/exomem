@@ -417,4 +417,3 @@ def test_remote_client_runs_the_whole_curation_workflow(
 
     assert applied["phase"] == "completed"
     assert (vault / "Knowledge Base/Notes/Insights/remote-curation-course-access.md").exists()
-
