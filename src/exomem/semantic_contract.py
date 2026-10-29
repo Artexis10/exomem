@@ -1000,12 +1000,12 @@ def compiled_intent(page: SemanticPageState) -> bool:
     )
 
 
-# Each half of a type-and-folder change is refused on its own, so an agent that
-# edits the type and then moves the file meets one refusal after the other.
-_RETYPE_ACROSS_HOMES = (
-    "Type and folder are checked together, so changing one and then the other is "
-    "refused both times. To turn this page into another kind of page, create that "
-    "page in its own home and retire this one."
+# Turning a compiled note into a non-compiled kind fails both ways: the new type
+# is refused in the old folder, and the old type is refused in the new folder.
+_RETYPE_ACROSS_FOLDERS = (
+    "If the new kind of page is not a compiled type (for example an entity), each "
+    "half of the change is refused alone: create the page in the folder for that "
+    "kind and retire this one."
 )
 
 
@@ -1035,7 +1035,7 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
                 "Set a compiled `type:` (shipped: "
                 + ", ".join(item.key for item in note_types.shipped(note_types.compiled))
                 + ") or move the document outside that canonical compiled destination. "
-                + _RETYPE_ACROSS_HOMES
+                + _RETYPE_ACROSS_FOLDERS
             ),
             governed_element_identity=("compiled_intent", "type"),
             resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
@@ -1053,7 +1053,7 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             remediation=(
                 f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
                 "a non-compiled type appropriate to this destination. "
-                + _RETYPE_ACROSS_HOMES
+                + _RETYPE_ACROSS_FOLDERS
             ),
             governed_element_identity=("compiled_intent", "destination"),
             resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
@@ -5100,7 +5100,11 @@ def _registry_findings(
                     + (
                         " A bullet written as `Label: [[page]]` reads as a relation; write "
                         "a field that is not a relation as a sentence."
+                        # Only the legacy note-level bullet grammar reads a label that
+                        # way; a typed edge under `## Relations` is meant as one.
                         if code == "unregistered_relation"
+                        and fact.origin == "semantic_relation"
+                        and fact.source_kind == "file"
                         else ""
                     )
                 ),
