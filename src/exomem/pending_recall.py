@@ -504,11 +504,12 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     Asking the stores also means the proof survives a restart, so a process that
     dies between the two publications does not strand the row.
 
-    Each lane is asked for what it owes. A lane that never holds a row for a
-    page (the catalogue suppresses a raw Record; neither lane walks `_archive`)
-    holds it by having none, once the expected bytes are the ones on disk.
-    Asked for those bytes instead, such a lane never answers yes, and every
-    batch that touched the page keeps its custody for good.
+    Each lane is asked for the exact bytes first. A path it does not hold that
+    way is asked once more, as absence, when the lane owes the page no row (the
+    catalogue suppresses a raw Record; neither lane walks `_archive`) and the
+    expected bytes are the ones on disk. Without that second question such a
+    lane never answers yes, and every batch that touched the page keeps its
+    custody for good.
     """
     if not expected:
         return True
@@ -517,17 +518,39 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     try:
         # The identity sidecar answers the whole batch in one query, so it is
         # asked first and short-circuits the per-path catalogue comparison.
-        identities = memory_refs.holds_content_identities(
-            vault_root, _owed(vault_root, expected, memory_refs.owes_custody_row)
-        )
-        if not all(identities.get(rel, False) for rel in expected):
-            return False
-        catalogue = lexstore.holds_content_identities(
-            vault_root, _owed(vault_root, expected, lexstore.owes_custody_row)
+        return _lane_holds(
+            vault_root,
+            expected,
+            memory_refs.holds_content_identities,
+            memory_refs.owes_custody_row,
+        ) and _lane_holds(
+            vault_root,
+            expected,
+            lexstore.holds_content_identities,
+            lexstore.owes_custody_row,
         )
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
-    return all(catalogue.get(rel, False) for rel in expected)
+
+
+def _lane_holds(
+    vault_root: Path,
+    expected: dict[str, str | None],
+    holds: Callable[[Path, dict[str, str | None]], dict[str, bool]],
+    owes_row: Callable[[Path, str], bool],
+) -> bool:
+    """Whether one lane holds `expected` exactly, or has no row where it owes none."""
+    answers = holds(vault_root, expected)
+    missed = {rel: digest for rel, digest in expected.items() if not answers.get(rel, False)}
+    if not missed:
+        return True
+    absent = _owed(vault_root, missed, owes_row)
+    if any(absent[rel] == digest for rel, digest in missed.items()):
+        # Nothing new to ask for this path: the lane owes it a row, its bytes
+        # moved, or absence was already the question.
+        return False
+    answers = holds(vault_root, absent)
+    return all(answers.get(rel, False) for rel in absent)
 
 
 def _owed(
