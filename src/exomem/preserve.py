@@ -1320,12 +1320,15 @@ def _render_sidecar(
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:
         lines.append(f"frame_ts: {frame_ts}")
-    extra_tag = ", scene-frame" if parent_media else ""
-    lines.append(
-        f"tags: [{label.lower()}, "
-        f"{scope.lower().replace(' ', '-')}, "
-        f"{category.lower().replace(' ', '-')}{extra_tag}]"
-    )
+    tags = [
+        label.lower(),
+        scope.lower().replace(" ", "-"),
+        category.lower().replace(" ", "-"),
+    ]
+    if parent_media:
+        tags.append("scene-frame")
+    # Tags remain strings even when YAML would otherwise parse a date or boolean.
+    lines.append("tags: [" + ", ".join(yaml_scalar(tag) for tag in tags) + "]")
     lines.append("ingested_into: []")
     lines.append("---")
     lines.append("")
