@@ -861,7 +861,10 @@ def _standby_supervisor(tmp_path, **kwargs):
     return manager, ingress, runtime, target
 
 
-def test_rejected_candidate_cleanup_keeps_old_worker_admitted_past_cutover(tmp_path, monkeypatch):
+@pytest.mark.parametrize("refusal", ["compatibility", "budget-before-detach"])
+def test_rejected_candidate_cleanup_keeps_old_worker_admitted_past_cutover(
+    tmp_path, monkeypatch, refusal
+):
     import httpx
 
     from exomem import state_migration
@@ -874,6 +877,16 @@ def test_rejected_candidate_cleanup_keeps_old_worker_admitted_past_cutover(tmp_p
 
     async def scenario():
         manager, _, runtime, target = _standby_supervisor(tmp_path, transition_timeout=0.03)
+        if refusal == "budget-before-detach":
+            import time
+
+            begin = manager.records.begin
+
+            def persist_past_budget(*args, **kwargs):
+                begin(*args, **kwargs)
+                time.sleep(0.06)
+
+            monkeypatch.setattr(manager.records, "begin", persist_past_budget)
         inspected = _manager().WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
         runtime.migration_required = inspected.migration_required
         target["state_descriptors"] = list(state_migration.declared_descriptor_ids())
@@ -904,7 +917,7 @@ def test_rejected_candidate_cleanup_keeps_old_worker_admitted_past_cutover(tmp_p
             served_during_cleanup = not cleanup_finished.is_set()
             result = await asyncio.wait_for(upgrade, 1)
             assert not result["ok"]
-            assert runtime.pid == 100
+            assert runtime.pid == 100, (result, runtime.events)
             assert "stop" not in runtime.events
             assert served_during_cleanup
             assert response.status_code == 200
