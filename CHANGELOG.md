@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.149.0](https://github.com/Artexis10/exomem/compare/v0.148.0...v0.149.0) (2026-10-29)
+
+
+### Features
+
+* **activation:** add a turn slice to the maps packet, on by default ([#2160](https://github.com/Artexis10/exomem/issues/2160)) ([544adbc](https://github.com/Artexis10/exomem/commit/544adbc1e3940b3aa86260b6ff55cf52a0d166f6))
+* complete the typed memory tool catalogue ([#2139](https://github.com/Artexis10/exomem/issues/2139)) ([a5091aa](https://github.com/Artexis10/exomem/commit/a5091aa8dfddce4317433c7dd4977b4423d7dcb2))
+
+
+### Bug Fixes
+
+* **derived:** settle expired advisories, log refusals, and keep the drain moving ([#2177](https://github.com/Artexis10/exomem/issues/2177)) ([df7f4cf](https://github.com/Artexis10/exomem/commit/df7f4cf2aa5d6b74d6e7715f9c1f0630951ffcab))
+* **links:** retain original owners during resolution ([#2197](https://github.com/Artexis10/exomem/issues/2197)) ([03527df](https://github.com/Artexis10/exomem/commit/03527df8418238a000b3db65bb8490979526e67d))
+* **logging:** quiet routine lock and lease events at INFO ([#2176](https://github.com/Artexis10/exomem/issues/2176)) ([71a4ddf](https://github.com/Artexis10/exomem/commit/71a4ddfda09edd7d4adf40a8142e28d2abaea42d))
+* **media:** keep speech after an early window end; keep prepacking where weights are not shared ([#2173](https://github.com/Artexis10/exomem/issues/2173)) ([3e0509f](https://github.com/Artexis10/exomem/commit/3e0509f074576feab8ba69e9270b76cd726539cc))
+* **media:** preserve string types in evidence tags ([#2195](https://github.com/Artexis10/exomem/issues/2195)) ([258f9f3](https://github.com/Artexis10/exomem/commit/258f9f3c01060c4856a517767f36a5113a4cb56e))
+* **media:** start ingestion before optional graph recovery ([#2189](https://github.com/Artexis10/exomem/issues/2189)) ([dc1970f](https://github.com/Artexis10/exomem/commit/dc1970fc2ae8c14e8e641f0e20539fa071604191))
+* **recall:** keep catalogue coverage relative to the reader ([#2179](https://github.com/Artexis10/exomem/issues/2179)) ([82d714e](https://github.com/Artexis10/exomem/commit/82d714e9917cbc4ace04c1ad03aa189a07721877))
+* **release:** run full CI on ready PRs and qualify Python independently ([#2125](https://github.com/Artexis10/exomem/issues/2125)) ([143af29](https://github.com/Artexis10/exomem/commit/143af29374314860076727af25469d579f9a4535))
+* restore governed references and reliable release verification ([#2193](https://github.com/Artexis10/exomem/issues/2193)) ([fb0872d](https://github.com/Artexis10/exomem/commit/fb0872dba15925dff660001077d09ce2d4ee2a8c))
+* **sources:** retain classification history across reversals ([#2190](https://github.com/Artexis10/exomem/issues/2190)) ([f23ba50](https://github.com/Artexis10/exomem/commit/f23ba50d63c30393065d2db0dae94f8da5a8f50c))
+* **storage:** harden local reservation follow-ups ([#2185](https://github.com/Artexis10/exomem/issues/2185)) ([1a434bd](https://github.com/Artexis10/exomem/commit/1a434bdac930501a561b039df14939b4d4e2dcdf))
+* **store:** back off rebuilds while derived sources remain missing ([#2183](https://github.com/Artexis10/exomem/issues/2183)) ([808f6ea](https://github.com/Artexis10/exomem/commit/808f6ea5068e27bfe64765a602b3a0a7c686707e))
+* **store:** retry queries after an idle handle handoff ([#2187](https://github.com/Artexis10/exomem/issues/2187)) ([c7295ec](https://github.com/Artexis10/exomem/commit/c7295ec6e08ce92178f39fbcf4220aec97550856))
+
+
+### Performance
+
+* **recall:** reuse admitted word counts for exact top-k ranking ([#2186](https://github.com/Artexis10/exomem/issues/2186)) ([0ff0441](https://github.com/Artexis10/exomem/commit/0ff04415863709a169132c6c66a25b0c3b75270b))
+* **records:** reuse authorization within collection inventories ([#2181](https://github.com/Artexis10/exomem/issues/2181)) ([d4aacfe](https://github.com/Artexis10/exomem/commit/d4aacfedc7c369ee06a7d6f319b6ad64614d64b9))
+
 ## [0.148.0](https://github.com/Artexis10/exomem/compare/v0.147.0...v0.148.0) (2026-10-27)
 
 
