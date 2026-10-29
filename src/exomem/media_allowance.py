@@ -166,7 +166,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                         raise ValueError("companion header was not read")
                     path = f"{kb_dirname()}/{entry.relative_path}"
                     bound = _binding(
-                        parse_frontmatter(entry.markdown.decode("utf-8"), strict=True)[0],
+                        parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
                         path, store, metadata, vault, placements, placement_versions,
                     )
                     del entry

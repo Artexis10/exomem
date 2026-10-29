@@ -319,7 +319,7 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             continue
         try:
             raw = reserved_paths.read_generic_bytes(vault, sidecar.relative_to(vault).as_posix())
-            fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), strict=True)
+            fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), custody=True)
             relative = originals.bound_path(fields)
             if not isinstance(relative, str):
                 continue
@@ -369,7 +369,7 @@ def _processing_status_row(vault: Path, path: str | Path) -> dict[str, object]:
     try:
         raw = reserved_paths.read_generic_bytes(vault, snapshot.sidecar_path.relative_to(vault).as_posix())
         text = raw.data.decode("utf-8")
-        fields, _body, _marker = parse_frontmatter(text, strict=True)
+        fields, _body, _marker = parse_frontmatter(text, custody=True)
         processing = fields.get("processing_state")
         media_type = fields.get("media_type")
         if originals.bound_path(fields) != relative:
@@ -491,7 +491,7 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     text, guard = read_guarded_text(vault, snapshot.sidecar_path)
     if content_hash(text) != snapshot.sidecar_hash:
         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the sidecar binding changed")
-    fields, body, _marker = parse_frontmatter(text, strict=True)
+    fields, body, _marker = parse_frontmatter(text, custody=True)
     if reference is None:
         fields.pop("stored_object", None)
     else:

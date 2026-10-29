@@ -235,7 +235,7 @@ def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object],
             if error.code != "MISSING":
                 raise
             continue
-        fields, _body, marker = parse_frontmatter(data.decode("utf-8"), strict=True)
+        fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
         if marker is not None and bound_path(fields) == relative:
             return companion, fields, data
     return None

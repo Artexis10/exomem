@@ -66,7 +66,7 @@ def reference_companion(vault: Path, binary_path: str) -> tuple[str, reserved_pa
         if error.code == "MISSING":
             return None
         raise
-    fields, body, _marker = parse_frontmatter(snapshot.data.decode("utf-8"), strict=True)
+    fields, body, _marker = parse_frontmatter(snapshot.data.decode("utf-8"), custody=True)
     if originals.bound_path(fields) != binary_path or not originals.is_reference_only_companion(fields, body):
         raise ValueError("Trash companion contains independent or unresolved content")
     return path, snapshot

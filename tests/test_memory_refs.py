@@ -517,6 +517,28 @@ def test_backfill_is_dry_run_by_default_and_preserves_content(tmp_path: Path) ->
     assert applied["updated"] == ["Knowledge Base/Notes/legacy.md"]
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_backfill_gives_an_empty_frontmatter_block_a_resolvable_identity(
+    tmp_path: Path, newline: str
+) -> None:
+    """An empty block shares the opening fence's line break, so no break precedes its closing fence."""
+    vault = tmp_path / "vault"
+    path = vault / "Knowledge Base" / "Notes" / "empty.md"
+    path.parent.mkdir(parents=True)
+    body = f"# Note{newline}{newline}Body.{newline}"
+    path.write_bytes(f"---{newline}---{newline}{body}".encode())
+
+    applied = memory_refs.backfill_ids(vault, dry_run=False)
+
+    rel = "Knowledge Base/Notes/empty.md"
+    fm, parsed_body, _ = vault_module.parse_frontmatter(path.read_bytes().decode())
+    identity = memory_refs.normalize_id(fm.get("exomem_id"))
+    assert identity is not None
+    assert parsed_body == body
+    assert applied["assigned_refs"] == {rel: memory_refs.memory_ref(identity)}
+    assert memory_refs.ReferenceIndex(vault).resolve(identity) == rel
+
+
 def test_governed_writers_return_canonical_refs(
     vault: Path, source_schema
 ) -> None:

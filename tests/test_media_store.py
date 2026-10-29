@@ -1357,6 +1357,18 @@ def test_reference_usage_does_not_hide_a_malformed_potential_companion(vault: Pa
     assert media_allowance.reference_usage(vault).used_bytes == expected
 
 
+def test_a_companion_candidate_with_an_unterminated_header_is_refused_not_skipped(vault: Path):
+    """Custody readers refuse a header they cannot prove empty; ordinary strict readers treat it as prose."""
+    from exomem.vault import FrontmatterError
+
+    path = _preserved(vault)
+    relative = path.relative_to(vault).as_posix()
+    assert originals.bound_companion(vault, relative) is not None
+    originals.sidecar_path(path).write_text("---\nevidence_file: unresolved\n")
+    with pytest.raises(FrontmatterError):
+        originals.bound_companion(vault, relative)
+
+
 def test_reference_usage_rejects_conflicting_sizes_and_ignores_a_foreign_store(vault: Path, selected_store):
     """One version has one original size; a foreign store never spends this cell's allowance."""
     from exomem import media_allowance, move_file

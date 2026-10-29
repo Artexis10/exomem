@@ -1643,9 +1643,9 @@ def splice_markdown_frontmatter(
     if match is None:
         raise FrontmatterSpliceError("NO_FRONTMATTER", "the page has no frontmatter block")
     start = match.start(1)
-    # The pattern puts a line ending between the block and its closing fence;
-    # the splice reads the block with that final line terminated.
-    end = match.end(1) + (2 if text.startswith("\r\n", match.end(1)) else 1)
+    # The splice reads the block with its final line terminated. An empty block has no
+    # line break before its closing fence, so its slice is empty and the splice refuses it.
+    end = match.end(1) + len(vault.frontmatter_line_break(text, match))
     patched = splice_frontmatter_fields(
         text[start:end],
         changes,

@@ -6634,16 +6634,33 @@ def read_frontmatter_header(
             raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter block is not terminated")
 
 
-def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any], str, str | None]:
+def frontmatter_line_break(text: str, match: re.Match[str]) -> str:
+    """The line break between a matched YAML block and its closing fence.
+
+    It is empty for an empty block, which shares the opening fence's line break.
+    """
+    end = match.end(1)
+    return next((line_break for line_break in ("\r\n", "\n") if text.startswith(line_break, end)), "")
+
+
+def parse_frontmatter(
+    text: str, *, strict: bool = False, custody: bool = False
+) -> tuple[dict[str, Any], str, str | None]:
     """Split a markdown file into (frontmatter_dict, body, frontmatter_text).
 
     Returns ({}, text, None) when no frontmatter block is present.
     `body` has no leading newline (mirrors find._parse_page).
+
+    `custody` is for a reader that accounts for stored originals. It implies `strict` and
+    also refuses a header it cannot prove holds no governed fields: an opening fence with no
+    closing fence, or a scalar root. Ordinary strict readers treat such a document as a
+    plain note, so one stray note never blocks a vault-wide write.
     """
+    strict = strict or custody
     m = _FM_PATTERN.match(text)
     if not m:
         # These delimiters are the fixed frontmatter format, not a rule about prose meaning.
-        if strict and text.removeprefix("\ufeff").startswith(("---\n", "---\r\n")):
+        if custody and text.removeprefix("\ufeff").startswith(("---\n", "---\r\n")):
             raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter block is not terminated")
         return {}, text, None
     fm_text = m.group(1)
@@ -6661,11 +6678,12 @@ def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any
             )
         else:
             fm = yaml_safe_load(fm_text)
-        if fm is None:
-            # Empty YAML and comments are allowed; an explicit null is still a scalar root.
-            if strict and yaml.compose(fm_text, Loader=_UniqueKeySafeLoader) is not None:
-                raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")
-            fm = {}
+        # Empty YAML and comments are allowed; any other non-mapping root, even a falsy one, is a scalar.
+        if custody and not isinstance(fm, dict) and (
+            fm is not None or yaml.compose(fm_text, Loader=_UniqueKeySafeLoader) is not None
+        ):
+            raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")
+        fm = fm or {}
         if not isinstance(fm, dict):
             if strict:
                 raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")

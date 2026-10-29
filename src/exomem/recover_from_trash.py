@@ -152,7 +152,7 @@ def _recover_from_trash_local(
 
     if trash_kind == "file" and trash_rel.lower().endswith(".md"):
         try:
-            fields, body, _marker = parse_frontmatter(trash_file_snapshot.data.decode("utf-8"), strict=True)
+            fields, body, _marker = parse_frontmatter(trash_file_snapshot.data.decode("utf-8"), custody=True)
         except (UnicodeError, ValueError):
             pass  # Ordinary page recovery retains its existing validation boundary.
         else:
