@@ -1337,7 +1337,7 @@
     }
   },
   "change_media": {
-    "description": "Process media, retry failed extraction, or reprocess it with a language hint. Select one operation.kind.",
+    "description": "Process, retry or reprocess media. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1385,7 +1385,7 @@
                 "paths": {},
                 "language": {
                   "type": "string",
-                  "description": "Speech language code for reprocess; omit to detect."
+                  "description": "Speech language code; omit to detect."
                 }
               },
               "required": [
@@ -1407,7 +1407,7 @@
                 "type": "string"
               },
               "type": "array",
-              "description": "1-32 unique governed paths for process/retry/reprocess."
+              "description": "1-32 unique governed paths, not for status."
             }
           }
         },
@@ -5581,7 +5581,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "1-32 unique governed paths for process/retry/reprocess."
+                  "description": "1-32 unique governed paths, not for status."
                 }
               },
               "required": [

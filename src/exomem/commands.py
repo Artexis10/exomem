@@ -8912,14 +8912,13 @@ def op_process_media(
 ) -> dict:
     """Check governed media; retry after remediation; extract again.
 
-    Status reads; process/retry/reprocess change extraction state. Extraction normally runs
-    automatically. Reprocess replaces a completed extraction and keeps the old text on a prior page.
+    Status reads; other operations change extraction state. Extraction normally runs
+    automatically. Reprocess keeps the old text on a prior page.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work.
-        paths: 1-32 unique governed paths for process/retry/reprocess.
-        operation: process, status, retry or reprocess.
-        language: Speech language code for reprocess; omit to detect.
+        paths: 1-32 unique governed paths, not for status.
+        language: Speech language code; omit to detect.
     """
     from . import due_state as due_state_module
     from .cli_ops import OpError

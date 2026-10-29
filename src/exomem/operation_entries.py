@@ -516,7 +516,7 @@ _TOOL_HELP = {
     "read_review": ("read", "Read review", "Read review queues, provenance, drift, backlog or one review item's bounded context. Submit meaning questions through triage_memory."),
     "triage_memory": ("write", "Triage memory", "Save a review decision or submit a meaning question. These writes do not grant mutation authority."),
     "read_media": ("read", "Read media", "Read native video frames or inspect media processing status."),
-    "change_media": ("write", "Change media", "Process media, retry failed extraction, or reprocess it with a language hint."),
+    "change_media": ("write", "Change media", "Process, retry or reprocess media."),
     "read_connections": ("read", "Read connections", "Find links, relations and entity candidates, or inspect a bounded graph neighborhood."),
     "change_connections": ("write", "Change connections", "Create a governed entity or accept a reviewed relation using current fingerprints."),
     "read_schema": ("read", "Read schema", "Inspect schemas without saving changes. Use preview for a registry delta merged with its live overlay, including collision and cap checks. Pass proposal={\"upsert\":{\"<key>\":{...}}}. Use validate-document for a complete registry document."),
