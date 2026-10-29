@@ -80,3 +80,91 @@ def remove_staged(root: Path, stage: import_stage.Stage, planned: dict) -> bool:
     except (held_fs.HeldFsError, OSError):
         return False
     return True
+
+
+def residual(root: Path, run: dict, filed_statuses: tuple[str, ...]) -> dict | None:
+    """What is still in the run's stage, by why it stays, with counts and bytes; None for a run with no stage.
+
+    `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. The reasons are a
+    closed set of result keys that this report defines, not vocabulary: `failed`, `text`, `kept`, `pending`,
+    `unselected`, `ineligible` and `outside_run` (hidden or added after the scan). The Cloud route
+    discards a stage with `transfer_memory`; a local import has no Exomem command, so its stage goes by hand.
+    Both name the whole stage folder, which holds the residual and nothing else.
+    """
+    recorded_stage = run.get("stage")
+    if not isinstance(recorded_stage, dict):
+        return None
+    folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
+    inventory = {row["path"]: row for row in run.get("inventory") or []}
+    plan = run.get("plan") or {}
+    items = {item["original_path"]: item for item in plan.get("items") or []}
+    skipped = {row.get("path") for row in plan.get("skipped") or []}
+    selected = set((run.get("selection") or {}).get("paths") or [])
+    outcomes = run.get("outcomes") or {}
+
+    def why(path: str) -> str:
+        item = items.get(path)
+        if item is not None:
+            status = (outcomes.get(path) or {}).get("status")
+            if status == "failed":
+                return "failed"
+            if status in filed_statuses:
+                return "text" if item["form"] == "text" else "kept"
+            return "pending"
+        if path in skipped:
+            return "ineligible"
+        row = inventory.get(path)
+        if row is not None:
+            if not row.get("eligible"):
+                return "ineligible"
+            return "pending" if path in selected else "unselected"
+        ancestors = (path.rsplit("/", depth)[0] for depth in range(1, path.count("/") + 1))
+        if any((inventory.get(ancestor) or {}).get("kind") == "folder" for ancestor in ancestors):
+            return "ineligible"  # a hidden folder that the scan did not enter
+        return "outside_run"
+
+    by_reason: dict[str, dict[str, int]] = {}
+    for directory, _names, files in os.walk(root / folder):
+        for name in files:
+            full = Path(directory) / name
+            try:
+                size = full.lstat().st_size
+            except OSError:
+                continue
+            entry = by_reason.setdefault(why(full.relative_to(root).as_posix()), {"files": 0, "bytes": 0})
+            entry["files"] += 1
+            entry["bytes"] += size
+    files = sum(entry["files"] for entry in by_reason.values())
+    route = (
+        f"call transfer_memory with action import_discard, import_id {recorded_stage['stage']} and confirm=true"
+        if recorded_stage.get("proof") == import_stage.CLOUD_PROOF
+        else f"delete the folder {folder} by hand; no Exomem command discards a local import"
+    )
+    return {
+        "folder": folder, "files": files, "bytes": sum(entry["bytes"] for entry in by_reason.values()),
+        "by_reason": by_reason, "discard": route if files else None,
+    }
+
+
+def remove_empty_folders(root: Path, run: dict) -> int:
+    """Remove the empty folders consuming left in the run's stage, deepest first; returns how many went.
+
+    A folder goes through the held filesystem and only while it is empty, so a file that arrives
+    during the walk keeps its folder. The `_Imports` folder itself is never removed.
+    """
+    recorded_stage = run.get("stage")
+    if not isinstance(recorded_stage, dict):
+        return 0
+    base = root / import_stage.STAGE_DIR / recorded_stage["stage"]
+    removed = 0
+    try:
+        with held_fs.acquire(root).require() as filesystem:
+            for directory, _names, _files in os.walk(base, topdown=False):
+                found = filesystem.parent(Path(directory).relative_to(root).as_posix(), access="mutate")
+                if not found.ok:
+                    continue
+                with found.require() as held:
+                    removed += int(filesystem.unlink_directory(held).ok)
+    except (held_fs.HeldFsError, OSError):
+        pass
+    return removed

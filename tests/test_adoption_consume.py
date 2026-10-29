@@ -99,20 +99,28 @@ def test_start_records_no_stage_for_a_hand_made_folder_or_an_import_that_is_stil
     assert adoption_run.start(vault, path=open_import["start_path"], today=TODAY)["stage"] is None
 
 
+def _cloud_stage(vault: Path, files: dict[str, bytes]) -> str:
+    """A stage laid out as the Cloud import Job leaves it: `_Imports/<id>/` and a receipt that lists its files."""
+    import_id = str(uuid.uuid4())
+    members = []
+    for rel, data in files.items():
+        path = vault / "_Imports" / import_id / "Field Notes" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        members.append({"path": f"Field Notes/{rel}", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    request = cloud_import_job.CloudImportRequest(
+        import_id=import_id, cell_id="abcdefghijklmnop", kind="adopt", declared_files=len(files),
+        declared_bytes=sum(len(data) for data in files.values()), ciphertext_bytes=1, ciphertext_sha256="0" * 64)
+    receipts = state_paths.ensure_vault_state_dir(vault) / "cloud-imports"
+    receipts.mkdir(exist_ok=True)
+    (receipts / f"{import_id}.json").write_text(json.dumps({
+        "request": request.model_dump(), "result": {"ok": True, "files": len(files)}, "members": members}))
+    return import_id
+
+
 def test_start_records_the_proof_of_a_cloud_import_that_has_a_receipt_manifest(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    import_id = str(uuid.uuid4())
-    stage = vault / "_Imports" / import_id / "Field Notes"
-    stage.mkdir(parents=True)
-    (stage / "paper.pdf").write_bytes(PDF)
-    request = cloud_import_job.CloudImportRequest(
-        import_id=import_id, cell_id="abcdefghijklmnop", kind="adopt", declared_files=1, declared_bytes=len(PDF),
-        ciphertext_bytes=1, ciphertext_sha256="0" * 64)
-    members = [{"path": "Field Notes/paper.pdf", "size": len(PDF), "sha256": hashlib.sha256(PDF).hexdigest()}]
-    receipts = state_paths.ensure_vault_state_dir(vault) / "cloud-imports"
-    receipts.mkdir()
-    (receipts / f"{import_id}.json").write_text(json.dumps(
-        {"request": request.model_dump(), "result": {"ok": True, "files": 1, "bytes": len(PDF)}, "members": members}))
+    import_id = _cloud_stage(vault, {"paper.pdf": PDF})
 
     run = adoption_run.start(vault, path=f"_Imports/{import_id}", today=TODAY)
 
@@ -367,3 +375,68 @@ def test_a_listed_copy_that_is_missing_with_no_source_still_fails_and_reads_as_s
     reply = _apply(vault, run_id, plan_id)
 
     assert _outcome(reply, staged, "paper.pdf")["code"] == "NOT_FOUND"
+
+
+def test_finish_removes_the_folders_consuming_emptied_and_reports_what_still_sits_in_the_stage(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    staged = _stage(tmp_path, vault, {
+        "paper.pdf": PDF, "sub/inner.pdf": IMAGE, "plan.md": note, "left.pdf": PDF + b"left", "changed.pdf": PDF + b"old"})
+    hidden = _staged(vault, staged, ".cache/blob.bin")
+    hidden.parent.mkdir()
+    hidden.write_bytes(b"hidden bytes")
+    run = adoption_run.start(vault, path=staged["start_path"], today=TODAY)
+    run_id = run["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=[staged["start_path"]],
+                        exclude=[f"{staged['start_path']}/Field Notes/left.pdf"])
+    plan_id = adoption_run.plan(vault, run_id=run_id, today=TODAY)["plan"]["plan_id"]
+    changed = PDF + b"new"
+    _staged(vault, staged, "changed.pdf").write_bytes(changed)
+    applied = _apply(vault, run_id, plan_id)
+    assert _outcome(applied, staged, "changed.pdf")["status"] == "failed"
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    residual = finished["finish"]["residual"]
+    assert finished["finish"]["consumed"] == 2 and not _staged(vault, staged, "sub").exists()
+    assert residual["by_reason"] == {
+        "text": {"files": 1, "bytes": len(note)}, "unselected": {"files": 1, "bytes": len(PDF + b"left")},
+        "failed": {"files": 1, "bytes": len(changed)}, "ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
+    assert residual["files"] == 4 and residual["removed_empty_folders"] >= 1
+    assert staged["start_path"] in residual["discard"]
+    assert _staged(vault, staged, "plan.md").read_bytes() == note
+
+
+def test_finish_removes_the_whole_stage_when_nothing_is_left_and_names_the_cloud_route_when_something_is(
+        tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    emptied = _cloud_stage(vault, {"paper.pdf": PDF})
+    run_id, _plan_id, _reply = _adopt(vault, f"_Imports/{emptied}")
+
+    residual = adoption_run.finish(vault, run_id=run_id, today=TODAY)["finish"]["residual"]
+
+    assert not (vault / "_Imports" / emptied).exists()
+    assert (residual["files"], residual["discard"]) == (0, None)
+
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    with_text = _cloud_stage(vault, {"paper.pdf": IMAGE, "plan.md": note})
+    run_id, _plan_id, _reply = _adopt(vault, f"_Imports/{with_text}")
+
+    residual = adoption_run.finish(vault, run_id=run_id, today=TODAY)["finish"]["residual"]
+
+    assert residual["by_reason"] == {"text": {"files": 1, "bytes": len(note)}}
+    assert "transfer_memory" in residual["discard"] and "import_discard" in residual["discard"]
+    assert with_text in residual["discard"]
+
+
+def test_finish_leaves_every_folder_and_file_of_a_run_started_with_consume_false(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"sub/inner.pdf": IMAGE})
+    _staged(vault, staged, "empty").mkdir()
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"], consume=False)
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert _staged(vault, staged, "sub/inner.pdf").read_bytes() == IMAGE and _staged(vault, staged, "empty").is_dir()
+    assert finished["finish"]["residual"]["by_reason"] == {"kept": {"files": 1, "bytes": len(IMAGE)}}
+    assert finished["finish"]["residual"]["removed_empty_folders"] == 0

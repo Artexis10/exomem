@@ -13,7 +13,7 @@
   - a file added to a stage after its manifest is never removed;
   - a failed removal leaves the item applied and not consumed.
 - [x] 2.5 Resolve a missing staged copy in a recorded stage through the import index before failing, in `apply`, `retry_failed`, the repeat-call re-verification and `probe_staleness`. Verify: tests show a stop after commit and before the run save recovering with no failure, and a second run over the same stage resolving consumed items as already applied.
-- [ ] 2.6 Make `finish` remove empty stage folders and report the residual with counts, bytes and the discard route. Verify: a test shows unselected, ineligible, failed and text items in the residual.
+- [x] 2.6 Make `finish` remove empty stage folders and report the residual with counts, bytes and the discard route. Verify: a test shows unselected, ineligible, failed and text items in the residual.
 
 ## 3. Scale
 

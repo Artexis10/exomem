@@ -2344,6 +2344,11 @@ def finish(
             )
         recall = _recall_check(root, run)
         coverage = _coverage(root, run, _call_budget())
+        # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
+        removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
+        stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES)
+        if stage_residual is not None:
+            stage_residual["removed_empty_folders"] = removed_folders
         # The counts the last `apply` recorded from its own re-hash — never a fresh
         # re-hash at finish time, which could disagree with what was verified then.
         verify = run.get("verify") or {}
@@ -2365,6 +2370,8 @@ def finish(
             "handoff": _handoff(run),
             "verified_unchanged": verified_unchanged,
             "verified_total": verified_total,
+            "consumed": _consumed_count(run.get("outcomes") or {}),
+            "residual": stage_residual,
             "manifest_path": manifest_path,
         }
         run["phase"] = "done"
