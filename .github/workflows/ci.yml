@@ -897,7 +897,37 @@ jobs:
           BASE_COMMIT: ${{ needs.mcp-read-latency-plan.outputs.base_commit }}
           UV_PYTHON: /usr/bin/python3
           UV_PYTHON_DOWNLOADS: never
-        run: uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py paired --shard "$SHARD" --tag "$TAG" --base-commit "$BASE_COMMIT" --output "mcp-read-latency-fragment-$SHARD.json"
+        run: uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py paired --shard "$SHARD" --tag "$TAG" --base-commit "$BASE_COMMIT" --scratch "$RUNNER_TEMP/mcp-read-latency-$SHARD" --output "mcp-read-latency-fragment-$SHARD.json"
+      - name: Retain content-free MCP timings
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          timing_dir="$RUNNER_TEMP/mcp-read-timing-$SHARD"
+          mkdir -p "$timing_dir"
+          for arm in base head; do
+            ledger_path="$RUNNER_TEMP/mcp-read-latency-$SHARD/arms/$arm/logs/ledger.jsonl"
+            if test -f "$ledger_path"; then
+              # The ledger schema fixes these timing fields; exclude arguments, paths and identities.
+              if jq -c '{sequence, ts_utc, tool, outcome, error_code, duration_ms, total_ms,
+                  spans: [.spans[]? | {name, count, ms,
+                    fields: ((.fields // {}) | with_entries(select(.value | type == "number")))}]}' \
+                  "$ledger_path" > "$timing_dir/$arm.jsonl"; then
+                echo 'ledger_read=complete coverage=completed-calls-only' > "$timing_dir/$arm.status"
+              else
+                echo 'ledger_read=partial coverage=completed-calls-only' > "$timing_dir/$arm.status"
+              fi
+            else
+              echo 'ledger_read=missing' > "$timing_dir/$arm.status"
+            fi
+          done
+      - name: Upload content-free MCP timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-read-timings-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mcp-read-timing-${{ matrix.shard }}
+          if-no-files-found: warn
       - name: Upload the paired fragment
         if: always()
         uses: actions/upload-artifact@v4
