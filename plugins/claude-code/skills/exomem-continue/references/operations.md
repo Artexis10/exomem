@@ -551,11 +551,16 @@ cannot be undone.
   `operation-routing.md` ("A shared file that is evidence"). It needs no user token
   and works on Exomem Cloud, which accepts no other upload, and on a personal server.
 
-- **Without file handles, on a personal server:** (1) call **`transfer_artifact(operation="upload")`** →
-  a short-lived `{token, ttl_seconds, upload_url}`; (2) only where the runtime
-  holding the file can reach `upload_url`, multipart-POST each attached file with `Authorization: Bearer
-  <token>` and form fields `file` / `scope` / `category` (optional `filename`,
-  `description`, **`text`**); (3) **searchability is automatic** — the server
+- **Without file handles, on a personal server:** request
+  `transfer_artifact(operation="upload", lane="source")` for raw material, or
+  `lane="evidence"` for proof. The short-lived token fixes that lane.
+  Only where the runtime holding the file can reach `upload_url`, multipart-POST
+  each attached file there with `Authorization: Bearer <token>`.
+  For Source, send `file`, `source_kind`, and a clear `domain` when known;
+  `title` and `filename` are optional. Omitting `source_kind` leaves the capture
+  unclassified. For Evidence, send `file`, `scope`, and `category`, with optional
+  `filename`, `description`, and **`text`**.
+  **Searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
   (pymupdf), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
   txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video

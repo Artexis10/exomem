@@ -438,6 +438,39 @@ def test_the_artifact_and_its_page_share_one_resolved_stem(
     assert added.path == f"{added.artifact_path}.md"
 
 
+def test_a_racing_editor_cannot_have_its_page_replaced_by_a_source_capture(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allocation does not authorize overwriting a companion that appears before publication."""
+    import hashlib
+
+    from exomem import add as add_module
+    from exomem import vault as vault_module
+
+    original = add_module.batch_atomic_write
+    editor_bytes = "# External draft\nKeep these bytes.\n"
+    raced = []
+    digest = hashlib.sha256(_PNG).hexdigest()
+
+    def publish_after_editor(writes, **kwargs):
+        for write in writes:
+            if isinstance(write.content, str):
+                fields, _, _ = vault_module.parse_frontmatter(write.content)
+                if fields.get("binary_sha256") == digest:
+                    write.path.parent.mkdir(parents=True, exist_ok=True)
+                    write.path.write_text(editor_bytes)
+                    raced.append(write.path)
+        return original(writes, **kwargs)
+
+    monkeypatch.setattr(add_module, "batch_atomic_write", publish_after_editor)
+    with pytest.raises((vault_module.ContentHashMismatchError, vault_module.CreateOnlyConflict)):
+        add_module.add(vault, source_schema, content="", title="Racing capture", source_type="correspondence",
+                       artifact=_staged(tmp_path / "incoming", "shot.png", _PNG), today=TODAY)
+    [page] = raced
+    assert page.read_text() == editor_bytes
+    assert list(page.parent.glob("*.png")) == []
+
+
 def test_a_second_capture_of_the_same_title_does_not_collide(
     vault: Path, source_schema, tmp_path: Path
 ) -> None:

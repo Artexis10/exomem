@@ -56,19 +56,12 @@ _FORM_OVERHEAD_BYTES = 1024 * 1024
 _TUS_EXTENSIONS = "creation,expiration,termination"
 _TUS_PATCH_CONTENT_TYPE = "application/offset+octet-stream"
 _SESSION_WRITE_BYTES = 1024 * 1024
-#: Digits a byte count or offset header may carry: a 64-bit count has at most 19, and
-#: every limit here is far below one. Longer strings never reach `int()`, which caps at 4300.
-_MAX_COUNT_DIGITS = 19
 #: The one `archive` mode: keep a zip as its members (`archive_members`).
 ARCHIVE_MEMBERS = "members"
 log = logging.getLogger(__name__)
 
 
-def _header_count(value: str) -> int | None:
-    """A byte count or offset header as an integer; None when it is not one."""
-    if value.isascii() and value.isdigit() and len(value) <= _MAX_COUNT_DIGITS:
-        return int(value)
-    return None
+_header_count = upload_sessions.header_count
 
 
 def _flag(value: str) -> bool | None:
@@ -189,6 +182,86 @@ def _reconcile_under_guard(
         return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
 
 
+def _source_session_destination(vault_root: Path, target: dict, *, size: int, sha256: str) -> str:
+    """Use the canonical Source validation before byte receipt and again before publication."""
+    from . import add, schema, temporal, vocabulary_gate
+
+    safe_name = add.source_artifact_name(target["filename"])
+    vocabulary_gate.artifact_admission(
+        vault_root, size=size, is_markdown=add.source_artifact_suffix(target["filename"]).endswith(".md"),
+    )
+    prepared = add.prepare_source_metadata(
+        vault_root, schema.load_source_schema(vault_root),
+        content=add._describe_artifact(safe_name, sha256, size),
+        title=target["title"], source_type=target["source_type"],
+        domain=target.get("domain"), url=target.get("url"),
+    )
+    folder = add.admit_source_destination(vault_root, prepared, temporal.render_date(temporal.now()))
+    return folder.relative_to(vault_root).as_posix()
+
+
+def _source_upload_receipt(vault_root: Path, result: dict) -> dict:
+    """Return custody without exposing the canonical writer's corpus advisories."""
+    from . import source_coverage
+
+    # These fields are the closed upload protocol; corpus advisories require governed command release.
+    receipt = {key: result[key] for key in ("path", "ref", "artifact_path", "hash", "hash_algorithm", "size")
+               if key in result}
+    receipt["semantic_compilation"] = source_coverage.compilation_guidance(vault_root, [result["path"]])
+    return receipt
+
+
+def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
+    """Publish one Source through the maintained mutation replay protocol."""
+    from . import add, schema
+    from .cli_ops import OpError
+    from .command_surface import Command
+    from .vault import BatchWriteError
+    from .writer_lease import _PostCommitOutcomeUncertain, invoke_command
+
+    def publish(root: Path, *, target: dict, length: int, sha256: str, session_id: str) -> dict:
+        if _source_session_destination(root, target, size=length, sha256=sha256) != target["destination"]:
+            raise upload_sessions.CommitFailed(
+                "SOURCE_DESTINATION_CHANGED", "the Source destination changed; uploaded bytes remain held", retryable=True,
+            )
+        try:
+            result = add.add(
+                root, schema.load_source_schema(root), content="", title=target["title"],
+                source_type=target["source_type"], domain=target.get("domain"), url=target.get("url"),
+                artifact=add.SourceArtifact(part, target["filename"], target.get("content_type")),
+                raw_protection=target["raw_protection"], expected_sha256=sha256,
+            ).as_dict()
+        except BatchWriteError as error:
+            if error.code == "BATCH_ROLLBACK_INCOMPLETE":
+                # Canonical bytes may remain, so the replay store must never execute this leaf again.
+                raise _PostCommitOutcomeUncertain() from error
+            raise
+        return _source_upload_receipt(root, result)
+
+    # A lane token carries no caller identity. Keep the same transfer floor across startup recovery.
+    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
+        try:
+            result = invoke_command(
+                Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
+                        cli_writes=True, response_detail="legacy"),
+                vault_root,
+                target=record["target"], length=record["length"],
+                sha256=record["sha256"], session_id=record["id"],
+                idempotency_key=record["id"], public_idempotency_key=None,
+            )
+        except OpError as error:
+            raise upload_sessions.CommitFailed(
+                error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
+            ) from error
+        if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
+            # Signed receipt recovery can prove a commit without recovering its complete leaf result.
+            raise upload_sessions.CommitFailed(
+                "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
+            )
+        # Also project older cached results before they leave the transfer principal's scope.
+        return _source_upload_receipt(vault_root, result)
+
+
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     """Preserve a verified session's bytes exactly as `/upload` would; return the receipt.
 
@@ -204,6 +277,33 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     preserve_module = _preserve_module()
     target = record["target"]
     manager = get_manager()
+    try:
+        lane = target.get("lane", upload_sessions.LANE)
+        if lane not in upload_tokens.UPLOAD_LANES:
+            raise upload_sessions.CommitFailed("INVALID_UPLOAD", "the upload session lane is invalid")
+        if lane == "source":
+            receipt = _commit_source_session(vault_root, part, record)
+        else:
+            receipt = _commit_evidence_session(vault_root, part, record, manager, preserve_module)
+    except archive_members.ArchiveError as exc:
+        raise upload_sessions.CommitFailed(
+            exc.code, exc.reason, retryable=exc.code == archive_members.NO_SPACE
+        ) from exc
+    except preserve_module.PreserveError as exc:
+        raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+    except OpError as exc:
+        error = error_dict(exc)
+        raise upload_sessions.CommitFailed(error["code"], error["message"], retryable=True) from exc
+    try:
+        # The Source receipt names its page; its artifact is what needs extraction.
+        _reconcile_under_guard(manager, vault_root, vault_root / receipt.get("artifact_path", receipt["path"]))
+    except Exception:  # noqa: BLE001 - preserved originals remain recoverable
+        log.warning("media reconciliation failed after upload; the original remains recoverable", exc_info=True)
+    return receipt
+
+
+def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager: Any, preserve_module: Any) -> dict:
+    target = record["target"]
     try:
         with part.open("rb") as stream:
             if target.get("archive") == ARCHIVE_MEMBERS:
@@ -240,22 +340,8 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
                 receipt = stored
             else:
                 receipt = result.as_dict()
-    except archive_members.ArchiveError as exc:
-        raise upload_sessions.CommitFailed(
-            exc.code, exc.reason, retryable=exc.code == archive_members.NO_SPACE
-        ) from exc
     except preserve_module.PreserveError as exc:
         raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
-    except OpError as exc:
-        # The writer lease or the vault guard: the same bytes commit once it returns.
-        error = error_dict(exc)
-        raise upload_sessions.CommitFailed(error["code"], error["message"], retryable=True) from exc
-    try:
-        # Also after `already_stored`: a stop may have come before the reconciliation ran.
-        _reconcile_under_guard(manager, vault_root, vault_root / receipt["path"])
-    except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
-        log.warning("media reconciliation failed for %s; evidence remains recoverable",
-                    receipt["path"], exc_info=True)
     return receipt
 
 
@@ -916,7 +1002,7 @@ def register_transfer_routes(
                 _reconcile_under_guard,
                 manager,
                 vault_root,
-                vault_root / result.path,
+                vault_root / (getattr(result, "artifact_path", None) or result.path),
             )
         except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
             log.warning(
@@ -924,7 +1010,10 @@ def register_transfer_routes(
                 result.path,
                 exc_info=True,
             )
-        return JSONResponse(result.as_dict(), status_code=201)
+        receipt = result.as_dict()
+        if lane == "source":
+            receipt = _source_upload_receipt(vault_root, receipt)
+        return JSONResponse(receipt, status_code=201)
 
     def _credential_binding(request: Request) -> str:
         """Which credential opened a session, for its per-binding quota; never the credential."""
@@ -1017,18 +1106,21 @@ def register_transfer_routes(
                 "INVALID_UPLOAD", "`Upload-Length` and a well-formed `Upload-Metadata` are required", 400
             )
         # The keys an upload handoff advertises: one list, so the two never disagree.
-        missing = [
-            key for key in upload_sessions.REQUIRED_METADATA if not metadata.get(key, "").strip()
-        ]
+        lane = _upload_lane(request)
+        missing = [key for key in upload_sessions.required_metadata(lane) if not metadata.get(key, "").strip()]
         if missing:
             return _tus_refusal(
                 "INVALID_UPLOAD", f"`Upload-Metadata` lacks {', '.join(missing)}", 400
             )
         preserve_module = _preserve_module()
+        from . import add
+        from .cli_ops import OpError, error_dict
+
         raw_protection, members, flag_refusal = _upload_flags(
             metadata.get("raw_protection", ""), metadata.get("archive", "")
         )
         target = {
+            "lane": lane,
             "filename": metadata.get("filename", "").strip(),
             "scope": metadata.get("scope", "").strip(),
             "category": metadata.get("category", "").strip(),
@@ -1039,19 +1131,30 @@ def register_transfer_routes(
         refusals = [
             refusal
             for refusal in (
-                preserve_module.destination_segment_refusal(target["scope"], field="scope"),
-                preserve_module.destination_segment_refusal(target["category"], field="category"),
+                preserve_module.destination_segment_refusal(target["scope"], field="scope") if lane == "evidence" else None,
+                preserve_module.destination_segment_refusal(target["category"], field="category") if lane == "evidence" else None,
                 flag_refusal,
-                None
-                if _upload_lane(request) == upload_sessions.LANE
-                else "an upload session preserves Evidence",
+                "archive=members preserves Evidence directly" if members and lane == "source" else None,
             )
             if refusal
         ]
         if refusals:
             return _tus_refusal("INVALID_UPLOAD", "; ".join(refusals), 400)
         try:
-            if members:
+            if lane == "source":
+                target = {
+                    "lane": lane, "filename": target["filename"],
+                    "title": metadata.get("title", "").strip() or target["filename"],
+                    "source_type": add.capture_kind(vault_root, metadata.get("source_kind") or None, unattended=True),
+                    "domain": metadata.get("domain", "").strip() or None,
+                    "url": metadata.get("url", "").strip() or None,
+                    "content_type": metadata.get("content_type", "").strip() or None,
+                    "raw_protection": raw_protection,
+                }
+                target["destination"] = _source_session_destination(
+                    vault_root, target, size=declared, sha256=metadata.get("sha256", "").strip(),
+                )
+            elif members:
                 folder = preserve_module.evidence_folder(vault_root, target["scope"], target["category"])
                 preserve_module.admit_destination(vault_root, folder, directory=True, members=True)
                 preserve_module.validate_raw_capture(target["filename"], raw_protection=True)
@@ -1080,6 +1183,11 @@ def register_transfer_routes(
                 max_bytes=session_max_bytes,
             )
         except preserve_module.PreserveError as exc:
+            return _tus_refusal(exc.code, exc.reason, 400)
+        except (OpError, ValueError) as exc:
+            error = error_dict(exc)
+            return _tus_refusal(error["code"], error["message"], 400)
+        except add.AddError as exc:
             return _tus_refusal(exc.code, exc.reason, 400)
         except upload_sessions.SessionError as exc:
             return _tus_refusal(exc.code, exc.reason, exc.status)

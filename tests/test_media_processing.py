@@ -1877,6 +1877,86 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     assert retried["requeued"] == 1
 
 
+def test_exact_media_status_finds_old_work_and_only_its_index_demand(vault: Path) -> None:
+    """A requested job must survive a newer global prefix without inheriting unrelated totals."""
+    from exomem import deferred_index
+
+    binary = _drop_media(vault, "older.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    _media_processing().reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    for index in range(media_jobs.STATUS_JOB_LIMIT + 1):
+        other = _drop_media(vault, f"newer-{index}.m4a")
+        store.enqueue(media_jobs.MediaJob(binary_path=other, sidecar_path=other.with_name(other.name + ".md"),
+                                         media_type="audio", do_ocr=True, do_clip=False))
+    deferred_index.add_full(vault, [relative + ".md", "Knowledge Base/Notes/unrelated.md"])
+    [row] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+    assert row["path"] == relative
+    assert row["counts"][media_jobs.PENDING] == 1
+    assert sum(row["counts"].values()) == 1
+    assert [job["path"] for job in row["jobs"]] == [relative]
+    assert row["errors"] == []
+    assert row["processing"] == {"state": "pending", "source": "job"}
+    assert row["activity"] == {"state": "queued", "source": "job", "freshness": "unknown"}
+    assert row["index_refresh"] == {
+        "source": "full_upserts", "coverage": "exact-path", "state": "available",
+        "count": 1, "paths": [relative + ".md"], "freshness": "unknown",
+    }
+    overview = commands_module.op_process_media(vault, operation="status")
+    assert overview["counts"][media_jobs.PENDING] == media_jobs.STATUS_JOB_LIMIT + 2
+    assert relative not in [job["path"] for job in overview["jobs"]]
+    deferred_index.clear_full(vault, [relative + ".md"])
+    [cleared] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+    assert cleared["index_refresh"]["count"] == 0
+    assert cleared["index_refresh"]["freshness"] == "unknown"
+
+
+def test_exact_media_status_does_not_mistake_a_recorded_claim_for_live_inference(vault: Path) -> None:
+    """A healthy reconciliation ledger and a registered PID cannot prove that a recording is being inferred."""
+    binary = _drop_media(vault, "claimed.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    _media_processing().reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    assert store.claim_next() is not None
+    store.set_worker(os.getpid())
+    [registered] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+    assert registered["processing"] == {"state": "running", "source": "job"}
+    assert registered["healthy"] is True
+    assert registered["health_scope"] == "reconciliation"
+    assert registered["activity"] == {"state": "unknown", "source": "job", "freshness": "unknown"}
+
+    store.clear_worker(os.getpid())
+    [abandoned] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+    assert abandoned["processing"]["state"] == "running"
+    assert abandoned["activity"] == registered["activity"]
+
+
+def test_exact_media_status_does_not_invent_completion_or_repair_custody(vault: Path) -> None:
+    """A bare completed field and missing or corrupt ledgers do not prove completed processing."""
+    from exomem import deferred_index
+
+    binary = _drop_media(vault, "unprocessed.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    sidecar = binary.with_name(binary.name + ".md")
+    sidecar.write_text(f"---\nevidence_file: {relative}\nmedia_type: audio\nprocessing_state: completed\n---\n")
+    for corrupt in (False, True):
+        if corrupt:
+            deferred_index.store_path(vault).parent.mkdir(parents=True, exist_ok=True)
+            deferred_index.store_path(vault).write_bytes(b"invalid sqlite")
+        [row] = commands_module.op_process_media(vault, operation="status", path=relative)["results"]
+        assert row["processing"] == {"state": "unknown", "source": "sidecar", "freshness": "unknown"}
+        assert row["activity"] == {"state": "unknown", "source": "unavailable", "freshness": "unknown"}
+        assert row["counts"] is None
+        assert row["job_inventory"]["state"] == "unavailable"
+        assert row["index_refresh"]["count"] is None
+        assert row["index_refresh"]["state"] == "unavailable"
+        assert not media_jobs.job_store_path(vault).exists()
+        if corrupt:
+            assert deferred_index.store_path(vault).read_bytes() == b"invalid sqlite"
+        else:
+            assert not deferred_index.store_path(vault).exists()
+
+
 def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) -> None:
     # A tool caller, such as a Cloud tenant, sees memory-blocked work as waiting
     # from every operation. The memory reason and the worker's detail stay with doctor.
@@ -1899,6 +1979,7 @@ def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) ->
     assert set(status) == {
         "operation",
         "healthy",
+        "health_scope",
         "counts",
         "reconciliation_required_count",
         "jobs",

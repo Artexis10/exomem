@@ -2421,6 +2421,9 @@ def test_activation_keeps_admitted_material_when_a_budget_pointer_origin_is_unce
         _write(tmp_path, pending_path, before)
     _reset_overlay()
     assert all(path.read_bytes() == raw for path, raw in canonical.items())
+    # Readable bytes settle the page's identity from the page itself; only
+    # bytes that cannot be read leave the origin coverage incomplete.
+    (tmp_path / pending_path).write_bytes(b"\xff")
     assert _overlay(tmp_path).servable and not _overlay(tmp_path).ready
 
     degraded = invoke(guest)
