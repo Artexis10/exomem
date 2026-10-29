@@ -263,6 +263,9 @@ def _initialize_idempotency_client(database: Path, role: str, legacy: bool, chan
     real_connect = sqlite3.connect
     real_lstat = Path.lstat
     real_try_lock = mutation_lock._try_os_lock
+    real_last_error = None
+    windows_open_errors = []
+    phase = "construct"
 
     def wait_for_parent() -> None:
         if not channel.poll(_HOLD_SECONDS):
@@ -315,14 +318,48 @@ def _initialize_idempotency_client(database: Path, role: str, legacy: bool, chan
         return connection
 
     try:
+        if os.name == "nt":
+            import ctypes
+            import sys
+
+            # Win32 error 5 can conceal delete-pending; preserve the real error.
+            get_last_nt_status = ctypes.WinDLL("ntdll", use_last_error=False).RtlGetLastNtStatus
+            get_last_nt_status.argtypes = []
+            get_last_nt_status.restype = ctypes.c_long
+            real_last_error = mutation_lock._windows_last_error
+
+            def observe_last_error(ctypes_module):  # noqa: ANN001
+                # This is the last thread status, captured before any diagnostics.
+                status = get_last_nt_status()
+                error = real_last_error(ctypes_module)
+                if error == 5 and len(windows_open_errors) < 4:
+                    caller = sys._getframe(1)
+                    values = caller.f_locals
+                    path = values.get("path")
+                    windows_open_errors.append(
+                        {
+                            "last_thread_ntstatus": f"0x{status & 0xFFFFFFFF:08X}",
+                            "function": caller.f_code.co_name,
+                            "leaf": path.name if isinstance(path, Path) else None,
+                            "access": values.get("access"),
+                            "share": values.get("share"),
+                            "creation": values.get("creation"),
+                        }
+                    )
+                return error
+
+            mutation_lock._windows_last_error = observe_last_error
         os.umask(0o022)
         mutation_lock._try_os_lock = observe_lock
         Path.lstat = observe_lstat
         sqlite3.connect = observe_connect
         store = IdempotencyStore(database)
+        phase = "run"
         retained = store.run("retained", "digest", lambda: {"retained": True}) if legacy else None
         first = store.run(role, "digest", lambda: {"writer": role})
+        phase = "replay"
         replay = store.run(role, "digest", lambda: {"unexpected": True})
+        phase = "final_connect"
         with store._connect():
             modes = [
                 stat.S_IMODE(path.stat().st_mode)
@@ -334,9 +371,34 @@ def _initialize_idempotency_client(database: Path, role: str, legacy: bool, chan
                 if path.exists()
             ]
         channel.send(("ok", first, replay, retained, modes))
-    except BaseException as error:
-        channel.send(("error", repr(error)))
+    except BaseException as error:  # noqa: BLE001 - report every child failure to its parent
+        if os.name == "nt":
+            import sys
+            import traceback
+
+            channel.send(
+                (
+                    "error",
+                    repr(error),
+                    {
+                        "role": role,
+                        "phase": phase,
+                        "python": sys.version.split()[0],
+                        "sqlite": sqlite3.sqlite_version,
+                        "windows_build": tuple(sys.getwindowsversion()),
+                        "windows_open_errors": windows_open_errors,
+                        "frames": [
+                            (Path(frame.filename).name, frame.name, frame.lineno)
+                            for frame in traceback.extract_tb(error.__traceback__, limit=-6)
+                        ],
+                    },
+                )
+            )
+        else:
+            channel.send(("error", repr(error)))
     finally:
+        if real_last_error is not None:
+            mutation_lock._windows_last_error = real_last_error
         channel.close()
 
 
