@@ -1729,6 +1729,44 @@ def test_pending_projection_excludes_non_recall_candidates(tmp_path: Path) -> No
     assert raw_rel not in snapshot.recall_paths("kb")
 
 
+def test_custody_retires_for_pages_a_lane_owes_no_row(tmp_path: Path) -> None:
+    """A raw Record has no catalogue row and an archived page has no row in either
+    lane, by design. A batch that touched them must still retire once its owed
+    rows are published, or the overlay degrades for good (2026-10-17 to 10-29)."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    manifest_rel = "Knowledge Base/Records/Health/_collection.md"
+    raw_rel = "Knowledge Base/Records/Health/items/raw.md"
+    archive_rel = "Knowledge Base/_archive/logs/log-0001.md"
+    note_rel = "Knowledge Base/Notes/beside-the-record.md"
+    _write(vault, manifest_rel, _records_manifest())
+    raw_before = "private measurement\n"
+    _write(vault, raw_rel, raw_before)
+    note_before = _page(title="Beside", body="Nothing yet.", updated="2026-10-01")
+    _write(vault, note_rel, note_before)
+    _prime(vault)
+
+    raw_after = "private measurement, revised\n"
+    archive_after = "# Archived log\n\nRotated entries.\n"
+    note_after = _page(title="Beside", body="Recorded a measurement.", updated="2026-10-17")
+    _publish_change(
+        vault,
+        batch_id="batch-unowed",
+        generation="generation-unowed",
+        changes=(
+            (raw_rel, raw_before, raw_after, None),
+            (archive_rel, None, archive_after, None),
+            (note_rel, note_before, note_after, None),
+        ),
+    )
+    assert set(_non_retired_rows(vault)) == {raw_rel, archive_rel, note_rel}
+
+    _publish_lanes(vault, (raw_rel, archive_rel, note_rel))
+
+    assert _non_retired_rows(vault) == {}
+    assert _overlay(vault).ready is True
+
+
 def test_resolve_page_applies_current_recall_admission(tmp_path: Path) -> None:
     """Finding 10: the hydration seam carries its own admission check."""
     vault = tmp_path

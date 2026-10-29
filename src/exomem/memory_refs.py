@@ -298,6 +298,12 @@ def _custody_expected(vault_root: Path, rel: str) -> tuple[str | None, bool]:
     return row[3], True
 
 
+def owes_custody_row(vault_root: Path, rel: str) -> bool:
+    """Whether the sidecar is supposed to hold an identity row for this path (see
+    `_custody_expected`); the pending-recall overlay asks it before proving a lane."""
+    return _custody_expected(Path(vault_root), rel)[1]
+
+
 def _custody_verify(
     vault_root: Path,
     rel_paths: tuple[str, ...],
