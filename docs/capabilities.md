@@ -74,7 +74,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | read_schema | inspect, preview, history, infer, validate, diff, validate-document, inventory, resolve, resolve-entity-type, propose-relation, census | schema_memory |
 | recall_context | Direct inputs | activate_context |
 | record_episode | record, prepare, disposition, resume | episode_memory |
-| repair_memory | structured-files, tag-variants | maintain_memory |
+| repair_memory | structured-files, tag-variants, curation-propose, curation-apply, curation-resume, curation-propose-compensation, curation-apply-compensation, curation-revert | maintain_memory |
 | search_memory | Direct inputs | ask_memory |
 | supersede_note | Direct inputs | replace_memory |
 | transfer_artifact | Direct inputs | transfer_artifact |

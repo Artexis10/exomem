@@ -298,14 +298,14 @@ def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() ->
         assert f"'kind': 'curation-{action}'" in text
     for action in ("propose", "apply", "resume", "propose-compensation", "apply-compensation"):
         assert f'curation_action="{action}"' in text
-    assert "Curation writes are CLI-only" in text
-    assert "repair_memory(operation=" not in text
+    # Remote clients run curation writes too, so the skill must name the remote route.
+    assert "repair_memory(operation=" in text
     assert "`structural_suggestions`" in text
     assert "`restructure_execution`" in text
     assert "preview the immutable plan once" in text
     assert "one explicit confirmation for that exact plan fingerprint" in text
     assert "resume automatically one step per request" in text
-    assert 'propose-compensation"` is `structural_suggestions`' in text
+    assert 'propose-compensation"`) is `structural_suggestions`' in text
     assert "does not need a fresh confirmation" in text
     assert "stop on `partial` or `blocked`" in text
     assert "standing approval" in text
