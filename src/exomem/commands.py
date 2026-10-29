@@ -36,7 +36,7 @@ from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NamedTuple, NotRequired
+from typing import Annotated, Any, Literal, NamedTuple, NotRequired, get_args
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -8903,11 +8903,14 @@ def op_transfer_artifact(
     return handoff
 
 
+ProcessMediaOperation = Literal["process", "status", "retry", "reprocess"]
+
+
 def op_process_media(
     vault_root: Path,
     path: str | None = None,
     paths: list[str] | None = None,
-    operation: Literal["process", "status", "retry", "reprocess"] = "process",
+    operation: ProcessMediaOperation = "process",
     language: str | None = None,
 ) -> dict:
     """Check governed media; retry after remediation; extract again.
@@ -13076,7 +13079,7 @@ _MISSING_SELECTOR_DEFAULT = object()
 
 def validate_process_media_operation(operation: Any) -> None:
     """Raise the product command's existing public selector error."""
-    if operation not in {"process", "status", "retry", "reprocess"}:
+    if operation not in get_args(ProcessMediaOperation):
         from .cli_ops import OpError
 
         raise OpError(
