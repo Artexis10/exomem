@@ -4029,6 +4029,12 @@ def _custody_indexable(vault_root: Path, rel: str) -> bool:
         return True
 
 
+def owes_custody_row(vault_root: Path, rel: str) -> bool:
+    """Whether this catalogue is supposed to hold a row for this path (see
+    `_custody_indexable`); the pending-recall overlay asks it before proving a lane."""
+    return _custody_indexable(Path(vault_root), rel)
+
+
 def _custody_file_digest(
     vault_root: Path, rel: str, digests: Mapping[str, str | None] | None = None
 ) -> str | None:

@@ -46,7 +46,7 @@ import hashlib
 import stat
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
@@ -503,6 +503,12 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     report would otherwise retire custody the catalogue does not actually hold.
     Asking the stores also means the proof survives a restart, so a process that
     dies between the two publications does not strand the row.
+
+    Each lane is asked for what it owes. A lane that never holds a row for a
+    page (the catalogue suppresses a raw Record; neither lane walks `_archive`)
+    holds it by having none, once the expected bytes are the ones on disk.
+    Asked for those bytes instead, such a lane never answers yes, and every
+    batch that touched the page keeps its custody for good.
     """
     if not expected:
         return True
@@ -511,13 +517,35 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     try:
         # The identity sidecar answers the whole batch in one query, so it is
         # asked first and short-circuits the per-path catalogue comparison.
-        identities = memory_refs.holds_content_identities(vault_root, expected)
+        identities = memory_refs.holds_content_identities(
+            vault_root, _owed(vault_root, expected, memory_refs.owes_custody_row)
+        )
         if not all(identities.get(rel, False) for rel in expected):
             return False
-        catalogue = lexstore.holds_content_identities(vault_root, expected)
+        catalogue = lexstore.holds_content_identities(
+            vault_root, _owed(vault_root, expected, lexstore.owes_custody_row)
+        )
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
     return all(catalogue.get(rel, False) for rel in expected)
+
+
+def _owed(
+    vault_root: Path,
+    expected: dict[str, str | None],
+    owes_row: Callable[[Path, str], bool],
+) -> dict[str, str | None]:
+    """`expected` as one lane must hold it: absence where it owes no row."""
+    return {
+        rel: (
+            None
+            if digest is not None
+            and not owes_row(vault_root, rel)
+            and _canonical_identity(vault_root, rel) == digest
+            else digest
+        )
+        for rel, digest in expected.items()
+    }
 
 
 def recall_lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
