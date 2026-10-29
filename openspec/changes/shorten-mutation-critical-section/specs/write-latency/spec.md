@@ -149,6 +149,12 @@ request SHALL retain their current guard behavior.
 - **THEN** the final seal rejects the preparation before revision selection
 - **AND** a fresh preparation omits an ambiguous about-reference
 
+#### Scenario: Pending identity cannot be proven for an about-reference
+
+- **WHEN** pending custody leaves the identity of a recap's about-references unprovable at admission
+- **THEN** the recap commits without those references and returns a warning with `about_skipped`
+- **AND** an edit or observation by reference still refuses with the warming outcome while its target stays unprovable
+
 #### Scenario: Reference preparation cannot be validated
 
 - **WHEN** the capture allowance, waiter admission, delivery reserve or an unreadable generation prevents a sealed preparation

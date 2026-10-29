@@ -77,12 +77,14 @@ def test_one_moved_pending_page_preserves_other_recall_and_worker_heals(
     assert memory_refs.ReferenceIndex(tmp_path).refs_for_paths([stable])[
         stable
     ] == memory_refs.memory_ref(stable_identity)
-    with pytest.raises(find.RetrievalIndexWarming):
+    # The moved page's body is unproven, so its current bytes settle identity: it
+    # no longer holds `identity`, and the stable page stays the one owner.
+    with pytest.raises(memory_refs.ReferenceError, match="memory id not found"):
         memory_refs.ReferenceIndex(tmp_path).resolve(identity)
-    with pytest.raises(find.RetrievalIndexWarming):
-        memory_refs.ReferenceIndex(tmp_path).resolve(stable_identity)
-    with pytest.raises(find.RetrievalIndexWarming):
-        memory_refs.paths_for_ids_read_only(tmp_path, [stable_identity])
+    assert memory_refs.ReferenceIndex(tmp_path).resolve(stable_identity) == stable
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [stable_identity]) == {
+        stable_identity: (stable,)
+    }
 
     delta._publish_lanes(tmp_path, (moved,))
     derived_drain.drain_once(
@@ -221,6 +223,34 @@ def test_moving_body_fence_falls_back_to_one_fresh_footprint(
     assert current.covers(rel)
     assert current.page(rel) is None
     assert calls == [False, True]
+
+
+def test_footprint_fallback_is_rehydrated_by_the_next_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/pending.md"
+    delta._publish_change(
+        tmp_path,
+        batch_id="healing-fence",
+        generation="generation-healing",
+        changes=(
+            (
+                rel,
+                None,
+                delta._page(title="Pending", body="pendingneedle", updated="2026-01-01"),
+                None,
+            ),
+        ),
+    )
+    pending_recall.reset()
+    with monkeypatch.context() as racing:
+        racing.setattr(
+            derived_receipts, "pending_visibility_snapshot_is_current", lambda *_: False
+        )
+        assert not pending_recall.overlay(tmp_path).ready
+    healed = pending_recall.overlay(tmp_path)
+    assert healed.ready
+    assert healed.page(rel) is not None
 
 
 def test_completed_overflow_retires_after_restart_without_readers(
@@ -640,9 +670,9 @@ def test_governed_identity_uncertainty_obeys_the_callers_release_floor(
                 ),
             ),
         )
-        (tmp_path / pending).write_bytes(
-            b"unprovable pending bytes" if ceiling is not None else b"\xff"
-        )
+        # Undecodable bytes stay unprovable, so only the caller's release floor
+        # decides whether the pending page is admitted and refuses.
+        (tmp_path / pending).write_bytes(b"\xff")
         pending_recall.reset()
     with principal.request_scope(guest):
         if ceiling == egress.LEVEL_NONE:
@@ -660,6 +690,83 @@ def test_governed_identity_uncertainty_obeys_the_callers_release_floor(
                 plan_progress._supersession(tmp_path, [identity])
     with principal.library_scope(), pytest.raises(find.RetrievalIndexWarming):
         memory_refs.paths_for_ids_read_only(tmp_path, [identity])
+
+
+@pytest.mark.usefixtures("managed_runtime")
+@pytest.mark.parametrize(
+    ("blocked_bytes", "outcome"),
+    [
+        (
+            delta._page(title="Blocked", body="no identity", updated="2026-03-01").encode(),
+            "commits",
+        ),
+        (
+            delta._page(
+                title="Blocked",
+                body="claims the id",
+                updated="2026-03-01",
+                exomem_id="87654321-4321-4321-8321-210987654321",
+            ).encode(),
+            "AMBIGUOUS_REFERENCE",
+        ),
+        (b"\xff", "warming"),
+    ],
+    ids=["no-id", "duplicate-id", "undecodable"],
+)
+def test_edit_by_reference_settles_unprovable_pending_pages_from_canonical_bytes(
+    tmp_path: Path, blocked_bytes: bytes, outcome: str
+) -> None:
+    from exomem import commands
+
+    identity = "87654321-4321-4321-8321-210987654321"
+    stable = "Knowledge Base/Notes/stable.md"
+    blocked = "Knowledge Base/Notes/blocked.md"
+    delta._write(
+        tmp_path,
+        stable,
+        delta._page(title="Stable", body="Before.", updated="2026-01-01", exomem_id=identity),
+    )
+    delta._prime(tmp_path)
+    delta._publish_change(
+        tmp_path,
+        batch_id="blocked-page",
+        generation="generation-blocked",
+        changes=(
+            (
+                blocked,
+                None,
+                delta._page(title="Blocked", body="pending", updated="2026-02-01"),
+                None,
+            ),
+        ),
+    )
+    (tmp_path / blocked).write_bytes(blocked_bytes)
+    pending_recall.reset()
+    original = (tmp_path / stable).read_bytes()
+    command = next(
+        command for command in commands.PRODUCT_COMMANDS if command.name == "edit_memory"
+    )
+
+    def edit() -> object:
+        return writer_lease.invoke_command(
+            command,
+            tmp_path,
+            path=memory_refs.memory_ref(identity),
+            why="Correct the stable page.",
+            operation={"kind": "replace_string", "old_string": "Before.", "new_string": "After."},
+        )
+
+    if outcome == "commits":
+        edit()
+        assert b"After." in (tmp_path / stable).read_bytes()
+        return
+    if outcome == "AMBIGUOUS_REFERENCE":
+        with pytest.raises(ValueError, match=outcome):
+            edit()
+    else:
+        with pytest.raises(find.RetrievalIndexWarming):
+            edit()
+    assert (tmp_path / stable).read_bytes() == original
 
 
 @pytest.mark.usefixtures("managed_runtime")
