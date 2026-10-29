@@ -127,6 +127,17 @@
       "compression_ratio_threshold": 2.4,
       "logprob_threshold": -1.0
     },
+    "faster_whisper": {
+      "revision": "fw-policy-1",
+      "source": "faster-whisper 1.2.x WhisperModel.transcribe; the library's default VadOptions, so language is detected on speech and a quiet opening does not decide it",
+      "options": {
+        "vad_filter": true,
+        "condition_on_previous_text": false,
+        "beam_size": 5,
+        "language_detection_segments": 3,
+        "language_detection_threshold": 0.5
+      }
+    },
     "metadata_files": [
       "config.json",
       "vocab.json",

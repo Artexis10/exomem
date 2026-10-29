@@ -171,7 +171,7 @@ def _resumable_backend(monkeypatch, recognized, stop_after=None):
             raise _Stopped
         recognized.append(seed)
         # One timestamp pair spanning the whole window; the text token names the window.
-        return 50259, (TS, seed // window, TS + 1500)
+        return 50259, (TS, seed // window, TS + 1500), None
 
     monkeypatch.setattr(backend, "_recognize", recognize)
     return backend, window
@@ -225,6 +225,96 @@ def test_progress_from_another_engine_revision_is_not_resumed(monkeypatch, vault
 
     assert [segment.text for segment in segments] == ["window 0", "window 1", "window 2"]
     assert again == [0, window, 2 * window]
+
+
+ESTONIAN = 50267
+
+
+def _knows_languages(backend):
+    backend._languages = {50259: "<|en|>", ESTONIAN: "<|et|>"}
+    backend._language_ids = {"en": 50259, "et": ESTONIAN}
+
+
+def test_a_requested_language_replaces_detection_in_every_window_and_is_reported(monkeypatch, vault):
+    from exomem.asr_facts import AsrFacts
+
+    audio = _recording(vault)
+    backend, _window = _resumable_backend(monkeypatch, [])
+    _knows_languages(backend)
+    asked = []
+
+    def recognize(_waveform, language, seed):
+        asked.append(language)
+        return language or 50259, (TS, seed, TS + 1500), None
+
+    monkeypatch.setattr(backend, "_recognize", recognize)
+    report = AsrFacts()
+
+    segments, _label = backend.transcribe(audio, vault_root=vault, language="et", report=report)
+    list(segments)
+
+    assert asked == [ESTONIAN] * 3
+    assert (report.language, report.language_probability) == ("et", None)
+
+
+def test_the_detected_language_and_its_probability_are_reported(monkeypatch, vault):
+    from exomem.asr_facts import AsrFacts
+
+    audio = _recording(vault)
+    backend, _window = _resumable_backend(monkeypatch, [])
+    _knows_languages(backend)
+    monkeypatch.setattr(backend, "_recognize", lambda _waveform, language, seed: (ESTONIAN, (TS, 1, TS + 1500), 0.75 if language is None else None))
+    report = AsrFacts()
+
+    segments, _label = backend.transcribe(audio, vault_root=vault, report=report)
+    list(segments)
+
+    assert (report.language, report.language_probability) == ("et", 0.75)
+
+
+def test_a_language_the_model_does_not_publish_is_refused(monkeypatch, vault):
+    from exomem.extract import UnsupportedLanguage
+
+    audio = _recording(vault)
+    backend, _window = _resumable_backend(monkeypatch, [])
+    _knows_languages(backend)
+
+    segments, _label = backend.transcribe(audio, vault_root=vault, language="xx")
+    with pytest.raises(UnsupportedLanguage):
+        list(segments)
+
+
+def test_progress_made_under_another_language_request_is_not_resumed(monkeypatch, vault):
+    audio = _recording(vault)
+    backend, window = _resumable_backend(monkeypatch, [], stop_after=1)
+    _knows_languages(backend)
+    segments, _label = backend.transcribe(audio, vault_root=vault)
+    with pytest.raises(_Stopped):
+        list(segments)
+
+    again = []
+    backend, _window = _resumable_backend(monkeypatch, again)
+    _knows_languages(backend)
+    segments, _label = backend.transcribe(audio, vault_root=vault, language="et")
+    list(segments)
+
+    assert again == [0, window, 2 * window]
+
+
+def test_the_language_probability_is_a_softmax_over_the_models_language_tokens(monkeypatch):
+    from exomem import onnx_asr_runtime
+
+    backend = onnx_asr_runtime.OnnxWhisperBackend()
+    backend._languages = {50259: "<|en|>", ESTONIAN: "<|et|>"}
+    backend._start_token = 1
+    logits = np.zeros(ESTONIAN + 1)
+    logits[50259], logits[ESTONIAN] = 0.0, 2.0
+    monkeypatch.setattr(backend, "_step", lambda _encoding: lambda _tokens, _state: (logits, None))
+
+    token, probability = backend._detect_language(object())
+
+    assert token == ESTONIAN
+    assert probability == pytest.approx(np.exp(2.0) / (np.exp(2.0) + 1.0))
 
 
 def test_removing_a_recording_discards_its_partial_transcript(monkeypatch, vault):

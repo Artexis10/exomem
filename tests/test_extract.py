@@ -19,6 +19,14 @@ from exomem import (
 )
 
 
+@pytest.fixture(autouse=True)
+def decoded_audio(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """These tests name audio files that do not exist; the decoder returns canned samples."""
+    samples = [0.0, 0.25, -0.25]
+    monkeypatch.setattr(extract, "_decode_audio_float32", lambda _path: samples)
+    return samples
+
+
 @pytest.mark.parametrize(
     "name,expected",
     [
@@ -212,7 +220,7 @@ def test_constructor_cuda_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_lazy_segment_cuda_failure_is_typed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _Model:
-        def transcribe(self, _path):
+        def transcribe(self, _audio, **_options):
             def segments():
                 raise RuntimeError("CUDA driver version is insufficient")
                 yield None
@@ -283,11 +291,15 @@ class _FakeSeg:
 
 
 class _FakeWhisper:
-    def __init__(self, segs: list) -> None:
+    def __init__(self, segs: list, *, info: object | None = None, supported=("en", "et")) -> None:
         self._segs = segs
+        self._info = info
+        self.supported_languages = supported
+        self.calls: list[tuple[object, dict]] = []
 
-    def transcribe(self, path):  # faster-whisper returns (segments_generator, info)
-        return iter(self._segs), None
+    def transcribe(self, audio, **options):  # faster-whisper returns (segments_generator, info)
+        self.calls.append((audio, options))
+        return iter(self._segs), self._info
 
 
 def test_diarize_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,6 +317,113 @@ def test_transcribe_plain_when_diarize_off(monkeypatch: pytest.MonkeyPatch) -> N
     assert r.text == "hello there general kenobi"
     assert r.speakers is None
     assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
+
+
+def test_the_speech_policy_reaches_the_model_and_the_engine_decisions_are_recorded(
+    monkeypatch: pytest.MonkeyPatch, decoded_audio: list[float]
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import asr_facts, media_models
+
+    monkeypatch.delenv(extract.ASR_LANGUAGE_ENV, raising=False)
+    info = SimpleNamespace(
+        language="et", language_probability=0.91, duration=61.5, duration_after_vad=40.25
+    )
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 1.0)], info=info)
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    result = extract._transcribe(Path("x.wav"), "audio")
+
+    policy = media_models.model_spec("speech")["faster_whisper"]
+    audio, options = model.calls[0]
+    assert audio is decoded_audio
+    assert options == {"language": None, **policy["options"]}
+    assert options["vad_filter"] is True  # language is detected on speech, not on a quiet opening
+    assert result.asr == asr_facts.AsrFacts(
+        language="et", language_probability=0.91, language_source="detected",
+        speech_seconds=40.25, duration_seconds=61.5, policy=policy["revision"],
+    )
+
+
+@pytest.mark.parametrize(
+    "requested,configured,forced,source",
+    [
+        ("et", "fi", "et", "requested"),
+        (None, "fi", "fi", "configured"),
+        (None, None, None, "detected"),
+    ],
+)
+def test_a_requested_language_beats_the_configured_one_and_both_beat_detection(
+    monkeypatch: pytest.MonkeyPatch, requested, configured, forced, source
+) -> None:
+    from types import SimpleNamespace
+
+    if configured:
+        monkeypatch.setenv(extract.ASR_LANGUAGE_ENV, configured)
+    else:
+        monkeypatch.delenv(extract.ASR_LANGUAGE_ENV, raising=False)
+    info = SimpleNamespace(
+        language=forced or "en", language_probability=1.0 if forced else 0.8,
+        duration=3.0, duration_after_vad=2.0,
+    )
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 1.0)], info=info, supported=("en", "et", "fi"))
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    result = extract.extract_text(Path("x.wav"), media_type="audio", language=requested)
+
+    assert model.calls[0][1]["language"] == forced
+    assert result.asr.language_source == source
+    assert result.asr.language_requested == (forced if source == "requested" else None)
+    # A language that was asked for was not measured, so it carries no probability.
+    assert (result.asr.language_probability is None) == (source != "detected")
+
+
+def test_a_language_the_model_does_not_publish_is_refused_not_replaced_by_detection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 1.0)], supported=("en", "et"))
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    with pytest.raises(extract.UnsupportedLanguage) as refused:
+        extract._transcribe(Path("x.wav"), "audio", language="xx")
+
+    assert refused.value.code == "xx" and refused.value.supported == ["en", "et"]
+    assert model.calls == []
+
+
+def test_pdf_text_names_each_page_including_a_page_read_by_ocr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import types
+
+    class _Page:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def get_text(self) -> str:
+            return self._text
+
+    class _Document(list):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+    pages = _Document([_Page("The first page holds enough text."), _Page(""), _Page("The third page holds more text.")])
+    monkeypatch.setitem(
+        sys.modules, "fitz", types.SimpleNamespace(open=lambda _path: pages)
+    )
+    monkeypatch.setattr(extract, "_ocr_pdf_page", lambda _page: "scanned words")
+
+    result = extract._extract_pdf(tmp_path / "case.pdf")
+
+    assert result.text == (
+        "[page 1]\nThe first page holds enough text.\n\n"
+        "[page 2]\nscanned words\n\n"
+        "[page 3]\nThe third page holds more text."
+    )
 
 
 def test_transcribe_labels_speakers_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -904,7 +1023,7 @@ def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path
 
     result = extract.extract_text(tmp_path / "scan.pdf")
 
-    assert result.text == "harbour lantern was repaired"
+    assert result.text == "[page 1]\nharbour lantern was repaired"
     assert alive_when_tesseract_starts == [0]
 
 
