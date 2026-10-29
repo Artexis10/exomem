@@ -7469,6 +7469,9 @@ def _op_activate_context_body(
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
             return context_views_module.turn_leads(compiled.packet)
 
+        # The map generation the caller holds. A token from anchors mode, an older one or a malformed one
+        # carries none, and the caller then gets the whole map.
+        held_map = working_set_runtime_module.decode_continuity(continuity)
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
@@ -7480,6 +7483,7 @@ def _op_activate_context_body(
                         "index_generation": evidence_token[1] if evidence_token else 0,
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
+                    known_generation=(held_map or {}).get("map_generation"),
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
@@ -7506,6 +7510,8 @@ def _op_activate_context_body(
         _attach_episode_advice(vault_root, packet)
         if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()
+        if not packet.get("abstained"):
+            packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
         return packet
 
     def read_caller_thread() -> _ThreadRead:

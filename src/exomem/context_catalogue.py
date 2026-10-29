@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    call_spans,
     episode_capture,
     find_corpus,
     foreground_priority,
@@ -97,6 +98,18 @@ SQL_VARIABLE_CHUNK = 500
 #: Most pages an inline update folds before leaving the rest to the background
 #: pass. A resource bound: a request thread folds a burst, not a vault.
 INLINE_FOLD_LIMIT = 200
+
+#: How far `ensure_unlisted` may advance a warm catalogue on the calling thread.
+#: `inline` folds a bounded burst and schedules the rest; `defer` folds nothing and
+#: schedules nothing, so the caller serves what is stored and names the lag;
+#: `background` is the one scheduled pass, which folds all of it and proves the graph.
+FOLD_INLINE = "inline"
+FOLD_DEFER = "defer"
+FOLD_BACKGROUND = "background"
+FOLD_MODES = (FOLD_INLINE, FOLD_DEFER, FOLD_BACKGROUND)
+
+#: `_graph_token` when another reader's proof of the graph sidecar is running.
+GRAPH_UNPROVEN = "unproven"
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,6 +593,7 @@ class ContextCatalogue:
         limit: int | None = None,
         freshness_stamp: str | None = None,
         fill_tags: bool = False,
+        prove: bool | str = True,
     ) -> dict[str, Any]:
         """Bring the catalogue to the current vault state, bumping only on change.
 
@@ -591,6 +605,9 @@ class ContextCatalogue:
         observed; a file that differs is left in `pending`. `limit` folds that
         many pages and leaves the rest in `pending`. `fill_tags` runs one full fold when the
         entries' tags were never stored: only a background pass sets it, since a full fold ignores `limit`.
+        `prove` is the graph's cold-proof mode: a request passes `SINGLE_FLIGHT`, so a graph
+        proof another reader is running leaves the stored edges as they are and the
+        catalogue reports them `warming`.
         """
         return self._write(
             full=False,
@@ -600,6 +617,7 @@ class ContextCatalogue:
             limit=limit,
             freshness_stamp=freshness_stamp,
             fill_tags=fill_tags,
+            prove=prove,
         )
 
     def _write(
@@ -612,6 +630,7 @@ class ContextCatalogue:
         limit: int | None = None,
         freshness_stamp: str | None = None,
         fill_tags: bool = False,
+        prove: bool | str = True,
     ) -> dict[str, Any]:
         foreground_priority.check_cancelled()
         if disabled():
@@ -621,7 +640,7 @@ class ContextCatalogue:
             return {"entries": 0, "generation": 0, "unavailable": True}
         for _attempt in range(WRITE_ATTEMPTS):
             token = sidecar_store.read_meta_token(conn)
-            plan = _Fold(self.vault_root, conn)
+            plan = _Fold(self.vault_root, conn, prove=prove)
             plan.decide(
                 full=full or not self.built(),
                 changed=changed,
@@ -653,6 +672,7 @@ class ContextCatalogue:
                 "folded": plan.folded,
                 "pending": len(plan.pending),
                 "deferred": plan.deferred,
+                "edges_read": int(plan.edges_read),
             }
         return {"entries": 0, "generation": 0, "unavailable": True}
 
@@ -736,10 +756,11 @@ class _Fold:
     rows as they are at that moment so a concurrent writer is never overwritten.
     """
 
-    def __init__(self, vault_root: Path, conn: sqlite3.Connection) -> None:
+    def __init__(self, vault_root: Path, conn: sqlite3.Connection, *, prove: bool | str = True) -> None:
         from . import activation_conventions
 
         self.root = vault_root
+        self.prove = prove
         self.kb = kb_dirname()
         self.registry = activation_conventions.load_conventions(vault_root)
         self.skip_folders = self.registry.conventions.skip_folders
@@ -843,7 +864,15 @@ class _Fold:
         whatever the token says: the graph may have indexed it before the
         catalogue did.
         """
-        token = _graph_token(self.root)
+        with call_spans.span("recall.working_set.catalogue.graph"):
+            self._pull_edges()
+
+    def _pull_edges(self) -> None:
+        token = _graph_token(self.root, self.prove)
+        if token == GRAPH_UNPROVEN:
+            # Another reader's proof of the graph sidecar is running: keep the stored edges and pull at the next fold.
+            self.edge_state, self.graph_token = EDGES_WARMING, ""
+            return
         new_source = any(entry_id == entry.path and entry_id not in self.stored for entry_id, entry in self.new.items())
         if (
             token
@@ -853,7 +882,7 @@ class _Fold:
         ):
             self.edge_state, self.graph_token = EDGES_AVAILABLE, token
             return  # the stored edges are the graph's edges at this token
-        self.edge_state, self.edges = _membership_edges(self.root)
+        self.edge_state, self.edges = _membership_edges(self.root, self.prove)
         self.edges_read = True
         self.graph_token = token if self.edge_state == EDGES_AVAILABLE else ""
 
@@ -1221,19 +1250,21 @@ def _collections(vault_root: Path, token: tuple[int, int, int]) -> dict[str, tup
     return out
 
 
-def _graph_token(vault_root: Path) -> str:
-    """The graph sidecar's content generation as a string, or "" when it has none to read."""
+def _graph_token(vault_root: Path, prove: bool | str = True) -> str:
+    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader proves it, or "" when it has none to read."""
     from . import epistemic_graph
 
     try:
-        token = epistemic_graph.cache_token(vault_root)
+        token = epistemic_graph.cache_token(vault_root, prove=prove)
     except Exception:  # noqa: BLE001 - an unreadable graph token means the edges are pulled
         log.debug("context catalogue: graph token unavailable", exc_info=True)
         return ""
+    if token == (GRAPH_UNPROVEN,):
+        return GRAPH_UNPROVEN
     return json.dumps(list(token)) if token else ""
 
 
-def _membership_edges(vault_root: Path) -> tuple[str, list[tuple[str, str]]]:
+def _membership_edges(vault_root: Path, prove: bool | str = True) -> tuple[str, list[tuple[str, str]]]:
     """The authored edges of every membership-family relation kind, or why there are none to read."""
     from . import epistemic_graph, relation_registry
 
@@ -1243,7 +1274,7 @@ def _membership_edges(vault_root: Path) -> tuple[str, list[tuple[str, str]]]:
         if definition.family == MEMBERSHIP_FAMILY
     )
     try:
-        result = epistemic_graph.EpistemicGraphIndex(vault_root).relation_edges(keys)
+        result = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove).relation_edges(keys)
     except Exception:  # noqa: BLE001 - a graph miss leaves the stored edges as they were
         log.debug("context catalogue: membership edges unavailable", exc_info=True)
         return "temporarily_unavailable", []
@@ -1355,6 +1386,7 @@ def ensure_unlisted(
     freshness_stamp: str = "",
     visible: Callable[[str], bool] | None = None,
     registry_visible: bool = True,
+    fold: str = FOLD_INLINE,
 ) -> tuple[str, ContextCatalogue | None, bool]:
     """`ensure`, naming only the lag that has no list: `(state, catalogue, unlisted)`.
 
@@ -1369,7 +1401,15 @@ def ensure_unlisted(
     only by pages that reader may not see is not a lag for it (`view_lag`). A
     reader whose map omits the project entries (`registry_visible=False`) is
     not told of a project-registry edit either.
+
+    `fold` says how far a managed runtime advances a warm catalogue here
+    (`FOLD_MODES`). A reader that can serve the rows it has, and has another
+    thread to bring them forward, passes `defer`: any movement of the vault
+    then answers unlisted with no fold and no scheduling. The scheduled pass
+    itself passes `background`.
     """
+    if fold not in FOLD_MODES:
+        raise ValueError(f"unknown fold mode: {fold!r}")
     if disabled():
         return DISABLED, None, False
     root = Path(vault_root)
@@ -1383,7 +1423,7 @@ def ensure_unlisted(
     if not catalogue.readable():
         return UNAVAILABLE, None, False
     if not catalogue.built():
-        if _managed():
+        if _managed() and fold != FOLD_BACKGROUND:
             _schedule(root, freshness_stamp)
             return WARMING, None, False
         with _inline_lock(root.absolute()):
@@ -1401,52 +1441,79 @@ def ensure_unlisted(
         with _inline_lock(root.absolute()):
             result = catalogue.update(freshness_stamp=freshness_stamp or None, fill_tags=True)
         return READY, catalogue, index_stale or bool(result.get("unavailable"))
-    return READY, catalogue, _advance(root, catalogue, index, freshness_stamp) or index_stale
+    unlisted = _advance(root, catalogue, index, freshness_stamp, fold)
+    return READY, catalogue, unlisted or index_stale
 
 
 def _advance(
-    root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str
+    root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str, fold: str
 ) -> bool:
     """Fold the freshness delta of a warm catalogue; True when it may be behind by work `pending()` cannot list."""
     # A catalogue from before `entry_tags` serves its rows, marked stale, while one background fold stores the tags.
     if not catalogue.tags_filled():
         # The fill is a full fold, so it also brings in the freshness delta.
+        return _catch_up(root, freshness_stamp, fold)
+    return _advance_delta(root, catalogue, index, freshness_stamp, fold)
+
+
+def _catch_up(root: Path, freshness_stamp: str, fold: str) -> bool:
+    """The full fold a catalogue owes: run it here for the scheduled pass, else leave it to that pass.
+
+    True when the catalogue stays behind by work `pending()` cannot list.
+    """
+    if fold == FOLD_BACKGROUND:
+        return bool(_fold_all(root, freshness_stamp).get("unavailable"))
+    if fold == FOLD_INLINE:
         _schedule(root, freshness_stamp)
-        return True
-    return _advance_delta(root, catalogue, index, freshness_stamp)
+    return True
 
 
 def _advance_delta(
-    root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str
+    root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str, fold: str
 ) -> bool:
     """The freshness-delta half of `_advance`."""
     pending = catalogue.pending()
     mirrored = catalogue.mirrored_activation_token() == json.dumps(list(index.token()))
     if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and mirrored and not pending:
         return False  # the vault has not moved since the last fold
+    if fold == FOLD_DEFER:
+        return True  # the rows stored now are served as they are, and the scheduled pass folds the movement
     key = root.absolute()
     checkpoint = _CHECKPOINTS.get(key)
     if checkpoint is None or not freshness.is_live(root, "kb"):
-        _schedule(root, freshness_stamp)
-        return True
+        return _catch_up(root, freshness_stamp, fold)
     delta = freshness.delta_since(root, "kb", checkpoint)
     if not delta.complete:
-        _schedule(root, freshness_stamp)
-        return True
+        return _catch_up(root, freshness_stamp, fold)
     if delta.changed or delta.deleted or pending or not mirrored:
-        result = catalogue.update(
-            delta.changed,
-            delta.deleted,
-            expected=dict(delta.target_signatures),
-            limit=INLINE_FOLD_LIMIT,
-            freshness_stamp=freshness_stamp or None,
-        )
+        from . import epistemic_graph
+
+        background = fold == FOLD_BACKGROUND
+        with call_spans.span("recall.working_set.catalogue.fold", {}) as measured:
+            result = catalogue.update(
+                delta.changed,
+                delta.deleted,
+                expected=dict(delta.target_signatures),
+                limit=None if background else INLINE_FOLD_LIMIT,
+                freshness_stamp=freshness_stamp or None,
+                prove=True if background else epistemic_graph.SINGLE_FLIGHT,
+            )
+            _measure_fold(measured, result)
         if result.get("unavailable"):
             return True
         if result.get("deferred"):
             _schedule(root, freshness_stamp)
         _CHECKPOINTS[key] = delta.to
     return False
+
+
+def _measure_fold(measured: dict[str, Any], result: Mapping[str, Any]) -> None:
+    """Fill a `catalogue.fold` span with what one update did."""
+    measured.update(
+        folded=int(result.get("folded", 0)),
+        deferred=int(result.get("deferred", 0)),
+        edges_read=int(result.get("edges_read", 0)),
+    )
 
 
 def _managed() -> bool:
@@ -1470,14 +1537,22 @@ def _schedule(root: Path, freshness_stamp: str = "") -> None:
     thread, so a vault never runs both passes at once and a stopping runtime
     waits for either one.
     """
-    key = root.absolute()
-
-    def _fold() -> None:
-        checkpoint = freshness.consumer_checkpoint(root, "kb") if freshness.is_live(root, "kb") else None
-        result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None, fill_tags=True)
-        if checkpoint is not None and not result.get("unavailable"):
-            _CHECKPOINTS[key] = checkpoint
-
     working_set_runtime._schedule_build(
-        root, freshness_stamp=freshness_stamp, job=_fold, label="context catalogue"
+        root, freshness_stamp=freshness_stamp, job=lambda: _fold_all(root, freshness_stamp), label="context catalogue"
     )
+
+
+def _fold_all(root: Path, freshness_stamp: str) -> dict[str, Any]:
+    """One signature diff of the whole KB against the stored rows, with blocking graph proofs.
+
+    The freshness checkpoint is taken before the fold, so a write during it is
+    in the next delta. Runs on the scheduled pass, never on a request thread.
+    """
+    key = root.absolute()
+    checkpoint = freshness.consumer_checkpoint(root, "kb") if freshness.is_live(root, "kb") else None
+    with call_spans.span("recall.working_set.catalogue.fold", {}) as measured:
+        result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None, fill_tags=True)
+        _measure_fold(measured, result)
+    if checkpoint is not None and not result.get("unavailable"):
+        _CHECKPOINTS[key] = checkpoint
+    return result

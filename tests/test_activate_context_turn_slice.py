@@ -431,8 +431,9 @@ def test_slice_leads_keep_admitted_relation_topics(vault: Path, caller, hidden_t
 
     items = {item["path"]: item for item in packet["turn_slice"]["items"]}
     assert set(items) == {lead, chain}
-    assert items[lead]["topics"] == topics
-    assert items[chain]["topics"] == []
+    # An item with no topics omits the field.
+    assert items[lead].get("topics", []) == topics
+    assert "topics" not in items[chain]
 
 
 def test_a_project_domain_edit_updates_a_warm_slice(vault: Path) -> None:
@@ -451,7 +452,7 @@ def test_a_project_domain_edit_updates_a_warm_slice(vault: Path) -> None:
             )
             packet = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
         (item,) = packet["turn_slice"]["items"]
-        return item["topics"]
+        return item.get("topics", [])
 
     assert slice_topics() == slice_topics() == ["harbour"]
     registry = vault / KB / "_Schema/project-keys.yaml"
