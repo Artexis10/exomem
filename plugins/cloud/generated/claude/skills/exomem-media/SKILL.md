@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: ceb459daa587ae6dde1a385ec2ff85fdbfdf3f451eefed7586b44d52263c45c3
+  skill_contract: f68e99e1e47a351953ebf2cc6ffda729a276d880dde9286a99074db67f264840
   version: "0.1.0"
 ---
 
@@ -47,8 +47,11 @@ identity after an uncertain commit.
 6. Reuse known meaningful connections; use `read_connections(operation={'kind': 'suggest-links'})` when candidates are still missing and review them. Then write with `create_note`, carrying the sources and accepted connections in the first write.
 7. For a set of recordings and documents to compile into notes, follow the multi-source steps of the source compilation pass in `references/writing.md`: inventory, timeline, reading by time range and page, attribution, verification, coverage ledger and final audit.
 
+## Declaring the language
+When the languages of a recording are unknown at ingest, ask the user once: "One language or several?" Say that several is slower, because the engine detects the language in every window. Declare the answer on the first processing with `change_media(operation={'kind': 'process', 'path': ..., 'language': <code>})`, or `'multilingual': true` for several. Do not ask per file when the languages are already known. If the file is already being processed, wait for the run to end, then use `reprocess` with the same field.
+
 ## Faulty transcripts
-Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` on the user's request or on that evidence. Omit `language` to let the engine detect it. The old extraction stays on a linked prior page.
+Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` on the user's request or on that evidence, or with `'multilingual': true` when the recording mixes languages. Omit both to let the engine detect one language. The old extraction stays on a linked prior page.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific

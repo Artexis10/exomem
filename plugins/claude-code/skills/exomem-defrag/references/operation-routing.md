@@ -162,11 +162,13 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   reconciliation, `operation="status"` for bounded per-artifact state and next
   actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
   These actions enqueue or inspect work; they do not wait for model completion or
-  overwrite an existing valid transcript. Only an explicit
+  overwrite an existing valid transcript. Add `'language': <code>` or
+  `'multilingual': true` to `process` to declare the language of a recording whose
+  transcript is not complete; a completed one refuses it. Only an explicit
   `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})`
   extracts again over a completed transcript. Use it when the text is in the wrong
-  language or loops on one line. The `language` code is optional and is kept for later
-  runs; the previous extraction stays on a linked prior page.
+  language or loops on one line. The `language` code or `multilingual` mode is optional
+  and is kept for later runs; the previous extraction stays on a linked prior page.
 - **Recover a stored original.** Call
   **`transfer_artifact(operation="download", artifact="<stored artifact or custody page>")`**.
   Supply `expected_sha256` when a particular version is required. The response names

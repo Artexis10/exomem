@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: ceb459daa587ae6dde1a385ec2ff85fdbfdf3f451eefed7586b44d52263c45c3
+  skill_contract: f68e99e1e47a351953ebf2cc6ffda729a276d880dde9286a99074db67f264840
   version: "0.1.0"
 ---
 
