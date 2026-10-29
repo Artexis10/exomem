@@ -35,6 +35,7 @@ from urllib.parse import urlencode
 
 from . import adopt as adopt_module
 from . import (
+    adoption_consume,
     adoption_plan,
     capabilities,
     context_refs,
@@ -58,7 +59,7 @@ SCHEMA_VERSION = 1
 PLAN_FORMAT = 2
 MAX_CANDIDATES_DEFAULT = 5000
 # Where Exomem Cloud stages an uploaded collection (see `cloud_import_job`).
-IMPORT_STAGE_DIR = "_Imports"
+IMPORT_STAGE_DIR = import_stage.STAGE_DIR
 # One `apply` batch holds at most this many items or bytes of originals (the
 # batch writer re-validates the whole batch per write, so cost grows with size).
 # 25 items is about 2-4 s on the measured vaults: a small share of the 50 s call.
@@ -758,6 +759,7 @@ def _present(root: Path, run: dict, **extra) -> dict:
     if verify:
         out["verified_unchanged"] = verify.get("verified_unchanged")
         out["verified_total"] = verify.get("verified_total")
+        out["consumed"] = verify.get("consumed", 0)
     if isinstance(out.get("finish"), dict):
         out["finish"] = {**out["finish"], "handoff": _handoff(run)}
     out.update(extra)
@@ -1539,6 +1541,14 @@ class _CallReads:
     index: list[adoption_plan.EarlierImport] | None = None
     source_counts: dict[str, int] | None = None
     notes: adoption_plan.NoteIndex | None = None
+    stage: import_stage.Stage | None = None
+    stage_read: bool = False
+
+    def recorded_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
+        """The run's stage manifest, read once per call: a manifest can list a million files."""
+        if not self.stage_read:
+            self.stage, self.stage_read = adoption_consume.recorded(root, run), True
+        return self.stage
 
 
 def _commit_chunk(
@@ -1661,8 +1671,14 @@ def _apply_chunk(
                 reads.index.append(
                     adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
                 )
+    landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
-        _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
+        outcome = outcomes[planned["original_path"]]
+        # A fresh write was hashed by the batch as it was written; a found copy is read back.
+        _settle_staged(
+            root, run, reads, planned, outcome, stats,
+            durable_verified=planned["original_path"] in landed_paths and _source_status(outcome) == "applied",
+        )
     extractions: list[float] = []
     copied: list[str] = []
     for planned in landed:
@@ -1802,6 +1818,31 @@ def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) 
     stats["verified_unchanged"] += int(unchanged)
 
 
+def _settle_staged(
+    root: Path, run: dict, reads: _CallReads, planned: dict, outcome: dict, stats: Counter, *,
+    durable_verified: bool = False,
+) -> None:
+    """Settle one filed item's staged copy: remove it when the run may, otherwise re-hash the original.
+
+    A removal needs an artifact item, a recorded stage that lists the file, and a run that did not opt out.
+    The copy is hashed against the manifest and the plan as it goes, so a removed copy is already checked
+    and only a copy that stays is re-hashed. A removal that fails leaves the item applied and not consumed.
+    """
+    if outcome.get("consumed"):
+        return
+    stage = reads.recorded_stage(root, run)
+    if (
+        stage is not None and run.get("consume", True) and planned["form"] == "artifact"
+        and (durable_verified or adoption_consume.durable_matches(root, outcome.get("artifact_path"), planned))
+        and adoption_consume.remove_staged(root, stage, planned) is adoption_consume.Removal.REMOVED
+    ):
+        outcome["consumed"] = True
+        outcome.pop("original_unchanged", None)
+        stats["consumed"] += 1
+        return
+    _record_unchanged(root, planned, outcome, stats)
+
+
 def _progress(run: dict) -> dict:
     plan_items = (run.get("plan") or {}).get("items") or []
     scope = run.get("scope")
@@ -1824,6 +1865,11 @@ def _verify_counts(outcomes: dict) -> tuple[int, int]:
         if o.get("status") in _APPLIED_STATUSES and "original_unchanged" in o
     ]
     return sum(1 for o in checked if o["original_unchanged"]), len(checked)
+
+
+def _consumed_count(outcomes: dict) -> int:
+    """Items filed whose staged copy is gone because adoption filed it."""
+    return sum(1 for o in outcomes.values() if o.get("status") in _APPLIED_STATUSES and o.get("consumed"))
 
 
 def apply(
@@ -1876,6 +1922,7 @@ def apply(
             "cursors": copy.deepcopy(run.get("cursors")), "inflight": run.get("inflight"),
         }
         stats: Counter = Counter()
+        reads = _CallReads()
         fresh = entry is None
         if fresh:
             _supersede_cursors(run, "apply")
@@ -1896,7 +1943,7 @@ def apply(
                 in_scope = scope is None or path in scope
                 if in_scope and path in by_path and outcomes[path].get("status") in _APPLIED_STATUSES:
                     outcomes[path] = {**outcomes[path], "status": "already-applied"}
-                    _record_unchanged(root, by_path[path], outcomes[path], stats)
+                    _settle_staged(root, run, reads, by_path[path], outcomes[path], stats)
         run["outcomes"] = outcomes
 
         budget = _call_budget()
@@ -1910,7 +1957,6 @@ def apply(
             run["inflight"] = True
 
         pacer = _ApplyPacer(root, budget)
-        reads = _CallReads()
         stopped = False
         chunks = 0
         while pending:
@@ -1952,11 +1998,13 @@ def apply(
         # The run keeps the cumulative counts; this call reports those of the originals it handled.
         unchanged, checked = _verify_counts(outcomes)
         run["verify"] = {
-            "verified_unchanged": unchanged, "verified_total": checked, "at": _now_iso()
+            "verified_unchanged": unchanged, "verified_total": checked,
+            "consumed": _consumed_count(outcomes), "at": _now_iso(),
         }
         call_counts = {
             "verified_unchanged": stats["verified_unchanged"],
             "verified_total": stats["verified_total"],
+            "consumed": stats["consumed"],
         }
         reply: dict = {
             **call_counts,

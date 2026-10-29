@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import private_state, state_migration, state_paths
 
+STAGE_DIR = "_Imports"
 CLOUD_RECEIPTS = "cloud-imports"
 LOCAL_RECORDS = "local-imports"
 # What a run records as the reason its stage is trusted; the two values are a closed protocol pair.
