@@ -42,12 +42,15 @@ from . import (
     media_jobs,
     media_slot_client,
     preserve,
+    prior_extraction,
     provenance,
     recall_policy,
     runtime_resources,
     scene_frames,
     semantic_segments,
+    temporal,
 )
+from .asr_facts import AsrFacts
 from .backfill import iter_kb_files
 from .cli_ops import OpError
 from .governance import projected_retrieval
@@ -98,6 +101,10 @@ _HANDOFF = "handoff"
 _STALE = "stale"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_LANGUAGE_ACTION = (
+    "choose a language the speech model supports and process the file again with reprocess, "
+    "or correct EXOMEM_ASR_LANGUAGE"
+)
 _COMPUTE_RUNTIME_ACTION = (
     "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
 )
@@ -268,6 +275,31 @@ def _evidence_version_or_none(content: str) -> str | None:
 def _sidecar_input_matches(content: str, expected_hash: str, expected_version: str | None) -> bool:
     return content_hash(content) == expected_hash or (
         expected_version is not None and _evidence_version_or_none(content) == expected_version
+    )
+
+
+def _result_basis_holds(
+    content: str,
+    *,
+    media_type: str,
+    replaces: str | None,
+    expected_hash: str,
+    expected_version: str | None,
+) -> bool:
+    """Whether a computed result still applies to the sidecar as it stands now.
+
+    An ordinary result applies to the exact sidecar it was computed from. A reprocess
+    result replaces one extraction, so it applies while that extraction is still the
+    sidecar's own, whatever else touched the sidecar during a long compute: the write
+    itself still compares the bytes it replaces, so no edit is lost.
+    """
+    if replaces is None:
+        return _sidecar_input_matches(content, expected_hash, expected_version)
+    from . import media_processing
+
+    return (
+        media_processing.has_completed_transcript(content, media_type=media_type)
+        and prior_extraction.extraction_digest(content) == replaces
     )
 
 
@@ -597,10 +629,16 @@ class MediaWorker:
             claimed_content, guard = read_guarded_text(self._vault_root, job.sidecar_path)
         except (OSError, UnicodeError, PathGuardError):
             return _ProcessOutcome(_STALE, "input identity unavailable")
-        if media_processing.has_completed_transcript(
+        completed = media_processing.has_completed_transcript(
             claimed_content, media_type=job.media_type
-        ):
+        )
+        # Only an explicit request extracts over a completed transcript.
+        reprocessing = completed and job.reprocess and job.do_ocr
+        if completed and not reprocessing:
             return _ProcessOutcome(_COMPLETE)
+        replaces = prior_extraction.extraction_digest(claimed_content) if reprocessing else None
+        # A request names the language; failing that, the sidecar keeps the last request's.
+        language = job.language or preserve.asr_language_pin(claimed_content)
         expected_sidecar = guard.expected_content_hash
         expected_evidence_version = _evidence_version_or_none(claimed_content)
         expected_binary = _binary_identity(job.binary_path)
@@ -625,6 +663,8 @@ class MediaWorker:
             accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
             if accepts_kwargs or "timestamps" in signature.parameters:
                 kwargs["timestamps"] = job.media_type in {"audio", "video"}
+            if language is not None:
+                kwargs["language"] = language
             result = extract.extract_text(job.binary_path, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
             error = f"{type(e).__name__}: {e}"
@@ -670,6 +710,20 @@ class MediaWorker:
                 presented_pending=True,
             )
             return self._publication_outcome(committed, BLOCKED, error)
+        except extract.UnsupportedLanguage as e:
+            error = f"{type(e).__name__}: {e}"
+            log.warning("unsupported language for %s: %s", job.binary_path.name, e)
+            committed = self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
+                expected_binary=expected_binary,
+                state=FAILED,
+                error=error,
+                next_action=_LANGUAGE_ACTION,
+                retryable=False,
+            )
+            return self._publication_outcome(committed, FAILED, error)
         except runtime_resources.ModelBusyError:
             raise
         except MemoryError:
@@ -707,6 +761,15 @@ class MediaWorker:
                 BLOCKED,
                 "AMBIGUOUS_SIDECAR_BOUNDARY: unmarked nonempty preserved notes have no machine-owned boundary",
             )
+        def basis_holds(content: str) -> bool:
+            return _result_basis_holds(
+                content,
+                media_type=job.media_type,
+                replaces=replaces,
+                expected_hash=expected_sidecar,
+                expected_version=expected_evidence_version,
+            )
+
         committed = False
         for commit_attempt in range(3):
             try:
@@ -719,6 +782,8 @@ class MediaWorker:
                     engine=result.engine,
                     speakers=result.speakers,
                     speaker_verification=result.speaker_verification or "unavailable",
+                    asr=result.asr,
+                    replaces=replaces,
                 )
             except preserve.PreserveError as exc:
                 if exc.code != "AMBIGUOUS_SIDECAR_BOUNDARY":
@@ -731,10 +796,7 @@ class MediaWorker:
                 latest, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
             except (OSError, UnicodeError, PathGuardError):
                 break
-            if (
-                _binary_identity(job.binary_path) != expected_binary
-                or not _sidecar_input_matches(latest, expected_sidecar, expected_evidence_version)
-            ):
+            if _binary_identity(job.binary_path) != expected_binary or not basis_holds(latest):
                 break
             if commit_attempt < 2:
                 time.sleep(0.02)
@@ -745,10 +807,17 @@ class MediaWorker:
             except (OSError, UnicodeError, PathGuardError):
                 sidecar_changed = True
             else:
-                sidecar_changed = not _sidecar_input_matches(latest, expected_sidecar, expected_evidence_version)
+                sidecar_changed = not basis_holds(latest)
             binary_changed = _binary_identity(job.binary_path) != expected_binary
+            if binary_changed and reprocessing:
+                # The request named a file that has since been replaced. The sidecar keeps
+                # its text; reconciliation processes the new file in the ordinary way.
+                log.info("reprocess dropped for %s: media identity changed", job.binary_path.name)
+                return _ProcessOutcome(_COMPLETE)
             if sidecar_changed:
-                stale_parts.append("sidecar content changed")
+                stale_parts.append(
+                    "transcript changed" if reprocessing else "sidecar content changed"
+                )
             if binary_changed:
                 stale_parts.append("media identity changed")
             if binary_changed and not sidecar_changed:
@@ -1043,20 +1112,27 @@ class MediaWorker:
         engine: str,
         speakers: list[dict] | None = None,
         speaker_verification: str | None = None,
+        asr: AsrFacts | None = None,
+        replaces: str | None = None,
     ) -> bool:
         if self._store is not None:
+            payload: dict[str, object] = {
+                "text": preserve._cap_extracted_text(text),
+                "engine": engine,
+                "speakers": speakers or [],
+                "speaker_verification": speaker_verification or "unavailable",
+            }
+            if asr is not None and asr.reported:
+                payload["asr"] = asr.as_payload()
+            if replaces is not None:
+                payload["replaces"] = replaces
             return self._store.record_result(
                 job,
                 kind="extraction",
                 sidecar_before_hash=expected_sidecar,
                 sidecar_before_evidence_version=expected_evidence_version,
                 binary_identity=_result_binary_identity(expected_binary),
-                payload={
-                    "text": preserve._cap_extracted_text(text),
-                    "engine": engine,
-                    "speakers": speakers or [],
-                    "speaker_verification": speaker_verification or "unavailable",
-                },
+                payload=payload,
             )
         with get_manager().mutation_guard(
             self._vault_root,
@@ -1073,28 +1149,39 @@ class MediaWorker:
 
             if (
                 _binary_identity(job.binary_path) != expected_binary
-                or not _sidecar_input_matches(before, expected_sidecar, expected_evidence_version)
+                or not _result_basis_holds(
+                    before,
+                    media_type=job.media_type,
+                    replaces=replaces,
+                    expected_hash=expected_sidecar,
+                    expected_version=expected_evidence_version,
+                )
             ):
                 log.warning("extraction result stale for %s; newer canonical input preserved", job.sidecar_path.name)
                 return False
-            if media_processing.has_completed_transcript(before, media_type=job.media_type):
+            if replaces is None and media_processing.has_completed_transcript(
+                before, media_type=job.media_type
+            ):
                 return False
-            target = preserve.render_sidecar_extraction(
+            writes = self._extraction_writes(
+                job,
                 before,
+                guard,
                 text=text,
                 engine=engine,
                 speakers=speakers,
                 speaker_verification=speaker_verification,
-                attempts=max(1, job.attempts),
+                asr=asr,
+                reprocessing=replaces is not None,
             )
             receipts = deferred_index.add_full_receipts(
                 self._vault_root,
-                [job.sidecar_path.relative_to(self._vault_root).as_posix()],
+                [write.path.relative_to(self._vault_root).as_posix() for write in writes],
             )
             try:
                 handoff = preserve.commit_media_sidecar_writes(
                     self._vault_root,
-                    (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
+                    writes,
                     post_commit_fanout=False,
                     defer_graph_completion=True,
                 )
@@ -1107,6 +1194,76 @@ class MediaWorker:
             assert isinstance(handoff, DeferredGraphCompletion)
         self._complete_deferred_graph_completion(handoff, receipts)
         return True
+
+    def _extraction_writes(
+        self,
+        job: _Job,
+        before: str,
+        guard: object,
+        *,
+        text: str,
+        engine: str,
+        speakers: list[dict] | None,
+        speaker_verification: str | None,
+        asr: AsrFacts | None,
+        reprocessing: bool,
+    ) -> tuple[PlannedWrite, ...]:
+        """The sidecar write for a finished extraction; a reprocess adds the page for the old one.
+
+        The old extraction moves to its own page in the same atomic batch, so the sidecar
+        always holds one extraction, and a rejected batch leaves the old text where it was.
+        """
+        if not reprocessing:
+            target = preserve.render_sidecar_extraction(
+                before,
+                text=text,
+                engine=engine,
+                speakers=speakers,
+                speaker_verification=speaker_verification,
+                attempts=max(1, job.attempts),
+                asr=asr,
+            )
+            return (
+                PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
+            )
+        page, ordinal = prior_extraction.next_page(job.sidecar_path)
+        prior_page = prior_extraction.render(
+            before,
+            artifact_name=job.sidecar_path.name.removesuffix(".md"),
+            sidecar_link=prior_extraction.link_to(self._vault_root, job.sidecar_path),
+            ordinal=ordinal,
+            date_iso=temporal.stamp(temporal.now()),
+        )
+        target = preserve.render_sidecar_extraction(
+            before,
+            text=text,
+            engine=engine,
+            speakers=speakers,
+            speaker_verification=speaker_verification,
+            attempts=max(1, job.attempts),
+            asr=asr,
+            prior_extractions=(
+                *prior_extraction.links_of(before),
+                prior_extraction.link_to(self._vault_root, page),
+            ),
+            reset_speakers=True,
+        )
+        return (
+            PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
+            PlannedWrite(page, prior_page, expected_hash=MISSING_CONTENT_HASH),
+        )
+
+    def _reprocesses_completed(self, job: _Job) -> bool:
+        """Whether this job re-extracts a transcript that is complete, so it must not touch the sidecar."""
+        if not (job.reprocess and job.do_ocr):
+            return False
+        from . import media_processing
+
+        try:
+            content, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+        except (OSError, UnicodeError, PathGuardError):
+            return False
+        return media_processing.has_completed_transcript(content, media_type=job.media_type)
 
     def _commit_processing_failure(
         self,
@@ -1124,6 +1281,14 @@ class MediaWorker:
         presented_pending: bool = False,
     ) -> bool:
         """Retain a failure and publish it against the same validated snapshot."""
+        if self._reprocesses_completed(job):
+            # The complete transcript is the one thing a failed re-extraction must not damage,
+            # so the failure lives on the job alone and the sidecar bytes stay as they are.
+            if self._store is None:
+                return True
+            return self._store.mark(
+                job, state, error, blocked_reason=blocked_reason, blocked_context=blocked_context
+            )
         if self._store is not None:
             payload: dict[str, object] = {
                 "error": error,
@@ -1763,6 +1928,18 @@ class MediaWorker:
             current_binary is None
             or _result_binary_identity(current_binary) != result.binary_identity
         )
+        # Set only by a reprocess: the extraction this result replaces.
+        replaces = result.payload.get("replaces") if result.kind == "extraction" else None
+
+        def basis_holds(content: str) -> bool:
+            return _result_basis_holds(
+                content,
+                media_type=job.media_type,
+                replaces=replaces,
+                expected_hash=result.sidecar_before_hash,
+                expected_version=result.sidecar_before_evidence_version,
+            )
+
         prepared_target = (
             result.target_hash is not None
             and result.target_size is not None
@@ -1834,10 +2011,13 @@ class MediaWorker:
                 keep_ocr=pending_target,
             )
             return
+        if binary_changed and replaces is not None:
+            # The request named a file that has since been replaced. The sidecar keeps its
+            # text; reconciliation processes the new file in the ordinary way.
+            self._store.finalize_result(result, requeue_remaining=True, ocr_complete=True)
+            return
         if binary_changed:
-            input_matches = _sidecar_input_matches(
-                current_content, result.sidecar_before_hash, result.sidecar_before_evidence_version
-            )
+            input_matches = basis_holds(current_content)
             if current_binary is not None and input_matches:
                 self._publish_pending_for_changed_binary(result, expected_sidecar=current_sidecar)
             else:
@@ -1848,12 +2028,20 @@ class MediaWorker:
                     else "stale media result: sidecar content changed",
                 )
             return
-        if not _sidecar_input_matches(
-            current_content, result.sidecar_before_hash, result.sidecar_before_evidence_version
-        ):
+        if not basis_holds(current_content):
             from . import media_processing
 
-            if media_processing.has_completed_transcript(
+            if replaces is not None:
+                # The extraction this result replaces is no longer the sidecar's own, so
+                # publishing would overwrite text that was never compared. The sidecar keeps
+                # what it holds; the job fails and a new request recomputes.
+                self._store.terminalize_result(
+                    result,
+                    state=media_jobs.FAILED,
+                    error="stale extraction: the transcript changed while the recording was "
+                    "processed again",
+                )
+            elif media_processing.has_completed_transcript(
                 current_content, media_type=job.media_type
             ):
                 # The OCR stage is done; a queued CLIP or re-embed stage still runs.
@@ -1877,18 +2065,24 @@ class MediaWorker:
             before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
             if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
                 return
-            if not _sidecar_input_matches(before, result.sidecar_before_hash, result.sidecar_before_evidence_version):
+            if not basis_holds(before):
                 return
+            writes: tuple[PlannedWrite, ...] = ()
             try:
                 if result.kind == "extraction":
-                    target = preserve.render_sidecar_extraction(
+                    asr = result.payload.get("asr")
+                    writes = self._extraction_writes(
+                        job,
                         before,
+                        guard,
                         text=str(result.payload["text"]),
                         engine=str(result.payload["engine"]),
                         speakers=list(result.payload.get("speakers", [])),
                         speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
-                        attempts=max(1, job.attempts),
+                        asr=AsrFacts.from_payload(asr) if asr is not None else None,
+                        reprocessing=replaces is not None,
                     )
+                    target = writes[0].content
                 elif result.payload.get("presented_state") == media_jobs.PENDING:
                     target = preserve.render_sidecar_processing_pending(
                         before,
@@ -1914,8 +2108,16 @@ class MediaWorker:
             if terminal_error is not None:
                 pass
             else:
+                if not writes:
+                    writes = (
+                        PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
+                    )
                 rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
-                [receipt] = deferred_index.add_full_receipts(self._vault_root, [rel])
+                receipts = deferred_index.add_full_receipts(
+                    self._vault_root,
+                    [write.path.relative_to(self._vault_root).as_posix() for write in writes],
+                )
+                receipt = next(item for item in receipts if item.rel_path == rel)
                 if not self._store.persist_prepared_result(
                     result,
                     target_hash=_target_digest(target),
@@ -1923,11 +2125,11 @@ class MediaWorker:
                     target_size=len(target.encode("utf-8")),
                     receipt_revision=receipt.revision,
                 ):
-                    deferred_index.clear_full_receipts(self._vault_root, [receipt])
+                    deferred_index.clear_full_receipts(self._vault_root, receipts)
                     return
                 handoff = preserve.commit_media_sidecar_writes(
                     self._vault_root,
-                    (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
+                    writes,
                     post_commit_fanout=False,
                     defer_graph_completion=True,
                     publication_intents_out=publication_intents,
@@ -1941,7 +2143,7 @@ class MediaWorker:
         assert handoff is not None
         if not self._complete_deferred_graph_completion(
             handoff,
-            [receipt],
+            receipts,
             publication_intents=publication_intents,
             recover_on_mismatch=True,
             parent_receipted_handoff=True,
@@ -2385,7 +2587,11 @@ def run_child(
                         "media identity changed" in (outcome.error or "")
                         and "sidecar content changed" not in (outcome.error or "")
                     )
-                    if media_processing.has_completed_transcript(
+                    if job.reprocess and job.do_ocr:
+                        # A completed transcript is the point of a reprocess, so it does not
+                        # mean the request is done; the job fails and says why.
+                        fail(job, outcome.error or "stale extraction commit")
+                    elif media_processing.has_completed_transcript(
                         current_content, media_type=job.media_type
                     ):
                         # This claim already ran its CLIP and re-embed stages; a

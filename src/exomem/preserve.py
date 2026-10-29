@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import IO, BinaryIO
 
 from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
+from .asr_facts import AsrFacts
 from .kbdir import kb_prefix
 from .source_inspection import Inspection, inspect_source
 from .vault import (
@@ -1594,8 +1595,17 @@ def render_sidecar_extraction(
     speakers: list[dict] | None = None,
     speaker_verification: str | None = None,
     attempts: int | None = None,
+    asr: AsrFacts | None = None,
+    prior_extractions: tuple[str, ...] = (),
+    reset_speakers: bool = False,
 ) -> str:
-    """Render an extraction sidecar without touching canonical or derived state."""
+    """Render an extraction sidecar without touching canonical or derived state.
+
+    `asr` records what the speech engine decided; facts of an earlier extraction never
+    survive into the new one. `prior_extractions` lists, in order, the vault-relative
+    paths (no extension) of the pages that hold the extractions this one replaced, and `reset_speakers` drops the speaker fields of
+    the replaced transcript, whose labels do not describe the new one.
+    """
     newline = document_newline(before)
     before = with_newline(before, "\n")
     if _has_ambiguous_legacy_preserved_notes(before):
@@ -1604,7 +1614,10 @@ def render_sidecar_extraction(
             missing=[],
             reason="unmarked nonempty preserved notes have no machine-owned boundary",
         )
-    content = _set_frontmatter_field(before, "extracted_by", engine)
+    content = before
+    if reset_speakers:
+        content = _remove_frontmatter_fields(content, lambda key: key in ("speakers", "speaker_verification"))
+    content = _set_frontmatter_field(content, "extracted_by", engine)
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
     content = _set_frontmatter_field(content, "processing_retryable", "false")
@@ -1626,8 +1639,76 @@ def render_sidecar_extraction(
                 labels.append(label)
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
+    content = _set_asr_facts(content, asr)
+    if prior_extractions:
+        links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
+        content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
     return with_newline(content, newline)
+
+
+#: The pin a caller left asks for the same language on every later run, so it outlives a new extraction.
+_ASR_PIN_FIELD = "asr_language_requested"
+
+
+def asr_language_pin(content: str) -> str | None:
+    """The speech language a caller pinned on this sidecar, or None."""
+    pinned = parse_frontmatter(content)[0].get(_ASR_PIN_FIELD)
+    return pinned if isinstance(pinned, str) and pinned else None
+
+
+def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
+    """Replace the `asr_*` fields with the new extraction's facts; keep the caller's language pin."""
+    content = _remove_frontmatter_fields(
+        content, lambda key: key.startswith("asr_") and key != _ASR_PIN_FIELD
+    )
+    if asr is None:
+        return content
+
+    def number(value: float | None, places: int) -> str:
+        return "null" if value is None else repr(round(float(value), places))
+
+    def text(value: str | None) -> str:
+        return "null" if value is None else yaml_scalar(value)
+
+    fields = [
+        ("asr_language", text(asr.language)),
+        ("asr_language_probability", number(asr.language_probability, 4)),
+        ("asr_language_source", text(asr.language_source)),
+        ("asr_speech_seconds", number(asr.speech_seconds, 2)),
+        ("asr_duration_seconds", number(asr.duration_seconds, 2)),
+        ("asr_policy", text(asr.policy)),
+    ]
+    if asr.language_requested is not None:
+        fields.append((_ASR_PIN_FIELD, yaml_scalar(asr.language_requested)))
+    for field, value in fields:
+        content = _set_frontmatter_field(content, field, value)
+    return content
+
+
+def _remove_frontmatter_fields(content: str, selected: Callable[[str], bool]) -> str:
+    """Drop the single-line frontmatter fields whose key `selected` accepts."""
+    if not content.startswith("---"):
+        return content
+    original = content
+    newline = document_newline(content)
+    content = with_newline(content, "\n")
+    end = content.find("\n---", 3)
+    if end == -1:
+        return original
+    kept: list[str] = []
+    dropping = False
+    for line in content[:end].split("\n"):
+        continuation = line[:1] in (" ", "\t") or line.startswith("- ")
+        if continuation:
+            if not dropping:
+                kept.append(line)  # a nested value belongs to the field above it
+            continue
+        dropping = selected(line.partition(":")[0])
+        if not dropping:
+            kept.append(line)
+    updated = "\n".join(kept) + content[end:]
+    return original if updated == content else with_newline(updated, newline)
 
 
 def commit_media_sidecar_writes(

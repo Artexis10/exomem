@@ -319,7 +319,7 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     assert schema["required"] == ["operation"]
     operation = schema["properties"]["operation"]
     variants = operation["oneOf"]
-    assert {branch["properties"]["kind"]["const"] for branch in variants} == {"process", "retry"}
+    assert {branch["properties"]["kind"]["const"] for branch in variants} == {"process", "retry", "reprocess"}
     properties = [{**branch["properties"], **operation.get("properties", {})} for branch in variants]
     assert all("governed" in fields["path"]["description"].lower() for fields in properties)
     assert schema["properties"]["response_detail"]["enum"] == ["compact", "full", "legacy"]

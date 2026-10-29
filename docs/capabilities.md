@@ -46,7 +46,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | change_connections | create-entity, accept-relation | connect_memory |
 | change_files | create, append, move, delete, recover, reclassify, revert-reclassification | manage_memory_file |
 | change_governance | propose, commit, grant-standing, revoke-standing, suspend, resume, undo, backfill-preview, backfill-commit | govern_memory |
-| change_media | process, retry | process_media |
+| change_media | process, retry, reprocess | process_media |
 | change_observations | add, update, remove | observe_memory |
 | change_plans | create, add, update, triage, revise, rebaseline | plan_memory |
 | change_records | create, append, update, bulk_upsert, discard, revise, rebaseline, import | record_memory |

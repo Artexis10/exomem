@@ -40,7 +40,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
-    "change_media": 1200,
+    "change_media": 1500,
     "change_observations": 6200,
     "change_plans": 3350,
     "change_records": 5550,

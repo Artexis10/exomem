@@ -63,7 +63,7 @@ identity after an uncertain commit.
    files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
    after review with the usual writers; a live citation still does not prove semantic coverage.
 3. Inspect available original media or extracted content; record the scope actually read.
-   Media processing is automatic. Use `read_media/change_media` for reconciliation, status or retry,
+   Media processing is automatic. Use `read_media/change_media` for reconciliation, status, retry or reprocess,
    and `read_media` or the exposed source-read route for inspection. Pending extraction
    does not prevent using an available original. Extraction completion says nothing
    about semantic compilation. Respect source-version guards on dependent writes.

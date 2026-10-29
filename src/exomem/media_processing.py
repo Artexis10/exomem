@@ -1168,6 +1168,74 @@ def retry_all_media(
     return requeued
 
 
+#: The shape of a language code, not a list of languages: whether the speech model supports a
+#: code is decided by the model's own published set, in the job.
+_LANGUAGE_CODE_RE = re.compile(r"[a-z]{2,16}")
+
+
+def reprocess_media(
+    vault_root: Path,
+    binary_path: str | Path,
+    *,
+    language: str | None = None,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    """Queue one explicit second extraction of a media file, optionally with a language hint.
+
+    Only this call extracts over a completed transcript. The job keeps the old text
+    on a page next to the sidecar when the new text is ready, and leaves the sidecar
+    as it is when the new extraction fails. A file that is being processed right now
+    is refused, so the caller asks again when that run ends.
+    """
+    from . import extract
+
+    vault = Path(vault_root).resolve()
+    binary = Path(binary_path)
+    if not binary.is_absolute():
+        binary = vault / binary
+    binary = Path(os.path.abspath(binary))
+    hint = extract.language_code(language)
+    if hint is not None and _LANGUAGE_CODE_RE.fullmatch(hint) is None:
+        raise MediaProcessingError(
+            "INVALID_LANGUAGE", "language must be a short alphabetic code, as the speech model names it"
+        )
+    media_type = classify_media(binary)
+    if hint is not None and media_engines.engine_for(media_type) != media_engines.SPEECH:
+        raise MediaProcessingError(
+            "LANGUAGE_NOT_APPLICABLE", "a language hint applies to audio and video only"
+        )
+    if media_type is not None and not media_engines.stage_enabled(media_type):
+        raise MediaProcessingError(
+            "MEDIA_ENGINE_DISABLED",
+            f"extraction of {media_type} files is switched off in this deployment",
+        )
+    result = reconcile_media(vault, binary, commit_guard=commit_guard)
+    if result is None:  # an explicit request is never skipped; this narrows the type
+        raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
+    boundary = commit_guard() if commit_guard is not None else nullcontext()
+    with boundary:
+        store = media_jobs.MediaJobStore(vault)
+        queued = store.request_reprocess(
+            media_jobs.MediaJob(
+                binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type
+            ),
+            hint,
+        )
+        job = store.get_by_binary(binary)
+    if not queued:
+        raise MediaProcessingError(
+            "MEDIA_BUSY",
+            "the file is being processed now; reprocess it again when that run ends",
+        )
+    return ReconcileResult(
+        result.media_type,
+        job.state if job is not None else media_jobs.PENDING,
+        result.sidecar_path,
+        job.id if job is not None else None,
+        requeued=1,
+    )
+
+
 def _retire_completed_ocr(
     vault: Path, binary: Path, sidecar: Path, media_type: str
 ) -> None:
