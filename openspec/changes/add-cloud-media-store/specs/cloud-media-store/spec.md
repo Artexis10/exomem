@@ -230,6 +230,16 @@ The gateway SHALL serve a download route for originals that works only with the 
 
 Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. The cell SHALL meter media storage from the versions its sidecars reference, counting each version once. Versions kept only for retained backups SHALL NOT count against the allowance. cellctl SHALL meter each prefix's physical bytes from the bucket listing for the operator. An upload or import whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. An original that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media. Status SHALL report two separately named figures: vault storage, which counts the volume's use without cached copies of stored originals, against the volume size; and media storage, which counts each stored original once, against the allowance. A figure that cannot be read SHALL be reported as unknown, never as zero.
 
+The owner allowance SHALL count original plaintext bytes, including versions referenced by sidecars in trash until trash is emptied.
+Multiple live or trash references to one version SHALL count once.
+The operator's physical meter SHALL count provider ciphertext bytes separately.
+
+#### Scenario: An owner keeps media in trash
+
+- **WHEN** live originals reference 60 GB and trash references another 20 GB of distinct original bytes
+- **THEN** the owner meter reports 80 GB against the media allowance
+- **AND** versions referenced only by retained backups do not increase that figure
+
 #### Scenario: An upload exceeds the allowance
 
 - **WHEN** an owner starts an upload whose declared size exceeds the remaining media allowance

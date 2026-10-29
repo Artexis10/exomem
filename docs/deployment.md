@@ -1659,7 +1659,9 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   read it; the listener's refusal tells it to use a session. `exomem attach`
   keeps the session's address and secret in a private file under your state
   directory. If the upload stops, run the same command again: it continues from
-  the last byte that the service holds. If the service holds every byte but
+  the last byte that the service holds. After a timed-out part, the command
+  reads the accepted offset before sending more bytes and reduces its part size.
+  If the service holds every byte but
   cannot preserve them yet, for example because the disk is full, the command
   says so and keeps the session. Run it again to retry the commit without
   sending the bytes again.
@@ -1673,11 +1675,22 @@ listener through the tus 1.0 protocol, with one addition that a stock tus
 client does not make. The client must capture the `Exomem-Upload-Secret`
 header that creation returns and send it on every later request; the secret
 never goes in a URL. Create a session with the credential that `/upload` takes
-on that listener. Put `filename`, `sha256` (of the whole file), `scope` and
-`category` in `Upload-Metadata`, and optionally `raw_protection` and
-`archive`. One request carries at most 64 MiB, and one session holds at most
+on that listener. The credential fixes the lane; metadata cannot change it.
+Evidence requires `filename`, `sha256` (of the whole file), `scope` and
+`category`. Source requires `filename` and `sha256`; its optional fields are
+`title`, `source_kind`, `domain`, `url`, `content_type` and `raw_protection`.
+Source uses the canonical Source writer and stores its original beside the
+Source page. It does not accept `archive=members`. Evidence also accepts
+`raw_protection` and `archive`. One request carries at most 64 MiB, and one session holds at most
 `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
+
+A Source capability does not grant read access to its destination. If governance
+withholds the custody receipt, the session retains the bytes and reports
+`SOURCE_OUTCOME_UNKNOWN`. The canonical commit may already exist.
+Use an authorized reader to inspect
+custody, and reuse this session for a retry. A different caller's credential
+does not change this session's transfer principal.
 
 The service preserves the file only when its SHA-256 matches. `GET` on the
 session returns its state and, after the commit, the receipt. The state
@@ -1697,64 +1710,54 @@ without authentication.
 
 ### Resumable uploads from a shell
 
-An agent with a shell, such as a coding agent, can send a file of several
-gigabytes through the public URL. The proxy edge caps one request at 100 MB, so
-the agent sends the file in parts through an upload session. For the Evidence
-lane, `transfer_artifact(operation="upload")` returns a `resumable` object
-beside `upload_url`. It names the session creation URL (`create_url`), the
-protocol, the header to resend, the most bytes per request (`max_part_bytes`)
-and per session (`max_bytes`), and the `Upload-Metadata` keys that creation
-requires. The minted `token` opens a session as it authorizes `/upload`. Later
-requests carry only the session secret, so an upload can outlast the token.
+`transfer_artifact(operation="upload", lane="evidence")` returns a `resumable`
+object beside `upload_url`. A Source handoff advertises the same protocol when
+its active storage format supports an opaque original. Otherwise,
+`resumable_unavailable` reports why that path is unavailable. Never change the
+storage authority mode or use Evidence to bypass a Source refusal.
 
-1. Call `transfer_artifact(operation="upload")` and keep `token` and `resumable.create_url`.
-2. Save the script below as `exomem-upload.sh`.
-3. Run `CREATE_URL=<create_url> TOKEN=<token> SCOPE=Device CATEGORY=Exports sh exomem-upload.sh device_days.zip`.
-4. If the script stops, run the same command again. It continues from the offset that the service holds.
-5. Run it again until the state it prints is `committed`, then delete `device_days.zip.exomem-session`.
+The handoff supplies `create_url`, `max_part_bytes`, `max_bytes` and the required
+metadata keys. The minted token authorizes creation. Later requests carry the
+session secret, so an existing upload can outlast that token. These personal
+server routes do not lift the separate Cloud gateway exclusion.
 
-The script prints the session state. Once the state is `committed`, the
-`receipt` names the stored path and the SHA-256 of the whole file.
+For local Evidence uploads, use the maintained client:
 
 ```sh
-#!/bin/sh
-# Send FILE to Evidence through an Exomem upload session; run it again to resume.
-set -eu
-FILE=$1 STATE=$1.exomem-session
-SIZE=$(wc -c < "$FILE" | tr -d ' ')
-header() { grep -i "^$1:" | tr -d '\r' | cut -d' ' -f2; }
-b64() { printf %s "$1" | base64 | tr -d '\n'; }
-if [ ! -s "$STATE" ]; then
-  SHA=$(sha256sum "$FILE" | cut -d' ' -f1)  # on macOS: shasum -a 256
-  CREATED=$(curl -sS -D - -o /dev/null -X POST "$CREATE_URL" \
-    -H "Authorization: Bearer $TOKEN" -H "Tus-Resumable: 1.0.0" -H "Upload-Length: $SIZE" \
-    -H "Upload-Metadata: filename $(b64 "${FILE##*/}"),sha256 $(b64 "$SHA"),scope $(b64 "$SCOPE"),category $(b64 "$CATEGORY")")
-  SECRET=$(printf %s "$CREATED" | header exomem-upload-secret)
-  [ -n "$SECRET" ] || { printf %s "$CREATED" | head -n 1; exit 1; }
-  LOCATION=$(printf %s "$CREATED" | header location)
-  (umask 077; echo "${CREATE_URL%/upload/sessions}$LOCATION $SECRET" > "$STATE")
-fi
-read -r SESSION SECRET < "$STATE"
-tus() { curl -sS -H "Tus-Resumable: 1.0.0" -H "Exomem-Upload-Secret: $SECRET" "$@"; }
-LAST=
-while OFFSET=$(tus -I "$SESSION" | header upload-offset) && [ -n "$OFFSET" ] && [ "$OFFSET" -lt "$SIZE" ]; do
-  # A part that kept no bytes: print the session's state and stop; run the script again later.
-  if [ "$OFFSET" = "$LAST" ]; then tus "$SESSION"; echo; exit 1; fi
-  LAST=$OFFSET
-  tail -c +"$((OFFSET + 1))" "$FILE" | head -c $((64 * 1024 * 1024)) | tus -o /dev/null -X PATCH "$SESSION" \
-    -H "Upload-Offset: $OFFSET" -H "Content-Type: application/offset+octet-stream" --data-binary @- || true
-done
-tus "$SESSION"; echo
+exomem attach export.zip --scope Device --category Exports --resumable
 ```
 
-A part that fails, for example because the connection drops, is sent again
-from the offset that the service reports. If a part keeps no bytes, the script
-prints the session's state and stops. The state `failed` names a code: for
-example, the bytes did not match their SHA-256. A session that has expired
-answers `UPLOAD_SESSION_EXPIRED`. In both cases, delete the `.exomem-session`
-file, call `transfer_artifact` for a new token and run the script again. To keep
-the original owner-only, or to keep a zip as its members, add `raw_protection 1`
-or `archive members` to `Upload-Metadata`, each value base64-encoded.
+The client reads its local token and port from the configuration above. It
+keeps its session secret in a private file. Run the same command after an
+interruption to resume accepted bytes or retry a pending commit. Held file
+handles and `--handoff-file` keep their separate one-request contract.
+
+For a remote or Source upload, use a tus client that retains the additional
+session-secret header. Follow this sequence:
+
+1. Mint a handoff for the intended lane; expect its supported `resumable` object.
+2. Create one session with its token and required metadata; retain the returned address and secret privately.
+3. Send bounded parts with the session secret; expect an advancing `Upload-Offset`.
+4. After an uncertain part response, read `HEAD` before retrying; expect the service's accepted offset.
+5. Resume from that offset with smaller parts; expect previously accepted bytes to remain stored.
+6. Read the session until it commits; expect an exact-hash receipt or an explicit pending or failed state.
+
+A lost creation response does not supply a session address. Reconcile that
+creation before creating another session. An expired creation token needs a
+new token; an existing session continues with its secret. An expired session
+answers `UPLOAD_SESSION_EXPIRED` and needs a new session.
+
+`retryable` means that the service still holds the bytes. Retry the same
+session; do not create a new identity for an uncertain Source commit.
+`SOURCE_OUTCOME_UNKNOWN` also retains the bytes when recovery proves a commit
+without recovering its complete receipt. That state needs reconciliation and
+does not authorize another Source publication.
+
+A Source receipt preserves the original and its Source page. Its
+`semantic_compilation` field remains `unassessed` until an agent compiles the
+content into governed knowledge. Media status reports recorded processing and
+activity separately. `health_scope="reconciliation"` does not prove active
+inference; an unobserved worker remains `activity.state="unknown"`.
 
 ## Deploying a new version
 
