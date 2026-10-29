@@ -9242,6 +9242,8 @@ def _media_remediation(code: str) -> str:
         return "Enable the extraction engine for this media type, then reprocess."
     if code == "MEDIA_BUSY":
         return "Wait for the current processing run to end, then reprocess again."
+    if code == "MEDIA_RUNTIME_UNAVAILABLE":
+        return "Restore the media runtime, then reprocess again."
     return "Inspect the media artifact and retry processing."
 
 

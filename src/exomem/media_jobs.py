@@ -2086,6 +2086,9 @@ class MediaJobStore:
                 "SELECT * FROM jobs WHERE state IN ('blocked', 'failed') "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id) "
+                # A reprocess is an explicit request over a completed transcript, which retry
+                # leaves alone, so its row would hold a place in every pass and never leave.
+                "AND reprocess = 0 "
                 "ORDER BY id"
             )
             eligible: list[MediaJob] = []
@@ -2694,9 +2697,17 @@ def _status_job(row: Any) -> dict[str, Any]:
         }
     if reason == OVER_BUDGET:
         actions[BLOCKED] = OVER_BUDGET_ACTION
-    # A failed reprocess leaves the completed transcript as it was, and a retry would
+    # A stopped reprocess leaves the completed transcript as it was, and a retry would
     # find that transcript complete, so only a new request runs it again.
-    reprocess_failed = state == FAILED and "reprocess" in row.keys() and bool(row["reprocess"])
+    reprocess_stopped = (
+        state in {BLOCKED, FAILED}
+        and "reprocess" in row.keys()
+        and bool(row["reprocess"])
+        and not _returns_by_itself(state, reason)
+    )
+    reprocess_failed = reprocess_stopped and state == FAILED
+    if reprocess_stopped and state == BLOCKED:
+        actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
     unsupported_language = state == FAILED and (error or "").startswith("UnsupportedLanguage:")
     if unsupported_language:
         actions[FAILED] = (
@@ -2705,7 +2716,7 @@ def _status_job(row: Any) -> dict[str, Any]:
             + ", or correct EXOMEM_ASR_LANGUAGE"
         )
     elif reprocess_failed:
-        actions[FAILED] = "the transcript is unchanged; reprocess the file again to replace it"
+        actions[FAILED] = "the transcript was not replaced; reprocess the file again to replace it"
     elif state == FAILED and error and "sidecar content changed" in error:
         actions[FAILED] = "review the sidecar changes, then retry media processing"
     elif state == FAILED and error and error.startswith("stale extraction:"):
@@ -2722,7 +2733,7 @@ def _status_job(row: Any) -> dict[str, Any]:
             state in {BLOCKED, FAILED}
             and reason != OVER_BUDGET
             and not unsupported_language
-            and not reprocess_failed
+            and not reprocess_stopped
         ),
         "next_action": actions[state],
     }

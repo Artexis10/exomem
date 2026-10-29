@@ -13,6 +13,9 @@
 - [x] 2.3 Narrow the stale check for reprocess to the extraction digest and binary identity. Record a failed reprocess on the job row only.
 - [x] 2.4 Add the `reprocess` operation and `language` argument to `process_media` / `change_media`, with parity across MCP, REST and CLI, and the writer-lease and egress classification of a mutation.
 
+- [x] 2.5 Block a pending reprocess on the job row alone when the runtime is marked unavailable, and refuse a new request then. Skip reprocess rows in the automatic retry pass.
+- [x] 2.6 Give a prior page the `type`, `source_type` and `tags` of its sidecar, never reuse a page number, and leave Sources of the superseded class out of the compile backlog.
+
 ## 3. PDF and skill
 
 - [x] 3.1 Emit `[page N]` before each page's text in `_extract_pdf`, including OCR pages.

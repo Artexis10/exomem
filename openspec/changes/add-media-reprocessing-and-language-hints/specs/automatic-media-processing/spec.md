@@ -57,7 +57,7 @@ A completed audio or video sidecar SHALL record, as frontmatter with correct YAM
 
 ### Requirement: Explicit Reprocessing Replaces A Completed Extraction And Keeps The Prior One
 
-The system SHALL offer an explicit `reprocess` media operation, with an optional language code, that requeues a completed audio, video or PDF item and replaces its extraction. Only this request MAY bypass the completed-transcript check. Before the new extraction becomes current, the prior extraction SHALL be kept as an immutable page next to the sidecar, in the same atomic write as the new sidecar. That page SHALL be marked superseded through the existing supersession convention, SHALL be linked from the sidecar in `prior_extractions`, and SHALL NOT itself be a media item. A request that names a language SHALL pin that language on the sidecar for later runs. A failed or stale reprocess MUST leave the prior text intact and SHALL fail the job with an actionable reason. The sidecar MUST NOT be left without either the old or the new text.
+The system SHALL offer an explicit `reprocess` media operation, with an optional language code, that requeues a completed item of any extractable media type and replaces its extraction. A language code SHALL be accepted for speech media (audio and video) only and SHALL be refused for other media. The request SHALL be refused while the media runtime is marked unavailable, as an explicit retry queues nothing then. Only this request MAY bypass the completed-transcript check. Before the new extraction becomes current, the prior extraction SHALL be kept as an immutable page next to the sidecar, in the same atomic write as the new sidecar. That page SHALL be marked superseded through the existing supersession convention, SHALL take the `type`, `source_type` and `tags` of the sidecar it was taken from, SHALL be linked from the sidecar in `prior_extractions`, and SHALL NOT itself be a media item or an item of the compile backlog. The page SHALL NOT take the number of a page that was listed before, even if that page was deleted. A request that names a language SHALL pin that language on the sidecar for later runs. A failed or stale reprocess MUST leave the prior text intact and SHALL fail the job with an actionable reason. The sidecar MUST NOT be left without either the old or the new text.
 
 #### Scenario: Reprocess replaces the text and keeps the old one
 
@@ -65,10 +65,23 @@ The system SHALL offer an explicit `reprocess` media operation, with an optional
 - **THEN** the sidecar holds the new text, the `asr_*` fields and a `prior_extractions` link
 - **AND** the linked page holds the old extraction fields and text, marked superseded by the sidecar
 
+#### Scenario: A prior page owes no compilation
+
+- **WHEN** a completed item was reprocessed once
+- **THEN** the unprocessed-source audit lists no prior extraction page
+
+#### Scenario: A blocked reprocess does not rewrite the completed sidecar
+
+- **WHEN** a reprocess is pending over a completed sidecar and the media runtime is then marked unavailable
+- **THEN** the sidecar keeps its completed transcript and state
+- **AND** only the job is marked blocked
+- **AND** a new reprocess request is refused while the runtime stays unavailable
+
 #### Scenario: Automatic retry leaves a completed transcript alone
 
 - **WHEN** reconciliation or an explicit retry runs over a completed sidecar after a reprocess request was served
 - **THEN** no job is queued for it and the sidecar is not rewritten
+- **AND** a failed or blocked reprocess row does not hold a place in the automatic retry pass
 
 #### Scenario: A stale reprocess keeps the prior text
 

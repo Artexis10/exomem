@@ -1209,6 +1209,9 @@ def reprocess_media(
             "MEDIA_ENGINE_DISABLED",
             f"extraction of {media_type} files is switched off in this deployment",
         )
+    unavailable = _runtime_unavailable(vault)
+    if unavailable is not None:  # retry_media queues nothing in this state either
+        raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
     result = reconcile_media(vault, binary, commit_guard=commit_guard)
     if result is None:  # an explicit request is never skipped; this narrows the type
         raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
@@ -1637,30 +1640,34 @@ def mark_processing_unavailable(
                     if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
                         continue
                     content, guard = read_guarded_text(vault, job.sidecar_path)
-                    blocked = preserve.render_sidecar_processing_failure(
-                        content,
-                        state=media_jobs.BLOCKED,
-                        attempts=current_job.attempts,
-                        error=reason,
-                        retryable=True,
-                        next_action=next_action,
-                    )
-                    written_result = preserve.commit_media_sidecar_writes(
-                        vault,
-                        (
-                            PlannedWrite(
-                                path=job.sidecar_path,
-                                content=blocked,
-                                expected_hash=content_hash(content),
-                                guard=guard,
+                    # A pending reprocess sits over a completed transcript. Marking that sidecar
+                    # blocked would make the next reconcile treat the old text as unfinished, so
+                    # only the job carries the state.
+                    if not has_completed_transcript(content, media_type=job.media_type):
+                        blocked = preserve.render_sidecar_processing_failure(
+                            content,
+                            state=media_jobs.BLOCKED,
+                            attempts=current_job.attempts,
+                            error=reason,
+                            retryable=True,
+                            next_action=next_action,
+                        )
+                        written_result = preserve.commit_media_sidecar_writes(
+                            vault,
+                            (
+                                PlannedWrite(
+                                    path=job.sidecar_path,
+                                    content=blocked,
+                                    expected_hash=content_hash(content),
+                                    guard=guard,
+                                ),
                             ),
-                        ),
-                        post_commit_fanout=commit_guard is None,
-                        publication_intents_out=publication_intents,
-                        batch_writer=batch_atomic_write,
-                    )
-                    assert isinstance(written_result, list)
-                    written = written_result
+                            post_commit_fanout=commit_guard is None,
+                            publication_intents_out=publication_intents,
+                            batch_writer=batch_atomic_write,
+                        )
+                        assert isinstance(written_result, list)
+                        written = written_result
                 if store.mark(current_job, media_jobs.BLOCKED, reason):
                     changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup

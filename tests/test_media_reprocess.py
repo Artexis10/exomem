@@ -10,6 +10,7 @@ import os
 import pytest
 
 from exomem import (
+    commands,
     extract,
     media_jobs,
     media_processing,
@@ -186,6 +187,7 @@ def test_a_transcript_edited_during_the_run_is_not_replaced(
     assert "corrected by hand" in now and RIGHT not in now
     (job,) = media_jobs.status(vault)["jobs"]
     assert job["state"] == media_jobs.FAILED and "transcript changed" in job["error"]
+    assert "unchanged" not in job["next_action"]  # the person's edit is the change
     assert not list(sidecar.parent.glob("*.prior-*.md"))
 
 
@@ -229,3 +231,84 @@ def test_a_job_store_from_before_reprocessing_opens_and_takes_a_request(vault) -
     assert upgraded.request_reprocess(job, "et")
     claimed = upgraded.claim_next()
     assert claimed is not None and (claimed.reprocess, claimed.language) == (True, "et")
+
+
+def test_a_prior_page_owes_no_compilation_and_a_deleted_page_number_is_not_reused(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    live_type = _frontmatter(sidecar)["type"]
+
+    media_processing.reprocess_media(vault, binary, language="et")
+    _run_to_idle(vault, worker)
+    (first_link,) = prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))
+    first = vault / f"{first_link}.md"
+    kept = _frontmatter(first)
+    # The old text is a former extraction of the same source, so it carries the sidecar's own kind.
+    assert kept["type"] == live_type and kept["source_type"] == _frontmatter(sidecar)["source_type"]
+
+    flagged = commands.op_audit(vault, categories=["unprocessed_source"])["findings"]
+    paths = {finding["path"] for finding in flagged}
+    assert sidecar.relative_to(vault).as_posix() in paths  # a live Source still waits
+    assert first.relative_to(vault).as_posix() not in paths
+
+    first.unlink()  # the user deletes the page; its number stays taken
+    media_processing.reprocess_media(vault, binary, language="fi")
+    _run_to_idle(vault, worker)
+    assert [link.rpartition(".prior-")[2] for link in prior_extraction.links_of(
+        sidecar.read_text(encoding="utf-8")
+    )] == ["1", "2"]
+    assert not first.exists()
+
+
+def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retried_by_the_pass(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    media_processing.reprocess_media(vault, binary, language="et")
+    before = sidecar.read_bytes()
+
+    try:
+        media_processing.mark_processing_unavailable(
+            vault, reason="MediaRuntimeUnavailable: no worker", next_action="start the worker"
+        )
+        assert sidecar.read_bytes() == before
+        assert media_processing.has_completed_transcript(
+            sidecar.read_text(encoding="utf-8"), media_type="audio"
+        )
+        (job,) = media_jobs.status(vault)["jobs"]
+        assert job["state"] == media_jobs.BLOCKED and job["retryable"] is False
+        assert "reprocess" in job["next_action"]
+
+        # The completed transcript stays complete for reconcile, and the request is refused.
+        media_processing.reconcile_media(vault, binary, explicit=False)
+        assert sidecar.read_bytes() == before
+        with pytest.raises(media_processing.MediaProcessingError) as refused:
+            media_processing.reprocess_media(vault, binary, language="et")
+        assert refused.value.code == "MEDIA_RUNTIME_UNAVAILABLE"
+        # A reprocess row never holds a place in the automatic retry pass.
+        assert media_jobs.MediaJobStore(vault).retryable_jobs() == []
+    finally:
+        media_processing.set_media_runtime_available(vault)
+
+    media_processing.reprocess_media(vault, binary, language="et")
+    _run_to_idle(vault, worker)
+    assert engine.languages == [None, "et"]
+    assert RIGHT in sidecar.read_text(encoding="utf-8")
+    assert len(prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))) == 1
+
+
+def test_a_failed_reprocess_does_not_starve_the_retry_pass(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    engine.fail_with = extract.UnsupportedLanguage("xx", ["en", "et"])
+    media_processing.reprocess_media(vault, binary, language="xx")
+    _run_to_idle(vault, worker)
+    (job,) = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.FAILED
+
+    assert media_jobs.MediaJobStore(vault).retryable_jobs() == []

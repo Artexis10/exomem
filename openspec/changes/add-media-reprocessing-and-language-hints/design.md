@@ -31,7 +31,7 @@ The job runtime already separates a child that computes from a parent that publi
 6. **Reprocess is a flag on the job.** The job row gains `reprocess` and `language`. Only a row with the flag bypasses the "completed transcript" check. Automatic retry and reconciliation never set it, so the existing scenario "a valid completed transcript is not overwritten" holds. A published extraction clears the flag, so one request replaces one extraction.
 7. **The prior extraction is a companion page in the same atomic write.**
    - The page is `<sidecar name>.prior-<n>.md` next to the sidecar. It holds the old extraction fields and text and is marked with the existing superseded convention: the pack's status of class `superseded`, and `superseded_by` naming the sidecar. Retrieval therefore demotes it with no new marker.
-   - The page names no binary, so it is never a media item and no pass picks it up.
+   - The page names no binary, so it is never a media item and no pass picks it up. It takes the `type`, `source_type` and `tags` of the sidecar, because it is a former extraction of the same source. The compile backlog skips any Source whose status is of the superseded class, so a prior page owes no compilation. A number that was listed once is never reused.
    - The sidecar lists the pages in `prior_extractions`.
    - The page and the sidecar are written in one batch. A reader sees the old text, or the new text with its prior page, and never a sidecar without text.
 8. **Stale handling is narrowed for reprocess, and failure never touches the sidecar.**
@@ -39,7 +39,7 @@ The job runtime already separates a child that computes from a parent that publi
    - A reprocess that fails records the failure on the job row only. A completed sidecar keeps its text and its state, so no failure path leaves the sidecar without a transcript.
    - If the extraction itself changed during the run, the job fails with an actionable message and the prior text stays. The new text is lost in that case. The cost is one repeated run, and the case needs a person to edit the machine-owned text during the run.
    - If the binary is replaced during the run, the request is dropped, and reconciliation processes the new file.
-9. **Reprocess uses the existing runtime.** It goes through the same job store, worker, brakes and per-artifact commit guard as `process` and `retry`. Cloud's memory brakes apply unchanged.
+9. **Reprocess uses the existing runtime.** It goes through the same job store, worker, brakes and per-artifact commit guard as `process` and `retry`. Cloud's memory brakes apply unchanged. When the runtime is marked unavailable, the request is refused and a queued request blocks on the job row alone, so the completed sidecar keeps its state. Automatic retry skips reprocess rows, because retry leaves a completed transcript alone and the row would never leave the retry pass.
 10. **PDF page markers are a plain line.** `[page N]` precedes each page's text. The timed-line pattern requires `m:ss`, so a page marker is not a timed line and the chunker and citation code read it as text.
 11. **The skill procedure is generic.** The scaffold names classes of claims through the open observation category and the `(context)` slot. The user's own positions come only from the user, and a missing one stays a marked slot.
 

@@ -1226,7 +1226,9 @@ class MediaWorker:
             return (
                 PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
             )
-        page, ordinal = prior_extraction.next_page(job.sidecar_path)
+        page, ordinal = prior_extraction.next_page(
+            job.sidecar_path, prior_extraction.links_of(before)
+        )
         prior_page = prior_extraction.render(
             before,
             artifact_name=job.sidecar_path.name.removesuffix(".md"),
