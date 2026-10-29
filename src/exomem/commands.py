@@ -8923,7 +8923,7 @@ def op_process_media(
         path: Governed KB media path; omit for bounded all-media work.
         paths: 1-32 unique governed paths, not for status.
         language: Speech language code; omit to detect.
-        multilingual: Detect the language per window (slower); not with language.
+        multilingual: Detect language per window (slower).
     """
     from . import due_state as due_state_module
     from . import media_processing

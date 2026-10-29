@@ -1740,6 +1740,7 @@ def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
         ("asr_language_probability", number(asr.language_probability, 4)),
         ("asr_language_source", text(asr.language_source)),
         (_ASR_MODE_FIELD, text(asr.language_mode)),
+        ("asr_decoding", text(asr.decoding)),
         ("asr_speech_seconds", number(asr.speech_seconds, 2)),
         ("asr_duration_seconds", number(asr.duration_seconds, 2)),
         ("asr_policy", text(asr.policy)),

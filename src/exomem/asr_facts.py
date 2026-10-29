@@ -20,6 +20,11 @@ LANGUAGE_MODE_SINGLE = "single"
 LANGUAGE_MODE_MULTILINGUAL = "multilingual"
 LANGUAGE_MODES = frozenset({LANGUAGE_MODE_SINGLE, LANGUAGE_MODE_MULTILINGUAL})
 
+#: How the engine walked through the audio: windows decoded together on a GPU, or one after another.
+DECODING_BATCHED = "batched"
+DECODING_SEQUENTIAL = "sequential"
+DECODING_PATHS = frozenset({DECODING_BATCHED, DECODING_SEQUENTIAL})
+
 
 @dataclass
 class AsrFacts:
@@ -31,6 +36,8 @@ class AsrFacts:
     language_requested: str | None = None
     #: The mode the engine ran in. In `multilingual` mode `language` is the engine's report for the file.
     language_mode: str | None = None
+    #: The decoding path the backend ran; None when the backend does not say.
+    decoding: str | None = None
     #: Seconds of audio that held speech, after the engine removed silence.
     speech_seconds: float | None = None
     duration_seconds: float | None = None
@@ -53,7 +60,7 @@ class AsrFacts:
         """Rebuild facts from a job result; a value of the wrong type is a corrupt result."""
         if not isinstance(value, dict) or set(value) - set(cls.__dataclass_fields__):
             raise ValueError("ASR facts must be a mapping of the known fields")
-        texts = ("language", "language_source", "language_requested", "language_mode", "policy")
+        texts = ("language", "language_source", "language_requested", "language_mode", "decoding", "policy")
         numbers = ("language_probability", "speech_seconds", "duration_seconds")
         for key in texts:
             if value.get(key) is not None and not isinstance(value[key], str):
@@ -66,4 +73,6 @@ class AsrFacts:
             raise ValueError("ASR fact 'language_source' is not a known source")
         if value.get("language_mode") not in (None, *LANGUAGE_MODES):
             raise ValueError("ASR fact 'language_mode' is not a known mode")
+        if value.get("decoding") not in (None, *DECODING_PATHS):
+            raise ValueError("ASR fact 'decoding' is not a known decoding path")
         return cls(**value)

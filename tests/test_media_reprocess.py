@@ -68,7 +68,8 @@ class _Engine:
             return extract.ExtractResult(WRONG, "audio", "faster-whisper:test+timed", asr=facts)
         facts = AsrFacts(
             language=language, language_source="requested", language_requested=language,
-            language_mode="single", speech_seconds=40.0, duration_seconds=61.5, policy="fw-policy-1",
+            language_mode="single", decoding="batched", speech_seconds=40.0, duration_seconds=61.5,
+            policy="fw-policy-1",
         )
         return extract.ExtractResult(f"{RIGHT} ({language})", "audio", "faster-whisper:test+timed", asr=facts)
 
@@ -123,6 +124,7 @@ def test_reprocess_replaces_a_completed_transcript_and_keeps_the_old_one(
     assert facts["asr_language_requested"] == "et"
     assert facts["asr_language_probability"] is None
     assert facts["asr_duration_seconds"] == 61.5 and facts["asr_policy"] == "fw-policy-1"
+    assert facts["asr_decoding"] == "batched"
     assert media_jobs.status(vault)["jobs"] == []
 
     (link,) = prior_extraction.links_of(now)

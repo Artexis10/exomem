@@ -50,6 +50,8 @@ from typing import Protocol
 
 from . import accel, asr_runtime, runtime_resources
 from .asr_facts import (
+    DECODING_BATCHED,
+    DECODING_SEQUENTIAL,
     LANGUAGE_CONFIGURED,
     LANGUAGE_DETECTED,
     LANGUAGE_MODE_MULTILINGUAL,
@@ -490,7 +492,9 @@ def _runs_on_cuda(model) -> bool:
 
 
 def _start_decoding(model, policy: dict, audio, *, language: str | None, multilingual: bool):
-    """Begin one decode under the policy: batched windows on CUDA, one window after another on CPU.
+    """Begin one decode under the policy: `(segments, info, decoding path)`.
+
+    The path is batched windows on CUDA and one window after another on CPU.
 
     The batched pipeline ignores `condition_on_previous_text` and `hallucination_silence_threshold`,
     so its options (`batched` in media_models.json) leave both out.
@@ -499,18 +503,20 @@ def _start_decoding(model, policy: dict, audio, *, language: str | None, multili
         from faster_whisper import BatchedInferencePipeline
 
         batched = policy["batched"]
-        return BatchedInferencePipeline(model).transcribe(
+        segments, info = BatchedInferencePipeline(model).transcribe(
             audio,
             language=language,
             multilingual=multilingual,
             batch_size=batched["batch_size"],
             **batched["options"],
         )
+        return segments, info, DECODING_BATCHED
     options = dict(policy["options"])
     # The library needs word timestamps to apply the hallucination guard, so the two go together.
     if options.get("hallucination_silence_threshold") is not None:
         options["word_timestamps"] = True
-    return model.transcribe(audio, language=language, multilingual=multilingual, **options)
+    segments, info = model.transcribe(audio, language=language, multilingual=multilingual, **options)
+    return segments, info, DECODING_SEQUENTIAL
 
 
 class FasterWhisperBackend:
@@ -538,7 +544,7 @@ class FasterWhisperBackend:
                     model = _get_whisper()
                     if language is not None and language not in (supported := model.supported_languages):
                         raise UnsupportedLanguage(language, supported)
-                    segments, info = _start_decoding(
+                    segments, info, decoding = _start_decoding(
                         model,
                         policy,
                         _decode_audio_float32(path),
@@ -550,6 +556,7 @@ class FasterWhisperBackend:
                         report.language_probability = _seconds(getattr(info, "language_probability", None))
                         report.speech_seconds = _seconds(getattr(info, "duration_after_vad", None))
                         report.duration_seconds = _seconds(getattr(info, "duration", None))
+                        report.decoding = decoding
                         report.policy = policy["revision"]
                     yield from segments
                 except Exception as exc:

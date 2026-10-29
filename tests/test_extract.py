@@ -367,6 +367,7 @@ def test_a_gpu_decodes_in_batches_and_keeps_segment_timestamps(
     assert options["without_timestamps"] is False  # the pipeline's own default gives one line per window
     assert model.calls == []
     assert result.text == "tere" and result.asr.policy == policy["revision"]
+    assert result.asr.decoding == "batched"
 
 
 def test_a_cpu_run_decodes_sequentially_even_where_the_batched_pipeline_exists(
@@ -377,11 +378,12 @@ def test_a_cpu_run_decodes_sequentially_even_where_the_batched_pipeline_exists(
     model = _FakeWhisper([_FakeSeg("tere", 0.0, 4.0)], device="cpu")
     monkeypatch.setattr(extract, "_get_whisper", lambda: model)
 
-    extract._transcribe(Path("x.wav"), "audio")
+    result = extract._transcribe(Path("x.wav"), "audio")
 
     policy = media_models.model_spec("speech")["faster_whisper"]
     assert batched_calls == []
     assert model.calls[0][1] == {"language": None, "multilingual": False, **policy["options"]}
+    assert result.asr.decoding == "sequential"
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -462,7 +464,7 @@ def test_the_speech_policy_reaches_the_model_and_the_engine_decisions_are_record
     assert options["vad_filter"] is True  # language is detected on speech, not on a quiet opening
     assert result.asr == asr_facts.AsrFacts(
         language="et", language_probability=0.91, language_source="detected", language_mode="single",
-        speech_seconds=40.25, duration_seconds=61.5, policy=policy["revision"],
+        decoding="sequential", speech_seconds=40.25, duration_seconds=61.5, policy=policy["revision"],
     )
 
 

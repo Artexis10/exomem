@@ -2,18 +2,20 @@
 
 ### Requirement: GPU Speech Decoding Runs Batched With Timestamped Lines
 
-When the local speech stage runs on CUDA, it SHALL decode through the engine's batched pipeline with the batch size and options that `media_models.json` declares, and it SHALL keep segment timestamps so that each transcript line covers a citable span. When the stage runs on CPU, it SHALL decode sequentially. The sidecar SHALL record the policy revision that produced it.
+When the local speech stage runs on CUDA, it SHALL decode through the engine's batched pipeline with the batch size and options that `media_models.json` declares, and it SHALL keep segment timestamps so that each transcript line covers a citable span. When the stage runs on CPU, it SHALL decode sequentially. The sidecar SHALL record the policy revision that produced it and the decoding path that the backend ran, as `asr_decoding: batched` or `asr_decoding: sequential`.
 
 #### Scenario: A GPU run decodes batched
 
 - **WHEN** the speech stage processes a recording on CUDA
 - **THEN** it decodes with the batched pipeline and the declared batch size
 - **AND** the transcript lines carry segment timestamps, not one line per decoding window
+- **AND** the sidecar records `asr_decoding: batched`
 
 #### Scenario: A CPU run stays sequential
 
 - **WHEN** the speech stage processes a recording on CPU
 - **THEN** it decodes sequentially with the declared sequential options
+- **AND** the sidecar records `asr_decoding: sequential`
 
 ### Requirement: A Caller Declares One Language Or Several
 
