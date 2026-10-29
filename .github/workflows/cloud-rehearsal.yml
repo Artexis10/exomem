@@ -14,10 +14,22 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies."
         type: choice
-        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill]
+        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import]
         default: full
+      large_import_files:
+        description: "large-import only: files in both folders (default 70000). The byte total shrinks before the count does."
+        type: string
+        default: ""
+      large_import_gb:
+        description: "large-import only: target size of both folders in GB (default 6), scaled down to the runner's free disk."
+        type: string
+        default: ""
+      large_import_smoke:
+        description: "large-import only: accept data too small to prove the volume claim; the verdict is then smoke_only, never pass."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,7 +67,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'local-storage-drill'
+    if: github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import')
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -114,6 +126,68 @@ jobs:
           path: |
             ${{ runner.temp }}/cloud-rehearsal-report.json
             ${{ runner.temp }}/rehearsal-diagnostics
+          if-no-files-found: error
+          retention-days: 30
+
+  large-import:
+    name: Large agent-led import on disposable K3s with TopoLVM
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'large-import'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      # The run sizes its folders and its volume from the free disk left after this step
+      # and after the images are built; the job log shows `df -h` before and after the
+      # fixture is generated.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # Substrate's gateway image pins Node 24; its web app builds with the same.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      # Exit 0 is a pass, or a smoke_only result when asked for; 1 is a recorded product
+      # finding, 2 a harness failure. Loop devices and the device-mapper module need sudo.
+      - name: Run the large import
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 140
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/large-import-diagnostics
+          LARGE_IMPORT_FILES: ${{ inputs.large_import_files }}
+          LARGE_IMPORT_GB: ${{ inputs.large_import_gb }}
+          LARGE_IMPORT_SMOKE: ${{ inputs.large_import_smoke && '--large-import-smoke' || '' }}
+        run: |
+          uv run --frozen exomem-cloud-rehearsal run --large-import ${LARGE_IMPORT_SMOKE} ${LARGE_IMPORT_FILES:+--large-import-files "$LARGE_IMPORT_FILES"} ${LARGE_IMPORT_GB:+--large-import-gb "$LARGE_IMPORT_GB"} --report "${RUNNER_TEMP}/large-import-report.json"
+      - name: Summarize the report
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/large-import-report.json"
+          if test -f "$report"; then
+            python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: large-import-report
+          path: |
+            ${{ runner.temp }}/large-import-report.json
+            ${{ runner.temp }}/large-import-diagnostics
           if-no-files-found: error
           retention-days: 30
 

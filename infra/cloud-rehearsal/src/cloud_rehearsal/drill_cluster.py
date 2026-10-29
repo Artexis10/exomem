@@ -52,7 +52,13 @@ GIB = 1024**3
 POOL_GIB = 64
 # Design D1: 64 KiB chunks and 64 bytes of pool metadata per chunk.
 CHUNK_BYTES = 64 * 1024
-METADATA_MIB = math.ceil(POOL_GIB * GIB / CHUNK_BYTES * 64 / 1024**2)
+
+
+def metadata_mib(pool_gib: int) -> int:
+    return math.ceil(pool_gib * GIB / CHUNK_BYTES * 64 / 1024**2)
+
+
+METADATA_MIB = metadata_mib(POOL_GIB)
 SNAPSHOT_DIR = "/var/lib/rancher/k3s/server/db/snapshots"
 LIST_PLAY = images.REPO_ROOT / "infra/ansible/list-cell-volumes.yml"
 
@@ -168,18 +174,25 @@ def wait_node_ready(server: infra.K3s, node: str, timeout: float = 240) -> None:
     wait_for(lambda: node_ready(server, node), timeout=timeout, interval=2, description=f"node {node} to be Ready")
 
 
+def attach_cells_disk(workdir: Path, name: str, pool_gib: int) -> tuple[Path, str, Path]:
+    """A sparse disk attached as a loop device, and the lvm.conf that reads
+    only it. The device must exist before its container starts: a container's
+    /dev holds only the host devices present when it starts."""
+
+    disk = workdir / f"{name}-cells.img"
+    with disk.open("wb") as handle:
+        handle.truncate((pool_gib + 1) * GIB)
+    loop = run(["sudo", "losetup", "--find", "--show", str(disk)]).stdout.strip()
+    conf = workdir / f"lvm-{name}.conf"
+    conf.write_text(LVM_CONF.format(device=loop), encoding="utf-8")
+    return disk, loop, conf
+
+
 def start_agent(cluster: Cluster, name: str, ip: str) -> Agent:
-    """Attaches a sparse disk as a loop device, then starts the agent. The
-    device must exist first: a container's /dev holds only the host devices
-    present when it starts."""
+    """Attaches a sparse disk as a loop device, then starts the agent."""
 
     stack = cluster.stack
-    disk = stack.workdir / f"{name}-cells.img"
-    with disk.open("wb") as handle:
-        handle.truncate((POOL_GIB + 1) * GIB)
-    loop = run(["sudo", "losetup", "--find", "--show", str(disk)]).stdout.strip()
-    conf = stack.workdir / f"lvm-{name}.conf"
-    conf.write_text(LVM_CONF.format(device=loop), encoding="utf-8")
+    disk, loop, conf = attach_cells_disk(stack.workdir, name, POOL_GIB)
     container = f"exo-drill-{name}-{stack.run_id}"
     mounts = infra.image_data_mounts(stack, cluster.agent_image, name)
     run(
@@ -208,17 +221,49 @@ def agent_shell(agent: Agent, script: str, *, check: bool = True):
     return run(["docker", "exec", agent.container, "sh", "-c", script], check=check, timeout=300)
 
 
-def create_volume_group(agent: Agent) -> dict[str, Any]:
+def create_volume_group(agent: Agent, pool_gib: int = POOL_GIB) -> dict[str, Any]:
     """The `cells` volume group and its thin pool, as spike 1.1 made them."""
 
+    metadata = metadata_mib(pool_gib)
     agent_shell(
         agent,
         f"pvcreate --yes {agent.loop_device} && vgcreate {VOLUME_GROUP} {agent.loop_device} && "
-        f"lvcreate --yes --type thin-pool --name {POOL} --size {POOL_GIB}G "
-        f"--poolmetadatasize {METADATA_MIB}M --chunksize 64k {VOLUME_GROUP}",
+        f"lvcreate --yes --type thin-pool --name {POOL} --size {pool_gib}G "
+        f"--poolmetadatasize {metadata}M --chunksize 64k {VOLUME_GROUP}",
     )
     agent.volume_group = True
-    return {"loop_device": agent.loop_device, "pool_gib": POOL_GIB, "metadata_mib": METADATA_MIB, "chunk": "64k"}
+    return {"loop_device": agent.loop_device, "pool_gib": pool_gib, "metadata_mib": metadata, "chunk": "64k"}
+
+
+def pool_gib_for(volume_gib: int) -> int:
+    """Pool size for one cell of `volume_gib` and two overlapping backups. TopoLVM counts
+    every thin volume at its virtual size (overprovisioning 1.0), and a backup holds a
+    snapshot and a clone of the cell's size; the margin covers the pool's own overhead."""
+
+    return 5 * volume_gib + 8
+
+
+def prepare_node_storage(run_id: str, workdir: Path, pool_gib: int) -> tuple[infra.NodeStorage, Agent]:
+    """What a single K3s node needs to serve cells from TopoLVM: the image with LVM,
+    a loop-device disk and its lvm.conf. The kernel modules load on the runner because
+    the node's LVM cannot load them from inside its container."""
+
+    run(["sudo", "modprobe", "--all", "dm_thin_pool", "dm_snapshot"])
+    image = build_agent_image(run_id, workdir)
+    disk, loop, conf = attach_cells_disk(workdir, "node", pool_gib)
+    node = Agent(name="node", container="", ip="", disk=disk, loop_device=loop, lvm_conf=conf)
+    return infra.NodeStorage(image=image, lvm_conf=conf), node
+
+
+def release_node_storage(node: Agent, stack: infra.Stack | None, agent_image: str) -> None:
+    """Teardown of `prepare_node_storage`, after the node's container is gone. It also
+    covers a stack that setup never returned, which has no volume group yet."""
+
+    if node.volume_group and stack is not None:
+        deactivate_volume_group(Cluster(stack=stack, token="", agent_image=agent_image), node, timeout=60)
+    if node.disk.exists():
+        run(["sudo", "losetup", "--detach", node.loop_device], check=False)
+        node.disk.unlink(missing_ok=True)
 
 
 def list_volumes_argv() -> list[str]:
