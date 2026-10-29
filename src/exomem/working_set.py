@@ -226,6 +226,9 @@ RETRIEVAL_CARRY_MIN_SCORE = 1.0
 #: work is about to shrink from the other side.
 RETRIEVAL_CARRY_BUDGET_MULTIPLE = 2.5
 
+#: The request-budget stage name of the retrieval carry, on both rungs (phrase and title).
+CARRY_STAGE = "working_set.carry"
+
 #: A stem is DISTINCTIVE when it occurs on no more than this share of the
 #: indexed pages. Corpus-relative on purpose: "rare" is a statement about
 #: the vault the turn is being answered from, and the same word is a name in
@@ -2599,7 +2602,7 @@ def _carry_by_retrieval(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if budget_exhausted(
-        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+        CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
         return ()
     freshness = None
@@ -2612,7 +2615,7 @@ def _carry_by_retrieval(
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
     with (
-        _span(timings, "working_set.carry"),
+        _span(timings, CARRY_STAGE),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
         call_spans.span("recall.working_set.carry.phrase", measured),
     ):
@@ -2690,7 +2693,7 @@ def _carry_groups_by_retrieval(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if budget_exhausted(
-        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+        CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
         return ()
     freshness = None
@@ -2703,7 +2706,7 @@ def _carry_groups_by_retrieval(
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
     with (
-        _span(timings, "working_set.carry"),
+        _span(timings, CARRY_STAGE),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
         call_spans.span("recall.working_set.carry.phrase", measured),
     ):
@@ -2871,7 +2874,7 @@ def _title_named_anchors(
     takes a slot.
     """
     if budget_exhausted(
-        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+        CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
         return (), None
     freshness = None
@@ -2884,7 +2887,7 @@ def _title_named_anchors(
             log.debug("activation title listing freshness unavailable", exc_info=True)
             return (), None
     with (
-        _span(timings, "working_set.carry"),
+        _span(timings, CARRY_STAGE),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
         call_spans.span("recall.working_set.carry.title", measured),
     ):

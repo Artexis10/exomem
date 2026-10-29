@@ -7507,6 +7507,12 @@ def _op_activate_context_body(
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
             )
+        if packet.get("abstained") is False:
+            # A map whose turn slice yielded to the deadline names the skipped stage, as a served packet does.
+            active_budget = request_budget_module.current()
+            block = active_budget.as_response_block() if active_budget is not None else None
+            if block is not None:
+                packet["request_budget"] = block
         _attach_episode_advice(vault_root, packet)
         if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()

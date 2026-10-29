@@ -79,7 +79,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
-from . import call_spans, foreground_priority, reserved_paths
+from . import call_spans, foreground_priority, request_budget, reserved_paths
 from .find_types import RankingPage
 from .kbdir import kb_dirname
 from .published_admission import Admission, admission_of, deciding
@@ -177,6 +177,66 @@ def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -
     if view is not None and dict(checkpoints) != view.checkpoints:
         raise ValueError("catalogue admission cannot replace a retained view's checkpoints")
     _ADMITTED_CATALOG.set((root, MappingProxyType(dict(checkpoints)), view))
+
+
+#: `CatalogReadiness.status` of a query that the request budget stopped; see `stopping_at_budget`.
+DEADLINE_STATUS = "deadline"
+#: SQLite calls the budget check once per this many VM instructions: the stop lands within a few
+#: milliseconds, and the check is a clock read.
+_BUDGET_CHECK_INSTRUCTIONS = 1000
+
+
+class BudgetStop:
+    """Whether a catalogue query run inside `stopping_at_budget` was stopped by the request budget."""
+
+    __slots__ = ("hit",)
+
+    def __init__(self) -> None:
+        self.hit = False
+
+
+_STOP_AT_BUDGET: ContextVar[BudgetStop | None] = ContextVar("catalogue_stop_at_budget", default=None)
+
+
+@contextlib.contextmanager
+def stopping_at_budget() -> Iterator[BudgetStop]:
+    """Stop each catalogue query run inside this scope once the request budget has no time left.
+
+    The query answers `CatalogReadiness(DEADLINE_STATUS, False)` and schedules no repair, and the
+    scope's `BudgetStop.hit` records it, so the caller can abstain instead of finishing after the
+    client has gone, however its code between queries read the empty answer. Opt-in, because only a
+    caller with a way to give up (the activation carry) may be handed no answer; with no budget
+    bound the scope changes nothing.
+    """
+    stop = BudgetStop()
+    token = _STOP_AT_BUDGET.set(stop)
+    try:
+        yield stop
+    finally:
+        _STOP_AT_BUDGET.reset(token)
+
+
+@contextlib.contextmanager
+def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[Callable[[], bool]]:
+    """Interrupt the statement `conn` runs once the request budget is spent; yields whether it did."""
+    scope = _STOP_AT_BUDGET.get()
+    budget = request_budget.current() if scope is not None else None
+    interrupted = False
+
+    def check() -> int:
+        nonlocal interrupted
+        if budget.remaining() > 0:
+            return 0
+        interrupted = scope.hit = True
+        return 1
+
+    if budget is not None:
+        conn.set_progress_handler(check, _BUDGET_CHECK_INSTRUCTIONS)
+    try:
+        yield lambda: interrupted
+    finally:
+        if budget is not None:
+            conn.set_progress_handler(None, 0)
 
 
 def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
@@ -1154,7 +1214,8 @@ class CatalogReadiness:
     ``status`` is one of ``available`` (this exact projection is present),
     ``stale`` (well-formed but not yet at the requested freshness, or missing),
     ``unsupported`` (the ``python`` kill switch retired the catalog),
-    ``transient_failure`` (a passing lock/interrupt), ``definitions_unavailable``
+    ``transient_failure`` (a passing lock/interrupt), ``deadline`` (the request budget
+    stopped the query, see ``stopping_at_budget``), ``definitions_unavailable``
     (an admitted page's selected definitions are missing, so dependent unit
     coverage is incomplete), or ``fatal_failure`` (the sidecar proved unusable
     for the process). Only ``available`` is
@@ -9794,8 +9855,7 @@ class LexicalStore:
                     # exactly current, or the full pass runs.
                     _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(None, readiness)
-                with call_spans.span("lexical.query"):
-                    return CatalogQueryResult(query_fn(view.connection), readiness)
+                return self._query_within_budget(view.connection, query_fn, readiness)
             except RegistryError:
                 return CatalogQueryResult(
                     None, CatalogReadiness("definitions_unavailable", False, backend())
@@ -9845,8 +9905,7 @@ class LexicalStore:
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
-                with call_spans.span("lexical.query"):
-                    return CatalogQueryResult(query_fn(conn), readiness)
+                return self._query_within_budget(conn, query_fn, readiness)
             finally:
                 conn.close()
         except RegistryError:
@@ -9858,6 +9917,28 @@ class LexicalStore:
             elif verdict.status == "fatal_failure":
                 log.warning(failure_message, e)
             return CatalogQueryResult(None, verdict)
+
+    @staticmethod
+    def _query_within_budget(
+        conn: sqlite3.Connection,
+        query_fn: Callable[[sqlite3.Connection], _CatalogValue],
+        readiness: CatalogReadiness,
+    ) -> CatalogQueryResult[_CatalogValue]:
+        """`query_fn(conn)`, or `DEADLINE_STATUS` when `stopping_at_budget` ended it.
+
+        A stopped query's value is dropped even when `query_fn` swallowed the interrupt: it may be
+        a partial answer.
+        """
+        with call_spans.span("lexical.query"), _interrupt_at_budget(conn) as stopped:
+            try:
+                value = query_fn(conn)
+            except sqlite3.Error:
+                if not stopped():
+                    raise
+            else:
+                if not stopped():
+                    return CatalogQueryResult(value, readiness)
+        return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, readiness.backend))
 
     def _serve_from_ready_catalog(self, scope, freshness, query_fn, failure_message):
         """Compatibility wrapper retaining the historical list-or-None contract."""

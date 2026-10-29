@@ -7,11 +7,14 @@ whose configuration can withhold nothing ranks on the maintained catalogue's
 statistics instead of rebuilding them from every page after each write. Each
 case below proves one of them changes no answer, and that any admission that
 can withhold a page ranks only on the pages it admits, whether one is
-withheld or none. Invented, generic vocabulary throughout.
+withheld or none. A fourth bound, the request deadline, ends a query that is already
+running. Invented, generic vocabulary throughout.
 """
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -618,3 +621,38 @@ def test_an_owner_rule_withholds_a_page_from_the_owners_carry(vault: Path, rival
     absent = _owner_packet(vault)
 
     assert present == absent
+
+
+def test_a_catalogue_query_in_a_carry_scope_stops_when_the_request_budget_is_spent() -> None:
+    """A running query ends within milliseconds of the deadline, with no value and a `deadline` status, instead
+    of scanning on after the client has gone. Outside the scope a spent budget changes nothing, and a budget
+    with time left stops nothing inside it."""
+    from exomem import request_budget
+
+    scan = (
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000000) SELECT count(*) FROM n"
+    )
+    readiness = lexstore.CatalogReadiness("available", True, "python")
+    conn = sqlite3.connect(":memory:")
+
+    def run(statement: str):
+        return lexstore.LexicalStore._query_within_budget(conn, lambda c: c.execute(statement).fetchone(), readiness)
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=0.3))
+    try:
+        started = time.monotonic()
+        with lexstore.stopping_at_budget() as stop:
+            stopped = run(scan)
+        elapsed = time.monotonic() - started
+        assert stopped.value is None and stopped.readiness.status == lexstore.DEADLINE_STATUS and stop.hit
+        assert elapsed < 2.0, "a scan of seconds must be cut at the 0.3 s budget"
+        assert run("SELECT 1").value == (1,), "outside the scope a spent budget stops nothing"
+    finally:
+        request_budget.reset_current(token)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=60))
+    try:
+        with lexstore.stopping_at_budget() as stop:
+            assert run(scan.replace("30000000", "300000")).value == (300000,)
+        assert not stop.hit
+    finally:
+        request_budget.reset_current(token)

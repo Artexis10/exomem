@@ -402,6 +402,55 @@ def test_a_slice_that_spends_the_request_budget_leaves_the_map_its_guard(vault: 
     assert packet["turn_slice"]["state"] == "skipped" and packet["map"] == expected["map"]
 
 
+def test_a_carry_that_finds_the_budget_spent_skips_the_slice_and_names_the_stage(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadline that passes while the carry runs ends the carry: the slice is `skipped`, the response and the
+    ledger's reading of it name the cause, and the map is the one the unhurried call gives."""
+    from types import SimpleNamespace
+
+    from test_working_set_carry import (
+        CARRY_PAGE,
+        CARRY_TURN,
+        _seed_carry_pages,
+        seed_ordinary_notes,
+    )
+
+    from exomem import activation_result, request_budget
+
+    _seed_carry_pages(vault)
+    seed_ordinary_notes(vault)
+    _structured(vault)
+    _cold()
+    clock = [1000.0]
+    rare_terms = working_set_runtime.rare_turn_terms
+
+    def spend_the_budget(*args, **kwargs):
+        result = rare_terms(*args, **kwargs)
+        clock[0] += 60.0  # the deadline passes during the carry's first lexical pass
+        return result
+
+    with monkeypatch.context() as patched:
+        patched.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        patched.setattr(working_set_runtime, "rare_turn_terms", spend_the_budget)
+        token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+        try:
+            packet = _activate(vault, turn=CARRY_TURN)
+        finally:
+            request_budget.reset_current(token)
+    assert not packet.get("abstained")
+    assert packet["turn_slice"]["state"] == "skipped" and packet["turn_slice"]["items"] == []
+    assert working_set.CARRY_STAGE in packet["request_budget"]["skipped"]
+    observed = activation_result.Observation()
+    observed.capture(packet)
+    assert observed.result["budget_limited"] is True
+    # The control: the same call with time to spare names the carried page, under the same map.
+    _cold()
+    unhurried = _activate(vault, turn=CARRY_TURN)
+    assert [item["ref"] for item in unhurried["turn_slice"]["items"]] == [CARRY_PAGE]
+    assert packet["map"] == unhurried["map"]
+
+
 @pytest.mark.parametrize(
     ("caller", "hidden_target", "topics"),
     [(OWNER, False, ["harbour"]), (_external(), False, ["harbour"]), (_external(), True, [])],
