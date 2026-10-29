@@ -81,7 +81,7 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest"})
 # Maintenance modes whose writes remote surfaces admit. Each one is governed by
 # an exact reviewed plan or preview identity, so remote callers get the same
 # capability as the CLI. Closed set: the maintain_memory mode literal fixes it.
-REMOTE_WRITE_MAINTENANCE_MODES = frozenset({"structured-files", "tag-variants", "curation"})
+REMOTE_WRITE_MAINTENANCE_MODES = frozenset({"structured-files", "tag-variants", "curation"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
 REMOTE_MAINTENANCE_MESSAGE = (
     "write-mode maintenance is unavailable through request-bound remote commands"
 )
