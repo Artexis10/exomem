@@ -217,6 +217,115 @@ def test_pending_path_resolves_before_disk_write(vault: Path) -> None:
     assert canonical == "Knowledge Base/Notes/Insights/fresh-note"
 
 
+def test_colliding_extension_keys_keep_each_pages_title_visibility_and_physical_path(
+    tmp_path: Path,
+) -> None:
+    from exomem import semantic_contract
+    from exomem.governance import egress
+
+    single = "Knowledge Base/Notes/plan.MD"
+    double = single + ".md"
+    for path, title in ((single, "First title"), (double, "Second title")):
+        page = tmp_path / path
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            f"---\ntype: insight\nstatus: active\ntitle: {title}\n---\nBody\n",
+            encoding="utf-8",
+        )
+    source = "Knowledge Base/Notes/source.md"
+    (tmp_path / source).write_text(
+        "---\ntype: insight\nstatus: active\ntitle: Source\n---\n[[Second title]]\n",
+        encoding="utf-8",
+    )
+    resolver = WikilinkResolver(tmp_path)
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    visible = egress.page_filter_over(tmp_path, lambda path: path == double)
+
+    assert normalize_wikilink("Second title", tmp_path, resolver=resolver, visible=visible) == (
+        single, None
+    )
+    with pytest.raises(UnresolvedWikilinkError):
+        normalize_wikilink("First title", tmp_path, resolver=resolver, visible=visible, strict=True)
+    assert semantic_contract._resolve_reference_wikilink_from_context(
+        corpus, "Second title", visible
+    ).path == double
+    assert semantic_contract._resolve_reference_wikilink_from_context(
+        corpus, "First title", visible
+    ).status == "unresolved"
+    assert semantic_contract._resolve_reference_wikilink_from_context(
+        corpus, single
+    ).status == "ambiguous"
+    assert semantic_contract._resolve_target(
+        tmp_path, "Second title", resolver, visible
+    )[:2] == ("resolved", double)
+    assert semantic_contract._qualifying_body_wikilink_targets(
+        corpus.pages[source], corpus, visible
+    ) == (double,)
+    assert normalize_wikilink(
+        single, tmp_path, targeted_namespace_contains=lambda _key: True,
+        resolver_factory=lambda: resolver, visible=visible,
+    ) == (single, None)
+    with pytest.raises(AmbiguousWikilinkError):
+        normalize_wikilink(single, tmp_path, resolver=resolver, strict=True)
+    only_single = egress.page_filter_over(tmp_path, lambda path: path == single)
+    assert semantic_contract._resolve_reference_wikilink_from_context(
+        corpus, "First title", only_single
+    ).path == single
+    assert semantic_contract._resolve_reference_wikilink_from_context(
+        corpus, "Second title", only_single
+    ).status == "unresolved"
+
+
+def test_retitle_and_delete_preserve_the_other_owner_of_a_colliding_extension_key(
+    tmp_path: Path,
+) -> None:
+    single = "Knowledge Base/Notes/plan.MD"
+    double = single + ".md"
+    for path, title in ((single, "First title"), (double, "Second title")):
+        page = tmp_path / path
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"---\ntitle: {title}\n---\nBody\n", encoding="utf-8")
+    resolver = WikilinkResolver(tmp_path)
+    detached = resolver.fork()
+    resolver.on_entries_changed([(single, "Renamed title")], [])
+    assert normalize_wikilink("Second title", tmp_path, resolver=resolver) == (single, None)
+    assert normalize_wikilink("First title", tmp_path, resolver=resolver)[1] is not None
+    (tmp_path / single).write_text("---\ntitle: Renamed title\n---\nBody\n", encoding="utf-8")
+    resolver.on_files_changed(tmp_path, [single], [single])
+    fresh = WikilinkResolver(tmp_path)
+    for target in ("First title", "Second title", "Renamed title", "plan.MD"):
+        assert normalize_wikilink(target, tmp_path, resolver=resolver) == normalize_wikilink(
+            target, tmp_path, resolver=fresh
+        )
+    assert normalize_wikilink("First title", tmp_path, resolver=detached) == (single, None)
+    assert normalize_wikilink("Renamed title", tmp_path, resolver=detached)[1] is not None
+
+    (tmp_path / single).unlink()
+    resolver.on_entries_changed([], [single])
+    fresh = WikilinkResolver(tmp_path)
+    assert normalize_wikilink("Second title", tmp_path, resolver=resolver) == (single, None)
+    for target in ("Second title", "Renamed title", "plan.MD"):
+        assert normalize_wikilink(target, tmp_path, resolver=resolver) == normalize_wikilink(
+            target, tmp_path, resolver=fresh
+        )
+
+
+def test_normalizer_keeps_stem_priority_while_semantic_references_union_title_matches(
+    tmp_path: Path,
+) -> None:
+    from exomem import semantic_contract
+
+    for path, title in (("topic.md", "Other title"), ("other.md", "topic")):
+        (tmp_path / path).write_text(f"---\ntitle: {title}\n---\nBody\n", encoding="utf-8")
+    resolver = WikilinkResolver(tmp_path)
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+
+    assert normalize_wikilink("topic", tmp_path, resolver=resolver) == ("topic", None)
+    assert semantic_contract._resolve_reference_wikilink_from_context(
+        corpus, "topic"
+    ).status == "ambiguous"
+
+
 def test_on_files_changed_same_rel_in_both_lists_retains_live_file(vault: Path) -> None:
     """A rel present in BOTH `changed_rels` and `deleted_rels` in the same batch
     — the two-path-string-forms-collapse-to-one-rel case (Windows 8.3 short
