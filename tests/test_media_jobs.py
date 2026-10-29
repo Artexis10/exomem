@@ -981,6 +981,15 @@ def test_status_counts_old_ambiguous_job_outside_bounded_projections(vault: Path
     assert all(not job.get("reconciliation_required", False) for job in snapshot["jobs"])
     assert all(not error.get("reconciliation_required", False) for error in snapshot["errors"])
 
+    exact = media_jobs.status(vault, path=ambiguous.binary_path.relative_to(vault).as_posix())
+    assert exact["healthy"] is False
+    assert exact["reconciliation_required_count"] == 1
+    assert exact["compute_runtime_count"] == 0
+    assert exact["counts"][media_jobs.FAILED] == 1
+    assert sum(exact["counts"].values()) == 1
+    assert [job["id"] for job in exact["jobs"]] == [ambiguous_id]
+    assert len(exact["errors"]) == 1
+
 
 @pytest.mark.parametrize("target_state", [media_jobs.BLOCKED, media_jobs.FAILED])
 def test_targeted_retry_requeues_only_the_exact_terminal_job(

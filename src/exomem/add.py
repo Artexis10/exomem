@@ -172,6 +172,23 @@ class SourceArtifact:
     content_type: str | None = None
 
 
+def source_artifact_name(filename: str) -> str:
+    """Validate the artifact name before byte admission or canonical publication."""
+    from .preserve import _sanitize_filename
+
+    safe_name = _sanitize_filename(filename)
+    if not safe_name:
+        raise AddError(code="INVALID_SOURCE", missing=["artifact"],
+                       reason="artifact filename is empty or only invalid characters")
+    return safe_name
+
+
+def source_artifact_suffix(filename: str) -> str:
+    """Keep original Markdown opaque to governed page parsers."""
+    suffix = Path(source_artifact_name(filename)).suffix
+    return ".md.bin" if suffix.lower() == ".md" else suffix
+
+
 def _artifact_pair(
     folder: Path, stem: str, suffix: str, *, vault_root: Path, protected: bool = False
 ) -> tuple[Path, Path]:
@@ -254,6 +271,122 @@ def artifact_binary_write(
         ),
         stream,
     )
+
+
+@dataclass(frozen=True)
+class PreparedSourceMetadata:
+    """Source validation shared by byte admission and canonical publication."""
+
+    taxonomy: source_taxonomy.SourceTaxonomy
+    kind: source_taxonomy.Resolution
+    domain_binding: vocabulary_resolution.SourceDomainBinding | None
+    domain_resolution: source_taxonomy.Resolution | None
+    episode_lines: tuple[str, ...] | None
+    filename_slug: str
+    slug_warnings: list[str]
+
+    @property
+    def segments(self) -> tuple[str, ...]:
+        return (self.domain_binding.segments if self.domain_binding is not None
+                else source_taxonomy.source_segments(self.kind, self.domain_resolution))
+
+
+def admit_source_destination(vault_root: Path, prepared: PreparedSourceMetadata, date_iso: str) -> Path:
+    """Admit the Source destination before allocation or receiving its artifact."""
+    from .governance import connector_boundary
+
+    folder = kb_root(vault_root).joinpath(*prepared.segments)
+    try:
+        connector_boundary.require_create(
+            vault_root, (folder / f"{date_iso}-{prepared.filename_slug}.md").relative_to(vault_root).as_posix(),
+        )
+    except ValueError as error:
+        raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
+    return folder
+
+
+def prepare_source_metadata(
+    vault_root: Path,
+    source_schema: schema.SourceSchema,
+    *,
+    content: str,
+    title: str,
+    source_type: str | None,
+    domain: str | None = None,
+    url: str | None = None,
+    slug: str | None = None,
+    extra_frontmatter: Mapping[str, object] | None = None,
+    supersede: Sequence[tuple[str, str]] = (),
+) -> PreparedSourceMetadata:
+    """Validate declared Source metadata without receiving or publishing artifact bytes."""
+    # The caller decides what a missing kind means: an agent-facing surface
+    # refuses it (`capture_kind`), and a surface with no agent in the loop
+    # passes `unclassified`. This layer never invents a kind.
+    if not source_type or not source_type.strip():
+        raise AddError(
+            code="SOURCE_KIND_REQUIRED",
+            missing=["source_type"],
+            reason="a source needs a kind; name what the material is",
+        )
+    requested_kind = source_type
+    domain_binding: vocabulary_resolution.SourceDomainBinding | None = None
+    try:
+        if domain is not None:
+            # A domain projects a destination, so it resolves through the same
+            # strict snapshot and existing-spelling rule as Notes experiments.
+            domain_binding = vocabulary_resolution.resolve_source_domain(
+                vault_root, kind=requested_kind, domain=domain
+            )
+            taxonomy = domain_binding.taxonomy
+            kind = domain_binding.kind
+            domain_resolution: source_taxonomy.Resolution | None = domain_binding.domain
+        else:
+            taxonomy = source_taxonomy.load_taxonomy(vault_root)
+            kind = taxonomy.resolve_kind(requested_kind)
+            domain_resolution = None
+    except source_taxonomy.TaxonomyError as e:
+        axis = getattr(e, "axis", "source_kind")
+        raise AddError(
+            code="INVALID_SOURCE",
+            missing=["source_type" if axis == "source_kind" else "domain"],
+            reason=str(e),
+        ) from e
+    except vocabulary_resolution.VocabularyResolutionError as e:
+        raise AddError(
+            code=e.code,
+            missing=["domain"],
+            reason=vocabulary_resolution.capture_refusal_reason(vault_root, e),
+        ) from e
+
+    # The legacy capture protocol refuses this compatibility token until its taxonomy migration ends.
+    if kind.key == source_taxonomy.LEGACY_OTHER_KIND:
+        raise AddError(
+            code="SOURCE_KIND_REQUIRED",
+            missing=["source_type"],
+            reason=f"{kind.key!r} is retired and no new source is filed under it",
+        )
+
+    episode_lines = _episode_frontmatter_lines(kind.key, extra_frontmatter, supersede)
+
+    err = schema.validate_source(
+        source_schema,
+        content=content,
+        source_type=kind.key,
+        title=title,
+        url=url,
+        requires_url=kind.requires_url,
+    )
+    if err is not None:
+        raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
+    try:
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title, slug, vault_root=vault_root
+        )
+    except InvalidSlugError as e:
+        raise AddError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
+
+    return PreparedSourceMetadata(taxonomy, kind, domain_binding, domain_resolution,
+                                  episode_lines, filename_slug, slug_warnings)
 
 
 def add(
@@ -346,88 +479,21 @@ def add(
     artifact_size: int | None = None
     artifact_suffix = ""
     if artifact is not None:
-        from .preserve import _sanitize_filename
-
-        safe_name = _sanitize_filename(artifact.filename)
-        if not safe_name:
-            raise AddError(
-                code="INVALID_SOURCE",
-                missing=["artifact"],
-                reason="artifact filename is empty or only invalid characters",
-            )
-        artifact_suffix = Path(safe_name).suffix
-        if artifact_suffix.lower() == ".md":
-            # Original Markdown bytes are not governed UTF-8 pages, including during a full index rebuild.
-            artifact_suffix = ".md.bin"
+        safe_name = source_artifact_name(artifact.filename)
+        artifact_suffix = source_artifact_suffix(artifact.filename)
         artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
         source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
 
-    # The caller decides what a missing kind means: an agent-facing surface
-    # refuses it (`capture_kind`), and a surface with no agent in the loop
-    # passes `unclassified`. This layer never invents a kind.
-    if not source_type or not source_type.strip():
-        raise AddError(
-            code="SOURCE_KIND_REQUIRED",
-            missing=["source_type"],
-            reason="a source needs a kind; name what the material is",
-        )
-    requested_kind = source_type
-    domain_binding: vocabulary_resolution.SourceDomainBinding | None = None
-    try:
-        if domain is not None:
-            # A domain projects a destination, so it resolves through the same
-            # strict snapshot and existing-spelling rule as Notes experiments.
-            domain_binding = vocabulary_resolution.resolve_source_domain(
-                vault_root, kind=requested_kind, domain=domain
-            )
-            taxonomy = domain_binding.taxonomy
-            kind = domain_binding.kind
-            domain_resolution: source_taxonomy.Resolution | None = domain_binding.domain
-        else:
-            taxonomy = source_taxonomy.load_taxonomy(vault_root)
-            kind = taxonomy.resolve_kind(requested_kind)
-            domain_resolution = None
-    except source_taxonomy.TaxonomyError as e:
-        axis = getattr(e, "axis", "source_kind")
-        raise AddError(
-            code="INVALID_SOURCE",
-            missing=["source_type" if axis == "source_kind" else "domain"],
-            reason=str(e),
-        ) from e
-    except vocabulary_resolution.VocabularyResolutionError as e:
-        raise AddError(
-            code=e.code,
-            missing=["domain"],
-            reason=vocabulary_resolution.capture_refusal_reason(vault_root, e),
-        ) from e
-
-    if kind.key == source_taxonomy.LEGACY_OTHER_KIND:
-        raise AddError(
-            code="SOURCE_KIND_REQUIRED",
-            missing=["source_type"],
-            reason=f"{kind.key!r} is retired and no new source is filed under it",
-        )
-
-    episode_lines = _episode_frontmatter_lines(kind.key, extra_frontmatter, supersede)
-
-    err = schema.validate_source(
-        source_schema,
-        content=content,
-        source_type=kind.key,
-        title=title,
-        url=url,
-        requires_url=kind.requires_url,
+    prepared = prepare_source_metadata(
+        vault_root, source_schema, content=content, title=title, source_type=source_type,
+        domain=domain, url=url, slug=slug, extra_frontmatter=extra_frontmatter, supersede=supersede,
     )
-    if err is not None:
-        raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
-    try:
-        filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root
-        )
-    except InvalidSlugError as e:
-        raise AddError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
+    taxonomy, kind = prepared.taxonomy, prepared.kind
+    domain_binding, domain_resolution = prepared.domain_binding, prepared.domain_resolution
+    episode_lines = prepared.episode_lines
+    filename_slug, slug_warnings = prepared.filename_slug, prepared.slug_warnings
 
     # Corpus-aware near-duplicate check (best-effort; warns, never blocks — the
     # 57% unprocessed-source backlog implies real dupes). Skipped when embeddings
@@ -463,19 +529,9 @@ def add(
     # The location is a projection of the canonical semantic keys, not the
     # ontology. `folder_name` stays the *top-level* segment because that is what
     # the source index counts and labels by; a domain adds one level below it.
-    segments = (
-        domain_binding.segments
-        if domain_binding is not None
-        else source_taxonomy.source_segments(kind, domain_resolution)
-    )
+    segments = prepared.segments
     folder_name = segments[1]
-    folder_path = kb_root(vault_root).joinpath(*segments)
-    from .governance import connector_boundary
-
-    try:
-        connector_boundary.require_create(vault_root, (folder_path / f"{date_iso}-{filename_slug}.md").relative_to(vault_root).as_posix())
-    except ValueError as error:
-        raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
+    folder_path = admit_source_destination(vault_root, prepared, date_iso)
     identity_warnings: list[str] = []
     if source_identity is not None:
         existing = source_capture.find_capture(vault_root, source_identity, warnings=identity_warnings)
@@ -569,7 +625,7 @@ def add(
         domain=domain_resolution.key if domain_resolution else None,
         projects=project_keys_clean,
         artifact_name=(
-            _sanitize_filename(artifact.filename) if artifact is not None else None
+            safe_name if artifact is not None else None
         ),
         artifact_rel=(
             artifact_path.relative_to(vault_root).as_posix()
@@ -655,7 +711,7 @@ def add(
             else update.top_index_content
         )
     writes = [
-        PlannedWrite(path=source_path, content=source_md),
+        PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
         PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
         PlannedWrite(path=kb / "index.md", content=top_index_final),
         PlannedWrite(path=kb / "log.md", content=update.log_content),

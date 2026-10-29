@@ -26,8 +26,6 @@ changed bytes left in the vault.
 - Remove duplicate rechecks of installed destinations.
 - Stream the exact content checks that rollback and post-error binding still
   need, so no path holds a whole binary in memory.
-- Refuse a stage that is larger than the vocabulary classifier's image bound
-  before reading it. The outcome is the same refusal the classifier gives today.
 
 ## Capabilities
 
@@ -43,7 +41,6 @@ changed bytes left in the vault.
 - `src/exomem/vault.py`: `_WorkspaceArtifact`, `_BatchArtifactGuard`,
   `_BatchWorkspace.create_stream_artifact`, `replace_artifact`,
   `bind_installed_after_error`, `unlink_installed`, and the batch commit loop.
-- `src/exomem/vocabulary_gate.py`: `_stage_bytes`.
 - No public API, envelope, or stored format changes. Callers that write
   binaries (`add`, `preserve`, `scene_frames`, adoption filing) get faster
   writes. Notes keep their current checks.

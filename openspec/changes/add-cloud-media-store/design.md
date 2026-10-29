@@ -83,6 +83,23 @@ A replaced file gets a new inode and change time, and restoring the modification
 
 Hydration concurrency and temporary space are bounded, so a bulk re-encode or an export cannot fill the volume.
 
+Pre-canary repairs keep the existing ledger and mutation boundaries.
+An exact-input verification refusal parks discovery until its digest changes or the owner explicitly retries it.
+The refusal records a nullable ciphertext size, because verification can fail before encryption.
+Size refusals compare their measured ciphertext with the current object bound.
+
+Status reads a bounded candidate prefix from the cache and refusal tables, then resolves canonical sidecars.
+Its overview always reports partial coverage and an unknown total; exact-path status does not require a candidate row.
+Missing custody reports unavailable without rebuilding it.
+Candidate failures remain path-bearing rows, and no sibling count or truncation flag reveals withheld candidates.
+Exhaustive browsing would need a separate interface decision.
+
+Ordinary pins insert without scanning existing pins.
+Hydration accounts only for indexed hydration reservations; eviction cleans only indexed pins for its target.
+Dead idle pins can remain until that path is considered, without spending hydration capacity.
+Page moves prepare the catalog and validate bindings before hydration, while retaining pins through rename, rollback and publication.
+Hydration classifies only backend open and read errors as transport failures; local staging errors retain their cause.
+
 ### D4. Encryption in the cell
 
 The cell encrypts each original with `age` to its own X25519 recipient before upload. `age` streams 64 KiB authenticated chunks, and the cell image already ships it for imports.
@@ -218,6 +235,7 @@ The same provider holds backups and media. A second copy at another provider was
 
 - **Arrival.** Files arrive as today: capture, attachments, imports, uploads. After the vault commit, an offload job on the existing durable media job ledger encrypts and uploads the original, confirms the new version's size and digest with a head, then writes the reference, version ID included, into the sidecar.
 - **Live capture.** The gateway proxies resumable (tus) uploads to the cell's existing upload sessions. This lifts the Cloud exclusion of those routes by its recorded condition.
+
 - **Processing.** Extraction runs at ingest while the original is local. Eviction never selects an original with pending work. Re-processing and CLIP re-encoding hydrate first.
 - **Playback and download.** The gateway serves a download route behind the owner's signed-in session. It forwards to the cell, which hydrates if needed and streams the original with range support. A tool result may carry this link, because it grants nothing without the owner's session. Local agents use `exomem cloud download` over OAuth, which verifies size and SHA-256 before it renames the file into place. No tool result carries a bearer link.
   - *Agent download.* The agent's route is `GET /download?path=<vault path>` on the gateway with the owner's OAuth access token, and it needs no ticket. The gateway validates the token, resolves the owner's cell, and signs a fresh gateway origin proof for each request, range requests included. The proof carries `purpose: "download"` and `target_sha256`, the SHA-256 of the requested path. The cell route checks the cell bearer, then the proof, and refuses with `DOWNLOAD_UNAVAILABLE` before it resolves anything. It then serves through the same artifact recovery as a local recovery, with its governance, custody page, size and SHA-256 checks. `transfer_artifact` download on Cloud returns the descriptor and a `next_step` command (`exomem cloud download '<path>'`), never a URL.
@@ -229,6 +247,16 @@ The same provider holds backups and media. A second copy at another provider was
   The archive's format and delivery stay those of the export contract. Export of more media than the staging volume can hold is an open question; until it is settled, no cell other than the canary may store more media than its export can stage (D11).
 - **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because no version that a retained snapshot references is destroyed (D9). A restored reference reads its pinned version, so a restore needs no reactivation step.
 - **Restore from an export.** A vault restored from an export can carry references to versions destroyed since the export. So the cell confirms with a head request that a pinned version exists before it evicts an original or reuses the version. A reference to an absent version counts as no reference, and the original is offloaded again (D3).
+
+The existing upload service carries the selected lane. Source sessions use the canonical Source writer and its existing mutation replay protocol.
+Their immutable session identity separates transport retries from caller-authored Source identity.
+The Source writer shares metadata validation with byte admission; the session passes its staged file directly to publication.
+Unknown canonical outcomes retain the upload without allocating another Source pair.
+
+The receipt reports semantic compilation as unassessed; extraction does not establish a compiled conclusion.
+Uploaders reconcile an uncertain part against its accepted offset before repeating writes, and reduce subsequent part sizes after interruption.
+The gateway route and its acceptance remain task 5.3; local Source support does not prove Cloud delivery.
+Activated vocabulary image handling remains a resource and compatibility gap for large binaries until task 5.3.3 proves that boundary.
 
 The job ledger is the job architecture. A Postgres-backed task queue such as Procrastinate was considered and does not fit: a cell runs on SQLite and holds no Postgres.
 
@@ -265,7 +293,7 @@ Collection is new lifecycle logic. No existing sweep supplies it: the archive me
 
 Each cell has a media allowance, separate from its volume size. It is a configured value in the one limits source; its first value is 100 GB. Paid blocks follow the existing paid-storage observation.
 
-- **Metering.** The cell meters media storage from the versions its sidecars reference, each counted once. Versions kept only for retained backups are not charged to the owner. cellctl separately meters physical bytes per prefix from the bucket listing, for the operator.
+- **Metering.** The cell meters original plaintext bytes from the versions its live and trash sidecars reference, each version counted once. Trash counts until it is emptied. A version kept only for retained backups does not count against the owner. cellctl separately meters physical ciphertext bytes per prefix from the bucket listing, for the operator.
 - **Admission.** An upload or import whose declared media bytes exceed the remaining allowance is refused before any byte arrives, with a code that names the limit.
 - **Overflow.** An original that the allowance cannot cover stays local and is reported in status.
 - **Two meters.** Status and the Home display report two figures, each named for what it counts:

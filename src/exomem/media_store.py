@@ -12,18 +12,19 @@ import hmac
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from . import held_fs, originals, reserved_paths
-from .media_jobs import OFFLOAD_MEDIA_TYPE, MediaJob, MediaJobStore, pid_alive
+from .media_jobs import OFFLOAD_MEDIA_TYPE, STATUS_JOB_LIMIT, MediaJob, MediaJobStore, pid_alive
 from .originals import OriginalSnapshot, StoredObject, original_state
 
 
@@ -34,7 +35,7 @@ class MediaStoreError(RuntimeError):
 
 
 class ObjectTooLarge(MediaStoreError):
-    """The store refuses this declared size for good; retrying the same bytes cannot succeed."""
+    """The store refuses this declared size under the current object bound."""
 
     def __init__(self, size: int, bound: int):
         super().__init__("MEDIA_OBJECT_TOO_LARGE", f"{size} bytes exceed the per-object bound of {bound}")
@@ -226,8 +227,8 @@ def _record_cache(conn, store: MediaJobStore, snapshot: OriginalSnapshot, source
     )
 
 
-def _clear_dead_access(conn) -> None:
-    for row in conn.execute("SELECT token, pid FROM media_access").fetchall():
+def _clear_dead_access(conn, rows) -> None:
+    for row in rows:
         if not pid_alive(row["pid"]):
             conn.execute("DELETE FROM media_access WHERE token = ?", (row["token"],))
 
@@ -239,7 +240,6 @@ def _pin(vault: Path, path: Path):
     conn = store._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        _clear_dead_access(conn)
         conn.execute("INSERT INTO media_access(token, binary_rel, pid) VALUES (?, ?, ?)",
                      (token, store._relative(path), os.getpid()))
         conn.commit()
@@ -270,8 +270,10 @@ def _reserve(store: MediaJobStore, token: str, snapshot: OriginalSnapshot, confi
     conn = store._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        _clear_dead_access(conn)
-        row = conn.execute("SELECT COALESCE(SUM(temporary_bytes), 0), COALESCE(SUM(hydrating), 0) FROM media_access").fetchone()
+        _clear_dead_access(conn, conn.execute(
+            "SELECT token, pid FROM media_access WHERE hydrating = 1").fetchall())
+        row = conn.execute("SELECT COALESCE(SUM(temporary_bytes), 0), COUNT(*) "
+                           "FROM media_access WHERE hydrating = 1").fetchone()
         if needed + row[0] > maximum or row[1] >= concurrent:
             raise MediaStoreError("MEDIA_STORE_BUSY", "hydration capacity is in use")
         conn.execute("UPDATE media_access SET temporary_bytes = ?, hydrating = 1 WHERE token = ?", (needed, token))
@@ -328,26 +330,70 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             continue
 
 
-def processing_status(vault: Path) -> list[dict[str, object]]:
+def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
+    # These sources and states belong to this fixed status protocol; neither is vault vocabulary.
+    coverage: dict[str, object] = {
+        "source": table, "limit": STATUS_JOB_LIMIT, "coverage": "partial", "total": None,
+        "state": "available",
+    }
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        return [], {**coverage, "state": "unavailable"}
+    try:
+        conn = ledger._connect(readonly=True)
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = ? AND type = 'table'", (table,)).fetchone() is None:
+                return [], {**coverage, "state": "unavailable"}
+            return conn.execute(query, (*parameters, STATUS_JOB_LIMIT)).fetchall(), coverage
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return [], {**coverage, "state": "unavailable", "code": "MEDIA_STATUS_UNAVAILABLE"}
+
+
+def _unavailable_original(path: str) -> dict[str, object]:
+    # Candidate failures carry their path so terminal governance can withhold the entire row.
+    return {"path": path, "state": "unavailable", "code": "MEDIA_ORIGINAL_UNVERIFIED"}
+
+
+def _processing_status_row(vault: Path, path: str | Path) -> dict[str, object]:
     from . import media_processing
     from .vault import parse_frontmatter
 
-    rows = []
-    for snapshot in bound_originals(vault):
-        if snapshot.state != "evicted":
-            continue
+    try:
+        snapshot = original_state(vault, path)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        target = Path(path)
+        return _unavailable_original(target.relative_to(vault).as_posix() if target.is_absolute() else target.as_posix())
+    relative = snapshot.path.relative_to(vault).as_posix()
+    try:
         raw = reserved_paths.read_generic_bytes(vault, snapshot.sidecar_path.relative_to(vault).as_posix())
         text = raw.data.decode("utf-8")
         fields, _body, _marker = parse_frontmatter(text, strict=True)
         processing = fields.get("processing_state")
         media_type = fields.get("media_type")
-        if processing is None and isinstance(media_type, str) and media_processing.has_completed_transcript(text, media_type=media_type):
-            processing = "completed"
-        rows.append({"path": snapshot.path.relative_to(vault).as_posix(),
-                     # 'stored' is the processing-status state fixed by the spec.
-                     "state": "stored", "original_state": snapshot.state,
-                     "processing_state": processing})
-    return rows
+        if originals.bound_path(fields) != relative:
+            return _unavailable_original(relative)
+        completed = isinstance(media_type, str) and media_processing.has_completed_transcript(text, media_type=media_type)
+        if processing == "completed" and not completed:
+            processing = "unknown"
+        elif processing is None:
+            processing = "completed" if completed else "unknown"
+        return {"path": relative, "sidecar_path": snapshot.sidecar_path.relative_to(vault).as_posix(),
+                # 'stored' is the processing-status state fixed by the spec.
+                "state": "stored" if snapshot.state == "evicted" else snapshot.state,
+                "original_state": snapshot.state, "processing_state": processing}
+    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return _unavailable_original(relative)
+
+
+def processing_status(vault: Path, *, path: str | None = None) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if path is not None:
+        return [_processing_status_row(vault, path)], {"source": "sidecar", "coverage": "exact-path"}
+    candidates, coverage = _status_candidates(vault, "media_cache",
+        "SELECT binary_rel FROM media_cache ORDER BY binary_rel LIMIT ?")
+    rows = [_processing_status_row(vault, row["binary_rel"]) for row in candidates]
+    return [row for row in rows if row["state"] in {"stored", "unavailable"}], coverage
 
 
 def enqueue_offload(vault: Path, path: Path) -> int:
@@ -358,7 +404,7 @@ def enqueue_offload(vault: Path, path: Path) -> int:
     if snapshot.state != "local" or snapshot.binary_sha256 is None or not snapshot.offloadable:
         return 0
     store = MediaJobStore(vault)
-    if _refused(store, snapshot):
+    if _refused(store, snapshot, config):
         return 0
     current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
@@ -455,7 +501,7 @@ def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> Non
         conn.close()
 
 
-def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStoreError, ciphertext_size: int) -> None:
+def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStoreError, ciphertext_size: int | None) -> None:
     """Record a refusal that holds for these exact bytes; the original stays local (D10)."""
     conn = store._connect()
     try:
@@ -470,36 +516,76 @@ def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStor
         conn.close()
 
 
-def _refused(store: MediaJobStore, snapshot: OriginalSnapshot) -> bool:
+def _refused(store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object]) -> bool:
     conn = store._connect(readonly=True)
     try:
-        return conn.execute("SELECT 1 FROM media_offload_refusals WHERE binary_rel = ? AND sha256 = ?",
-                            (store._relative(snapshot.path), snapshot.binary_sha256)).fetchone() is not None
+        row = conn.execute("SELECT sha256, code, ciphertext_size FROM media_offload_refusals "
+                           "WHERE binary_rel = ? AND sha256 = ?",
+                           (store._relative(snapshot.path), snapshot.binary_sha256)).fetchone()
+        return row is not None and _refusal_applies(row, snapshot, config)
     finally:
         conn.close()
 
 
-def offload_refusals(vault: Path) -> list[dict[str, object]]:
+def _refusal_applies(row, snapshot: OriginalSnapshot, config: dict[str, object]) -> bool:
+    if row["sha256"] != snapshot.binary_sha256:
+        return False
+    # These refusal codes are fixed by the media protocol, not inferred from error prose.
+    if row["code"] == "MEDIA_OBJECT_TOO_LARGE":
+        bound = config.get("max_object_bytes")
+        return bound is not None and row["ciphertext_size"] is not None and row["ciphertext_size"] > int(bound)
+    return True
+
+
+def retry_offload(vault: Path, path: Path) -> int:
+    """Explicit retry releases this input's terminal refusal without replacing extraction."""
+    if originals.binding_for(vault) is None:
+        return 0
+    ledger = MediaJobStore(vault)
+    conn = ledger._connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM media_offload_refusals WHERE binary_rel = ?", (ledger._relative(path),))
+    finally:
+        conn.close()
+    return enqueue_offload(vault, path)
+
+
+@contextmanager
+def _offload_input(vault: Path, path: Path, ledger: MediaJobStore):
+    snapshot = original_state(vault, path)
+    try:
+        yield snapshot
+    except MediaStoreError as error:
+        # Park repeated verification failures for these bytes; explicit retry or a changed SHA recovers them.
+        if error.code == "MEDIA_ORIGINAL_UNVERIFIED" and snapshot.binary_sha256 is not None:
+            _refuse(ledger, snapshot, error, None)
+        raise
+
+
+def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Originals that stay local because the store refused their exact bytes."""
-    store = MediaJobStore(vault, create=False)
-    if not store.path.exists():
-        return []
-    conn = store._connect(readonly=True)
-    try:
-        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_offload_refusals' AND type = 'table'").fetchone() is None:
-            return []
-        rows = conn.execute("SELECT binary_rel, sha256, code, ciphertext_size FROM media_offload_refusals "
-                            "ORDER BY binary_rel").fetchall()
-    finally:
-        conn.close()
+    query = "SELECT binary_rel, sha256, code, ciphertext_size FROM media_offload_refusals"
+    parameters: tuple[object, ...] = ()
+    if path is not None:
+        query += " WHERE binary_rel = ?"
+        parameters = (path,)
+    rows, coverage = _status_candidates(vault, "media_offload_refusals", query + " ORDER BY binary_rel LIMIT ?", parameters)
+    if path is not None:
+        coverage = {**coverage, "coverage": "exact-path"}
+    config = originals.configuration(vault) or {}
     result = []
     for row in rows:
-        snapshot = original_state(vault, row["binary_rel"])
-        if snapshot.binary_sha256 != row["sha256"]:
-            continue  # Changed bytes are a new offload candidate, not this refusal.
+        try:
+            snapshot = original_state(vault, row["binary_rel"])
+        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            result.append(_unavailable_original(row["binary_rel"]))
+            continue
+        if not _refusal_applies(row, snapshot, config):
+            continue
         result.append({"path": row["binary_rel"], "original_state": snapshot.state,
                        "code": row["code"], "ciphertext_size": row["ciphertext_size"]})
-    return result
+    return result, coverage
 
 
 def _finish_reference(ledger: MediaJobStore, snapshot: OriginalSnapshot, source: reserved_paths.GenericBinarySource | None = None) -> None:
@@ -521,7 +607,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
     None means that the original stays local: notes and datasets are never
-    offloaded, and a store refusal for these exact bytes is final (D10).
+    offloaded, and a refusal stays parked until its input, policy or explicit retry changes it (D10).
     """
     vault = Path(vault).resolve()
     config = _settings(vault)
@@ -529,10 +615,11 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
     backend = store_for(vault)
     ledger = MediaJobStore(vault)
-    with _pin(vault, path):
-        snapshot = original_state(vault, path)
+    with _pin(vault, path), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
+        if _refused(ledger, snapshot, config):
+            return None
         if not snapshot.offloadable:
             return None
         if snapshot.reference is not None:
@@ -632,13 +719,9 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
     backend = store_for(vault)
     guard = PathGuard.capture(vault, ledger._relative(snapshot.path), leaf_policy="absent")
     with tempfile.TemporaryFile() as ciphertext, tempfile.TemporaryFile() as plaintext:
-        with _transport("read"), backend.open(snapshot.reference.object, snapshot.reference.version) as stream:
-            remaining = snapshot.reference.ciphertext_size
-            while chunk := stream.read(min(1024 * 1024, remaining + 1)):
-                if len(chunk) > remaining:
-                    raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext exceeds its recorded size")
+        with closing(_stored_chunks(backend, snapshot.reference)) as chunks:
+            for chunk in chunks:
                 ciphertext.write(chunk)
-                remaining -= len(chunk)
         ciphertext.seek(0)
         if _digest(ciphertext) != ObjectHead(snapshot.reference.ciphertext_size, snapshot.reference.ciphertext_sha256):
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext size or digest differs")
@@ -667,6 +750,17 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
                         _record_cache(conn, ledger, original_state(vault, snapshot.path), placed)
                 finally:
                     conn.close()
+
+
+def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
+    # Only backend operations are transport failures; local staging writes keep their own errors.
+    with _transport("read"), backend.open(reference.object, reference.version) as stream:
+        remaining = reference.ciphertext_size
+        while chunk := stream.read(min(1024 * 1024, remaining + 1)):
+            if len(chunk) > remaining:
+                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext exceeds its recorded size")
+            remaining -= len(chunk)
+            yield chunk
 
 
 @contextmanager
@@ -765,8 +859,9 @@ def evict(vault: Path, path: Path) -> bool:
         conn = ledger._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            _clear_dead_access(conn)
             relative = ledger._relative(path)
+            _clear_dead_access(conn, conn.execute(
+                "SELECT token, pid FROM media_access WHERE binary_rel = ?", (relative,)).fetchall())
             row = conn.execute("SELECT last_read FROM media_cache WHERE binary_rel = ?", (relative,)).fetchone()
             if (row is None or time.time() - row[0] < float(config["minimum_idle_seconds"])
                     or conn.execute("SELECT 1 FROM media_access WHERE binary_rel = ?", (relative,)).fetchone()

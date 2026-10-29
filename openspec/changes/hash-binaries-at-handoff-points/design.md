@@ -86,9 +86,9 @@ directory census, as the last check before commit.
 
 Rollback removal of a batch-created destination keeps its exact content check,
 which the requirement mandates, but hashes the held descriptor in chunks.
-Post-error binding does the same. The vocabulary gate refuses a stage larger
-than the classifier's image bound before reading it; the classifier refuses
-such an image in any case.
+Post-error binding does the same. The vocabulary gate already refuses a stage
+larger than the classifier's image bound before reading it, so no binary path
+holds a whole file in memory.
 
 ## Risks / Trade-offs
 

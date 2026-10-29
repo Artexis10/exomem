@@ -1052,6 +1052,7 @@ def _move_file_local(
                 # path; the link rewrites around it earn nothing (review F1).
                 if _validate_prepared_bindings is not None:
                     _validate_prepared_bindings()
+                _materialize_originals(vault_root, originals_context, old_rel)
                 heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
                 try:
                     _held_rename(vault_root, old_rel, new_rel)
@@ -1122,8 +1123,6 @@ def _move_file_local(
                     ),
                 )
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
-            if not preflight.should_block:  # commit_move refuses a blocked move before any rename.
-                _materialize_originals(vault_root, originals_context, old_rel)
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )
