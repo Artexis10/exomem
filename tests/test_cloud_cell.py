@@ -538,10 +538,14 @@ def test_cloud_tool_list_allows_staged_adoption(
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
         assert "transfer_artifact" not in names
-        assert "adopt_vault" in names
-        assert "process_media" in names
-        assert "read_media" not in names
-        assert "configure_memory" in names
+        assert {"read_import", "import_memory"} <= names
+        assert "change_media" in names
+        # Media status remains available; Cloud still omits the video-frame command.
+        media = next(tool for tool in tools if tool.name == "read_media")
+        kinds = {branch["properties"]["kind"]["const"]
+                 for branch in media.to_mcp_tool().input_schema["properties"]["operation"]["oneOf"]}
+        assert kinds == {"status"}
+        assert {"change_settings"} <= names
         assert "recall_context" in names
         assert "search_memory" in names
         assert "create_note" in names
@@ -649,7 +653,7 @@ def test_cloud_never_registers_legacy_aliases_even_with_the_opt_in_set(
         # The excluded commands stay excluded -- a legacy alias must not
         # re-expose what CLOUD_SURFACE_EXCLUSIONS just removed.
         assert "transfer_artifact" not in names
-        assert "adopt_vault" in names
+        assert {"read_import", "import_memory"} <= names
     finally:
         _teardown_activation(mcp)
 
@@ -792,7 +796,7 @@ def test_standalone_server_unaffected_by_cloud_module(
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
         # The standalone server keeps commands cloud mode would exclude.
-        assert "adopt_vault" in names or "adopt_vault" not in commands_module.PRODUCT_PUBLIC_NAMES
+        assert {"read_import", "import_memory"} <= names
         assert "search_memory" in names
     finally:
         _teardown_activation(mcp)

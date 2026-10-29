@@ -53,8 +53,30 @@ ENTRY_FIELDS = frozenset(
     # nosemgrep: ep-word-set -- The generic registry entry schema defines these field names.
     {"label", "description", "aliases", "status", "replaced_by", "parent", "attributes", "guidance"}
 )
-# nosemgrep: ep-word-set -- The save protocol fixes these three operation names.
-_DELTA_VERBS = frozenset({"upsert", "alias", "deprecate", "remove"})
+def delta_schema() -> dict[str, Any]:
+    """The closed delta grammar, shared by discovery and the registry parser."""
+    return {
+        "type": "object",
+        "description": (
+            "A delta merged with the live registry overlay before validation. "
+            "Use keyed upsert objects, not a complete registry document."
+        ),
+        "properties": {
+            "upsert": {"type": "object", "additionalProperties": {"type": "object"}},
+            "alias": {"type": "object", "additionalProperties": {
+                "type": "array", "items": {"type": "string"},
+            }},
+            "deprecate": {"type": "object", "additionalProperties": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+            }},
+            "remove": {"type": "array", "items": {"type": "string"}},
+        },
+        "minProperties": 1,
+        "additionalProperties": False,
+    }
+
+
+_DELTA_VERBS = frozenset(delta_schema()["properties"])
 _STATUSES = frozenset({"active", "deprecated"})
 #: A save that would grow an overlay past this many bytes is refused.
 MAX_OVERLAY_BYTES = 256 * 1024

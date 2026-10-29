@@ -17,7 +17,9 @@ from exomem import commands, semantic_authoring, semantic_index
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.__main__ import main
+from exomem.command_surface import listed_names
 from exomem.governance import principal as principal_module
+from exomem.operation_entries import DEFAULT_TOOL_SHAPE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTHORING_TOOLS = (
@@ -144,7 +146,7 @@ def test_observe_schema_field_split_renders_one_compact_row(
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
     tools = _mcp_tools(mcp)
-    content_help = tools["observe_memory"]["inputSchema"]["properties"]["content"][
+    content_help = tools["change_observations"]["inputSchema"]["properties"]["operation"]["properties"]["content"][
         "description"
     ]
     assert "substantive" in content_help
@@ -208,13 +210,13 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     compact = "- [category] content #tags (context) ^anchor"
     identity = semantic_authoring.contract_identity()
     for name in AUTHORING_TOOLS:
-        assert identity in tools[_command(name).public_name]["description"]
+        assert all(identity in tools[public]["description"] for public in listed_names(_command(name), DEFAULT_TOOL_SHAPE))
     assert compact in tools["create_note"]["description"]
     assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in tools["create_note"][
         "inputSchema"
     ]["properties"]["content"]["description"]
     assert "transitions to live" in tools["edit_note"]["description"]
-    assert "same semantic precommit contract" in tools["manage_memory_file"]["description"]
+    assert "same semantic precommit contract" in tools["change_files"]["description"]
 
     client = TestClient(mcp.http_app())
     openapi = client.get(
@@ -247,7 +249,7 @@ def test_govern_memory_is_tier_two_on_mcp_rest_and_cli(
     assert command.cli_writes is True
     assert {"mcp", "rest", "cli"} <= set(command.surfaces)
     assert command.name in commands.DESTRUCTIVE_OPS
-    assert _mcp_tools(mcp)["govern_memory"]["annotations"]["destructiveHint"] is True
+    assert _mcp_tools(mcp)["change_governance"]["annotations"]["destructiveHint"] is True
 
     client = TestClient(mcp.http_app())
     response = client.post(
@@ -276,7 +278,7 @@ def test_govern_memory_response_detail_default_is_command_scoped(
     assert "full (default)" in _param(govern_memory, "response_detail").help
     assert "compact (default)" in _param(remember, "response_detail").help
     tools = _mcp_tools(mcp)
-    assert tools["govern_memory"]["inputSchema"]["properties"]["response_detail"][
+    assert tools["change_governance"]["inputSchema"]["properties"]["response_detail"][
         "default"
     ] == "full"
     assert tools["create_note"]["inputSchema"]["properties"]["response_detail"][
@@ -288,15 +290,11 @@ def test_govern_memory_schema_exposes_closed_session_action_selector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
-    schema = _mcp_tools(mcp)["govern_memory"]["inputSchema"]
-
-    assert "session" in schema["properties"]["operation"]["enum"]
-    assert schema["properties"]["session_action"]["enum"] == [
-        "open",
-        "status",
-        "rotate",
-        "close",
-    ]
+    schema = _mcp_tools(mcp)["manage_authorization_session"]["inputSchema"]
+    variants = schema["properties"]["operation"]["oneOf"]
+    assert {variant["properties"]["kind"]["const"] for variant in variants} == {
+        "open", "status", "rotate", "close",
+    }
     for caller_identity in (
         "principal",
         "principal_scope",

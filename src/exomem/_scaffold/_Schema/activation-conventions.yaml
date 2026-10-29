@@ -10,7 +10,7 @@
 # stops counting as contact. This file is where that shape lives, so the
 # compiler never has to guess it from constants tuned on someone else's vault.
 #
-# No server component writes this file except a governed `schema_memory` save
+# No server component writes this file except a governed `change_schema` save
 # your agent makes on your explicit request (subject `activation-conventions`).
 #
 # YOUR OVERRIDE: copy this file's shape (not its shipped values) to

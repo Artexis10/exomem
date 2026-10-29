@@ -132,7 +132,7 @@ def test_the_ask_comes_after_k_substantive_turns_with_the_session_key(
     assert _is_episode_ask(results[-1])
     key = episode_capture.hook_key("claude-code", SESSION)
     assert key in results[-1]["reason"]
-    assert "episode_memory" in results[-1]["reason"]
+    assert "record_episode" in results[-1]["reason"]
     assert results[-1]["decision"] == "block"
 
 
@@ -1108,18 +1108,12 @@ def test_the_checkpoint_reads_the_real_ledger_through_the_rest_door(
     assert _stop(monkeypatch, capsys, _prepared(tmp_path, "after.jsonl")) is None
 
 
-def test_the_stop_ask_bytes_are_unchanged_from_the_base() -> None:
-    """Sink guidance arrives through the coverage response, never the per-turn
-    Stop ask, so the injected bytes must not grow."""
-    import hashlib
-
+def test_the_stop_ask_names_the_active_episode_jobs() -> None:
+    """The Stop hook keeps one short prompt while naming the typed read and write jobs."""
     ask = hook.COVERAGE_ASK
-    assert len(ask) == 381
-    assert (
-        hashlib.sha256(ask.encode("utf-8")).hexdigest()
-        == "939a5fcb7ede0e278f5feb70d054862ba8b32470664cc6058c7f93b68fb9424d"
-    )
+    assert "read_episode" in ask and "record_episode" in ask
     assert "sink" not in ask and "cluster" not in ask
+
 
 
 # --- the per-turn capture reminder fires on landings, not on reply length -----

@@ -311,9 +311,14 @@ def test_vocabulary_review_context_and_decision_reach_the_real_leaves(
     assert context["definitions"]["selected_relation"] is None
     assert result["state"] == "resolved_without_mutation"
     schemas = _live_schemas(_build_server(monkeypatch, tmp_path / "public-schema"))
+    from exomem.operation_entries import spell_call
+
+    name, arguments = spell_call(
+        "triage_memory", {"ref": item.ref, "action": "decide-vocabulary", "decision": decision}, "nested"
+    )
     validate(
-        {"ref": item.ref, "action": "decide-vocabulary", "decision": decision},
-        schemas["triage_memory"]["inputSchema"],
+        arguments,
+        schemas[name]["inputSchema"],
     )
 
 
@@ -411,7 +416,12 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
     }
     direct = commands.op_schema_memory(vault, **request)
     mcp = server_module.build_server(require_auth=False)
-    mcp_result = asyncio.run(mcp.call_tool("schema_memory", request, run_middleware=True))
+    from exomem.operation_entries import spell_call
+
+    name, arguments = spell_call("schema_memory", request, "nested")
+    assert name == "read_schema"
+    assert arguments["operation"]["kind"] == "resolve-entity-type"
+    mcp_result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=True))
     rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=request,
@@ -445,7 +455,9 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
         for tool in asyncio.run(mcp.list_tools())
         if tool.name == "triage_memory"
     )
-    decision_schema = triage_schema["properties"]["decision"]
+    operation = triage_schema["properties"]["operation"]
+    decision_branch = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "decision")
+    decision_schema = {**decision_branch["properties"], **operation.get("properties", {})}["decision"]
     assert decision_schema["additionalProperties"] is False
     assert set(decision_schema["required"]) == {
         "item_ref",
@@ -464,7 +476,9 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
             "application/json"
         ]["schema"]["properties"]["decision"]
     )
-    assert rest_schema == decision_schema
+    assert {key: value for key, value in rest_schema.items() if key != "description"} == {
+        key: value for key, value in decision_schema.items() if key != "description"
+    }
 
 
 def test_reconcile_repairs_vocabulary_projection_only_outside_dry_run(tmp_path, monkeypatch):

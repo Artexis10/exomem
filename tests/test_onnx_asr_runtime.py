@@ -29,14 +29,16 @@ def test_streamed_audio_keeps_the_tail_after_the_thirty_second_window(tmp_path):
     assert np.max(chunks[-1]) > 0.25
 
 
-VOCAB = 8
+VOCAB = 12
 END = 7
+TS = 9  # token 8 is a special token between end-of-text and the first timestamp
 POLICY = {
     "max_new_tokens": 40,
     "temperatures": [0.0, 0.2],
     "compression_ratio_threshold": 2.4,
     "logprob_threshold": -1.0,
 }
+RATE = 16000
 
 
 def _scripted(choices):
@@ -56,7 +58,8 @@ def _decode(step, temperature=0.0, **overrides):
 
     options = dict(
         policy=POLICY, suppressed=np.array([], dtype=np.int64), begin_suppressed=np.array([], dtype=np.int64),
-        end_token=END, detokenize=lambda tokens: " ".join(f"w{token}" for token in tokens),
+        end_token=END, timestamp_begin=TS, max_initial_timestamp=VOCAB - TS - 1,
+        detokenize=lambda tokens: " ".join(f"w{token}" for token in tokens),
         temperature=temperature, rng=np.random.default_rng(0),
     )
     options.update(overrides)
@@ -64,7 +67,7 @@ def _decode(step, temperature=0.0, **overrides):
 
 
 def test_a_repetition_loop_stops_before_the_token_cap():
-    looping = _decode(_scripted([0, 1, 2, *[3] * 60]))
+    looping = _decode(_scripted([TS, 1, 2, *[3] * 60]))
 
     assert looping.compression_ratio > POLICY["compression_ratio_threshold"]
     assert len(looping.tokens) < POLICY["max_new_tokens"]
@@ -73,24 +76,74 @@ def test_a_repetition_loop_stops_before_the_token_cap():
 def test_fallback_keeps_the_first_attempt_that_is_neither_repetitive_nor_improbable():
     from exomem.onnx_asr_runtime import decode_with_fallback
 
-    attempts = {0.0: _decode(_scripted([0, 1, 2, *[3] * 60])), 0.2: _decode(_scripted([0, 1, 2, 4, 5, END]))}
+    attempts = {0.0: _decode(_scripted([TS, 1, 2, *[3] * 60])), 0.2: _decode(_scripted([TS, 1, 2, 4, 5, END]))}
 
     chosen = decode_with_fallback(lambda temperature: attempts[temperature], POLICY)
 
-    assert chosen.tokens == (0, 1, 2, 4, 5)
+    assert chosen.tokens == (TS, 1, 2, 4, 5)
 
 
-def test_suppressed_tokens_never_decode_and_blanks_are_barred_only_at_the_start():
-    prefers_blank_then_suppressed = _scripted([0, 6, 5, END])
+def test_suppressed_tokens_never_decode_and_begin_suppression_applies_only_at_the_start():
+    prefers_blank_then_suppressed = _scripted([TS + 1, 6, 5, END])
 
     decoded = _decode(
         prefers_blank_then_suppressed,
         suppressed=np.array([5], dtype=np.int64),
-        begin_suppressed=np.array([6], dtype=np.int64),
+        begin_suppressed=np.array([TS + 1], dtype=np.int64),
     )
 
-    assert 6 not in decoded.tokens[:1]
+    assert decoded.tokens[0] != TS + 1
+    assert 6 in decoded.tokens
     assert 5 not in decoded.tokens
+
+
+def test_timestamp_rules_turn_text_first_and_a_backward_timestamp_into_a_valid_sequence():
+    choices = [3, 4, TS, END]  # text first, then a closing timestamp below the opening one
+
+    def step(tokens, state):
+        logits = np.full(VOCAB, -20.0)
+        logits[TS + 1:] = 0.0  # a mild lean to the later timestamps, which the rules leave open
+        logits[choices[min(len(tokens) - 1, len(choices) - 1)]] = 10.0
+        return logits, state
+
+    decoded = _decode(step)
+
+    stamps = [token for token in decoded.tokens if token >= TS]
+    assert decoded.tokens[0] >= TS
+    assert len(stamps) == 2 and stamps[0] < stamps[1]
+
+
+WINDOW = 30 * RATE
+STEP = int(RATE * 0.02)
+
+
+def test_a_closed_final_segment_advances_to_the_next_window():
+    from exomem.onnx_asr_runtime import split_window
+
+    # [0.0] words [10.0]: the closing timestamp ends the window, as Whisper specifies.
+    plan = split_window([TS, 1, 2, TS + 500], timestamp_begin=TS, window_samples=WINDOW, rate=RATE)
+
+    assert plan.seek == WINDOW
+    assert plan.segments[0].tokens == (1, 2)
+    assert plan.segments[0].end == 500 * STEP
+
+
+def test_a_decode_that_ends_on_text_never_re_decodes_what_it_emitted():
+    from exomem.onnx_asr_runtime import split_window
+
+    plan = split_window([TS + 50, 1, 2, 3], timestamp_begin=TS, window_samples=WINDOW, rate=RATE)
+
+    assert plan.seek == WINDOW
+
+
+def test_an_unfinished_segment_is_dropped_and_the_seek_stops_at_the_last_complete_timestamp():
+    from exomem.onnx_asr_runtime import split_window
+
+    # (0.0 a 5.0)(5.0 b ...) the second segment never closes.
+    plan = split_window([TS, 1, TS + 250, TS + 250, 2, 3], timestamp_begin=TS, window_samples=WINDOW, rate=RATE)
+
+    assert [segment.tokens for segment in plan.segments] == [(1,)]
+    assert plan.seek == 250 * STEP
 
 
 class _Stopped(Exception):
@@ -104,6 +157,8 @@ def _resumable_backend(monkeypatch, recognized, stop_after=None):
     monkeypatch.setattr(onnx_asr_runtime, "audio_chunks", lambda *_args: iter([np.full(window, 0.5, dtype=np.float32)] * 3))
     backend = onnx_asr_runtime.OnnxWhisperBackend()
     monkeypatch.setattr(backend, "_load", lambda: None)
+    backend._timestamp_begin = TS
+    monkeypatch.setattr(backend, "_text", lambda tokens: f"window {tokens[0]}")
 
     class _Speech:
         def segment_batch(self, *_args):
@@ -115,7 +170,8 @@ def _resumable_backend(monkeypatch, recognized, stop_after=None):
         if stop_after is not None and len(recognized) == stop_after:
             raise _Stopped
         recognized.append(seed)
-        return 50259, f"window {seed}"
+        # One timestamp pair spanning the whole window; the text token names the window.
+        return 50259, (TS, seed // window, TS + 1500)
 
     monkeypatch.setattr(backend, "_recognize", recognize)
     return backend, window
@@ -147,7 +203,7 @@ def test_a_stopped_transcript_resumes_after_its_last_finished_window(monkeypatch
     segments, _label = backend.transcribe(audio, vault_root=vault)
 
     assert [segment.text for segment in segments] == ["window 0", "window 1", "window 2"]
-    assert second == [2]
+    assert second == [2 * window]
     assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 0
 
 
@@ -168,7 +224,7 @@ def test_progress_from_another_engine_revision_is_not_resumed(monkeypatch, vault
     segments, _label = backend.transcribe(audio, vault_root=vault)
 
     assert [segment.text for segment in segments] == ["window 0", "window 1", "window 2"]
-    assert again == [0, 1, 2]
+    assert again == [0, window, 2 * window]
 
 
 def test_removing_a_recording_discards_its_partial_transcript(monkeypatch, vault):

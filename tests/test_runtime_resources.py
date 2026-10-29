@@ -968,6 +968,23 @@ def test_service_onnx_session_obeys_reported_default_budget(monkeypatch):
     assert options.intra_op_num_threads == runtime_resources.resolve_policy().cpu_threads == 1
 
 
+@pytest.mark.parametrize(("share", "prepacking"), [("0", ""), ("1", "1")])
+def test_media_session_disables_prepacking_only_when_weights_are_shared(monkeypatch, share, prepacking):
+    monkeypatch.setenv("EXOMEM_ONNX_SHARE_WEIGHTS", share)
+    entries: dict[str, str] = {}
+    # onnxruntime is not installed in every test environment; the fake records
+    # the entries the helper adds, as `SessionOptions` does.
+    options = types.SimpleNamespace(
+        add_session_config_entry=entries.__setitem__,
+        get_session_config_entry=lambda key: entries.get(key, ""),
+    )
+
+    runtime_resources.configure_onnx_media_session_options(options, default_threads=2)
+
+    assert options.get_session_config_entry("session.disable_prepacking") == prepacking
+    assert options.get_session_config_entry("session.intra_op.allow_spinning") == "0"
+
+
 def test_service_bulk_cannot_reacquire_ahead_of_an_admitted_small_caller(monkeypatch):
     """The legacy RLock let a bulk caller take all 256 turns ahead of its waiter."""
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")

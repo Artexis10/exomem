@@ -27,6 +27,21 @@ STATUS_CLASSIFICATION_RULE = (
     "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
 )
 
+OBSERVATION_UPDATE_GUIDANCE = (
+    "Updates rebuild the unit: omitted verdict/check_by/id persist; "
+    "tags/context/relations clear unless resent."
+)
+
+# This explains the existing preview boundary; it grants no authority to save a review or content.
+EXISTING_VALIDATION_GUIDANCE = (
+    "Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. "
+    "Inspect the current page and candidate evidence. "
+    'If no truthful relation applies, revalidate with relation_disposition="reviewed_none" and a bounded evidence-based relation_review_reason. '
+    "Missing edges prove nothing; preserve typed relations and metadata. "
+    "Report insufficient evidence or unresolved material choices. "
+    "Commit needs separate write authority and returned guards."
+)
+
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -474,6 +489,16 @@ def get_semantic_authoring_contract() -> SemanticAuthoringContract:
     return AUTHORING_CONTRACT
 
 
+def _placement_rule(rule: str, tool_shape: str) -> str:
+    from .operation_entries import call_text
+
+    # This exact code-owned compatibility call uses the serving adapter's spelling.
+    return rule.replace(
+        'schema_memory(subject="homes", operation="inspect")',
+        call_text("schema_memory", {"subject": "homes", "operation": "inspect"}, tool_shape),
+    )
+
+
 def bootstrap_projection(
     contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
     *,
@@ -490,6 +515,21 @@ def bootstrap_projection(
     (role and domain) examples.
     """
     projection = contract.as_dict()
+    projection["validation_review"] = EXISTING_VALIDATION_GUIDANCE
+    from . import capabilities
+
+    projection["minimum_semantic_unit"]["placement_rule"] = _placement_rule(
+        projection["minimum_semantic_unit"]["placement_rule"], capabilities.current_tool_shape()
+    )
+    projection["minimum_semantic_unit"]["status_registry"] = capabilities.active_call_route(
+        "schema_memory", {"subject": "statuses", "operation": "inspect"}
+    )
+    projection["routes"]["single_semantic_unit"] = capabilities.active_tools_text("observe_memory", "write")
+    projection["routes"]["tier_2"] = (
+        f"{capabilities.active_tools_text('manage_memory_file', 'write')} create, overwrite, and append "
+        "receive the same semantic precommit contract on the complete resulting compiled Markdown; "
+        "prefer create_note or supersede_note when their typed route fits."
+    )
     if profile != "full":
         rich = dict(projection["rich"])
         rich.pop("correction_detail")
@@ -518,8 +558,8 @@ def render_tool_guidance(
 ) -> str:
     """Render the bounded tool-specific rule from the canonical contract fields.
 
-    Every fact here comes from the contract, so a normative change moves this
-    text and the identity marker together. Prose that only elaborates a rule
+    Normative facts come from the contract; validation guidance clarifies its
+    existing review boundary. Prose that only elaborates a rule
     (form preference, boundary and vocabulary notes, the empty-body finding)
     lives in the full bootstrap projection, not in every authoring tool.
     """
@@ -543,6 +583,9 @@ def render_tool_guidance(
             minimum["rule"],
             minimum["final_unit_rule"],
             rich["correction_rule"],
+            # The source command and its public rendering share this operation-specific rule.
+            OBSERVATION_UPDATE_GUIDANCE if tool == "observe_memory" else "",
+            EXISTING_VALIDATION_GUIDANCE if not whole_page else "",
             f"Compact: `{compact['canonical_section']}` then `{compact['syntax']}`; "
             f"one {compact['category']['vocabulary']} category. "
             f"Rich: `{rich['heading_syntax']}`.",
@@ -550,7 +593,7 @@ def render_tool_guidance(
             f"Role example: {portable['examples']['role']}" if whole_page else "",
             f"`missing_semantic_unit`: {missing['compact_remediation']}",
             f"`empty_rich_unit`: {findings['empty_rich_unit']['remediation']}",
-            'Keys/examples: call bootstrap(profile="full").',
+            'Keys/examples: call bootstrap with operation.kind="instructions", profile="full".',
         )
         if part
     )
@@ -628,7 +671,11 @@ def render_concise(
     rich = contract.rich
     roles = contract.semantic_roles
     minimum = contract.minimum_semantic_unit
-    routes = contract.routes
+    from .operation_entries import DEFAULT_TOOL_SHAPE, call_text, tools_text
+
+    placement_rule = _placement_rule(minimum["placement_rule"], DEFAULT_TOOL_SHAPE)
+    routes = {**contract.routes, "single_semantic_unit": tools_text("observe_memory", DEFAULT_TOOL_SHAPE, "write"),
+              "tier_2": "change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits."}
     findings = contract.findings
     portable = contract.portable_categories
     portable_keys = ", ".join(f"`{key}`" for key in portable["core_keys"])
@@ -683,16 +730,15 @@ def render_concise(
         f"- Rich boundary: {rich['heading_boundary_rule']} `empty_rich_unit` means "
         f"{findings['empty_rich_unit']['when']}; "
         f"{findings['empty_rich_unit']['remediation']}\n"
-        '- Exact applicability: obtain `bootstrap(profile="compact", '
-        'section="authoring")` and read `semantic_authoring.minimum_semantic_unit` '
+        f"- Exact applicability: obtain `{call_text('bootstrap', {'profile': 'compact', 'section': 'authoring'}, DEFAULT_TOOL_SHAPE)}` and read `semantic_authoring.minimum_semantic_unit` "
         "for current structural applicability and the status-class rule. "
         "If the exposed bootstrap schema lacks `section`, use "
-        '`bootstrap(profile="full")` instead; released profiles reject section arguments. '
+        f"`{call_text('bootstrap', {'profile': 'full'}, DEFAULT_TOOL_SHAPE)}` instead; released profiles reject section arguments. "
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
-        f"Shipped compiled types and their default folders: {destinations}. More may be "
-        'registered; `schema_memory(subject="note-types", operation="inspect")` lists the '
-        f"live set. {minimum['structural_rule']} {minimum['placement_rule']} "
-        f"The minimum predicate applies when {applies}. "
+        f"Shipped compiled types and their default folders: {destinations}. More may be registered; "
+        f"`{call_text('schema_memory', {'subject': 'note-types', 'operation': 'inspect'}, DEFAULT_TOOL_SHAPE)}` lists the live set. "
+        f"{minimum['structural_rule']} {placement_rule} The minimum predicate applies when "
+        f"{applies}. "
         f"{minimum['lifecycle_rule']}\n"
         f"- Existing active pages: {minimum['final_unit_rule']}\n"
         f"- Exempt content: {exemptions}.\n"
@@ -708,6 +754,7 @@ def render_concise(
         f"{findings['missing_semantic_unit']['compact_remediation']}\n"
         f"- Rich remediation: {findings['missing_semantic_unit']['rich_remediation']}\n"
         f"- {minimum['independence_rule']}\n"
+        f"- Validation review: {EXISTING_VALIDATION_GUIDANCE}\n"
         f"- Portable categories: {portable['short_selection_rule']} "
         f"{portable['open']} {portable_rules} Core keys are {portable_keys}. "
         f"Core aliases are {portable_aliases}. Role example: "
