@@ -7598,6 +7598,37 @@ def _discard_from_list(mapping: dict[str, list[str]], key: str, value: str) -> N
         mapping.pop(key, None)
 
 
+@dataclass(frozen=True, slots=True)
+class WikilinkCandidate:
+    """One indexed page's physical path and its own normalized title."""
+
+    path: str
+    title_key: str | None
+
+
+def _wikilink_path_key(path: str) -> str:
+    """Keep the legacy canonical key separate from the indexed physical path."""
+    return path.removesuffix(".md")
+
+
+def wikilink_candidates(
+    candidates_by_key: Mapping[str, Iterable[WikilinkCandidate]],
+    keys: Iterable[str],
+    *,
+    title_key: str | None = None,
+    visible: Callable[[str], bool] | None = None,
+) -> list[WikilinkCandidate]:
+    """Select visible owners of resolver keys, optionally by their own title."""
+    matches: dict[str, WikilinkCandidate] = {}
+    for key in keys:
+        for candidate in candidates_by_key.get(key, ()):
+            if title_key is not None and candidate.title_key != title_key:
+                continue
+            if visible is None or visible(candidate.path):
+                matches[candidate.path] = candidate
+    return [matches[path] for path in sorted(matches)]
+
+
 class WikilinkResolver:
     """In-memory index of vault paths + frontmatter titles for wikilink resolution.
 
@@ -7623,6 +7654,7 @@ class WikilinkResolver:
         self.kb_stripped: set[str] = set()
         self.stems: dict[str, list[str]] = {}
         self.titles: dict[str, list[str]] = {}
+        self.candidates_by_key: dict[str, list[WikilinkCandidate]] = {}
         # no_ext rel path -> the (lower-cased) frontmatter title it contributed
         # to `titles`, so an incremental patch can drop the OLD title edge
         # before re-adding the new one (a title-only edit still needs fixing).
@@ -7642,16 +7674,17 @@ class WikilinkResolver:
         resolver.kb_stripped = set()
         resolver.stems = {}
         resolver.titles = {}
+        resolver.candidates_by_key = {}
         resolver._title_by_rel = {}
         normalized = sorted(
             (
-                str(rel_path).replace("\\", "/").lstrip("/").removesuffix(".md"),
+                str(rel_path).replace("\\", "/").lstrip("/"),
                 str(title).strip().lower() if title and str(title).strip() else None,
             )
             for rel_path, title in entries
         )
-        for no_ext, title_lower in normalized:
-            resolver._add_entry(no_ext, title_lower)
+        for rel_path, title_lower in normalized:
+            resolver._add_entry(rel_path, title_lower)
         return resolver
 
     def _build(self) -> None:
@@ -7661,7 +7694,7 @@ class WikilinkResolver:
                 rel = md.resolve().relative_to(vault_resolved).as_posix()
             except ValueError:
                 continue
-            self._add_entry(rel.removesuffix(".md"), self._read_title_lower(md))
+            self._add_entry(rel, self._read_title_lower(md))
 
     def fork(self) -> WikilinkResolver:
         """Return an I/O-free detached copy suitable for write preparation.
@@ -7675,6 +7708,9 @@ class WikilinkResolver:
         resolver.kb_stripped = set(self.kb_stripped)
         resolver.stems = {key: list(values) for key, values in self.stems.items()}
         resolver.titles = {key: list(values) for key, values in self.titles.items()}
+        resolver.candidates_by_key = {
+            key: list(values) for key, values in self.candidates_by_key.items()
+        }
         resolver._title_by_rel = dict(self._title_by_rel)
         return resolver
 
@@ -7689,29 +7725,58 @@ class WikilinkResolver:
     # same on-disk state (parity is what keeps the graph lane's recall
     # unchanged — only the cost model differs).
 
-    def _add_entry(self, no_ext: str, title_lower: str | None) -> None:
+    def _add_entry(self, rel_path: str, title_lower: str | None) -> None:
         """Index one file's path/stem (always) and title (when present).
 
         Mirrors `_build`'s historical per-file body exactly: the path + stem
         edges are added even for an unreadable file (title read failed), the
         title edge only when a non-empty frontmatter `title:` was read.
         """
+        no_ext = _wikilink_path_key(rel_path)
+        self._remove_entry(rel_path)
+        candidates = self.candidates_by_key.setdefault(no_ext, [])
+        candidates.append(WikilinkCandidate(rel_path, title_lower))
+        candidates.sort(key=lambda candidate: candidate.path)
         self.full_paths.add(no_ext)
         self.kb_stripped.add(no_ext.removeprefix(kb_prefix()))
         stem = no_ext.rsplit("/", 1)[-1]
         self.stems.setdefault(stem, []).append(no_ext)
+        self.stems[stem].sort()
         if title_lower:
             self.titles.setdefault(title_lower, []).append(no_ext)
-            self._title_by_rel[no_ext] = title_lower
+            self.titles[title_lower].sort()
+        for candidate in candidates:
+            if candidate.title_key:
+                self._title_by_rel[no_ext] = candidate.title_key
 
-    def _remove_entry(self, no_ext: str) -> None:
+    def _remove_entry(self, rel_path: str) -> None:
         """Drop every edge a file contributed (path, stem, title)."""
-        self.full_paths.discard(no_ext)
-        self.kb_stripped.discard(no_ext.removeprefix(kb_prefix()))
-        _discard_from_list(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
-        old_title = self._title_by_rel.pop(no_ext, None)
-        if old_title is not None:
-            _discard_from_list(self.titles, old_title, no_ext)
+        no_ext = _wikilink_path_key(rel_path)
+        previous = self.candidates_by_key.get(no_ext, ())
+        if not any(candidate.path == rel_path for candidate in previous):
+            return
+        remaining = [candidate for candidate in previous if candidate.path != rel_path]
+        if remaining:
+            self.candidates_by_key[no_ext] = remaining
+        else:
+            self.candidates_by_key.pop(no_ext, None)
+            self.full_paths.discard(no_ext)
+            stripped = no_ext.removeprefix(kb_prefix())
+            if stripped not in self.full_paths and kb_prefix() + stripped not in self.full_paths:
+                self.kb_stripped.discard(stripped)
+        stem = no_ext.rsplit("/", 1)[-1]
+        _discard_from_list(self.stems, stem, no_ext)
+        if remaining:
+            self.stems.setdefault(stem, []).extend(no_ext for _ in remaining)
+            self.stems[stem].sort()
+        for title in {candidate.title_key for candidate in previous if candidate.title_key}:
+            _discard_from_list(self.titles, title, no_ext)
+        self._title_by_rel.pop(no_ext, None)
+        for candidate in remaining:
+            if candidate.title_key:
+                self.titles.setdefault(candidate.title_key, []).append(no_ext)
+                self.titles[candidate.title_key].sort()
+                self._title_by_rel[no_ext] = candidate.title_key
 
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
@@ -7753,25 +7818,25 @@ class WikilinkResolver:
             for r in rels:
                 s = str(r).replace("\\", "/")
                 if s.lower().endswith(".md"):
-                    out.add(s[:-3])
+                    out.add(s.lstrip("/"))
             return out
 
         changed = _norm(changed_rels)
         deleted = _norm(deleted_rels)
         conflict = changed & deleted
-        for no_ext in conflict:
-            if (vault_root / (no_ext + ".md")).is_file():
-                deleted.discard(no_ext)
+        for rel_path in conflict:
+            if (vault_root / rel_path).is_file():
+                deleted.discard(rel_path)
             else:
-                changed.discard(no_ext)
+                changed.discard(rel_path)
         if not (deleted or changed):
             return
-        for no_ext in deleted | changed:
-            self._remove_entry(no_ext)
-        for no_ext in changed:
-            abs_path = vault_root / (no_ext + ".md")
+        for rel_path in deleted | changed:
+            self._remove_entry(rel_path)
+        for rel_path in sorted(changed):
+            abs_path = vault_root / rel_path
             if abs_path.is_file():
-                self._add_entry(no_ext, self._read_title_lower(abs_path))
+                self._add_entry(rel_path, self._read_title_lower(abs_path))
 
     def on_entries_changed(
         self,
@@ -7786,18 +7851,18 @@ class WikilinkResolver:
         an earlier freshness target.
         """
 
-        def _no_ext(rel: str) -> str:
-            return str(rel).replace("\\", "/").lstrip("/").removesuffix(".md")
+        def _path(rel: str) -> str:
+            return str(rel).replace("\\", "/").lstrip("/")
 
         changed = {
-            _no_ext(rel): (str(title).strip().lower() if title and str(title).strip() else None)
+            _path(rel): (str(title).strip().lower() if title and str(title).strip() else None)
             for rel, title in entries
         }
-        deleted = {_no_ext(rel) for rel in deleted_rels}
-        for no_ext in deleted | set(changed):
-            self._remove_entry(no_ext)
-        for no_ext, title_lower in sorted(changed.items()):
-            self._add_entry(no_ext, title_lower)
+        deleted = {_path(rel) for rel in deleted_rels}
+        for rel_path in deleted | set(changed):
+            self._remove_entry(rel_path)
+        for rel_path, title_lower in sorted(changed.items()):
+            self._add_entry(rel_path, title_lower)
 
     def add_pending(self, no_ext_path: str, *, title: str | None = None) -> None:
         """Register a file the writer is about to create.
@@ -7806,15 +7871,22 @@ class WikilinkResolver:
         note's path) resolve before the file lands on disk.
         """
         no_ext = no_ext_path.removesuffix(".md").lstrip("/")
-        self._add_entry(no_ext, title.strip().lower() if title and title.strip() else None)
+        self._add_entry(no_ext + ".md", title.strip().lower() if title and title.strip() else None)
 
 
 def _strip_wikilink_brackets(s: str) -> str:
-    """Strip `[[ ... ]]` wrappers and the trailing `|alias` if present."""
+    """Strip `[[ ... ]]` wrappers if present."""
     s = s.strip()
     if s.startswith("[[") and s.endswith("]]"):
         s = s[2:-2].strip()
     return s
+
+
+def split_wikilink_target(target: str) -> tuple[str, str]:
+    """Split a wikilink's page and anchor without resolving its identity."""
+    cleaned = _strip_wikilink_brackets(target).split("|", 1)[0].strip()
+    page, separator, anchor = cleaned.partition("#")
+    return page.rstrip(), separator + anchor
 
 
 def obsidian_uses_kb_root(vault_root: Path) -> bool:
@@ -7899,92 +7971,87 @@ def normalize_wikilink(
     `targeted_namespace_contains` answers exact resolver keys for explicit
     paths. Bare names use `resolver` or lazily call `resolver_factory`.
     """
-    def _seen(no_ext: str) -> bool:
-        # The resolver strips one lowercase `.md`, so a key ending in `.md` may name
-        # `x.MD` (the key itself) or `x.md.md`; see it only when both spellings are seen.
-        if visible is None:
-            return True
-        seen = visible(f"{no_ext}.md")
-        if no_ext.lower().endswith(".md"):
-            seen = seen and visible(no_ext)
-        return seen
+    canonical, warning, _candidate = _normalize_wikilink(
+        target, vault_root, resolver=resolver,
+        targeted_namespace_contains=targeted_namespace_contains,
+        resolver_factory=resolver_factory, strict=strict, visible=visible,
+    )
+    return canonical, warning
 
-    def _matches(values: list[str] | None) -> list[str] | None:
-        if values is None or visible is None:
-            return values
-        return [value for value in values if _seen(value)] or None
 
-    cleaned = _strip_wikilink_brackets(target)
-    if "|" in cleaned:
-        cleaned = cleaned.split("|", 1)[0].strip()
-    # Preserve #anchor across normalization.
-    anchor = ""
-    if "#" in cleaned:
-        cleaned, anchor_part = cleaned.split("#", 1)
-        anchor = "#" + anchor_part
-        cleaned = cleaned.rstrip()
+def _normalize_wikilink(
+    target: str,
+    vault_root: Path,
+    *,
+    resolver: WikilinkResolver | None = None,
+    targeted_namespace_contains: Callable[[str], bool] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
+    strict: bool = False,
+    visible: Callable[[str], bool] | None = None,
+) -> tuple[str, str | None, WikilinkCandidate | None]:
+    """Normalize a link and retain the physical owner for internal consumers."""
+
+    cleaned, anchor = split_wikilink_target(target)
     cleaned = cleaned.removesuffix(".md").strip().strip("/")
     if not cleaned:
         if strict:
             raise UnresolvedWikilinkError(f"empty wikilink target: {target!r}")
-        return "", f"empty wikilink target: {target!r}"
+        return "", f"empty wikilink target: {target!r}", None
 
     # Folder-hub link (e.g. `[[Knowledge Base/Notes/Patterns/]]`): we never
     # canonicalize beyond ensuring the Knowledge Base/ prefix.
     if cleaned.endswith("/"):
         canonical = cleaned if cleaned.startswith(kb_prefix()) else kb_prefix() + cleaned
-        return canonical + anchor, None
+        return canonical + anchor, None, None
 
     # Explicit paths need namespace membership only; bare names need the full
     # stem/title index and retain its ambiguity rules.
-    targeted = targeted_namespace_contains is not None and "/" in cleaned
+    # Boolean membership cannot prove which physical owner passes visibility.
+    targeted = targeted_namespace_contains is not None and "/" in cleaned and visible is None
     if not targeted and resolver is None:
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
 
-    # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
-    if contains(cleaned) and _seen(cleaned):
-        return cleaned + anchor, None
-    if not cleaned.startswith(kb_prefix()):
-        candidate = kb_prefix() + cleaned
-        if contains(candidate) and _seen(candidate):
-            return candidate + anchor, None
+    def _matches(keys: Iterable[str], *, title_key: str | None = None) -> list[WikilinkCandidate]:
+        return wikilink_candidates(
+            resolver.candidates_by_key, keys, title_key=title_key, visible=visible
+        )
 
-    # 2. KB-relative match (target looks like KB-relative). The KB page itself must
-    # exist: `kb_stripped` also holds the keys of pages outside the Knowledge Base,
-    # so a hidden vault-root page named like the target would pass a membership test
-    # on it and then be judged by `_seen` on a path that is not in the vault.
-    if contains(kb_prefix() + cleaned) and _seen(kb_prefix() + cleaned):
-        return kb_prefix() + cleaned + anchor, None
+    def _selected(
+        matches: list[WikilinkCandidate], kind: str,
+    ) -> tuple[str, str | None, WikilinkCandidate | None]:
+        if len(matches) == 1:
+            candidate = matches[0]
+            return _wikilink_path_key(candidate.path) + anchor, None, candidate
+        paths = [candidate.path for candidate in matches]
+        if strict:
+            raise AmbiguousWikilinkError(
+                f"wikilink {target!r} matches {len(matches)} files by {kind}: {paths}"
+            )
+        return cleaned + anchor, (
+            f"wikilink {target!r} matches {len(matches)} files "
+            f"by {kind}; left unchanged. Files: {paths}"
+        ), None
+
+    # Full paths take precedence over Knowledge-Base-relative paths.
+    for key in (cleaned, kb_prefix() + cleaned):
+        if contains(key):
+            if targeted:
+                return key + anchor, None, None
+            matches = _matches((key,))
+            if matches:
+                return _selected(matches, "path")
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
     if "/" not in cleaned:
-        stem_matches = _matches(resolver.stems.get(cleaned))
+        stem_matches = _matches(resolver.stems.get(cleaned, ()))
         if stem_matches:
-            if len(stem_matches) == 1:
-                return stem_matches[0] + anchor, None
-            if strict:
-                raise AmbiguousWikilinkError(
-                    f"bare wikilink {target!r} resolves to "
-                    f"{len(stem_matches)} files: {stem_matches}"
-                )
-            return cleaned + anchor, (
-                f"bare wikilink {target!r} matches {len(stem_matches)} files "
-                f"by stem; left unchanged. Files: {stem_matches}"
-            )
-        title_matches = _matches(resolver.titles.get(cleaned.lower()))
+            return _selected(stem_matches, "stem")
+        title_matches = _matches(
+            resolver.titles.get(cleaned.lower(), ()), title_key=cleaned.lower()
+        )
         if title_matches:
-            if len(title_matches) == 1:
-                return title_matches[0] + anchor, None
-            if strict:
-                raise AmbiguousWikilinkError(
-                    f"wikilink {target!r} matches {len(title_matches)} "
-                    f"files by frontmatter title: {title_matches}"
-                )
-            return cleaned + anchor, (
-                f"wikilink {target!r} matches {len(title_matches)} files "
-                f"by title; left unchanged. Files: {title_matches}"
-            )
+            return _selected(title_matches, "title")
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result
@@ -8005,7 +8072,7 @@ def normalize_wikilink(
         fallback = kb_prefix() + cleaned
     else:
         fallback = cleaned
-    return fallback + anchor, (f"wikilink {target!r} does not resolve to any file in the vault")
+    return fallback + anchor, (f"wikilink {target!r} does not resolve to any file in the vault"), None
 
 
 def _mask_code_spans(text: str, *, check: Callable[[], None] | None = None) -> str:

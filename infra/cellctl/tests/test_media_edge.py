@@ -135,8 +135,14 @@ def test_an_unchanged_selection_plans_the_published_set() -> None:
     assert media_edge.plan_active_set(first, {CANARY: 2}, NOW_MS + 60_000) is first
 
 
-def test_an_unreadable_published_set_is_replaced_with_a_newer_generation() -> None:
-    assert media_edge.read_active_set({media_edge.ACTIVE_SET_KEY: "{broken"}) == media_edge.ActiveSet()
+@pytest.mark.parametrize("selected", [{}, {CANARY: 0}], ids=["empty", "selected"])
+def test_an_unreadable_published_set_is_replaced_with_a_newer_generation(selected) -> None:
+    unreadable = media_edge.read_active_set({media_edge.ACTIVE_SET_KEY: "{broken"})
+    assert unreadable == media_edge.ActiveSet()
+    planned = media_edge.plan_active_set(unreadable, selected, NOW_MS)
+    assert planned.generation > 0
+    assert set(planned.cells) == set(selected)
+    assert media_edge.plan_active_set(planned, selected, NOW_MS + 60_000).generation == planned.generation
 
 
 # -- cellctl's settings --

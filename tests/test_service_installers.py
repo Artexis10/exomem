@@ -259,6 +259,10 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
             grep -Fx "$expected" "$FAKE_SERVICE_ENV_FILE" >/dev/null || exit 1
         fi
         printf 'uv %s\n' "$*" >> "$TRACE_FILE"
+        if [ "$1" = "venv" ] && [ -n "${FAKE_NEW_VENV_PYTHON:-}" ]; then
+            mkdir -p "$2/bin"
+            cp "$FAKE_NEW_VENV_PYTHON" "$2/bin/python"
+        fi
         if [ -n "${FAKE_UV_FAIL_ONCE_MARKER:-}" ] \
             && [ ! -e "$FAKE_UV_FAIL_ONCE_MARKER" ]; then
             : > "$FAKE_UV_FAIL_ONCE_MARKER"
@@ -415,6 +419,7 @@ def _invoke(
     service_root: Path,
     env_file: Path,
     *args: str,
+    creation_umask: int = -1,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -432,6 +437,7 @@ def _invoke(
         text=True,
         capture_output=True,
         check=False,
+        umask=creation_umask,
     )
 
 
@@ -488,6 +494,31 @@ def test_linux_release_install_renders_env_gates_then_verifies(tmp_path: Path) -
     assert stat.S_IMODE(service_env.stat().st_mode) == 0o600
     assert "-> 401 (healthy, OAuth enforced)" in result.stdout
     assert "version:    9.9.9" in result.stdout
+
+
+def test_release_install_creates_private_ancestors_under_a_permissive_umask(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, template_root, env_file = _fixture(tmp_path)
+    env["FAKE_NEW_VENV_PYTHON"] = str(template_root / ".venv" / "bin" / "python")
+    application_root = tmp_path / "application"
+    service_root = application_root / "service"
+
+    result = _invoke(env, service_root, env_file, "--profile", "lean", creation_umask=0o002)
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(application_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(service_root.stat().st_mode) == 0o700
+
+
+def test_release_install_preserves_permissions_on_an_existing_service_root(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    service_root.chmod(0o775)
+
+    result = _invoke(env, service_root, env_file, "--profile", "lean", creation_umask=0o002)
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(service_root.stat().st_mode) == 0o775
 
 
 def test_linux_fresh_install_persists_the_state_root_before_target_install(

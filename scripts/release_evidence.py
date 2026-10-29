@@ -344,15 +344,16 @@ def main() -> int:
             raise ValueError("actual checkout differs from GITHUB_SHA")
         if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
             pr = event["pull_request"]
+            parents = command("git", "show", "-s", "--format=%P", "HEAD").decode().split()
+            if len(parents) != 2 or parents[1] != pr["head"]["sha"]:
+                raise ValueError("actual checkout differs from the PR merge parents")
             receipt["pull_request"] = {
                 "number": event["number"],
                 "draft": pr["draft"],
                 "head": {"sha": pr["head"]["sha"], "ref": pr["head"]["ref"]},
-                "base": {"sha": pr["base"]["sha"]},
+                # The tested merge binds the base; the PR payload can carry an older snapshot.
+                "base": {"sha": parents[0]},
             }
-            parents = command("git", "show", "-s", "--format=%P", "HEAD").decode().split()
-            if parents != [pr["base"]["sha"], pr["head"]["sha"]]:
-                raise ValueError("actual checkout differs from the PR merge parents")
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     elif args.command == "select":
         if not args.source:

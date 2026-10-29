@@ -224,6 +224,44 @@ def test_reconciliation_keeps_unchanged_crlf_pending_sidecar_bytes(vault: Path) 
     assert sidecar.read_bytes() == original
 
 
+def test_dated_evidence_tags_do_not_rewrite_pending_recording(vault: Path) -> None:
+    """A date-shaped category must not invalidate an in-flight extraction's source."""
+    import base64
+    import datetime as dt
+    import io
+    import wave
+
+    from exomem import preserve
+
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as recording:
+        recording.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+        recording.writeframes(b"\x00\x00" * 80)
+    original = audio.getvalue()
+    captured = dt.date(2001, 2, 3)
+    stored = preserve.preserve(
+        vault, scope="Audio", category=captured.isoformat(), filename="sample.wav",
+        content_base64=base64.b64encode(original).decode("ascii"),
+        description="Recorder caption.", today=captured,
+    )
+    binary = vault / stored.path
+    sidecar = vault / stored.sidecar_path
+    before, body = _frontmatter_and_body(sidecar)
+
+    processing = _media_processing()
+    processing.reconcile_media(vault, binary)
+    after, reconciled_body = _frontmatter_and_body(sidecar)
+
+    assert after["tags"] == ["evidence", "audio", captured.isoformat()]
+    assert after["captured"] == captured
+    assert after["exomem_id"] == before["exomem_id"]
+    assert reconciled_body == body
+    assert binary.read_bytes() == original
+    canonical = sidecar.read_bytes()
+    processing.reconcile_media(vault, binary)
+    assert sidecar.read_bytes() == canonical
+
+
 def _handle_stat(path: Path) -> os.stat_result:
     """Stat through an open handle, the way `_read_provenance` does.
 
