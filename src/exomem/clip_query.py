@@ -37,11 +37,7 @@ class OnnxClipQueryEncoder:
         self._tokenizer.enable_truncation(max_length=spec["max_tokens"])
         self._tokenizer.enable_padding(pad_id=pad_id, pad_token=pad_token)
         options = ort.SessionOptions()
-        runtime_resources.configure_onnx_session_options(options, default_threads=2)
-        options.enable_cpu_mem_arena = False
-        options.add_session_config_entry("session.disable_prepacking", "1")
-        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        runtime_resources.configure_onnx_media_session_options(options, default_threads=2)
         self._session = ort.InferenceSession(
             str(artifact.root / spec["graph_file"]),
             sess_options=options,

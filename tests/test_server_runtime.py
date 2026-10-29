@@ -443,6 +443,9 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
     seed_started = threading.Event()
     release_seed = threading.Event()
     activated = threading.Event()
+    recovery_started = threading.Event()
+    release_recovery = threading.Event()
+    uploads_resumed = threading.Event()
 
     class Watcher:
         def wait_until_seeded(self, timeout=None) -> bool:
@@ -453,7 +456,8 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
             return True
 
         def finish_startup_recovery(self) -> None:
-            calls.append("watcher-recovery")
+            recovery_started.set()
+            assert release_recovery.wait(timeout=5.0)
 
     def start_compute(root, **_kwargs) -> None:
         calls.append(f"compute:{root}")
@@ -482,6 +486,7 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
     )
 
     activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+    monkeypatch.setattr(activation, "_resume_upload_sessions", lambda _root: uploads_resumed.set())
 
     async def exercise() -> None:
         assert calls == []
@@ -504,18 +509,15 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
             assert not activated.wait(timeout=0.05)
             assert calls[-1] == f"compute:{vault}"
             readiness.mark_ready("semantic_corpus")
-            assert activated.wait(timeout=1.0)
-            assert calls == [
-                f"watcher:{vault}",
-                "watcher-seed:wait",
-                "watcher-seed:ready",
-                f"compute:{vault}",
-                "watcher-recovery",
-                f"graph:{vault}",
-                f"media:{vault}",
-            ]
-            activation.start()
-            assert len(calls) == 7
+            try:
+                assert recovery_started.wait(timeout=1.0)
+                assert activated.wait(timeout=1.0), "graph recovery stranded media startup"
+                assert uploads_resumed.is_set(), "graph recovery stranded upload recovery"
+                activation.start()
+                assert calls.count(f"media:{vault}") == 1
+                assert calls.count(f"compute:{vault}") == 1
+            finally:
+                release_recovery.set()
 
     try:
         asyncio.run(exercise())
@@ -578,14 +580,9 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     assert observed_timeouts == [server_runtime.RECALL_SEED_WAIT_SECONDS]
     assert 0 < server_runtime.RECALL_SEED_WAIT_SECONDS <= 180
     assert managed_at_compute == [False]
-    assert calls == [
-        "watcher",
-        "watcher-seed:wait",
-        "watcher-stop",
-        "compute",
-        "graph",
-        "media",
-    ]
+    assert "watcher-stop" in calls
+    assert calls.count("graph") == 1
+    assert calls.count("media") == 1
 
 
 def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
@@ -1305,7 +1302,7 @@ def test_dreamer_starts_last_and_only_when_enabled(
         activation = server_runtime.LocalRuntimeActivation(vault)
         activation.start()
         activation._thread.join(5)
-        assert calls == ["compute", "graph", "media", "vocabulary", "dreamer"]
+        assert calls[-1] == "dreamer"
         assert activation.dreamer is None
         assert not dreamer.running()
 

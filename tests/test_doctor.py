@@ -1096,6 +1096,36 @@ def test_warm_exits_zero_when_only_the_withheld_torch_models_are_unavailable(
     assert "onnx" in out
 
 
+def test_warm_skips_the_image_tower_on_an_onnx_lane_without_pillow(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The image tower cannot run without Pillow, so warm must not fetch its artifact."""
+    from exomem import __main__ as main_module
+    from exomem import embeddings as embeddings_module
+
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(main_module, "_module_available", lambda name: name != "PIL")
+    loaded: list[str] = []
+
+    def _image_tower():
+        loaded.append("image")
+        return object()
+
+    monkeypatch.setattr(embeddings_module, "get_model", lambda: object())
+    monkeypatch.setattr(embeddings_module, "get_reranker", lambda: object())
+    monkeypatch.setattr(embeddings_module, "get_clip_model", _image_tower)
+    monkeypatch.setattr(embeddings_module, "get_clip_query_model", lambda: object())
+    monkeypatch.setattr(embeddings_module, "clip_enabled", lambda: True)
+
+    code, out, _err = _run(["warm"], capsys)
+
+    assert code == 0
+    assert loaded == []
+    assert "Pillow is not installed" in out
+
+
 def test_models_cache_does_not_demand_torch_models_on_the_onnx_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

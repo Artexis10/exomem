@@ -1914,9 +1914,10 @@ def _warm_main(argv: list[str]) -> int:
 
         state_migration.require_vault_state_ready(vault_root)
 
-    # Which models this install can actually load. The reranker and CLIP are
-    # sentence-transformers models, so the `embeddings-onnx` lane withholds both
-    # by design. Reporting their absence as a warm failure means a correct ONNX
+    # Which models this install can actually load. The reranker and the torch
+    # CLIP are sentence-transformers models, so the `embeddings-onnx` lane
+    # withholds both by design. The ONNX image tower also needs Pillow to decode
+    # images, so a lane without it skips that tower rather than fetch it. Reporting their absence as a warm failure means a correct ONNX
     # install exits 1 on a successful run, and calls itself "lean" while holding
     # a working embedder.
     try:
@@ -1960,7 +1961,10 @@ def _warm_main(argv: list[str]) -> int:
     )
     if embeddings.clip_enabled():
         _step("multilingual image queries", embeddings.get_clip_query_model)
-        _step(f"CLIP image model {embeddings.CLIP_MODEL_NAME}", embeddings.get_clip_model)
+        if lane_serves_torch_models or _module_available("PIL"):
+            _step(f"CLIP image model {embeddings.CLIP_MODEL_NAME}", embeddings.get_clip_model)
+        else:
+            print("  CLIP image model: skipped (Pillow is not installed, so images cannot be decoded)")
     else:
         print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
 
