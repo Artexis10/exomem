@@ -1,4 +1,4 @@
-"""Offline Whisper transcription: the ONNX ASR adapter's model with Whisper's long-form guards."""
+"""Offline Whisper transcription: the ONNX ASR adapter's model with Whisper's long-form decoding and seek."""
 
 from __future__ import annotations
 
@@ -126,6 +126,34 @@ def compression_ratio(text: str) -> float:
     return len(data) / len(zlib.compress(data)) if data else 0.0
 
 
+def _log_softmax(logits: np.ndarray) -> np.ndarray:
+    peak = np.max(logits)
+    return logits - (peak + np.log(np.sum(np.exp(logits - peak))))
+
+
+def _apply_timestamp_rules(
+    logits: np.ndarray, generated: list[int], *, end_token: int, timestamp_begin: int, max_initial_timestamp: int,
+) -> None:
+    """OpenAI's ApplyTimestampRules: timestamps come in pairs, never go back, and win when they outweigh text."""
+    stamps = [token for token in generated if token >= timestamp_begin]
+    after_stamp = bool(generated) and generated[-1] >= timestamp_begin
+    after_pair = len(generated) < 2 or generated[-2] >= timestamp_begin
+    if after_stamp:
+        if after_pair:
+            logits[timestamp_begin:] = -np.inf
+        else:
+            logits[:end_token] = -np.inf
+    if stamps:
+        floor = stamps[-1] if after_stamp and not after_pair else stamps[-1] + 1
+        logits[timestamp_begin:floor] = -np.inf
+    if not generated:
+        logits[:timestamp_begin] = -np.inf
+        logits[timestamp_begin + max_initial_timestamp + 1:] = -np.inf
+    logprobs = _log_softmax(logits)
+    if np.logaddexp.reduce(logprobs[timestamp_begin:]) > np.max(logprobs[:timestamp_begin]):
+        logits[:timestamp_begin] = -np.inf
+
+
 def decode_window(
     step: Callable[[list[int], object], tuple[np.ndarray, object]],
     prompt: list[int],
@@ -134,11 +162,13 @@ def decode_window(
     suppressed: np.ndarray,
     begin_suppressed: np.ndarray,
     end_token: int,
+    timestamp_begin: int,
+    max_initial_timestamp: int,
     detokenize: Callable[[list[int]], str],
     temperature: float,
     rng: np.random.Generator,
 ) -> Decoded:
-    """Decode one window greedily, or by sampling above zero temperature, within the token cap."""
+    """Decode one window with timestamp tokens, greedily or by sampling above zero temperature, within the token cap."""
     tokens = list(prompt)
     generated: list[int] = []
     state = None
@@ -147,10 +177,16 @@ def decode_window(
         logits, state = step(tokens, state)
         logits = np.asarray(logits, dtype=np.float64).copy()
         logits[suppressed] = -np.inf
+        # The tokenizer fixes the special tokens between end-of-text and the first timestamp.
+        logits[end_token + 1:timestamp_begin] = -np.inf
         if index == 0:
             logits[begin_suppressed] = -np.inf
+        _apply_timestamp_rules(
+            logits, generated, end_token=end_token, timestamp_begin=timestamp_begin,
+            max_initial_timestamp=max_initial_timestamp,
+        )
         peak = np.max(logits)
-        logprobs = logits - (peak + np.log(np.sum(np.exp(logits - peak))))
+        logprobs = _log_softmax(logits)
         if temperature == 0:
             token = int(np.argmax(logits))
         else:
@@ -162,10 +198,58 @@ def decode_window(
         generated.append(token)
         tokens.append(token)
         # Stop a repetition loop as soon as it shows; the fallback decides what survives.
-        if compression_ratio(detokenize(generated)) > policy["compression_ratio_threshold"]:
+        spoken = [token for token in generated if token < end_token]
+        if spoken and compression_ratio(detokenize(spoken)) > policy["compression_ratio_threshold"]:
             break
-    text = detokenize(generated)
+    spoken = [token for token in generated if token < end_token]
+    text = detokenize(spoken) if spoken else ""
     return Decoded(tuple(generated), text, logprob_sum / (len(generated) + 1), compression_ratio(text))
+
+
+#: Seconds one timestamp token spans: the Whisper tokenizer's fixed time precision.
+TIMESTAMP_SECONDS = 0.02
+
+
+@dataclass(frozen=True)
+class TimedTokens:
+    """Text tokens of one segment, with its start and end in samples from the window's start."""
+
+    start: int
+    end: int
+    tokens: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class WindowSplit:
+    segments: tuple[TimedTokens, ...]
+    seek: int
+
+
+def split_window(tokens: tuple[int, ...] | list[int], *, timestamp_begin: int, window_samples: int, rate: int) -> WindowSplit:
+    """Cut a window's tokens into segments and decide how far to seek, as OpenAI's transcribe.py does."""
+    step = rate * TIMESTAMP_SECONDS
+
+    def sample(token: int) -> int:
+        return min(int(round((token - timestamp_begin) * step)), window_samples)
+
+    def timed(part: list[int]) -> TimedTokens:
+        return TimedTokens(sample(part[0]), sample(part[-1]), tuple(t for t in part if t < timestamp_begin))
+
+    is_stamp = [token >= timestamp_begin for token in tokens]
+    single_ending = len(tokens) >= 2 and not is_stamp[-2] and is_stamp[-1]
+    cuts = [index + 1 for index in range(len(tokens) - 1) if is_stamp[index] and is_stamp[index + 1]]
+    if not cuts:
+        stamps = [token for token in tokens if token >= timestamp_begin]
+        end = sample(stamps[-1]) if stamps and stamps[-1] != timestamp_begin else window_samples
+        return WindowSplit((TimedTokens(0, end, tuple(t for t in tokens if t < timestamp_begin)),), window_samples)
+    if single_ending:
+        cuts.append(len(tokens))
+    segments, previous = [], 0
+    for cut in cuts:
+        segments.append(timed(list(tokens[previous:cut])))
+        previous = cut
+    content_end = sample(tokens[previous - 1])
+    return WindowSplit(tuple(segments), window_samples if single_ending else content_end)
 
 
 def decode_with_fallback(decode: Callable[[float], Decoded], policy: dict) -> Decoded:
@@ -179,6 +263,35 @@ def decode_with_fallback(decode: Callable[[float], Decoded], policy: dict) -> De
         attempts.append(result)
     plausible = [attempt for attempt in attempts if attempt.compression_ratio <= threshold] or attempts
     return max(plausible, key=lambda attempt: attempt.avg_logprob)
+
+
+class _SeekBuffer:
+    """Samples from the current seek on, read from the audio stream as far as one window ahead."""
+
+    def __init__(self, chunks: Iterator[np.ndarray]) -> None:
+        self._chunks = chunks
+        self._samples = np.empty(0, dtype=np.float32)
+        self._start = 0  # absolute sample index of self._samples[0]
+        self._ended = False
+
+    def _drop_before(self, seek: int) -> None:
+        drop = min(seek - self._start, len(self._samples))
+        if drop > 0:
+            self._samples = self._samples[drop:]
+            self._start += drop
+
+    def window(self, seek: int, length: int) -> np.ndarray:
+        """The window of up to `length` samples at `seek`."""
+        self._drop_before(seek)
+        while len(self._samples) < seek - self._start + length and not self._ended:
+            chunk = next(self._chunks, None)
+            if chunk is None:
+                self._ended = True
+                break
+            self._samples = np.concatenate([self._samples, chunk])
+            self._drop_before(seek)
+        begin = seek - self._start
+        return self._samples[begin:begin + length]
 
 
 class OnnxWhisperBackend:
@@ -200,11 +313,7 @@ class OnnxWhisperBackend:
 
             raise ExtractionUnavailable(f"offline speech engine unavailable: {error}") from error
         options = ort.SessionOptions()
-        runtime_resources.configure_onnx_session_options(options, default_threads=2)
-        options.enable_cpu_mem_arena = False
-        options.add_session_config_entry("session.disable_prepacking", "1")
-        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        runtime_resources.configure_onnx_media_session_options(options, default_threads=2)
         runtime = dict(sess_options=options, providers=["CPUExecutionProvider"])
         model = onnx_asr.load_model(
             "whisper", artifact.root, quantization=artifact.spec["artifact"]["quantization"], **runtime,
@@ -223,14 +332,16 @@ class OnnxWhisperBackend:
         generation = json.loads((artifact.root / "generation_config.json").read_text(encoding="utf-8"))
         self._start_token = int(generation["decoder_start_token_id"])
         self._end_token = int(generation["eos_token_id"])
-        self._prompt_tokens = (int(generation["task_to_id"]["transcribe"]), int(generation["no_timestamps_token_id"]))
+        self._prompt_tokens = (int(generation["task_to_id"]["transcribe"]),)
+        self._timestamp_begin = int(generation["no_timestamps_token_id"]) + 1
+        self._max_initial_timestamp = int(generation["max_initial_timestamp_index"])
         self._languages = {int(token_id): token for token, token_id in generation["lang_to_id"].items()}
         protocol = {self._start_token, int(generation["prev_sot_token_id"]), *map(int, generation["task_to_id"].values())}
         self._suppressed = np.asarray(sorted({*map(int, generation["suppress_tokens"]), *protocol}), dtype=np.int64)
         self._begin_suppressed = np.asarray(generation["begin_suppress_tokens"], dtype=np.int64)
         policy = self.spec["decoding"]
-        # The prompt (start, language, task, no-timestamps) and the new tokens share the text context.
-        if not policy["temperatures"] or policy["max_new_tokens"] + 4 > int(generation["max_length"]):
+        # The prompt (start, language, task) and the new tokens share the text context.
+        if not policy["temperatures"] or policy["max_new_tokens"] + 3 > int(generation["max_length"]):
             raise ValueError("the speech registry's decoding policy does not fit the model")
         self._model, self._vad = model, vad
 
@@ -250,27 +361,28 @@ class OnnxWhisperBackend:
         candidates = np.fromiter(self._languages, dtype=np.int64)
         return int(candidates[np.argmax(logits[candidates])])
 
-    def _recognize(self, waveform: np.ndarray, language: int | None, seed: int) -> tuple[int, str]:
+    def _text(self, tokens: list[int]) -> str:
+        return self._model.asr._decode_tokens(np.asarray(tokens, dtype=np.int64)).text
+
+    def _recognize(self, waveform: np.ndarray, language: int | None, seed: int) -> tuple[int, tuple[int, ...]]:
         whisper = self._model.asr
         encoding = whisper._encode(waveform[None], np.array([len(waveform)], dtype=np.int64))
         language = language or self._detect_language(encoding)
         policy = self.spec["decoding"]
         rng = np.random.default_rng(seed)
 
-        def detokenize(tokens: list[int]) -> str:
-            return whisper._decode_tokens(np.asarray(tokens, dtype=np.int64)).text
-
         def decode(temperature: float) -> Decoded:
             return decode_window(
                 self._step(encoding), [self._start_token, language, *self._prompt_tokens], policy=policy,
                 suppressed=self._suppressed, begin_suppressed=self._begin_suppressed, end_token=self._end_token,
-                detokenize=detokenize, temperature=temperature, rng=rng,
+                timestamp_begin=self._timestamp_begin, max_initial_timestamp=self._max_initial_timestamp,
+                detokenize=self._text, temperature=temperature, rng=rng,
             )
 
-        return language, decode_with_fallback(decode, policy).text
+        return language, decode_with_fallback(decode, policy).tokens
 
     def transcribe(self, path: Path, *, vault_root: Path | None = None) -> tuple[Iterator[Segment], str]:
-        """Transcribe in fixed windows; with a vault, a stopped run resumes from its last window."""
+        """Transcribe by seeking through the audio; with a vault, a stopped run resumes at its last seek."""
         label = (
             f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
             f":decoding-{self.spec['decoding']['revision']}"
@@ -293,38 +405,47 @@ class OnnxWhisperBackend:
                 ):
                     record = None
                 done = [Segment(**segment) for segment in record["segments"]] if record else []
-                resume_at = int(record["next_offset"]) if record else 0
+                seek = int(record["next_offset"]) if record else 0
                 language = record["language"] if record else None
                 yield from done
-                offset = 0
-                for waveform in audio_chunks(path, rate, chunk_samples):
-                    length = len(waveform)
-                    if offset + length <= resume_at:
-                        offset += length
-                        continue
+                samples = _SeekBuffer(audio_chunks(path, rate, chunk_samples))
+                while True:
+                    window = samples.window(seek, chunk_samples)
+                    length = len(window)
+                    if not length:
+                        break
                     # Normalize only VAD amplitude so quiet speech is not discarded;
                     # Whisper retains the waveform used in the quality comparison.
-                    peak = float(np.max(np.abs(waveform)))
+                    peak = float(np.max(np.abs(window)))
                     if not np.isfinite(peak):
                         raise ValueError("decoded audio contains non-finite samples")
-                    vad_waveform = waveform / peak if peak > 0 else waveform
+                    vad_waveform = window / peak if peak > 0 else window
                     # Silero's 16 kHz input needs one hop and its context samples.
                     padded = np.pad(vad_waveform, (0, max(0, self.spec["vad_min_samples"] - length)))
                     detected = next(self._vad.segment_batch(padded[None], np.array([len(padded)]), rate))
-                    # VAD skips non-speech but leaves spoken chunks unchanged.
+                    advance = length
+                    # VAD skips non-speech but leaves spoken windows unchanged.
                     if next(detected, None) is not None:
                         # Like the local engine, one language serves the whole file.
-                        language, text = self._recognize(waveform, language, seed=offset // chunk_samples)
-                        if text.strip():
-                            segment = Segment(offset / rate, (offset + length) / rate, text)
-                            done.append(segment)
-                            yield segment
-                    offset += length
+                        language, tokens = self._recognize(window, language, seed=seek)
+                        plan = split_window(
+                            tokens, timestamp_begin=self._timestamp_begin, window_samples=length, rate=rate,
+                        )
+                        advance = plan.seek
+                        for timed in plan.segments:
+                            text = self._text(list(timed.tokens)).strip() if timed.tokens else ""
+                            # Clamping timestamps to this window can erase a span beyond its end.
+                            # Drop that text, usually padding hallucination; an overshot final word can also be lost.
+                            if text and timed.end > timed.start:
+                                segment = Segment((seek + timed.start) / rate, (seek + timed.end) / rate, text)
+                                done.append(segment)
+                                yield segment
+                    seek += advance
                     if progress is not None:
                         _write_progress(vault_root, progress, {
                             "format": PROGRESS_FORMAT, "input_sha256": identity, "engine": label,
                             "chunk_samples": chunk_samples,
-                            "language": language, "next_offset": offset,
+                            "language": language, "next_offset": seek,
                             "segments": [segment.__dict__ for segment in done],
                         })
                 if progress is not None:

@@ -1684,11 +1684,17 @@ class OperationAuthorization:
     def _validate_metadata_binding(self, payload, handle, evidence):
         from . import views
 
-        if (evidence.root != self.root.resolve() or evidence.handle is not handle._inspection_identity
+        if (evidence.root != self.root.resolve()
                 or evidence.principal != self.who or evidence.purpose != self.purpose
                 or evidence.store_identity != tuple(sorted(views.store_identity(self.conn).items()))
                 or evidence.payload_hash != hashlib.sha256(_json(payload).encode()).hexdigest()):
             self.refuse()
+        if evidence.handle is not handle._inspection_identity:
+            # Only authentic query evidence may retry across a retired handle.
+            error = (_StaleQueryHistoryProjection
+                     if type(evidence) is _CanonicalInspectionEvidence and evidence.query_sources is not None
+                     else collections.CollectionError)
+            self.refuse(error)
 
     def coverage_evidence(self, payload, handle, contributors):
         """Seal only authenticated coverage receipt paths; retain every current contributor."""
