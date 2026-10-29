@@ -286,6 +286,72 @@
         {"if": {"properties": {"allCells": {"const": true}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}}
       ]
     },
+    "mediaEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "endpoint", "cellIds", "allCells", "credentialEpochs", "maxObjectBytes", "storePolicy", "bucket", "b2SecretName", "signingKeySecretName", "signingKeySecretKey", "publicKeySecretName", "publicKeySecretKey", "state", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "endpoint": {"type": "string", "pattern": "^(?:|http://(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|172\\.(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])):8769/?)$"},
+        "cellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}},
+        "allCells": {"type": "boolean"},
+        "credentialEpochs": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z2-7]{16}$"},
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "maxObjectBytes": {"type": "integer", "minimum": 1},
+        "storePolicy": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {"type": ["boolean", "number"]}
+        },
+        "bucket": {"type": "string"},
+        "b2SecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "signingKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "signingKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "publicKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "publicKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "state": {
+          "type": "object", "additionalProperties": false, "required": ["size", "storageClassName"],
+          "properties": {"size": {"type": "string", "pattern": "^[1-9][0-9]*(Gi|Ti)$"}, "storageClassName": {"type": "string"}}
+        },
+        "resources": {
+          "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+          "properties": {"requests": {"type": "object"}, "limits": {"type": "object"}}
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"endpoint": {"minLength": 1}, "bucket": {"minLength": 1}}}},
+        {"if": {"properties": {"cellIds": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}}}},
+        {"if": {"properties": {"allCells": {"const": true}}}, "then": {"properties": {"enabled": {"const": true}}}}
+      ]
+    },
+    "mediaSlotLease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "endpoint", "cellIds", "allCells", "poolMiB", "queueSeconds", "maxJobSeconds", "leaseMarginSeconds", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string"},
+        "endpoint": {"type": "string", "pattern": "^(?:|http://(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|172\\.(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])):8768/?)$"},
+        "cellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}},
+        "allCells": {"type": "boolean"},
+        "poolMiB": {"type": "integer", "minimum": 1},
+        "queueSeconds": {"type": "integer", "minimum": 30},
+        "maxJobSeconds": {"type": "integer", "minimum": 1},
+        "leaseMarginSeconds": {"type": "integer", "minimum": 15},
+        "resources": {
+          "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+          "properties": {"requests": {"type": "object"}, "limits": {"type": "object"}}
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"image": {"pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"}}}},
+        {"if": {"properties": {"cellIds": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}},
+        {"if": {"properties": {"allCells": {"const": true}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}}
+      ]
+    },
     "cloudGateway": {
       "type": "object",
       "additionalProperties": false,
@@ -300,6 +366,7 @@
           "required": ["enabled"],
           "properties": {"enabled": {"type": "boolean"}}
         },
+        "uploadCellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}},
         "artifactSigningKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "artifactSigningKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "image": {"type": "string"},

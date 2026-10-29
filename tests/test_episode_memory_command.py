@@ -24,6 +24,7 @@ from exomem import (
     commands,
     curation,
     episode_capture,
+    episode_memory,
     episode_model,
     episode_recovery,
     memory_refs,
@@ -1251,6 +1252,32 @@ def test_unknown_and_withheld_about_refs_are_indistinguishable(vault: Path) -> N
     assert {key: hidden[key] for key in ("about_skipped", "ledger", "idempotent")} == {
         key: missing[key] for key in ("about_skipped", "ledger", "idempotent")
     }
+
+
+def test_record_commits_without_about_when_pending_identity_is_unprovable(vault: Path) -> None:
+    import test_pending_recall_delta as delta
+
+    from exomem import pending_recall
+
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    blocked = "Knowledge Base/Notes/Insights/blocked.md"
+    delta._publish_change(
+        vault,
+        batch_id="blocked-about",
+        generation="generation-about",
+        changes=(
+            (blocked, None, delta._page(title="Blocked", body="x", updated="2026-02-01"), None),
+        ),
+    )
+    (vault / blocked).write_bytes(b"\xff")
+    pending_recall.reset()
+
+    with request_scope(owner_principal(surface="mcp")):
+        result = _record(vault, about=[reference])
+
+    assert result["revision"] == 1 and result["about_skipped"] == 1
+    assert result["warnings"] == [episode_memory.ABOUT_UNSETTLED_WARNING]
+    assert "about" not in _frontmatter(vault / result["source"]["path"])
 
 
 # --------------------------------------------------------------------------- #

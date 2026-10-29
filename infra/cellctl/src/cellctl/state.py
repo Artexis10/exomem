@@ -99,6 +99,8 @@ class CellRow:
     backup_key_version: int | None = None
     cell_root_key_wrapped: bytes | None = None
     cell_root_key_version: int | None = None
+    media_key_wrapped: bytes | None = None
+    media_key_version: int | None = None
     content_keys_retired_at: datetime | None = None
     last_live_key_destroyed_at: datetime | None = None
     key_retention_sources: str | None = None

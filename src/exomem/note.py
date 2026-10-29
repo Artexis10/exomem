@@ -81,6 +81,7 @@ from .vault import (
     ensure_canonical_h1,
     escape_wikilinks_for_log,
     find_body_wikilinks,
+    folder_split_warnings,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
@@ -89,6 +90,7 @@ from .vault import (
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
+    respell_new_path,
     rotate_log_if_needed,
     unique_path,
     writer_link_visibility,
@@ -153,7 +155,10 @@ def _plan_project_registrations(
         close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
             raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
-        folder = project_keys_module._title_case_slug(candidate)
+        research_dir = kb_root(vault_root) / "Notes" / "Research"
+        folder = project_keys_module._title_case_slug(
+            candidate, [*folders.values(), *project_keys_module.child_folder_names(research_dir)]
+        )
         if not text.endswith("\n"):
             text += "\n"
         text += (
@@ -1302,7 +1307,10 @@ def _resolve_path(
         topics=topics,
         predecessor=predecessor,
     )
-    folder, stem = placement.folder, placement.stem
+    folder = vault_root / respell_new_path(
+        vault_root, placement.folder.relative_to(vault_root).as_posix()
+    )
+    stem = placement.stem
     from .governance import connector_boundary
 
     try:
@@ -2055,8 +2063,11 @@ def note(
             root,
             home,
             destination=destination,
-            default_destination=canonical_vault_rel(
-                root, (default.folder / f"{default.stem}.md").relative_to(root).as_posix()
+            default_destination=respell_new_path(
+                root,
+                canonical_vault_rel(
+                    root, (default.folder / f"{default.stem}.md").relative_to(root).as_posix()
+                ),
             ),
             source=source,
         )
@@ -2093,6 +2104,7 @@ def note(
     warnings = (
         list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
+        + folder_split_warnings(root, note_path.parent)
     )
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)

@@ -56,6 +56,16 @@ class _VaultLock:
         self._handle = None
 
 
+def arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="python -m exomem.media_worker_child")
+    parser.add_argument("--vault", required=True)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--idle-seconds", type=float, required=True)
+    # What the parent's node media slot reserves; absent when the cell has no slot.
+    parser.add_argument("--leased-anon-bytes", type=int, default=None)
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     from .runtime_resources import bootstrap
 
@@ -64,11 +74,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(resolve_log_dir(), process="media")
 
-    parser = argparse.ArgumentParser(prog="python -m exomem.media_worker_child")
-    parser.add_argument("--vault", required=True)
-    parser.add_argument("--parent-pid", type=int, required=True)
-    parser.add_argument("--idle-seconds", type=float, required=True)
-    args = parser.parse_args(argv)
+    args = arguments(argv)
 
     vault_root = Path(args.vault).resolve()
     lock = _VaultLock(worker_lock_path(vault_root))
@@ -84,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
             vault_root,
             parent_pid=args.parent_pid,
             idle_seconds=max(0.1, args.idle_seconds),
+            leased_anon_bytes=args.leased_anon_bytes,
         )
     finally:
         lock.release()

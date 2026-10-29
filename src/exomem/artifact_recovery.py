@@ -16,7 +16,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-from . import request_budget, reserved_paths, source_corrections, upload_tokens, vault
+from . import (
+    held_fs,
+    media_store,
+    originals,
+    request_budget,
+    reserved_paths,
+    source_corrections,
+    upload_tokens,
+    vault,
+)
 from .governance import companions, connector_boundary, egress, policy
 from .governance.principal import effective_principal, request_scope
 
@@ -45,6 +54,10 @@ class RecoveryUnavailable(ValueError):
         super().__init__(
             "ORIGINAL_UNAVAILABLE: original recovery is unavailable; retry or request a fresh handoff"
         )
+
+
+class RecoveryBusy(RecoveryUnavailable):
+    """Both private spools are in use. The slot is taken before any path is resolved, so this says nothing about a path."""
 
 
 class _CapabilityRedaction(logging.Filter):
@@ -99,29 +112,15 @@ def native_max_bytes() -> int:
 
 
 def _companion(root: Path, path: str) -> tuple[str, dict]:
-    from .governance import raw_protection
-    from .preserve import _sidecar_paths
-
-    source = Path(path).is_relative_to(vault.kb_root(root).relative_to(root) / "Sources")
-    for candidate in _sidecar_paths(Path(path), protected=raw_protection.marked(path), source=source):
-        companion = candidate.as_posix()
-        try:
-            raw = reserved_paths.read_generic_bytes(root, companion).data
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code != "MISSING":
-                raise
-            continue
-        frontmatter, _, marker = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
-        binding = frontmatter.get("governance_companion")
-        bound_path = binding.get("artifact_path") if isinstance(binding, dict) else None
-        if marker is None or path not in (bound_path, frontmatter.get("data_file"), frontmatter.get("evidence_file")):
-            continue
-        return companion, frontmatter
-    raise reserved_paths.ReservedPathLeafError("MISSING")
+    found = originals.bound_companion(root, path)
+    if found is None:
+        raise reserved_paths.ReservedPathLeafError("MISSING")
+    companion, frontmatter, _data = found
+    return companion, frontmatter
 
 
 def _resolve(root: Path, selected: str) -> tuple[str, dict]:
-    path = reserved_paths.resolve_physical_relative(root, selected)
+    path = originals.resolve_original_relative(root, selected)
     try:
         _, metadata = _companion(root, path)
     except reserved_paths.ReservedPathLeafError as error:
@@ -138,7 +137,7 @@ def _resolve(root: Path, selected: str) -> tuple[str, dict]:
         artifact = artifact or metadata.get("data_file") or metadata.get("evidence_file")
         if marker is None or not isinstance(artifact, str):
             raise RecoveryUnavailable from None
-        artifact = reserved_paths.resolve_physical_relative(root, artifact)
+        artifact = originals.resolve_original_relative(root, artifact)
         companion, metadata = _companion(root, artifact)
         if companion != path:
             raise RecoveryUnavailable from None
@@ -267,10 +266,15 @@ def stage(
     byte_proofs: dict | None = None,
 ):
     """Own private storage for one request, including refusal and cancellation cleanup."""
-    if not who.resolved or not _SLOTS.acquire(blocking=False):
+    if not who.resolved:
         raise RecoveryUnavailable
+    if not _SLOTS.acquire(blocking=False):
+        raise RecoveryBusy
     try:
-        with reserved_paths.private_copy_directory() as temporary:
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            temporary = stack.enter_context(reserved_paths.private_copy_directory())
             try:
                 seconds = request_budget.budget_seconds()
                 budget = request_budget.current()
@@ -280,6 +284,7 @@ def stage(
                     else time.monotonic() + seconds
                 )
                 path, metadata = _resolve(root, selected)
+                stack.enter_context(media_store.local_originals(root, (path,)))
                 available = shutil.disk_usage(temporary).free
                 copied = reserved_paths.copy_generic_file(
                     root,
@@ -302,6 +307,8 @@ def stage(
                 yield copied, descriptor
             except (
                 reserved_paths.ReservedPathLeafError,
+                media_store.MediaStoreError,
+                held_fs.HeldFsError,
                 OSError,
                 UnicodeError,
                 vault.FrontmatterError,
@@ -394,6 +401,15 @@ def complete_native_grant(grant: str) -> None:
     if state is None or state.grant is None or state.grant != grant:
         raise RecoveryUnavailable
     state.completed = True
+
+
+def describe(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:
+    """The descriptor of a readable original under the caller's current authority; it mints no delivery."""
+    from dataclasses import replace
+
+    who = replace(effective_principal(), administrative_ingress=False)
+    with stage(root, selected, who, expected_sha256=expected_sha256) as (_copied, descriptor):
+        return descriptor
 
 
 def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:

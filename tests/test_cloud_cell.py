@@ -528,6 +528,9 @@ def test_cloud_surface_exclusions_keep_live_transfer_and_video_sampling_unavaila
     for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values():
         assert exclusion.reason
         assert exclusion.lifted_when
+    # A cell with the gateway key serves transfer_artifact for uploads and original downloads.
+    assert commands_module.CLOUD_SURFACE_EXCLUSIONS["transfer_artifact"].lifted_by_upload_bridge
+    assert not commands_module.CLOUD_SURFACE_EXCLUSIONS["read_media"].lifted_by_upload_bridge
 
 
 def test_cloud_tool_list_allows_staged_adoption(

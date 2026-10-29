@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
@@ -27,6 +27,7 @@ from . import (
     media_jobs,
     media_types,
     memory_refs,
+    originals,
     recall_policy,
     reserved_paths,
 )
@@ -159,7 +160,6 @@ _PROVENANCE_FIELDS = (
 # recorded transcript no longer describes this artifact.
 _IDENTITY_FIELDS = (
     "evidence_file",
-    "original_filename",
     "binary_sha256",
     "binary_size",
 )
@@ -199,7 +199,7 @@ def _runtime_unavailable(vault_root: Path) -> tuple[str, str] | None:
 
 def _is_automatic_media_candidate(vault: Path, binary: Path) -> bool:
     """Reject raw Records media before automatic discovery reads its inputs."""
-    sidecar = binary.with_name(binary.name + ".md")
+    sidecar = originals.sidecar_path(binary)
     if not recall_policy.is_structured_only_path(vault, sidecar):
         return True
     try:
@@ -280,6 +280,36 @@ def reconcile_media(
         )
     rel_binary = lexical_relative
     try:
+        stored = originals.original_state(vault, binary)
+    except reserved_paths.ReservedPathLeafError:
+        stored = None  # The existing confinement path supplies the public refusal.
+    if stored is not None and stored.state in {"evicted", "cached"}:
+        from . import media_store
+
+        _confine_sidecar(vault, stored.sidecar_path)
+        tier = access.access_tier(vault, rel_binary)
+        if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+            if not explicit:
+                return None
+            raise MediaProcessingError("MEDIA_PATH_ACCESS_DENIED", "media path is not writable")
+        if explicit and stored.state == "evicted":
+            with media_store.open_original(vault, binary):
+                return reconcile_media(vault, binary, explicit=explicit,
+                                       commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal)
+        if (stored.state == "evicted"
+                or media_store.cache_matches(vault, binary, snapshot=stored)
+                or media_store.recover_cache(vault, binary, stored)):
+            text = _read_sidecar_text(vault, stored.sidecar_path)
+            if text is not None and has_completed_transcript(text, media_type=media_type):
+                _retire_completed_ocr(vault, binary, stored.sidecar_path, media_type)
+                return ReconcileResult(media_type, "completed", stored.sidecar_path, None)
+            store = media_jobs.MediaJobStore(vault)
+            job = store.get_by_binary(binary)
+            if job is None and media_engines.stage_enabled(media_type):
+                job_id = store.enqueue(media_jobs.MediaJob(binary, stored.sidecar_path, media_type))
+                job = store.get(job_id)
+            return ReconcileResult(media_type, job.state if job else "pending", stored.sidecar_path, job.id if job else None)
+    try:
         retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code not in {"MISSING", "RESERVED_PATH"}:
@@ -297,7 +327,7 @@ def reconcile_media(
             f"media path is {tier} under _access.yaml: {rel_binary}",
         )
 
-    sidecar = binary.with_name(binary.name + ".md")
+    sidecar = stored.sidecar_path if stored is not None else originals.sidecar_path(binary)
     _confine_sidecar(vault, sidecar)
     original = _read_sidecar_text(vault, sidecar)
     provenance = _read_provenance(
@@ -536,6 +566,10 @@ def reconcile_media(
             result = ReconcileResult(media_type, state, sidecar, job_id)
 
     assert result is not None
+    if originals.binding_for(vault) is not None:
+        from . import media_store
+
+        media_store.enqueue_offload(vault, binary)
     return result
 
 
@@ -554,6 +588,10 @@ def reconcile_all_media(
     if isinstance(limit, bool) or limit <= 0:
         raise ValueError("media reconciliation limit must be a positive integer")
     vault = Path(vault_root).resolve()
+    if originals.binding_for(vault) is not None:
+        from . import media_store
+
+        media_store.enqueue_offloads(vault)
     reconcile_one = reconcile_one or (
         lambda binary: reconcile_media(vault, binary, explicit=False)
     )
@@ -633,6 +671,12 @@ def _iter_rotating_governed_media(
 
 def _iter_governed_media(vault: Path, kb_root: Path):
     """Yield supported binaries from a deterministic, hidden/pruned KB walk."""
+    if originals.binding_for(vault) is not None:
+        from . import media_store
+
+        for stored in media_store.bound_originals(vault):
+            if stored.state == "evicted" and classify_media(stored.path):
+                yield stored.path
     stack = [kb_root]
     while stack:
         directory = stack.pop()
@@ -694,10 +738,10 @@ def _needs_reconciliation(
     binary: Path,
     store: media_jobs.MediaJobStore | None,
 ) -> bool:
-    sidecar = binary.with_name(binary.name + ".md")
     try:
+        sidecar = originals.original_state(vault, binary).sidecar_path
         original = _read_sidecar_text(vault, sidecar)
-    except MediaProcessingError:
+    except (MediaProcessingError, reserved_paths.ReservedPathLeafError):
         return True
     if original is None:
         return True
@@ -771,7 +815,7 @@ def _is_pending_sidecar_shape(
         _capture_owned_shape_is_valid(frontmatter)
         and frontmatter.get("media_type") == media_type
         and frontmatter.get("evidence_file") == expected_path
-        and frontmatter.get("original_filename") == binary.name
+        and frontmatter.get("original_filename") == _original_filename(frontmatter, binary.name)
         and str(frontmatter.get("extracted_by", "")).strip().lower() == "pending"
         and frontmatter.get("processing_state") == "pending"
         and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
@@ -793,10 +837,14 @@ def _is_completed_sidecar_shape(
     present = tuple(field in frontmatter for field in _PROVENANCE_FIELDS)
     if not all(present):
         return False
-    try:
-        current = binary.stat()
-    except OSError:
-        return False
+    stored = originals.original_state(vault, binary)
+    if stored.state == "evicted":
+        current_size = stored.binary_size
+    else:
+        try:
+            current_size = binary.stat().st_size
+        except OSError:
+            return False
     # Deliberately NOT comparing binary_mtime_ns/binary_ctime_ns. They are cache
     # hints, not identity: `binary.stat()` here and the `os.fstat()` that recorded
     # them in _read_provenance can disagree for an unchanged file (see the note in
@@ -804,8 +852,8 @@ def _is_completed_sidecar_shape(
     # Treating that drift as "not completed" made every pass re-render the sidecar.
     expected = {
         "evidence_file": binary.relative_to(vault).as_posix(),
-        "original_filename": binary.name,
-        "binary_size": current.st_size,
+        "original_filename": _original_filename(frontmatter, binary.name),
+        "binary_size": current_size,
     }
     digest = str(frontmatter.get("binary_sha256", ""))
     return (
@@ -909,7 +957,7 @@ def _pending_sidecar_matches_current_provenance(
         vault, binary, frontmatter, media_type
     ):
         return False
-    values = _provenance_values(provenance)
+    values = _provenance_values(provenance, frontmatter=frontmatter)
     return all(frontmatter.get(field) == values[field] for field in _PROVENANCE_FIELDS)
 
 
@@ -999,6 +1047,34 @@ def _retry_ambiguous_batch_failure(
 
 
 def retry_media(
+    vault_root: Path, binary_path: str | Path, *,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    from .media_store import open_original
+
+    if originals.binding_for(vault_root) is None:
+        return _retry_media_local(vault_root, binary_path, commit_guard=commit_guard)
+    vault = Path(vault_root).resolve()
+    binary = Path(binary_path)
+    binary = Path(os.path.abspath(binary if binary.is_absolute() else vault / binary))
+    try:
+        snapshot = originals.original_state(vault, binary)
+    except (reserved_paths.ReservedPathLeafError, ValueError):
+        return _retry_media_local(vault, binary, commit_guard=commit_guard)
+    if snapshot.state != "evicted":
+        return _retry_media_local(vault, binary, commit_guard=commit_guard)
+    _confine_sidecar(vault, snapshot.sidecar_path)
+    _require_media_access(vault, binary)
+    try:
+        with open_original(vault, binary):
+            return _retry_media_local(vault, binary, commit_guard=commit_guard)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            raise
+        raise MediaProcessingError("MEDIA_NOT_FOUND", "media artifact does not exist") from error
+
+
+def _retry_media_local(
     vault_root: Path,
     binary_path: str | Path,
     *,
@@ -1023,6 +1099,14 @@ def retry_media(
             )
 
     result = reconcile_media(vault, binary, commit_guard=commit_guard)
+    from . import media_store
+
+    offloads = 0
+    if originals.binding_for(vault) is not None:
+        boundary = commit_guard() if commit_guard is not None else nullcontext()
+        with boundary:
+            offloads = media_store.retry_offload(vault, binary)
+        result = replace(result, requeued=result.requeued + offloads)
     if result.state == "completed" or result.job_id is None:
         return result
     if _runtime_unavailable(vault) is not None:
@@ -1041,7 +1125,7 @@ def retry_media(
         state,
         result.sidecar_path,
         result.job_id,
-        requeued=requeued,
+        requeued=requeued + offloads,
     )
 
 
@@ -1263,7 +1347,7 @@ def _render_pending_sidecar(
             adoption_receipt = candidate_receipt
         if _is_canonical_pending_shape(frontmatter, media_type, provenance):
             rendered = original
-            pending_fields = _pending_fields(provenance)
+            pending_fields = _pending_fields(provenance, frontmatter=frontmatter)
             if frontmatter.get("processing_state") == media_jobs.BLOCKED:
                 pending_fields = pending_fields[1:]
             for field, value in pending_fields:
@@ -1339,11 +1423,20 @@ def _strip_empty_extracted_sections(text: str) -> str:
     return _EXTRACTED_HEADING_RE.sub("", text)
 
 
-def _pending_fields(provenance: _BinaryProvenance) -> tuple[tuple[str, object], ...]:
+def _original_filename(frontmatter: dict[str, object] | None, fallback: str) -> str:
+    # The capture's display filename does not identify its stored bytes; preserve's
+    # filename rule decides which recorded names are well formed.
+    value = frontmatter.get("original_filename") if frontmatter is not None else None
+    return value if isinstance(value, str) and value and _preserve_module()._sanitize_filename(value) == value else fallback
+
+
+def _pending_fields(
+    provenance: _BinaryProvenance, *, frontmatter: dict[str, object] | None = None,
+) -> tuple[tuple[str, object], ...]:
     return (
         ("processing_state", "pending"),
         ("evidence_file", yaml_scalar(provenance.relative_path)),
-        ("original_filename", yaml_scalar(provenance.original_filename)),
+        ("original_filename", yaml_scalar(_original_filename(frontmatter, provenance.original_filename))),
         ("binary_sha256", provenance.sha256),
         ("binary_size", provenance.size),
         ("binary_mtime_ns", provenance.mtime_ns),
@@ -1388,7 +1481,7 @@ def _completed_provenance_state(
         return "not-completed"
     if not _is_completed_transcript_shape(frontmatter, body, media_type):
         return "not-completed"
-    values = _provenance_values(provenance)
+    values = _provenance_values(provenance, frontmatter=frontmatter)
     for field in _IDENTITY_FIELDS:
         if field in frontmatter and frontmatter.get(field) != values[field]:
             return "conflict"
@@ -1401,7 +1494,8 @@ def _completed_provenance_state(
         field in frontmatter and frontmatter.get(field) != values[field]
         for field in _TIMESTAMP_FIELDS
     )
-    if drifted or not all(field in frontmatter for field in _PROVENANCE_FIELDS):
+    if (drifted or not all(field in frontmatter for field in _PROVENANCE_FIELDS)
+            or frontmatter.get("original_filename") != values["original_filename"]):
         return "repairable"
     return "valid"
 
@@ -1420,18 +1514,20 @@ def _backfill_completed_provenance(
     # _pending_fields carries the SERIALIZED form (yaml_scalar-quoted for strings);
     # compare against the parsed semantic value so an already-correct quoted field
     # is not rewritten on every pass.
-    semantic = _provenance_values(provenance)
-    for field, serialized in _pending_fields(provenance)[1:]:
+    semantic = _provenance_values(provenance, frontmatter=existing)
+    for field, serialized in _pending_fields(provenance, frontmatter=existing)[1:]:
         if field not in existing or existing.get(field) != semantic[field]:
             rendered = preserve._set_frontmatter_field(rendered, field, str(serialized))
     return rendered
 
 
-def _provenance_values(provenance: _BinaryProvenance) -> dict[str, object]:
+def _provenance_values(
+    provenance: _BinaryProvenance, *, frontmatter: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Provenance as parsed frontmatter would carry it, for comparison."""
     return {
         "evidence_file": provenance.relative_path,
-        "original_filename": provenance.original_filename,
+        "original_filename": _original_filename(frontmatter, provenance.original_filename),
         "binary_sha256": provenance.sha256,
         "binary_size": provenance.size,
         "binary_mtime_ns": provenance.mtime_ns,
@@ -1456,7 +1552,7 @@ def mark_processing_unavailable(
     preserve = _preserve_module()
     changed = 0
     for job in jobs:
-        if job.id is None:
+        if job.id is None or job.media_type == media_jobs.OFFLOAD_MEDIA_TYPE:
             continue
         written: list[Path] = []
         publication_intents: list[object] = []

@@ -25,8 +25,10 @@ from exomem import list_directory as list_dir_module
 from exomem import list_inbound_links as inbound_module
 from exomem import list_trash as list_trash_module
 from exomem import move_file as move_module
+from exomem import preserve as preserve_module
 from exomem import recover_from_trash as recover_module
 from exomem import set_frontmatter_field as set_fm_module
+from exomem import vault as vault_module
 from exomem.command_surface import listed_names
 from exomem.operation_entries import DEFAULT_TOOL_SHAPE
 
@@ -503,6 +505,92 @@ def test_outside_content_still_routes_through_the_capture_writers(vault: Path) -
 
     assert exc.value.code == "APPEND_ONLY"
     assert "preserve" in exc.value.reason
+
+
+def test_move_repoints_an_evidence_back_reference_and_keeps_every_other_byte(
+    vault: Path,
+) -> None:
+    """Defect: moving a note that Evidence names in `ingested_into` refuses APPEND_ONLY."""
+    note_rel = "Knowledge Base/Notes/food/trial.md"
+    (vault / note_rel).parent.mkdir(parents=True)
+    (vault / note_rel).write_text("---\ntype: note\n---\n\nTrial.\n", encoding="utf-8")
+    captured = preserve_module.preserve(
+        vault, scope="food", category="receipts", filename="receipt.txt", content="milk"
+    )
+    sidecar = vault / captured.sidecar_path
+    before = vault_module.append_frontmatter_list_item(
+        sidecar.read_text(encoding="utf-8"),
+        "ingested_into",
+        "[[Knowledge Base/Notes/food/trial]]",
+    )
+    sidecar.write_text(before, encoding="utf-8")
+
+    result = move_module.move_file(
+        vault,
+        old_path=note_rel,
+        new_path="Knowledge Base/Notes/garden/trial.md",
+        today=TODAY,
+    )
+
+    assert captured.sidecar_path in result.files_touched
+    assert sidecar.read_text(encoding="utf-8") == before.replace(
+        "Notes/food/trial", "Notes/garden/trial"
+    )
+
+
+def test_move_still_refuses_a_link_in_an_evidence_body(vault: Path) -> None:
+    """Defect: the back-reference exception also rewrites captured Evidence content."""
+    note_rel = "Knowledge Base/Notes/food/trial.md"
+    (vault / note_rel).parent.mkdir(parents=True)
+    (vault / note_rel).write_text("---\ntype: note\n---\n\nTrial.\n", encoding="utf-8")
+    captured = preserve_module.preserve(
+        vault, scope="food", category="receipts", filename="receipt.txt", content="milk"
+    )
+    sidecar = vault / captured.sidecar_path
+    before = vault_module.append_frontmatter_list_item(
+        sidecar.read_text(encoding="utf-8"),
+        "ingested_into",
+        "[[Knowledge Base/Notes/food/trial]]",
+    ) + "\nSee [[Knowledge Base/Notes/food/trial]].\n"
+    sidecar.write_text(before, encoding="utf-8")
+
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path=note_rel,
+            new_path="Knowledge Base/Notes/garden/trial.md",
+            today=TODAY,
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert (vault / note_rel).is_file()
+
+
+def test_move_refuses_an_evidence_page_that_would_keep_a_link_to_the_old_path(vault: Path) -> None:
+    """Defect: an escaped back-reference matched the link count, so a body link kept the old path."""
+    note_rel = "Knowledge Base/Notes/food/trial.md"
+    (vault / note_rel).parent.mkdir(parents=True)
+    (vault / note_rel).write_text("---\ntype: note\n---\n\nTrial.\n", encoding="utf-8")
+    captured = preserve_module.preserve(
+        vault, scope="food", category="receipts", filename="receipt.txt", content="milk"
+    )
+    sidecar = vault / captured.sidecar_path
+    text = sidecar.read_text(encoding="utf-8")
+    escaped = 'ingested_into:\n  - "[[Knowledge Base/Notes/food/tri\\x61l]]"\n'
+    before = text.replace("ingested_into: []\n", escaped, 1) + "\nSee [[Knowledge Base/Notes/food/trial]].\n"
+    sidecar.write_text(before, encoding="utf-8")
+
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path=note_rel,
+            new_path="Knowledge Base/Notes/garden/trial.md",
+            today=TODAY,
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert sidecar.read_text(encoding="utf-8") == before
 
 
 def test_move_file_allows_intra_sources_relocation(vault: Path) -> None:

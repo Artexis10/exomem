@@ -629,11 +629,13 @@ class Supervisor:
                         "error": "could not record the transition; current worker is still serving",
                     }
             compatibility_refused = False
+            cutover_started = False
             try:
                 # The cutover budget bounds everything that happens while
                 # abandoning the upgrade is still cheap. Past the stop there is
                 # no worker to give admission back to, so it ends there.
                 async with asyncio.timeout(deadline.remaining(40)):
+                    cutover_started = True
                     await self.ingress.detach_streams()
                     # Enrollment may have changed during standby warming or
                     # draining. Refuse before stopping the worker still serving.
@@ -720,7 +722,8 @@ class Supervisor:
             # unavailable, discards the standby and stops the worker -- and
             # writing a `failed` record here would misreport a shutdown as one.
             except Exception:  # noqa: BLE001 - every post-stop failure must retain recovery state
-                if compatibility_refused:
+                if compatibility_refused or (not resume and not cutover_started):
+                    # Before detachment starts, failure leaves the serving worker untouched.
                     # Leave the cutover timeout before cleanup; a slow discard
                     # must not turn a pre-stop refusal into worker downtime.
                     if not resume:
@@ -733,7 +736,11 @@ class Supervisor:
                     await self._discard_standby(standby)
                     return {
                         "ok": False,
-                        "error": "candidate state compatibility changed; refused before stop",
+                        "error": (
+                            "candidate state compatibility changed; refused before stop"
+                            if compatibility_refused
+                            else "upgrade failed before stream detachment; current worker is still serving"
+                        ),
                     }
                 self.phase = "recovery-required"
                 self.ingress.unavailable()

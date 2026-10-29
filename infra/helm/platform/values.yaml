@@ -272,17 +272,83 @@ artifactBroker:
   endpoint: ""
   cellIds: []
   allCells: false
+  # The public half of the gateway's artifact signing pair. The broker verifies grants
+  # with it, and cellctl gives it to the cells cloudGateway.uploadCellIds selects.
   publicKeySecretName: exomem-artifact-broker-public-key
   publicKeySecretKey: public-key
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
 
+# add-cloud-media-store: the media edge, the one place that holds the bucket's
+# credential. Cells reach it through a literal Service IP on port 8769. It runs
+# the broker's image (`artifactBroker.image`). `cellIds` lists the cells it serves,
+# such as one canary; `allCells` serves every cell, including each cell created
+# later, and works beside the list. Raise a cell's number in `credentialEpochs`
+# to replace its credential and revoke the old one. `storePolicy` holds the
+# eviction and hydration settings cells read beside their keys. Create the
+# signing key and the edge's Secrets first (docs/runbooks/cloud-media-edge.md).
+mediaEdge:
+  enabled: false
+  endpoint: ""
+  cellIds: []
+  allCells: false
+  credentialEpochs: {}
+  maxObjectBytes: 1073741824
+  storePolicy: {}
+  bucket: ""
+  b2SecretName: exomem-media-edge-b2
+  signingKeySecretName: exomem-media-edge-signing-key
+  signingKeySecretKey: signing-key
+  publicKeySecretName: exomem-media-edge-public-key
+  publicKeySecretKey: public-key
+  state:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+# The node media-slot lease caps heavy media work across all cells of the node
+# (cloud-multimodal-processing D10). Stage it before any cell asks: set
+# `endpoint` to the verified Service IP, list a canary in `cellIds`, then turn
+# `allCells` on. `poolMiB` is the anonymous memory the node can spare for media
+# beyond what the serving pods use; measure it on the node (docs/runbooks/cloud-media.md).
+# `queueSeconds` is how long a waiting cell may go without polling. A cell states
+# its own media job timeout and byte budget; the service refuses a budget above
+# `poolMiB` and a timeout above `maxJobSeconds`. A lease lasts the stated timeout
+# plus `leaseMarginSeconds`, and after a restart the service grants nothing for
+# `maxJobSeconds` plus the margin. Keep `maxJobSeconds` at the longest
+# EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS any cell runs.
+mediaSlotLease:
+  enabled: false
+  image: ""
+  endpoint: ""
+  cellIds: []
+  allCells: false
+  poolMiB: 1280
+  queueSeconds: 60
+  maxJobSeconds: 900
+  leaseMarginSeconds: 60
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 128Mi}
+
 cloudGateway:
   enabled: false
   artifactTransportEnabled: false
   artifactSigningKeySecretName: exomem-cloud-artifact-signing-key
   artifactSigningKeySecretKey: signing-key
+  # Cells that serve the exact-byte upload handoff (docs/runbooks/cloud-upload-handoff.md).
+  # This one list selects them for the gateway (EXOMEM_CLOUD_UPLOAD_CELL_IDS) and for
+  # cellctl, which gives exactly these cells the public half of the signing pair
+  # (artifactBroker.publicKeySecretName), so the two selections cannot differ. The
+  # gateway has no all-cells switch for uploads. Empty is off and renders as before.
+  # A non-empty list needs cloudGateway.enabled, cellctl.enabled, the signing key
+  # Secret above, and traefik.ports.websecure.transport.respondingTimeouts.readTimeout
+  # of at least 900s: Traefik reads a whole request body within that time, 60s by default.
+  # The chart checks the timeout only when cloudIngress.enabled; it never checks the Secrets.
+  uploadCellIds: []
   # Enable only after the matched web/gateway release, reviewer schema/grants,
   # and dedicated complimentary sample account are verified. Ordinary Cloud
   # accounts do not require this separate reviewer authority.

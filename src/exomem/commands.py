@@ -26,6 +26,7 @@ import logging
 import mimetypes
 import os
 import re
+import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
@@ -2115,8 +2116,7 @@ def op_bootstrap(
                 "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
-                    "args": {"operation": "upload"},
-                    "endpoint": "/upload",
+                    "args": {"hold": True},
                     "when": "the client cannot supply file handles",
                 },
             },
@@ -2133,7 +2133,7 @@ def op_bootstrap(
                     if profile != "compact"
                     else {}
                 ),
-                "cloud": "outbound delivery is unavailable",
+                "cloud": "no link or blob; the result names `exomem cloud download <path>`, which fetches the exact original over the owner's sign-in",
             },
         },
         "performance_profiles": {
@@ -2255,8 +2255,11 @@ def op_bootstrap(
             {
                 "goal": "preserve binaries when the client cannot supply file handles",
                 "call": (
-                    "transfer_artifact(operation='upload') then POST multipart bytes to /upload; "
-                    "success requires stored_path, size, and hash"
+                    "transfer_artifact(operation='upload', lane='source', hold=true, "
+                    "expected_sha256='<sha256>'), then `exomem attach <file> --handoff-file "
+                    "<json> --root <dir>` or the same multipart POST to upload_url, then "
+                    "capture_source(files=[<returned file>], expected_sha256=...); "
+                    "success requires its receipt"
                 ),
             },
         ]
@@ -8378,8 +8381,9 @@ def op_capture_source(
     """Save Source text or original files.
 
     Never retype originals: use files, or transfer_artifact(upload, lane=source,
-    hold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.
-    Cloud needs handles; stdio needs HTTP MCP. source_kind is required.
+    hold=true, expected_sha256=...) then exomem attach --handoff-file or the same
+    POST on HTTP MCP. A Cloud cell without transfer_artifact needs handles; stdio
+    needs HTTP MCP. source_kind is required.
 
     Args:
         content: Authored text, or supply files.
@@ -8789,9 +8793,8 @@ def op_preserve_artifacts(
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
-    Attachments or single-use exomem attach handles; else
-    transfer_artifact(operation="upload") then /upload. Keep the original,
-    not only a transcription. No model-visible base64.
+    Attachments or single-use exomem attach handles; else a held transfer_artifact
+    upload. Keep the original, not only a transcription. No model-visible base64.
     Per handle: stored, already_stored (exact bytes present; no write), or failed.
     Lost replies replay on retry.
 
@@ -8830,10 +8833,10 @@ def op_transfer_artifact(
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False,
 ) -> dict:
-    """Prepare an original upload or download; a handoff does not prove custody.
+    """Prepare an upload or download; a handoff does not prove custody.
 
-    Upload: hold=true with expected_sha256, then exomem attach --handoff-file.
-    Capture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.
+    Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
+    Capture its handle. Download: supply artifact; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
@@ -8845,8 +8848,19 @@ def op_transfer_artifact(
     from . import cloud_cell
 
     if cloud_cell.cloud_mode_enabled() and not hold:
-        # A Cloud cell has only the gateway's held-upload receiver: no download or credential upload route.
-        raise ValueError("INVALID_MODE: an Exomem Cloud cell supports only hold=true uploads")
+        # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
+        if operation != "download" or not artifact:
+            raise ValueError("INVALID_MODE: an Exomem Cloud cell supports hold=true uploads and original downloads")
+        from . import artifact_recovery
+
+        # The agent fetches the bytes itself over its own sign-in; no link or native resource leaves the cell.
+        found = artifact_recovery.describe(vault_root, artifact, expected_sha256=expected_sha256)
+        return {
+            "handoff_status": "handoff_prepared",
+            "committed": False,
+            "artifact": found,
+            "next_step": "exomem cloud download -- " + shlex.quote(found["path"]),
+        }
     if hold:
         if operation != "upload" or artifact is not None or expected_sha256 is None:
             raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
@@ -8884,6 +8898,20 @@ def op_transfer_artifact(
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
+        if lane == "source":
+            from . import vocabulary_authority, vocabulary_gate
+
+            try:
+                # The Source writer keeps every original opaque, including original Markdown.
+                format_limit = vocabulary_gate.artifact_admission(vault_root)
+                if format_limit is not None:
+                    handoff["resumable"]["max_bytes"] = min(handoff["resumable"]["max_bytes"], format_limit)
+            except (vocabulary_authority.VocabularyAuthorityDenied, vocabulary_authority.VocabularyAuthorityUnavailable):
+                handoff.pop("resumable", None)
+                handoff["resumable_unavailable"] = {
+                    "code": "SOURCE_UPLOAD_UNAVAILABLE",
+                    "reason": "Source uploads are unavailable for the active write format",
+                }
     return handoff
 
 
@@ -8952,6 +8980,14 @@ def _process_media(
                 "MEDIA_PATHS_UNSUPPORTED_FOR_STATUS",
                 "process_media paths is only supported for process or retry",
             )
+        selected = _selected_media_paths(vault_root, path=None, paths=[path]) if path is not None else None
+        if selected is not None:
+            from . import deferred_index
+
+            row = media_jobs.tool_status(vault_root, path=selected[0][1])
+            row["index_refresh"] = deferred_index.exact_full_status(vault_root, row["sidecar_path"])
+            # All exact-path facts stay in the row that terminal governance can withhold.
+            return {"operation": operation, "results": [row]}
         return {
             "operation": operation,
             **media_jobs.tool_status(vault_root),
@@ -14135,11 +14171,13 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                 command="transfer_artifact",
                 reason=(
                     "This Exomem Cloud cell is not configured for the gateway's "
-                    "upload handoff, and direct browser transfers are out of "
-                    "scope for Exomem Cloud (design Non-Goals)."
+                    "upload handoff and proved original download, and direct "
+                    "browser transfers are out of scope for Exomem Cloud "
+                    "(design Non-Goals)."
                 ),
                 lifted_when=(
-                    "the cell is configured for gateway upload handoffs"
+                    "the cell is configured for gateway upload handoffs "
+                    "and original downloads"
                 ),
                 lifted_by_upload_bridge=True,
             ),

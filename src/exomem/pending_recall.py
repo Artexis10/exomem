@@ -221,6 +221,9 @@ class _VaultState:
     paths: frozenset[str]
     batches: tuple[object, ...]
     hydrated_at: float
+    #: A footprint-only fallback holds no proven bodies. The next request owes one
+    #: re-hydration, which the proven-body memo keeps cheap.
+    footprint_only: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -669,8 +672,12 @@ def overlay(vault_root: Path) -> PendingOverlay:
     key = _key(root)
     with _STATE_LOCK:
         state = _STATES.get(key)
-    if state is not None and derived_receipts.pending_visibility_snapshot_is_current(
-        root, state.snapshot_generation
+    if (
+        state is not None
+        and not state.footprint_only
+        and derived_receipts.pending_visibility_snapshot_is_current(
+            root, state.snapshot_generation
+        )
     ):
         return PendingOverlay(
             outcome=state.outcome,
@@ -698,9 +705,10 @@ def overlay(vault_root: Path) -> PendingOverlay:
                 _forget(key)
                 return _warming("pending_visibility_unprovable", snapshot.snapshot_generation)
             projection = _Projection(rows={}, unprovable=snapshot.paths)
-            degraded = True
+            degraded = footprint_only = True
         else:
             degraded = snapshot.outcome == "overflow" or bool(projection.unprovable)
+            footprint_only = False
     except (OSError, RuntimeError, TypeError, ValueError):
         _forget(key)
         return _warming("pending_visibility_unprovable")
@@ -713,6 +721,7 @@ def overlay(vault_root: Path) -> PendingOverlay:
             outcome="degraded" if degraded else "ready",
             rows=projection.rows, paths=snapshot.paths,
             batches=tuple(snapshot.batches), hydrated_at=time.monotonic(),
+            footprint_only=footprint_only,
         )
     return PendingOverlay(
         outcome="degraded" if degraded else "ready",
