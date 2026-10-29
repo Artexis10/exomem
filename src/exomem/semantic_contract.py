@@ -1142,6 +1142,7 @@ class SemanticCorpusContext:
     resolver_kb_stripped: frozenset[str]
     resolver_stems: Mapping[str, tuple[str, ...]]
     resolver_titles: Mapping[str, tuple[str, ...]]
+    resolver_candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]] = field(init=False)
     raw_target_dependencies: Mapping[str, tuple[str, ...]]
     relation_facts: tuple[RelationFact, ...]
     eligible_governed_paths: frozenset[str]
@@ -1161,6 +1162,11 @@ class SemanticCorpusContext:
             MappingProxyType({key: self.pages[key] for key in sorted(self.pages)}),
         )
         object.__setattr__(self, "resolver_entries", tuple(self.resolver_entries))
+        resolver = vault.WikilinkResolver.from_entries(self.vault_root, self.resolver_entries)
+        object.__setattr__(
+            self, "resolver_candidates_by_key",
+            _mapping_of_tuples(resolver.candidates_by_key),
+        )
         object.__setattr__(self, "resolver_full_paths", frozenset(self.resolver_full_paths))
         object.__setattr__(self, "resolver_kb_stripped", frozenset(self.resolver_kb_stripped))
         object.__setattr__(
@@ -1988,9 +1994,6 @@ def _resolve_reference_wikilink_from_context(
     view, see `vault.writer_link_visibility`); `None` matches every page.
     """
 
-    def _seen(no_ext: str) -> bool:
-        return visible is None or visible(f"{no_ext}.md")
-
     cleaned = str(raw_target or "").strip()
     if cleaned.startswith("[[") and cleaned[-2:] == "]]":
         cleaned = cleaned[2:-2].strip()
@@ -2000,25 +2003,38 @@ def _resolve_reference_wikilink_from_context(
         return ReferenceWikilinkResolution("unresolved")
 
     if "/" in cleaned:
-        candidates = (cleaned, f"{vault.kb_prefix()}{cleaned}")
-        for candidate in candidates:
-            if candidate in context.resolver_full_paths and _seen(candidate):
-                return ReferenceWikilinkResolution("resolved", f"{candidate}.md")
+        for key in (cleaned, f"{vault.kb_prefix()}{cleaned}"):
+            matches = vault.wikilink_candidates(
+                context.resolver_candidates_by_key, (key,), visible=visible
+            )
+            if len(matches) > 1:
+                return ReferenceWikilinkResolution("ambiguous")
+            if matches:
+                return ReferenceWikilinkResolution("resolved", matches[0].path)
         # No Knowledge-Base-relative step follows: `normalize_wikilink` matches that form
         # by `kb_prefix() + cleaned` in `full_paths`, which the second candidate above
         # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
         # with the same name decide the result.
         return ReferenceWikilinkResolution("unresolved")
 
-    matches = set(context.resolver_stems.get(cleaned, ()))
-    matches.update(context.resolver_titles.get(cleaned.lower(), ()))
-    if visible is not None:
-        matches = {match for match in matches if _seen(match)}
+    matches = {
+        candidate.path for candidate in vault.wikilink_candidates(
+            context.resolver_candidates_by_key,
+            context.resolver_stems.get(cleaned, ()), visible=visible,
+        )
+    }
+    matches.update(
+        candidate.path for candidate in vault.wikilink_candidates(
+            context.resolver_candidates_by_key,
+            context.resolver_titles.get(cleaned.lower(), ()),
+            title_key=cleaned.lower(), visible=visible,
+        )
+    )
     if len(matches) > 1:
         return ReferenceWikilinkResolution("ambiguous")
     if not matches:
         return ReferenceWikilinkResolution("unresolved")
-    return ReferenceWikilinkResolution("resolved", f"{next(iter(matches))}.md")
+    return ReferenceWikilinkResolution("resolved", next(iter(matches)))
 
 
 def resolve_reference_wikilink(
@@ -2090,6 +2106,7 @@ def borrow_link_snapshot(
             kb_stripped=context.resolver_kb_stripped,
             stems=context.resolver_stems,
             titles=context.resolver_titles,
+            candidates_by_key=context.resolver_candidates_by_key,
         ),
         snapshot.reference_owners,
     )
@@ -3339,6 +3356,7 @@ def build_corpus_context_with_census(
             kb_stripped=context.resolver_kb_stripped,
             stems=context.resolver_stems,
             titles=context.resolver_titles,
+            candidates_by_key=context.resolver_candidates_by_key,
         )
         facts = _derive_relation_facts(root, states, resolver, corpus_registry)  # type: ignore[arg-type]
         enriched = _context_from_resolved_state(
@@ -3981,6 +3999,7 @@ def _context_with_stable_topology_candidate(
         kb_stripped=context.resolver_kb_stripped,
         stems=context.resolver_stems,
         titles=context.resolver_titles,
+        candidates_by_key=context.resolver_candidates_by_key,
     )
     # Incoming exact endpoints depend on the target's anchors and fingerprints.
     affected = {state.path} | {
@@ -4157,7 +4176,7 @@ def _resolve_target(
             return "unresolved", None, authored_anchor, alias
         return "resolved", f"{source_path}#{authored_anchor}", authored_anchor, alias
     try:
-        normalized, _ = vault.normalize_wikilink(
+        normalized, _, candidate = vault._normalize_wikilink(
             raw_target, root, resolver=resolver, strict=True, visible=visible
         )
     except vault.AmbiguousWikilinkError:
@@ -4165,7 +4184,7 @@ def _resolve_target(
     except vault.UnresolvedWikilinkError:
         return "unresolved", None, authored_anchor, alias
     path, separator, anchor = normalized.partition("#")
-    resolved = path if path.lower().endswith(".md") else f"{path}.md"
+    resolved = candidate.path if candidate is not None else path
     if separator:
         resolved = f"{resolved}#{anchor}"
     return "resolved", resolved, anchor or authored_anchor, alias
@@ -4581,6 +4600,7 @@ class _WikilinkResolverView:
     kb_stripped: frozenset[str]
     stems: Mapping[str, tuple[str, ...]]
     titles: Mapping[str, tuple[str, ...]]
+    candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
 
 
 def _qualifying_body_wikilink_targets(
@@ -4594,21 +4614,16 @@ def _qualifying_body_wikilink_targets(
         kb_stripped=corpus.resolver_kb_stripped,
         stems=corpus.resolver_stems,
         titles=corpus.resolver_titles,
+        candidates_by_key=corpus.resolver_candidates_by_key,
     )
     targets: list[str] = []
     for raw_target, _line in page.body_wikilinks:
-        try:
-            normalized, _ = vault.normalize_wikilink(
-                raw_target,
-                corpus.vault_root,
-                resolver=resolver,  # type: ignore[arg-type]
-                strict=True,
-                visible=visible,
-            )
-        except (vault.AmbiguousWikilinkError, vault.UnresolvedWikilinkError):
+        status, resolved, _anchor, _alias = _resolve_target(
+            corpus.vault_root, raw_target, resolver, visible  # type: ignore[arg-type]
+        )
+        if status != "resolved" or resolved is None:
             continue
-        path = normalized.split("#", 1)[0]
-        resolved_path = path if path.lower().endswith(".md") else f"{path}.md"
+        resolved_path = resolved.split("#", 1)[0]
         if resolved_path == page.path:
             continue
         require_page_status(corpus.pages.get(resolved_path))
