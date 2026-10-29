@@ -10586,12 +10586,12 @@ def op_adoption_studio(
 ) -> dict:
     """Review and import a collection in a resumable run.
 
-    Never rewrite, move or delete originals. Status/work-item read; other actions
-    write. Apply commits the previewed plan or refuses.
+    Never rewrite or move originals; apply deletes filed staged copies.
+    Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     start scans; select chooses; plan previews; apply copies into Sources and
     drafts notes under own-note rules; cancel closes pre-apply; finish reports
-    recall and coverage. Resume plan/apply with `continuation`; page start with `after`.
+    recall and coverage. Resume plan/apply with `continuation`.
     work-item reads context; propose submits; apply-proposal approves.
     Details: references/operations.md.
 
@@ -10599,9 +10599,8 @@ def op_adoption_studio(
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
         path: For `start`, scan subtree (default: vault root). For run-listing
-            `status`, count distinct successfully filed originals across historical
-            runs in this subtree; null with `complete=false` if incomplete.
-            Omit for legacy listing.
+            `status`, count distinct filed originals under it (null with
+            `complete=false` if incomplete). Omit for legacy listing.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
@@ -10612,7 +10611,7 @@ def op_adoption_studio(
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
         plan_id: For `apply`, from `plan`/`status`.
-        continuation: For `plan` and `apply`, from the previous result.
+        continuation: For `plan`/`apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
@@ -10621,8 +10620,8 @@ def op_adoption_studio(
         expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
-        after: For `start`, the previous page's `next_after`.
-        consume: For `start`, false keeps staged copies after filing.
+        after: For `start`, a reply's `next_after`.
+        consume: For `start`, false keeps staged copies.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -14227,13 +14226,15 @@ def product_commands_for(
     )
     if surface not in {"mcp", "rest"}:
         return selected
-    # Remote repair admission already allows only these two maintenance modes.
+    from .writer_lease import REMOTE_WRITE_MAINTENANCE_MODES
+
+    # Publish only the maintenance writes that remote admission accepts.
     return tuple(replace(command, renderings=tuple(
         replace(rendering, variants=tuple(variant for variant in rendering.variants
                                           if variant.effect == "read"
-                                          or variant.action in {"structured-files", "tag-variants"}))
+                                          or variant.action in REMOTE_WRITE_MAINTENANCE_MODES))
         for rendering in command.renderings
-        if any(variant.effect == "read" or variant.action in {"structured-files", "tag-variants"}
+        if any(variant.effect == "read" or variant.action in REMOTE_WRITE_MAINTENANCE_MODES
                for variant in rendering.variants)
     )) if command.name == "maintain_memory" else command for command in selected)
 

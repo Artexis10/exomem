@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -193,8 +194,9 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     if query.get("code_challenge_method") != ["S256"] or not query.get("code_challenge"):
         raise StepFailure("native OAuth did not use S256 PKCE")
     checkpoint = fixture / "checkpoint"
-    if stat.S_IMODE(checkpoint.stat().st_mode) != 0o700 or stat.S_IMODE((checkpoint / "checkpoint.json").stat().st_mode) != 0o600:
-        raise StepFailure("native checkpoint permissions are not private")
+    # The CLI signs in before it inventories the folder and writes checkpoint.json, so only the folder exists yet.
+    if stat.S_IMODE(checkpoint.stat().st_mode) != 0o700:
+        raise StepFailure("native checkpoint folder is not private")
     callback = await ctx.browser.consent_redirect(ctx.a.session, url, redirect_uri)
     # Deliver to the real loopback server in the CLI container, preserving code/state/issuer.
     await asyncio.to_thread(wait_for, lambda: run(["docker", "exec", name, "python3", "-c", LISTENER_SCRIPT,
@@ -203,6 +205,18 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     delivered = run(["docker", "exec", "--interactive", name, "python3", "-c", CALLBACK_SCRIPT], input_text=callback)
     if delivered.stdout.strip() != "200":
         raise StepFailure("the native callback did not accept the authorization response")
+    record = checkpoint / "checkpoint.json"
+
+    def record_written_or_cli_ended() -> bool:
+        running = run(["docker", "inspect", "--format", "{{.State.Running}}", name], check=False).stdout.strip()
+        return record.exists() or running != "true"
+
+    await asyncio.to_thread(wait_for, record_written_or_cli_ended, timeout=wait_seconds,
+                            description="the native checkpoint record")
+    # A CLI that succeeded removes its record, so a fast run may leave none to check.
+    with contextlib.suppress(FileNotFoundError):
+        if stat.S_IMODE(record.stat().st_mode) != 0o600:
+            raise StepFailure("native checkpoint record is not private")
     exited = await asyncio.to_thread(run, ["docker", "wait", name], timeout=wait_seconds)
     logs = run(["docker", "logs", name], check=False)
     log_file = fixture / "cli.log"

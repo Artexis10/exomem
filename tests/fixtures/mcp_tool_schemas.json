@@ -4248,7 +4248,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
+                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
                   "type": "string",
                   "default": ""
                 },
@@ -4268,10 +4268,10 @@
                 },
                 "after": {
                   "type": "string",
-                  "description": "For `start`, the previous page's `next_after`."
+                  "description": "For `start`, a reply's `next_after`."
                 },
                 "consume": {
-                  "description": "For `start`, false keeps staged copies after filing.",
+                  "description": "For `start`, false keeps staged copies.",
                   "type": "boolean",
                   "default": true
                 }
@@ -4496,7 +4496,7 @@
             },
             "continuation": {
               "type": "string",
-              "description": "For `plan` and `apply`, from the previous result."
+              "description": "For `plan`/`apply`, from the previous result."
             },
             "why": {
               "type": "string",
@@ -5489,7 +5489,7 @@
                 },
                 "run_id": {},
                 "path": {
-                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
+                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
                   "type": "string",
                   "default": ""
                 }
@@ -8155,6 +8155,151 @@
                 "apply"
               ],
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "curation-propose",
+                  "type": "string"
+                },
+                "curation_action": {
+                  "description": "Curation step when mode is curation.",
+                  "enum": [
+                    "propose"
+                  ],
+                  "type": "string"
+                },
+                "plan": {
+                  "type": "object",
+                  "description": "Closed agent-authored plan for curation propose."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "curation-apply",
+                  "type": "string"
+                },
+                "plan_id": {},
+                "why": {},
+                "curation_action": {
+                  "description": "Curation step when mode is curation.",
+                  "enum": [
+                    "apply"
+                  ],
+                  "type": "string"
+                },
+                "run_id": {},
+                "expected_plan_fingerprint": {},
+                "vocabulary_ref": {},
+                "vocabulary_fingerprint": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "curation-resume",
+                  "type": "string"
+                },
+                "plan_id": {},
+                "curation_action": {
+                  "description": "Curation step when mode is curation.",
+                  "enum": [
+                    "resume"
+                  ],
+                  "type": "string"
+                },
+                "run_id": {},
+                "vocabulary_ref": {},
+                "vocabulary_fingerprint": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "curation-propose-compensation",
+                  "type": "string"
+                },
+                "curation_action": {
+                  "description": "Curation step when mode is curation.",
+                  "enum": [
+                    "propose-compensation"
+                  ],
+                  "type": "string"
+                },
+                "run_id": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "curation-apply-compensation",
+                  "type": "string"
+                },
+                "plan_id": {},
+                "why": {},
+                "curation_action": {
+                  "description": "Curation step when mode is curation.",
+                  "enum": [
+                    "apply-compensation"
+                  ],
+                  "type": "string"
+                },
+                "run_id": {},
+                "expected_plan_fingerprint": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "curation-revert",
+                  "type": "string"
+                },
+                "why": {},
+                "curation_action": {
+                  "description": "Curation step when mode is curation.",
+                  "enum": [
+                    "revert"
+                  ],
+                  "type": "string"
+                },
+                "review_ref": {
+                  "type": "string",
+                  "description": "Recurring-identity review ref for a work-item."
+                },
+                "expected_plan_fingerprint": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
             }
           ],
           "discriminator": {
@@ -8194,6 +8339,22 @@
             "acknowledge_skipped": {
               "type": "boolean",
               "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
+            },
+            "run_id": {
+              "type": "string",
+              "description": "Curation run identity."
+            },
+            "expected_plan_fingerprint": {
+              "type": "string",
+              "description": "Reviewed plan fingerprint for approval."
+            },
+            "vocabulary_ref": {
+              "type": "string",
+              "description": "Vocabulary decision for curation apply or resume."
+            },
+            "vocabulary_fingerprint": {
+              "type": "string",
+              "description": "Reviewed vocabulary fingerprint; grants no write."
             }
           }
         },
