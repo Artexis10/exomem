@@ -1352,7 +1352,9 @@
                   "type": "string"
                 },
                 "path": {},
-                "paths": {}
+                "paths": {},
+                "language": {},
+                "multilingual": {}
               },
               "required": [
                 "kind"
@@ -1383,10 +1385,8 @@
                 },
                 "path": {},
                 "paths": {},
-                "language": {
-                  "type": "string",
-                  "description": "Speech language code; omit to detect."
-                }
+                "language": {},
+                "multilingual": {}
               },
               "required": [
                 "kind"
@@ -1408,6 +1408,15 @@
               },
               "type": "array",
               "description": "1-32 unique governed paths, not for status."
+            },
+            "language": {
+              "type": "string",
+              "description": "Speech language code; omit to detect."
+            },
+            "multilingual": {
+              "description": "Detect language per window (slower).",
+              "type": "boolean",
+              "default": false
             }
           }
         },
