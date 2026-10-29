@@ -173,6 +173,8 @@ def exomem_tool_names(
     for arm in arms:
         config = layout.arm_dir(arm) / "session-inputs" / "mcp.json"
         servers = json.loads(config.read_text(encoding="utf-8"))["mcpServers"]
+        if not servers:
+            continue  # an arm with no server was shown no tool
         for tree in trees:
             surface = json.loads(
                 (layout.arm_tree(arm, tree) / "surface.json").read_text(encoding="utf-8")

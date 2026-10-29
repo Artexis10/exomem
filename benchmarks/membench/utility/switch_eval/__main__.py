@@ -190,9 +190,10 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     args.hook_mode = args.hook_mode if args.hook_mode is not None else DEFAULT_HOOK_MODE
     args.profile = args.profile if args.profile is not None else DEFAULT_PROFILE
     arm_ids = tuple(args.arms.split(","))
-    unknown = [arm for arm in arm_ids if arm not in protocol.ARM_IDS]
+    specs = arm_specs(hook_mode=args.hook_mode, profile=args.profile)
+    unknown = [arm for arm in arm_ids if arm not in specs]
     if unknown or len(set(arm_ids)) != len(arm_ids):
-        raise SystemExit(f"--arms takes distinct arms from {protocol.ARM_IDS}, got {args.arms}")
+        raise SystemExit(f"--arms takes distinct arms from {tuple(specs)}, got {args.arms}")
     keys = [(split, Path(path)) for split, path in _pairs(args.key, "--key")]
     case_files = [Path(path) for path in args.cases]
     cases, struck = load_cases(keys=keys, case_files=case_files)
@@ -201,6 +202,15 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         cases = tuple(case for case in cases if case.case_id in wanted)
         if len(cases) != len(set(wanted)):
             raise SystemExit("--case-ids names a case the key does not hold")
+    # Amendment 15: an arm outside the protocol's arms is a development arm and
+    # never touches a case of the decision's split.
+    development = [arm for arm in arm_ids if arm not in protocol.ARM_IDS]
+    decisive = sorted({case.split for case in cases} - {protocol.SPLIT_DEV})
+    if development and decisive:
+        raise SystemExit(
+            f"refused: arm {','.join(development)} is a development arm and runs only on "
+            f"development cases, but the run holds cases of {', '.join(decisive)}"
+        )
     trees = {}
     for name, value in _pairs(args.tree, "--tree"):
         path, _, frozen = value.partition("@")
@@ -229,7 +239,6 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
     launcher = shlex.split(args.claude_launcher or "")
     declared = declared_cli_options(envelope)
-    specs = arm_specs(hook_mode=args.hook_mode, profile=args.profile)
     undeclared = sorted(
         {
             token
@@ -354,7 +363,8 @@ def cmd_state(args: argparse.Namespace) -> int:
     _stage(layout, inputs, "state")
     needed = sorted({case.tree for case in cases})
     for tree in needed:
-        for arm in inputs["arms"]:
+        # An arm with no Exomem has no state to build.
+        for arm in (arm for arm in inputs["arms"] if specs[arm].exomem):
             source = Path(inputs["trees"][tree]["path"])
             record = build_arm(
                 layout,
@@ -413,11 +423,12 @@ def _session_inputs_for(layout, inputs, cases, specs, planned: dict, parent_env)
 
     case = next(c for c in cases if c.case_id == planned["case_id"])
     record = load_arm_state(layout, planned["arm"], case.tree)
-    digests = (
-        {"vault": record["vault_digest"], "state": record["state_digest"]}
-        if record is not None
-        else {"vault": "pending: state stage not run", "state": "pending: state stage not run"}
-    )
+    if not specs[planned["arm"]].exomem:
+        digests = {"vault": "none", "state": "none"}
+    elif record is not None:
+        digests = {"vault": record["vault_digest"], "state": record["state_digest"]}
+    else:
+        digests = {"vault": "pending: state stage not run", "state": "pending: state stage not run"}
     envelope = AgentEnvelope(
         executable=Path(inputs["client"]["executable"]), version=inputs["client"]["version"]
     )
@@ -510,6 +521,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     surfaces = {
         (arm, tree): load_arm_state(layout, arm, tree)["surface"]
         for arm in inputs["arms"]
+        if specs[arm].exomem
         for tree in trees
     }
     client_version = version.split()[0]

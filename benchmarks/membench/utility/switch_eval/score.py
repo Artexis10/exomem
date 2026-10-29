@@ -842,7 +842,10 @@ def score_run(
         "arm_guess_audit": audited,
         "secondary": secondary(cases=cases, table=built["cases"], arm_ids=arm_ids),
         "usage": usage(layout, sessions, project_sessions=project_sessions),
-        "warming_at_gate": warming_tally(sessions, arm_ids),
+        # A development arm runs no server, so it has no gate to tally.
+        "warming_at_gate": warming_tally(
+            sessions, [arm for arm in arm_ids if arm in protocol.ARM_IDS]
+        ),
         "cases": built["cases"],
         "actor_failures": sum(1 for r in sessions.values() if r["outcome"] == ACTOR_FAILURE),
         "deltas": {str(k): v for k, v in deltas.items()},

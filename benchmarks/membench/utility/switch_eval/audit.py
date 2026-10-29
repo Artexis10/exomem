@@ -96,8 +96,13 @@ def original_items(layout: Layout, unblinded: Unblinded) -> list[dict]:
 
     if not isinstance(unblinded, Unblinded):
         raise UnblindingError("the arm-guess audit runs only after unblinding")
+    # The audit guesses among the protocol's arms; a development arm is no
+    # candidate of its guess and no part of the decision it protects.
     return [
-        item for item in read_items(layout) if not unblinded.arm_key[item["item_id"]]["rejudge_of"]
+        item
+        for item in read_items(layout)
+        if not unblinded.arm_key[item["item_id"]]["rejudge_of"]
+        and unblinded.arm_key[item["item_id"]]["arm"] in protocol.ARM_IDS
     ]
 
 
