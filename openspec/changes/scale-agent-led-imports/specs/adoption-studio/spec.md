@@ -1,66 +1,78 @@
 ## ADDED Requirements
 
-### Requirement: Recorded staged copies are consumed after verified filing
+### Requirement: Recorded staged artifacts are consumed after verified filing
 
-A run SHALL consume staged copies only when its scanned folder lies inside a recorded import stage `_Imports/<import_id>/`. A Cloud stage is recorded by the import's vault-state receipt for an `adopt` import. A local stage is recorded by the stage record that `exomem import` writes in the vault's state folder. `start` SHALL record the stage and its proof in the run object, and a run started with `consume=false` SHALL never consume.
+A run SHALL consume only artifact items whose staged copies lie in a recorded import stage `_Imports/<import_id>/`. A recorded stage has a manifest that lists each staged file's stage-relative path, size and SHA-256: the Cloud import receipt's member manifest for an `adopt` import, or the stage record that `exomem import` writes when an import finishes. A run started with `consume=false` SHALL never consume. Text items SHALL never be consumed.
 
-For a recorded stage, after the chunk that files an item commits, `apply` SHALL remove the item's staged copy only when all of these hold:
+After the chunk that files an artifact item commits, `apply` SHALL remove its staged copy only when all of these hold:
 
-- the item's outcome is `applied` or `already-applied`, with no draft note still owed;
-- the durable copy reproduces the planned `original_sha256` when read back after the commit;
-- the staged copy still has the planned size and hash.
+- the outcome is `applied` or `already-applied`;
+- the durable artifact matches the planned `original_sha256`;
+- the staged file's path, size and SHA-256 match a manifest entry.
 
-The outcome SHALL record `consume: "pending"` in the run object that the commit writes, before the removal. On replay, a pending item whose staged copy is missing and whose durable copy verifies SHALL count as consumed. Repeat-call re-verification and staleness probes SHALL skip consumed items, and the item SHALL keep the `original_unchanged` result taken before the removal. `finish` SHALL remove empty folders left in the stage. It SHALL report the residual still in the stage (unselected, ineligible and failed items), with counts and bytes, and name the discard route.
+The removal SHALL go through the held filesystem with an identity check. A removal that fails SHALL leave the item applied and not consumed.
 
-#### Scenario: Filing a recorded stage keeps about one copy on disk
+When an artifact item's staged copy is missing in a recorded stage, `apply` SHALL resolve the item through the import index, by collection, `collection_path` and `original_sha256`, before it reports a failure. Repeat-call re-verification and staleness probes SHALL treat a missing staged copy whose Source verifies as consumed. The run SHALL report a `consumed` count separately from `verified_unchanged`. `finish` SHALL remove empty folders left in the stage, SHALL report the residual still in the stage (unselected, ineligible, failed and text items) with counts and bytes, and SHALL name the discard route.
 
-- **WHEN** a run over a recorded stage applies every selected item
-- **THEN** each applied item's staged copy is gone, its Source or artifact verifies against the planned hash, and the stage holds only the residual
+#### Scenario: Filing a recorded stage keeps about one copy of its artifacts
+
+- **WHEN** a run over a recorded stage applies every selected artifact
+- **THEN** each applied artifact's staged copy is gone, its Knowledge Base copy matches the planned hash, and `consumed` counts them
 - **AND** `finish` reports the residual's counts and bytes and names the discard route
 
-#### Scenario: A folder without a stage record is never consumed
+#### Scenario: Nothing outside a manifest is consumed
 
-- **WHEN** a run applies items from a folder under `_Imports/` that has no receipt or stage record, or from any other folder
-- **THEN** every original is byte-identical afterwards
+- **WHEN** a run applies artifacts from a folder under `_Imports/` that has no manifest, or a file added to a recorded stage after its manifest was written
+- **THEN** those files are byte-identical afterwards
 
-#### Scenario: An item still owed a draft note keeps its staged copy
+#### Scenario: A stop between commit and removal recovers from the Source
 
-- **WHEN** an item's Source is committed and its draft note is still owed
-- **THEN** its staged copy stays until the note settles, and is consumed in the call that settles it
+- **WHEN** the process stops after a chunk commits and before the run object records its outcomes or removes the staged copies
+- **THEN** the next `apply` resolves each item whose staged copy is gone through its committed Source, removes any listed staged copy still present, and reports no failure
 
-#### Scenario: A crash between commit and removal recovers
+#### Scenario: Two runs over one stage do not fail each other
 
-- **WHEN** the process stops after a chunk commits and before its staged copies are removed
-- **THEN** the next `apply` verifies each pending item's durable copy, removes any staged copy still present, and reports no failure for the missing ones
+- **WHEN** a second run applies an item whose staged copy the first run consumed
+- **THEN** the second run resolves it as already applied through the import index
 
-#### Scenario: An opted-out run consumes nothing
+#### Scenario: Text and opted-out runs keep their staged copies
 
-- **WHEN** a run over a recorded stage started with `consume=false`
-- **THEN** every staged copy remains after apply
+- **WHEN** a run files text items, or a run over a recorded stage started with `consume=false` files artifacts
+- **THEN** those staged copies remain after apply
 
-### Requirement: Apply checks free space before each chunk
+### Requirement: Apply bounds space, memory and time per chunk
 
-Before it writes a chunk, `apply` SHALL compare the chunk's bytes plus the vault's free-space reserve against the free space of the vault's filesystem. When they do not fit, it SHALL stop the call before writing that chunk with a resumable `INSUFFICIENT_SPACE` outcome that gives the measured bytes and the free space, and a next action. Apply SHALL read, hash and copy an artifact in bounded chunks, so that memory does not grow with the file's size.
+Before it writes a chunk, `apply` SHALL compare the chunk's bytes plus the vault's free-space reserve against the free space of the vault's filesystem. When they do not fit, it SHALL stop the call before writing that chunk with a resumable `INSUFFICIENT_SPACE` outcome that gives the measured bytes and the free space, and a next action. Apply SHALL copy an artifact in one streamed pass that hashes while it copies and SHALL roll the item back on a mismatch, so memory does not grow with the file's size. A staged artifact above the adoption ceiling SHALL stay in the residual with a code that names the ceiling.
 
 #### Scenario: A chunk that does not fit stops the call cleanly
 
 - **WHEN** the next chunk's bytes plus the reserve exceed the free space
 - **THEN** the call stops before writing it, reports `INSUFFICIENT_SPACE` with the measured bytes, and a later `apply` continues from that chunk
 
-### Requirement: Local staging records its stage in the vault
+#### Scenario: A large staged artifact adopts on Cloud
 
-When `exomem import` claims an import id, it SHALL write a stage record for that id in the vault's state folder, holding the import id and the staged folder's name. When the vault's state placement is not yet settled, it SHALL write no record and SHALL report that adoption will keep the staged copy until discard.
+- **WHEN** a Cloud cell applies a staged artifact over 100 MiB and within the adoption ceiling
+- **THEN** its Knowledge Base copy matches the planned hash, and the process's memory does not grow with the file's size
 
-#### Scenario: A local stage qualifies for consuming
+### Requirement: Local staging records a finished stage in the vault
 
-- **WHEN** `exomem import` stages a folder into an initialized vault and adoption runs on the printed path
-- **THEN** the run records the stage as recorded, and applied items' staged copies are consumed
+When an `exomem import` finishes, the command SHALL write a stage record for the import id in the vault's state folder. The record SHALL list each staged file's stage-relative path, size and SHA-256 from the journal. An import that stays open SHALL have no record. When the vault's state placement is not yet settled, the command SHALL write no record and SHALL report that adoption will keep the staged copy until discard.
+
+#### Scenario: A finished local stage qualifies for consuming
+
+- **WHEN** `exomem import` finishes staging a folder into an initialized vault and adoption runs on the printed path
+- **THEN** applied artifacts' staged copies are consumed
+
+#### Scenario: An open local import is not consumed
+
+- **WHEN** adoption runs on the path of a local import that stays open
+- **THEN** no staged copy is consumed, and a rerun of the import copies only what was missing
 
 ## MODIFIED Requirements
 
 ### Requirement: Deterministic read-only scan and candidate inventory
 
-`adoption_studio(action="start")` SHALL perform a read-only `overview` scan of the target subtree and record, in the run object, a compact `scan_summary`, `pack_suggestions`, and a candidate `inventory` containing every adoption-relevant file outside `Knowledge Base/` with its vault-relative path, byte size, mtime, and import form (`text` for a text-like suffix, `artifact` for any other regular file). `start` SHALL accept an optional `collection` label and SHALL default it to the scanned folder's name, or to the single top-level folder inside an `_Imports/<import_id>/` stage. A skipped hidden folder SHALL be recorded as one inventory row with its file count and reason. Ineligible candidates SHALL be retained in the inventory with a machine-readable `reason` (never silently dropped), the inventory SHALL be capped at a configurable `max_candidates` with an explicit `inventory_truncated` counter, `start` SHALL accept an optional `after` cursor (a vault-relative path) and record only rows that sort strictly after it in the scan's deterministic order, and it SHALL return `next_after`, the last recorded path, while rows remain beyond the cap, and a stat-based `inventory_fingerprint` SHALL be computed over the sorted eligible rows. The scan SHALL write nothing outside the run object. `start` SHALL require `Knowledge Base/` to exist and refuse with `KB_NOT_INITIALIZED` unless `initialize_kb=true`, in which case it initializes the scaffold first; pure pre-init discovery remains `adopt_vault(mode="scan-only")`, unchanged.
+`adoption_studio(action="start")` SHALL perform a read-only `overview` scan of the target subtree and record, in the run object, a compact `scan_summary`, `pack_suggestions`, and a candidate `inventory` containing every adoption-relevant file outside `Knowledge Base/` with its vault-relative path, byte size, mtime, and import form (`text` for a text-like suffix, `artifact` for any other regular file). `start` SHALL accept an optional `collection` label and SHALL default it to the scanned folder's name, or to the single top-level folder inside an `_Imports/<import_id>/` stage. A skipped hidden folder SHALL be recorded as one inventory row with its file count and reason. Ineligible candidates SHALL be retained in the inventory with a machine-readable `reason` (never silently dropped), the inventory SHALL be capped at a configurable `max_candidates` with an explicit `inventory_truncated` counter, `start` SHALL return an opaque `next_after` cursor while rows remain beyond the cap and SHALL accept it as `after`, recording only the rows that follow it under the collection root and label pinned by the first page, with artifact rows ordered before text rows, and a stat-based `inventory_fingerprint` SHALL be computed over the sorted eligible rows. The scan SHALL write nothing outside the run object. `start` SHALL require `Knowledge Base/` to exist and refuse with `KB_NOT_INITIALIZED` unless `initialize_kb=true`, in which case it initializes the scaffold first; pure pre-init discovery remains `adopt_vault(mode="scan-only")`, unchanged.
 
 #### Scenario: Scan snapshots an eligible-only inventory deterministically
 
@@ -85,17 +97,33 @@ When `exomem import` claims an import id, it SHALL write a stage record for that
 #### Scenario: A folder with more files than the cap is covered page by page
 
 - **WHEN** a staged folder holds more eligible files than `max_candidates` in one flat folder
-- **THEN** `start` records the first `max_candidates` rows and returns `next_after`
-- **AND** `start` with `after` set to that value records the next rows, so successive pages cover every file exactly once and in the same order
+- **THEN** `start` records the first page and returns `next_after`
+- **AND** each `start` with the previous `next_after` records the next page under the same collection root and label, so the pages cover every file exactly once
 
-#### Scenario: A staged file over the client-pull cap is eligible on every runtime
+#### Scenario: Consuming does not change a later page's collection identity
 
-- **WHEN** a Cloud cell scans a staged artifact larger than the gateway's client-pull cap and within the upload-session cap
+- **WHEN** applying the first page consumes a top-level staged file and leaves a folder empty
+- **THEN** the next page keeps the first page's collection root, label and `collection_path` values
+
+#### Scenario: A paged collection never guesses a link target
+
+- **WHEN** a note on an early page links by a name that only an alias on a later page could match
+- **THEN** the link stays unresolved instead of resolving to another target
+- **AND** a link whose bare name is unique across the whole scanned folder resolves
+
+#### Scenario: A page waits for the one before it
+
+- **WHEN** `plan` is called for a page while an earlier page of the same collection still has unapplied plan items
+- **THEN** it refuses and names the earlier run
+
+#### Scenario: A staged artifact over the client-pull cap is eligible on every runtime
+
+- **WHEN** a Cloud cell scans a staged artifact larger than the gateway's client-pull cap and within the adoption ceiling
 - **THEN** the row is eligible with import form `artifact`, as it is on a standalone server
 
 ### Requirement: Originals are never modified
 
-Across every action and every failure mode, adoption SHALL never rewrite, move, or delete an original file. A staged copy inside a recorded import stage is not an original: the person's original stays on their own device or folder, and adoption MAY remove that staged copy only as the requirement on consuming recorded staged copies allows. Imports are copies into `Knowledge Base/Sources/Imported/` or, for a classified item, into its kind's Source directory, carrying provenance; an artifact import copies the original bytes. Scans, selection, and preview write nothing outside the run object; cancellation, budget stops and partial/failed apply leave already-copied Sources intact and originals untouched.
+Across every action and every failure mode, adoption SHALL never rewrite, move, or delete an original file. A staged artifact listed in a recorded import stage's manifest is not an original: the person's original stays on their own device or folder, and adoption MAY remove that staged copy only as the requirement on consuming recorded staged copies allows. Imports are copies into `Knowledge Base/Sources/Imported/` or, for a classified item, into its kind's Source directory, carrying provenance; an artifact import copies the original bytes. Scans, selection, and preview write nothing outside the run object; cancellation, budget stops and partial/failed apply leave already-copied Sources intact and originals untouched.
 
 #### Scenario: Originals are byte-identical after any outcome
 
@@ -116,7 +144,7 @@ The `exomem import <folder>` command SHALL enumerate the folder without followin
 
 Before it copies, the command SHALL report what it leaves behind, with the count and bytes under each reason, and SHALL report the selected file count and bytes against the free space of the vault's filesystem. It SHALL refuse before copying, with the measured bytes and the free space, when the copy plus a reserve does not fit. The limits the adoption engine applies after staging SHALL be warnings, not refusals. Otherwise it SHALL copy each selected regular file into `_Imports/<import_id>/<folder name>/`, streaming, record a manifest of relative path, size and SHA-256, re-hash every copy, and report progress while copying. Every entry left behind SHALL get a per-path code in the manifest. The command SHALL never modify the original folder, and the folder's name SHALL be the collection label. A file that changed while it was read, could not be read, or was refused by the disk SHALL be left out with a code and SHALL keep the import open: the command SHALL exit with an error and say that the same command run again retries only those files under the same import id. A file that the vault refuses because of its own name or path SHALL be left out with the vault's code and SHALL NOT keep the import open: the import SHALL finish, and the report SHALL give the count of such files. An interrupted or incomplete copy SHALL resume from its manifest under the same import id without copying a verified file again. On a resume, a staged file that the folder no longer selects SHALL be removed and recorded in the manifest, and a staged file that changed after it was verified SHALL be copied again. The command SHALL name an unfinished import made with other options and SHALL NOT resume it, and SHALL NOT let two runs write the same import at once.
 
-When the import finishes, the command SHALL end by reporting the bytes it staged, stating that the staged folder is a second copy of the data on the disk until adoption files and consumes each staged file or the folder is discarded, naming the discard route that exists, and printing the `adoption_studio start` path. An import that stays open SHALL also print that path, as the way to adopt what is staged so far.
+When the import finishes, the command SHALL end by reporting the bytes it staged, stating that the staged folder is a second copy of the data on the disk until adoption consumes each staged artifact or the folder is discarded, naming the discard route that exists, and printing the `adoption_studio start` path. An import that stays open SHALL also print that path, as the way to adopt what is staged so far.
 
 #### Scenario: A local folder is staged and adopted
 
@@ -161,7 +189,7 @@ When the import finishes, the command SHALL end by reporting the bytes it staged
 #### Scenario: The command names the second copy
 
 - **WHEN** staging finishes
-- **THEN** the report gives the staged bytes, says that they duplicate the original until adoption consumes them or they are discarded, and names the discard route
+- **THEN** the report gives the staged bytes, says that they duplicate the original until adoption consumes the staged artifacts or they are discarded, and names the discard route
 
 #### Scenario: An outside path given to start is refused with the route
 

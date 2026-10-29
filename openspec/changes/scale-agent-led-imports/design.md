@@ -19,63 +19,69 @@ The import routes are `exomem cloud import` (encrypted archive, a cell Job unpac
 
 ## Decisions
 
-### D1. Only a recorded stage is consumable
+The independent critique of the first draft found no route to byte loss: every consume follows a hash match against the Knowledge Base copy. It found four wrong results, in crash bookkeeping, local resume, page identity and link resolution. These decisions settle them.
 
-A staged copy is consumable only when the stage is proven to be an import's own copy:
+### D1. Only artifacts in a recorded stage, and only listed files, are consumable
 
-- **Cloud:** the vault-state receipt `cloud-imports/<import_id>.json` exists and names an `adopt` import whose staging path is this `_Imports/<import_id>/`.
-- **Local:** `exomem import` writes a stage record `local-imports/<import_id>.json` in the vault's state folder when it claims the import id. The record holds the import id, the folder name and the record time. When the vault's state placement is not settled yet, the importer writes no record. That stage is then not consumable: it files with two copies, as today, and adoption says so in its next actions.
+A run consumes only artifact items. Text items, which are mostly Markdown notes owed draft notes, stay staged until discard. Text is a small share of bytes, and a text file over `INLINE_TEXT_MAX_BYTES` already imports as an artifact. Consuming text would also need fence-level verification, would interfere with the owed-note step, and would make the file watcher publish deletions for every note.
 
-A folder that a person creates under `_Imports/` has no record, and adoption never consumes it. The run object stores the decision with its proof (`consume: {"stage": "<import_id>", "proof": "cloud-receipt" | "local-record"}`) at `start`. A run started with `consume=false` never consumes.
+A stage is recorded when its own manifest lists each staged file with its path, size and SHA-256:
 
-### D2. An item is consumed only once it is fully settled and verified
+- **Cloud:** the import Job adds a member manifest to its vault-state receipt `cloud-imports/<import_id>.json` for an `adopt` import.
+- **Local:** `exomem import` writes a stage record `local-imports/<import_id>.json` in the vault's state folder when the import finishes, from its journal. An open import is not recorded, so a rerun never has to recopy a consumed file. When the vault's state placement is not settled, the importer writes no record and reports that adoption keeps the staged copy.
 
-An item's staged copy is removed only when all of these hold:
+At removal time, the staged file's stage-relative path, size and SHA-256 must match a manifest entry. A file that a person or a sync tool adds to a stage later is never consumed. A stage under `_Imports/` without a manifest, a restored stage (a restore moves the state folder aside), a moved vault, and discard all leave nothing consumable. A run started with `consume=false` never consumes.
 
-- Its outcome is `applied` or `already-applied`. An item in `_SOURCE_ONLY` (a draft note still owed) keeps its staged copy, because the note step re-reads it.
-- The chunk's batch has committed.
-- The durable copy matches the planned `original_sha256`, read back after the commit by streaming:
-  - for an artifact, the artifact file's bytes;
-  - for a text item, the original text recovered from the committed Source page and hashed as the original bytes. If the Source's form cannot reproduce the bytes exactly, the text item is not consumed. See the open questions.
-- The staged file still has the planned size and hash. This is the existing `_record_unchanged` check, taken before the unlink and kept as `original_unchanged`.
+### D2. Order, verification and recovery
 
-### D3. Crash-safe order
+After the chunk's batch commits, adoption removes an artifact item's staged copy when all of these hold:
 
-1. The outcome records `consume: "pending"` in the run object that the chunk's commit writes.
-2. After the commit and the D2 checks, adoption unlinks the staged file through the held filesystem. It uses the same pattern as `media_store.evict`, which keeps the vault's access-tier backstop.
-3. Adoption records `consume: "done"` at the next run save.
+- the outcome is `applied` or `already-applied`;
+- the durable artifact matches the planned `original_sha256`, from the batch's write-time hash for a fresh write and a streamed read-back for an already-applied item;
+- the D1 manifest proof holds.
 
-On replay, a `pending` item whose staged file is missing and whose durable copy verifies counts as consumed. A `pending` item whose staged file is present is verified and unlinked again. The repeat-call re-verification in `apply` and `probe_staleness` skip consumed items, so `verified_unchanged` keeps the hash taken before the delete. Empty folders left in the stage are removed at `finish`.
+The removal uses `held_fs.unlink` with an identity check under the held handle.
 
-### D4. Free space is checked per chunk
+The committed Source is the recovery record, not a flag in the run object. When an artifact item's staged copy is missing in a recorded stage, `_read_original`'s caller resolves it through the import index (`_earlier_with_same_bytes`, matching collection, `collection_path` and `original_sha256`) before it reports a failure. This covers every path:
 
-Before each chunk, `apply` compares the chunk's bytes plus the vault's reserve against free space. When they do not fit, it stops the call with a resumable `INSUFFICIENT_SPACE`, giving the measured bytes, and a next action. Because consumption frees space as filing proceeds, the peak is about one copy plus one chunk. A large artifact adds its own size once, while both of its copies exist.
+- a stop after commit and before the run object is saved;
+- the settled and dedupe paths;
+- a batch that raised after it landed;
+- `retry_failed`;
+- a concurrent run on the same stage.
 
-### D5. The inventory pages
+Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual (unselected, ineligible, failed and text items) with counts and bytes, and the discard route.
 
-`start(after=<vault-relative path>)` scans in the existing deterministic order and records rows strictly after the cursor, up to `max_candidates`. It returns `next_after`, the last recorded path, while more rows exist. Each page is its own run with the same collection label, so the import index dedupes across pages, as a repeat import does today. The cap stays: it bounds the run object that every chunk rewrites.
+### D3. Free space is checked per chunk
 
-### D6. The staged-file ceiling is the session cap, read by streaming
+Before each chunk, `apply` compares the chunk's bytes plus the reserve against free space. When they do not fit, it stops with a resumable `INSUFFICIENT_SPACE` that gives the measured bytes. The reserve must cover derived state: the index, embeddings, the graph and media sidecars.
 
-Inventory eligibility and apply for an artifact use the upload-session cap (`upload_sessions.max_bytes_from_env`) on every runtime, instead of the client-pull cap. Apply hashes and copies an artifact in bounded chunks. Text items keep the existing text ceiling, because rendering needs the whole text in memory. A text file over that ceiling becomes an artifact item rather than an ineligible row.
+### D4. The inventory pages with one collection identity
 
-### D7. The agent leads from tool text
+`start(after=<cursor>)` records rows strictly after the cursor in the scan's deterministic order, up to `max_candidates`, and returns `next_after` while rows remain. The cursor is an opaque token that carries the collection root and label pinned by the first page, so consuming or removing an empty folder cannot change them. Every page is its own run under that identity, so the import index dedupes across pages. Pages order artifacts before text, so a note's embeds resolve against earlier imports.
 
-- The `observe_transfer` description and its `import_handoff` routes name the full sequence: import, wait for `done`, page through `start`, `select`, `plan`, `apply` and `finish`, review the residual, then discard.
-- `adoption_studio` `next_actions` name the next page while `next_after` is set.
-- `finish` reports the residual left in the stage (unselected, ineligible and failed), with counts and bytes, and names the discard route.
-- The skill scaffold gains a generic import reference.
+Link resolution on a paged collection uses the full stat-only walk that `build_inventory` already performs before truncating:
 
-A client without a shell is routed to Home, because it cannot read local files.
+- a link resolves by exact path, or by a bare name that is unique across the whole walk;
+- a match by alias only stays unresolved, because later pages' aliases are unknown.
+
+`plan` refuses a page while an earlier page of the same collection still has unapplied plan items, so destinations cannot collide. The cap stays, because it bounds the run object that every chunk rewrites.
+
+### D5. Large staged artifacts get their own ceiling and one streamed pass
+
+A new `adoption_ceiling()` sets the staged-file ceiling on every runtime. `fetch_budget()` stays the client-pull cap, because `server_transfer` and `upload_handoff` use it.
+
+An artifact is copied in a single streamed pass that hashes while it copies and rolls back on a mismatch. This replaces the separate pre-hash, copy and post-hash passes, so a large file costs one read and one write. The ceiling defaults to what fits one call's time budget on a Cloud volume. A larger file stays in the residual with a code that names it. Background apply for files above one call is a follow-up.
+
+### D6. The agent leads from tool text
+
+The `observe_transfer` description, its `import_handoff` routes and the `adoption_studio` next actions name the whole flow: import, wait for `done`, page through `start` while `next_after` is set, `select`, `plan`, `apply`, `finish`, review the residual, then discard. The skill scaffold gains a generic import reference. A client without a shell is routed to Home.
+
+### D7. Proof runs where admission does not double the volume
+
+Substrate admission still multiplies declared bytes by two. On attachable storage, a cell grows its volume or refuses the import. A local-storage cell publishes no limits and keeps legacy admission without growth. The rehearsal therefore proves one-copy filing on a local-storage cell with a fixed volume below twice the data. Making the factor depend on the import kind remains the `publish-cloud-import-limits` follow-up, and attachable cells near the cap need it.
 
 ## Risks
 
-- **A wrong consume deletes the only staged copy.** D1 and D2 restrict it to proven stages and verified durable copies. The person's own folder or device keeps the original bytes in every route, because both importers copy.
-- **Links across pages.** Planning resolves links against planned items and earlier imports, so a link into a later page stays unresolved at plan time. See the open questions.
-
-## Open questions for the critic
-
-1. Can a text Source reproduce the original bytes exactly, given encoding, line endings and fence escaping? If not, should text items stay unconsumed? Text is a small share of bytes in media-heavy imports.
-2. Should pages order artifacts before text, so that a note's embeds resolve against earlier imports? And should `finish` re-resolve links across the pages of one collection?
-3. Is the local stage record better written at claim time or at finish? Is skipping it, when the vault's state placement is unsettled, the right fail-safe?
-4. Does consuming interact with backup, Trash or media custody of the staged tree in a way that these decisions miss?
+- **A wrong consume deletes the only staged copy.** D1 and D2 restrict it to manifest-listed artifacts in a recorded stage, verified against the Knowledge Base copy. The person's own folder or device keeps the original bytes in every route, because both importers copy.
+- **Links across pages.** D4 leaves alias-only matches on a paged collection unresolved rather than guessed.

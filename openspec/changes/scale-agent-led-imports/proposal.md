@@ -12,17 +12,24 @@ The intended experience is that a person asks their agent to bring their data in
 
 ## What changes
 
-- After adoption commits an item's Source and verifies it, adoption removes that item's staged copy. This applies only to a stage that an import created and recorded. A folder that a person created, inside `_Imports/` or anywhere else, is never consumed, so the bytes on disk stay close to one copy throughout filing. A run can opt out of consuming.
-- The local `exomem import` command records each stage it creates in the vault, so local stages qualify the same way as Cloud stages.
-- `adoption_studio start` takes an `after` cursor and returns `next_after`, so a run can page through any number of candidates in a stable order.
-- Adoption reads staged files by streaming and applies the same per-file limit on every runtime. Staged files over 100 MiB adopt on Cloud as they do locally.
-- The import tools and the Adoption Studio next actions guide an agent through the whole flow: import, wait, page, select, plan, apply, finish, review the residual and discard.
+- **Consume filed artifacts.** After adoption files an artifact from an import stage and verifies the Knowledge Base copy, it removes the staged copy. This applies only when the stage's manifest lists the file with the same path, size and hash. Notes and other text stay staged until discard: they are a small share of bytes. A folder that a person created is never consumed. A run can opt out.
+- **Stage manifests.** The Cloud import Job lists each staged member in its receipt. The local `exomem import` command writes a stage record with the same list when an import finishes.
+- **Recovery and parallel runs.** A missing staged copy resolves through the committed Source, so a crash or a parallel run never turns into a failure.
+- **Paging.** `adoption_studio start` pages through any number of candidates with an opaque cursor that keeps one collection identity. Pages plan in order and never guess a link target.
+- **Large files.** A new adoption ceiling replaces the client-pull cap for staged files on every runtime. Each artifact is copied in one streamed pass that hashes as it copies, so files over 100 MiB adopt on Cloud as they do locally.
+- **Agent guidance.** The import tools and the Adoption Studio next actions guide an agent through the whole flow: import, wait, page, select, plan, apply, finish, review the residual and discard.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- `adoption-studio`: These requirements change: originals stay untouched except for recorded staged copies, which are consumed after filing; the inventory pages; staged files are not limited by the client-pull cap; and finish reports the residual.
+- `adoption-studio`:
+  - consume recorded staged artifacts after verified filing;
+  - page the inventory under one collection identity;
+  - bound space, memory and time per chunk;
+  - record finished local stages;
+  - report the residual at finish.
+- `cloud-vault-import`: the import receipt lists each staged member.
 
 ## Impact
 
