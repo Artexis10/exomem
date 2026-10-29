@@ -1720,13 +1720,17 @@ def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
     """Replace the `asr_*` fields with the new extraction's facts, and with them the caller's pin.
 
     Facts that name no request clear the old pin, so a later multilingual request replaces a
-    language pin. An extraction that reports nothing leaves the pin as it was.
+    language pin. An extraction that reports nothing leaves the pin as it was, the language and
+    the multilingual mode alike.
     """
+    pinned_multilingual = asr is None and asr_language_pin(content) == (None, True)
     content = _remove_frontmatter_fields(
         content,
         lambda key: key.startswith(_ASR_FIELD_PREFIX) and (asr is not None or key != _ASR_PIN_FIELD),
     )
     if asr is None:
+        if pinned_multilingual:
+            content = _set_frontmatter_field(content, _ASR_MODE_FIELD, yaml_scalar(LANGUAGE_MODE_MULTILINGUAL))
         return content
 
     def number(value: float | None, places: int) -> str:

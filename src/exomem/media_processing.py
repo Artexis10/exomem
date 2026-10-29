@@ -130,6 +130,15 @@ class ReconcileResult:
 
 
 @dataclass(frozen=True)
+class ExtractionRequest:
+    """The language or mode a caller declared, and whether it replaces a completed transcript."""
+
+    language: str | None
+    mode: str | None
+    reprocess: bool
+
+
+@dataclass(frozen=True)
 class _BinaryProvenance:
     relative_path: str
     original_filename: str
@@ -233,6 +242,7 @@ def reconcile_media(
     explicit: bool = True,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     defer_fanout_to_terminal: bool = False,
+    request: ExtractionRequest | None = None,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -247,6 +257,9 @@ def reconcile_media(
     mutation's terminal is persisted. Opt-in because it changes when a caller's
     own follow-up reads see the refreshed index; the preservation lanes, whose
     receipt is what the client is waiting for, are the callers that need it.
+
+    A `request` goes into the job row when this call creates or re-queues it, in the same
+    store transaction, so the worker never claims the job without it.
     """
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -296,7 +309,8 @@ def reconcile_media(
         if explicit and stored.state == "evicted":
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
-                                       commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal)
+                                       commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
+                                       request=request)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
@@ -307,7 +321,7 @@ def reconcile_media(
             store = media_jobs.MediaJobStore(vault)
             job = store.get_by_binary(binary)
             if job is None and media_engines.stage_enabled(media_type):
-                job_id = store.enqueue(media_jobs.MediaJob(binary, stored.sidecar_path, media_type))
+                job_id = _enqueue(store, media_jobs.MediaJob(binary, stored.sidecar_path, media_type), request)
                 job = store.get(job_id)
             return ReconcileResult(media_type, job.state if job else "pending", stored.sidecar_path, job.id if job else None)
     try:
@@ -518,15 +532,17 @@ def reconcile_media(
             needs_clip = requested_clip and (durable_job is None or not durable_job.do_clip)
             do_ocr = extraction_on and (original != pending or needs_ocr)
             do_clip = requested_clip if original != pending else needs_clip
-            if do_ocr or do_clip:
-                job_id = store.enqueue(
+            if do_ocr or do_clip or (request is not None and extraction_on):
+                job_id = _enqueue(
+                    store,
                     media_jobs.MediaJob(
                         binary_path=binary,
                         sidecar_path=sidecar,
                         media_type=media_type,
                         do_ocr=do_ocr,
                         do_clip=do_clip,
-                    )
+                    ),
+                    request,
                 )
                 durable_job = store.get(job_id)
             job_id = durable_job.id if durable_job is not None else None
@@ -1169,6 +1185,23 @@ def retry_all_media(
     return requeued
 
 
+def _enqueue(
+    store: media_jobs.MediaJobStore, job: media_jobs.MediaJob, request: ExtractionRequest | None
+) -> int:
+    """Queue the job; a declared request goes in with the row, so no worker claim can precede it."""
+    if request is None:
+        return store.enqueue(job)
+    if not store.request_extraction(job, request.language, request.mode, reprocess=request.reprocess):
+        raise MediaProcessingError(
+            "MEDIA_BUSY", "the file is being processed now; ask again when that run ends"
+        )
+    if job.do_clip:  # the request row carries the extraction stage only
+        store.enqueue(replace(job, do_ocr=False))
+    queued = store.get_by_binary(job.binary_path, media_type=job.media_type)
+    assert queued is not None and queued.id is not None  # request_extraction just wrote the row
+    return queued.id
+
+
 #: The shape of a language code, not a list of languages: whether the speech model supports a
 #: code is decided by the model's own published set, in the job.
 _LANGUAGE_CODE_RE = re.compile(r"[a-z]{2,16}")
@@ -1263,7 +1296,8 @@ def _queue_extraction(
     unavailable = _runtime_unavailable(vault)
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
-    result = reconcile_media(vault, binary, commit_guard=commit_guard)
+    request = ExtractionRequest(hint, mode, reprocess)
+    result = reconcile_media(vault, binary, commit_guard=commit_guard, request=request)
     if result is None:  # an explicit request is never skipped; this narrows the type
         raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
     if not reprocess and result.state == "completed":
@@ -1271,9 +1305,15 @@ def _queue_extraction(
             "TRANSCRIPT_COMPLETE",
             "the transcript is already complete; reprocess replaces it with the declared language",
         )
+    store = media_jobs.MediaJobStore(vault)
+    job = store.get_by_binary(binary)
+    if result.state != "completed" and job is not None and job.state == media_jobs.PENDING and (
+        (job.language, job.language_mode, job.reprocess) == (hint, mode, reprocess)
+    ):
+        # reconcile_media queued the job with the request already in its row.
+        return ReconcileResult(result.media_type, job.state, result.sidecar_path, job.id, requeued=1)
     boundary = commit_guard() if commit_guard is not None else nullcontext()
     with boundary:
-        store = media_jobs.MediaJobStore(vault)
         queued = store.request_extraction(
             media_jobs.MediaJob(
                 binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type

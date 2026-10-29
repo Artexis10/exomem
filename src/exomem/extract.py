@@ -33,6 +33,7 @@ Two OPTIONAL deepen-the-moat transducers ship here, both DEFAULT-OFF + soft-fail
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -491,10 +492,22 @@ def _runs_on_cuda(model) -> bool:
     return getattr(getattr(model, "model", None), "device", None) == "cuda"
 
 
+def _primed(segments: Iterable):
+    """The same segments, with the first one already decoded; an error in the first batch surfaces here."""
+    iterator = iter(segments)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        return iter(())
+    return itertools.chain((first,), iterator)
+
+
 def _start_decoding(model, policy: dict, audio, *, language: str | None, multilingual: bool):
     """Begin one decode under the policy: `(segments, info, decoding path)`.
 
-    The path is batched windows on CUDA and one window after another on CPU.
+    The path is batched windows on CUDA and one window after another on CPU. A GPU too small for
+    the batch size runs out of memory on the first batch; the file then decodes sequentially, so a
+    smaller card still transcribes. An error after the first segment is the job's to report.
 
     The batched pipeline ignores `condition_on_previous_text` and `hallucination_silence_threshold`,
     so its options (`batched` in media_models.json) leave both out.
@@ -503,14 +516,22 @@ def _start_decoding(model, policy: dict, audio, *, language: str | None, multili
         from faster_whisper import BatchedInferencePipeline
 
         batched = policy["batched"]
-        segments, info = BatchedInferencePipeline(model).transcribe(
-            audio,
-            language=language,
-            multilingual=multilingual,
-            batch_size=batched["batch_size"],
-            **batched["options"],
-        )
-        return segments, info, DECODING_BATCHED
+        try:
+            segments, info = BatchedInferencePipeline(model).transcribe(
+                audio,
+                language=language,
+                multilingual=multilingual,
+                batch_size=batched["batch_size"],
+                **batched["options"],
+            )
+            return _primed(segments), info, DECODING_BATCHED
+        except Exception as error:  # noqa: BLE001 - only a CUDA out-of-memory error falls back; the rest re-raises
+            if not asr_runtime.is_cuda_out_of_memory(error):
+                raise
+            log.warning(
+                "batched decoding ran out of GPU memory at batch size %s; decoding this file sequentially",
+                batched["batch_size"],
+            )
     options = dict(policy["options"])
     # The library needs word timestamps to apply the hallucination guard, so the two go together.
     if options.get("hallucination_silence_threshold") is not None:

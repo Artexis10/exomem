@@ -129,7 +129,7 @@
     },
     "faster_whisper": {
       "revision": "fw-policy-2",
-      "source": "faster-whisper 1.2.x; WhisperModel.transcribe on CPU and BatchedInferencePipeline.transcribe on CUDA; the library's default VadOptions, so language is detected on speech and a quiet opening does not decide it",
+      "source": "faster-whisper 1.2.x; WhisperModel.transcribe on CPU and BatchedInferencePipeline.transcribe on CUDA; the library's default VadOptions, so language is detected on speech and a quiet opening does not decide it; options (sequential) and batched.options are tuned separately on purpose, because the two pipelines accept different options and a CUDA run that runs out of memory before its first segment falls back to options",
       "options": {
         "vad_filter": true,
         "condition_on_previous_text": false,

@@ -725,7 +725,11 @@ class MediaWorker:
                 expected_binary=expected_binary,
                 state=FAILED,
                 error=error,
-                next_action=_LANGUAGE_ACTION,
+                next_action=(
+                    media_jobs.MULTILINGUAL_UNSUPPORTED_ACTION
+                    if isinstance(e, extract.MultilingualUnsupported)
+                    else _LANGUAGE_ACTION
+                ),
                 retryable=False,
             )
             return self._publication_outcome(committed, FAILED, error)

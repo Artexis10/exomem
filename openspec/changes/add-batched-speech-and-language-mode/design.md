@@ -22,6 +22,8 @@ In faster-whisper 1.2.1, `BatchedInferencePipeline.transcribe` defaults `without
 
 The backend chooses the batched pipeline when its device is CUDA, with `without_timestamps: false` and `batch_size` from `media_models.json`. Segment timestamps make the decoder emit timestamped segments inside each window. That gives lines of sentence-like length, decided by the model and not by punctuation rules in code. CPU stays sequential. Batching on CPU trades memory for little measured gain, and the deployments that run on CPU are the memory-constrained ones.
 
+A GPU that is too small for the batch size fails on the first batch with CTranslate2's out-of-memory `RuntimeError`. When that happens before the pipeline yields a segment, the backend decodes the same file sequentially and records `asr_decoding: sequential`. CTranslate2 has no exception type for it, so the check reads the library's documented message. An error after the first segment stays the job's failure, because a retry decodes the file again from the start.
+
 Alternative considered: `word_timestamps=True` and re-splitting lines on pauses. It adds a cross-attention pass and a splitting rule to maintain. Choose it only if segment timestamps still give lines too coarse to cite.
 
 ### Language mode is one declared choice
@@ -34,8 +36,8 @@ The sequential path accepts `hallucination_silence_threshold` from the policy, w
 
 ## Risks / Trade-offs
 
-- Batched text can differ from sequential text on the same file → the policy revision moves to `fw-policy-2`, so a reader can tell them apart, and the proof compares the two arms on the same files.
-- Batch 16 with large-v3 fp16 needs VRAM headroom → the existing CUDA admission probe gates the run, and the batch size is data.
+- Batched text can differ from sequential text on the same file → the policy revision moves to `fw-policy-2` and the sidecar records `asr_decoding`, so a reader can tell them apart, and the proof compares the two arms on the same files.
+- Batch 16 with large-v3 fp16 needs more VRAM than the sequential run, and the CUDA admission probe only requires 2 GiB of free memory, so it does not gate batching → a first-batch out-of-memory error falls back to sequential decoding for that file, `asr_decoding` records which path ran, and the batch size is data.
 - `multilingual` costs time → the skill states the cost when it asks.
 
 ## Proof plan

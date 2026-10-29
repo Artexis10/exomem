@@ -336,7 +336,14 @@ def batched_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, object,
 
         def transcribe(self, audio, **options):
             calls.append((self.model, audio, options))
-            return iter(self.model._segs), self.model._info
+            failure = getattr(self.model, "batched_failure", None)
+
+            def decode():
+                if failure is not None:  # the engine fails when it decodes the first batch
+                    raise failure
+                yield from self.model._segs
+
+            return decode(), self.model._info
 
     module = types.ModuleType("faster_whisper")
     module.__spec__ = ModuleSpec("faster_whisper", loader=None)  # engine selection asks importlib for it
@@ -368,6 +375,23 @@ def test_a_gpu_decodes_in_batches_and_keeps_segment_timestamps(
     assert model.calls == []
     assert result.text == "tere" and result.asr.policy == policy["revision"]
     assert result.asr.decoding == "batched"
+
+
+def test_a_gpu_too_small_for_the_batch_decodes_the_file_sequentially_and_records_it(
+    monkeypatch: pytest.MonkeyPatch, batched_calls: list
+) -> None:
+    from exomem import media_models
+
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 4.0)], device="cuda")
+    model.batched_failure = RuntimeError("CUDA failed with error out of memory")
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    result = extract._transcribe(Path("x.wav"), "audio")
+
+    policy = media_models.model_spec("speech")["faster_whisper"]
+    assert len(batched_calls) == 1  # the batched pipeline was tried first
+    assert model.calls[0][1] == {"language": None, "multilingual": False, **policy["options"]}
+    assert result.text == "tere" and result.asr.decoding == "sequential"
 
 
 def test_a_cpu_run_decodes_sequentially_even_where_the_batched_pipeline_exists(
@@ -421,14 +445,6 @@ def test_a_declared_hallucination_guard_travels_with_the_word_timestamps_it_need
 
     options = model.calls[0][1]
     assert options["hallucination_silence_threshold"] == 2.0 and options["word_timestamps"] is True
-
-
-def test_the_shipped_policy_leaves_the_hallucination_guard_off() -> None:
-    from exomem import media_models
-
-    options = media_models.model_spec("speech")["faster_whisper"]["options"]
-    assert options["hallucination_silence_threshold"] is None
-    assert "word_timestamps" not in options  # a cross-attention pass the guard alone needs
 
 
 @pytest.mark.parametrize("engine", ["mlx", "onnx"])

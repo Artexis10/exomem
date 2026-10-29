@@ -8,9 +8,9 @@ Recordings can also hold more than one language, such as a lecture with an Engli
 
 - **Batched decoding on a GPU.** When the speech stage runs on CUDA, it uses the batched pipeline with a batch size from `media_models.json`. It keeps segment timestamps, so lines stay short enough to cite. CPU runs stay sequential.
 - **One language or several, declared at processing time.** `process_media` accepts `language` (one code) or `multilingual: true` on the first processing request as well as on `reprocess`. A declared mode pins on the sidecar like a language does. The shipped media skill tells the agent to ask "one language or several?" at ingest when it cannot tell, and to say that several is slower.
-- **The sidecar records the mode.** `asr_language_mode` is `single` or `multilingual`. With `multilingual`, `asr_language` holds the language of most speech, and `asr_language_source` is `requested`.
+- **The sidecar records the mode.** `asr_language_mode` is `single` or `multilingual`. With `multilingual`, `asr_language` holds the language that the engine detected on the first speech windows, and `asr_language_source` is `requested`.
 - **A hallucination guard, only if it pays.** The sequential path can skip silent stretches where the engine invents text (`hallucination_silence_threshold`). The policy enables it only if a measured run on a recording with known loops removes them without losing speech. The batched pipeline ignores the option, and it decodes each window independently, so a loop cannot carry from one window into the next.
-- **Policy revision `fw-policy-2`.** Sidecars name the revision that produced them, so a reader can tell a batched transcript from a sequential one.
+- **Policy revision `fw-policy-2`, and the decoding path.** Sidecars name the revision that produced them. A new `asr_decoding` fact (`batched` or `sequential`) tells a batched transcript from a sequential one, because both run under the same revision.
 
 ## Capabilities
 

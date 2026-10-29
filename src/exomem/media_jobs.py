@@ -102,6 +102,10 @@ _SELF_RETURNING_SQL = ",".join(f"'{reason}'" for reason in sorted({*_WAITING_REA
 OVER_BUDGET_ERROR = "ExceedsProcessingBudget: the file exceeds this deployment's processing budget"
 OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget"
 WAIT_ACTION = "wait for media processing"
+#: Both ways out of a multilingual request that the configured speech engine cannot run.
+MULTILINGUAL_UNSUPPORTED_ACTION = (
+    "give one language code or use the faster-whisper engine, then reprocess the file again"
+)
 #: A stop that moved the engine forward leaves the job pending and spends none of its stops.
 _UNCOUNTED_STOP = "state = 'pending', blocked_reason = NULL, last_error = NULL, blocked_context = NULL"
 
@@ -2726,10 +2730,13 @@ def _status_job(row: Any) -> dict[str, Any]:
     reprocess_failed = reprocess_stopped and state == FAILED
     if reprocess_stopped and state == BLOCKED:
         actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
-    unsupported_language = state == FAILED and (error or "").startswith(
-        ("UnsupportedLanguage:", "MultilingualUnsupported:")
+    multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
+    unsupported_language = multilingual_unsupported or (
+        state == FAILED and (error or "").startswith("UnsupportedLanguage:")
     )
-    if unsupported_language:
+    if multilingual_unsupported:
+        actions[FAILED] = MULTILINGUAL_UNSUPPORTED_ACTION
+    elif unsupported_language:
         actions[FAILED] = (
             "choose a language the speech model supports and "
             + ("reprocess the file again" if reprocess_failed else "process the file again with reprocess")

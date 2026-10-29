@@ -95,7 +95,11 @@ def _completed(vault, filename: str):
 
 
 def _frontmatter(path) -> dict:
-    return parse_frontmatter(path.read_text(encoding="utf-8"))[0]
+    return _frontmatter_of(path.read_text(encoding="utf-8"))
+
+
+def _frontmatter_of(content: str) -> dict:
+    return parse_frontmatter(content)[0]
 
 
 def test_reprocess_replaces_a_completed_transcript_and_keeps_the_old_one(
@@ -182,6 +186,22 @@ def test_the_multilingual_mode_is_pinned_until_a_later_language_replaces_it(
     facts = _frontmatter(sidecar)
     assert (engine.languages[-1], engine.multilingual[-1]) == ("fi", False)
     assert (facts["asr_language_mode"], facts["asr_language_requested"]) == ("single", "fi")
+
+
+def test_an_extraction_that_reports_no_speech_facts_keeps_the_pinned_mode(vault) -> None:
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="audio", filename="rec.mp3", data=b"FAKEBYTES"
+    )
+    before = (vault / stub.sidecar_path).read_text(encoding="utf-8")
+    several = AsrFacts(
+        language="et", language_source="requested", language_mode="multilingual", policy="fw-policy-2"
+    )
+    pinned = preserve.render_sidecar_extraction(before, text="[0:01] one", engine="test", asr=several)
+
+    rerun = preserve.render_sidecar_extraction(pinned, text="[0:01] two", engine="test", asr=None)
+
+    assert preserve.asr_language_pin(rerun) == (None, True)
+    assert "asr_language" not in _frontmatter_of(rerun)  # the facts of the old run are gone
 
 
 def test_a_recording_can_be_declared_multilingual_before_the_pipeline_reads_it(
@@ -275,7 +295,8 @@ def test_an_engine_that_cannot_detect_per_window_fails_the_multilingual_job_and_
     assert sidecar.read_bytes() == before
     (job,) = media_jobs.status(vault)["jobs"]
     assert job["state"] == media_jobs.FAILED and job["retryable"] is False
-    assert "onnx-asr" in job["error"] and "language" in job["next_action"]
+    assert "onnx-asr" in job["error"]
+    assert "one language code" in job["next_action"] and "faster-whisper engine" in job["next_action"]
 
 
 def test_a_transcript_edited_during_the_run_is_not_replaced(
