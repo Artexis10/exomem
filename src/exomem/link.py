@@ -56,6 +56,7 @@ from .vault import (
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
+    split_wikilink_target,
     writer_link_visibility,
     yaml_scalar,
 )
@@ -466,9 +467,10 @@ def _normalize_connections(
         c = (c or "").strip()
         if not c:
             continue
-        if c.lower().startswith(memory_refs.REF_PREFIX):
+        target, anchor = split_wikilink_target(c)
+        if target.lower().startswith(memory_refs.REF_PREFIX):
             try:
-                c = egress.resolve_visible_identifier(vault_root, c)
+                c = egress.resolve_visible_identifier(vault_root, target) + anchor
             except memory_refs.ReferenceError as exc:
                 raise LinkError(exc.code, ["connections"], exc.reason) from exc
         canonical, warning = normalize_wikilink(

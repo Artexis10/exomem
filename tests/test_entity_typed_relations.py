@@ -35,9 +35,14 @@ def _create_target(vault: Path) -> str:
     return created["path"].removesuffix(".md")
 
 
-def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(vault: Path) -> None:
+@pytest.mark.parametrize("target_form", ["{}", "[[{}]]", "[[{}|Ledger]]"])
+def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(
+    vault: Path, target_form: str,
+) -> None:
     target = _create_target(vault)
-    target_ref = memory_refs.ref_from_markdown((vault / f"{target}.md").read_text())
+    target_ref = target_form.format(
+        memory_refs.ref_from_markdown((vault / f"{target}.md").read_text())
+    )
 
     created = commands.op_connect_memory(
         vault,
@@ -172,7 +177,7 @@ def test_unavailable_reference_refuses_before_creating_an_entity(vault: Path, fa
     ref = memory_refs.ref_from_markdown(page.read_text())
     expected = "REFERENCE_NOT_FOUND"
     if failure == "invalid":
-        ref = memory_refs.REF_PREFIX + "invalid"
+        ref = "[[" + memory_refs.REF_PREFIX + "invalid|Ledger]]"
         expected = "INVALID_REFERENCE"
     elif failure == "missing":
         ref = memory_refs.memory_ref(memory_refs.new_id())
