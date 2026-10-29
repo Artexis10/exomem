@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import media_worker, resource_status, runtime_resources
+from exomem import media_jobs, media_worker, resource_status, runtime_resources
 
 
 def test_cloud_budget_is_validated_before_native_runtime_setup(
@@ -595,14 +595,15 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
     ]
 
 
-def test_clip_model_busy_propagates_to_the_child_defer_boundary(tmp_path: Path) -> None:
-    worker = object.__new__(media_worker.MediaWorker)
+def test_clip_model_busy_propagates_to_the_child_defer_boundary(vault: Path) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
     worker._is_recall_admitted_media_sidecar = lambda _sidecar: True
     worker._run_clip = lambda _job: (_ for _ in ()).throw(
         runtime_resources.ModelBusyError("model compute is busy; retry shortly")
     )
-    job = types.SimpleNamespace(
-        sidecar_path=tmp_path / "sidecar.md", do_ocr=False, do_clip=True, do_reembed=False
+    job = media_jobs.MediaJob(
+        binary_path=vault / "image.png", sidecar_path=vault / "sidecar.md",
+        media_type="image", do_ocr=False, do_clip=True,
     )
 
     with pytest.raises(runtime_resources.ModelBusyError):

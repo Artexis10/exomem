@@ -38,6 +38,7 @@ from . import (
 from .cli_ops import OpError
 from .episode_model import EpisodeError
 from .episode_recovery import EpisodeInputOwner
+from .find import RetrievalIndexWarming
 from .governance import egress
 from .governance.principal import effective_principal
 from .vault import (
@@ -55,6 +56,11 @@ LEDGER_FULL_WARNING = (
     "This episode's ledger is full, so this recap committed as a Source but is not bound to it, "
     "and a retry may not bind it. Later recaps keep committing as Sources. "
     "Record the next recap without `episode` to start a new key."
+)
+
+ABOUT_UNSETTLED_WARNING = (
+    "This recap committed without its `about` links because the pending index could not yet "
+    "prove those memories' identities. Record the links again once indexing has caught up."
 )
 
 # These fixed counters describe ordered proof branches, never source content.
@@ -327,11 +333,17 @@ def record(
                     continue
                 about_skipped = 0
                 about_paths: dict[str, str] = {}
+                about_warnings: list[str] = []
                 if recap.about:
-                    about_paths = egress.visible_memory_ref_paths(
-                        vault_root, recap.about, principal=effective_principal(),
-                        _prepared_owners=preparation.owners if preparation is not None else None,
-                    )
+                    try:
+                        about_paths = egress.visible_memory_ref_paths(
+                            vault_root, recap.about, principal=effective_principal(),
+                            _prepared_owners=preparation.owners if preparation is not None else None,
+                        )
+                    except RetrievalIndexWarming:
+                        # The links are optional; the recap is the durable record, so
+                        # unprovable pending identity omits them instead of refusing it.
+                        about_warnings = [ABOUT_UNSETTLED_WARNING]
                     kept = [ref for ref in recap.about if ref in about_paths]
                     about_skipped = len(recap.about) - len(kept)
                     if about_skipped:
@@ -404,6 +416,7 @@ def record(
 
     if not defer_housekeeping_until_terminal_persisted(record_housekeeping):
         record_housekeeping()
+    warnings = [*about_warnings, *ledger_warnings]
     return {
         "operation": "episode_memory",
         "episode": recap.key,
@@ -413,7 +426,7 @@ def record(
         "recovery": recovery,
         "ledger": ledger,
         "about_skipped": about_skipped,
-        **({"warnings": ledger_warnings} if ledger_warnings else {}),
+        **({"warnings": warnings} if warnings else {}),
     }
 
 

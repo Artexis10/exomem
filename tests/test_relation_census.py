@@ -995,6 +995,9 @@ def test_census_streams_edges_instead_of_holding_them(
             _page("insight", f"Page {index}", f"- supports [[{NOTES}/page-{(index + 1) % 40:02d}]]"),
         )
     _built(vault)
+    # Resolve lazy admission imports on the small graph before tracing edge growth.
+    relation_census.census(vault)
+    relation_census.sample(vault, size=40)
     sidecar = epistemic_graph.sidecar_path(vault)
     connection = sqlite3.connect(sidecar)
     columns = [row[1] for row in connection.execute("PRAGMA table_info(graph_edges)")]
@@ -1040,11 +1043,25 @@ def test_census_streams_edges_instead_of_holding_them(
         lambda _self, **_kwargs: sqlite3.connect(f"file:{sidecar}?mode=ro", uri=True),
     )
 
+    limit_bytes = 12 * 1024 * 1024
+    allocation_sites = None
     tracemalloc.start()
     try:
         result = relation_census.census(vault)
+        after_census = tracemalloc.get_traced_memory()
         sampled = relation_census.sample(vault, size=40)
-        _current, peak = tracemalloc.get_traced_memory()
+        current, peak = tracemalloc.get_traced_memory()
+        if peak >= limit_bytes:
+            # Capture diagnostics after the asserted peak, so they cannot inflate it.
+            allocation_sites = [
+                {
+                    "file": Path(stat.traceback[0].filename).name,
+                    "line": stat.traceback[0].lineno,
+                    "bytes": stat.size,
+                    "count": stat.count,
+                }
+                for stat in tracemalloc.take_snapshot().statistics("lineno")[:8]
+            ]
     finally:
         tracemalloc.stop()
 
@@ -1052,4 +1069,20 @@ def test_census_streams_edges_instead_of_holding_them(
     assert sampled["drawn"] == 40
     # Holding one object per edge costs several hundred bytes each (tens of
     # MB here); streaming keeps the census to a few MB.
-    assert peak < 12 * 1024 * 1024, peak
+    diagnostics = None
+    if peak >= limit_bytes:
+        import sys
+        import threading
+
+        diagnostics = json.dumps(
+            {
+                "peak_bytes": peak,
+                "current_bytes": current,
+                "after_census_bytes": after_census,
+                "python": sys.version,
+                "threads": [thread.name for thread in threading.enumerate()],
+                "allocation_sites": allocation_sites,
+            },
+            sort_keys=True,
+        )
+    assert peak < limit_bytes, diagnostics

@@ -485,6 +485,19 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
         raise StepFailure(f"provisioning took {provision:.1f}s, target < 180s")
 
 
+# Read the running image's registry and configured discovery shape; command names can share a public rendering.
+CLOUD_DISCOVERY_POLICY_COMMAND = (
+    "import json,os;from exomem.commands import product_commands_for;"
+    "from exomem.command_surface import listed_names;from exomem.server import _tool_shape_from_environment;"
+    "from exomem import cloud_origin;shape=_tool_shape_from_environment();tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
+    "personal=product_commands_for('mcp',expose_tier2=tier2);"
+    "cloud=product_commands_for('mcp',expose_tier2=tier2,cloud=True,upload_bridge=cloud_origin.enabled());"
+    "names=lambda commands:{name for command in commands for name in listed_names(command,shape)};"
+    "print(json.dumps({'excluded':sorted(names(personal)-names(cloud)),"
+    "'adoption':sorted(names(command for command in cloud if command.name=='adopt_vault'))}))"
+)
+
+
 async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     _require(ctx.a.session and ctx.a.cell_id)
     # The stock MCP Python SDK client: its PKCE verifiers use the whole RFC
@@ -499,12 +512,14 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     policy = wait_for(
         lambda: ctx.exec_in(
             namespace_name(ctx.a.cell_id), "statefulset/cell", "python3", "-c",
-            "import json;from exomem.commands import CLOUD_SURFACE_EXCLUSIONS;"
-            "print(json.dumps(list(CLOUD_SURFACE_EXCLUSIONS)))",
+            CLOUD_DISCOVERY_POLICY_COMMAND,
         ).stdout,
         timeout=120, description="tenant A's runtime policy to be readable",
     )
-    exclusions = json.loads(policy)
+    discovery = json.loads(policy)
+    exclusions = discovery["excluded"]
+    adoption = discovery["adoption"]
+    adoption_present = bool(adoption) and set(adoption) <= set(tools)
     exposed = set(exclusions) & set(tools)
     record.evidence.update(
         {
@@ -519,13 +534,14 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             "tools": tools,
             "expected_cloud_exclusions": exclusions,
             "cloud_exclusions_absent": not exposed,
-            "staged_adoption_present": "adopt_vault" in tools,
+            "staged_adoption_tools": adoption,
+            "staged_adoption_present": adoption_present,
         }
     )
     if exposed:
         raise StepFailure(f"cloud-excluded tools are served: {sorted(exposed)}")
     # Staged encrypted imports require the standard adoption command.
-    if "adopt_vault" not in tools:
+    if not adoption_present:
         raise StepFailure("staged adoption is absent from the Cloud tool surface")
     # 5.3: warm initialize and tools/list, each on a fresh MCP session over
     # the connector's existing token and its one HTTP client, so a sample
@@ -869,8 +885,11 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
         # Which session failed, and what the gateway says to each tenant now.
         for tenant in (ctx.a, ctx.b):
             if tenant.client and tenant.client.access_token:
-                probe = await raw_mcp_post(ctx.resolver, token=tenant.client.access_token)
-                record.evidence[f"gateway_now_{tenant.label}"] = {"status": probe.status_code, "body": _safe_body(probe)}
+                try:
+                    probe = await raw_mcp_post(ctx.resolver, token=tenant.client.access_token)
+                    record.evidence[f"gateway_now_{tenant.label}"] = {"status": probe.status_code, "body": _safe_body(probe)}
+                except Exception as diagnostic_error:  # noqa: BLE001 -- diagnostics must not replace the original failure
+                    record.evidence[f"gateway_now_{tenant.label}"] = {"error_type": type(diagnostic_error).__name__}
         raise
 
 
@@ -902,10 +921,16 @@ async def _step_10(ctx: Context, record: StepRecord) -> None:
     else:
         async with ctx.a.client.mcp() as session:
             a_sees_b = await session.call("ask_memory", {"query": ctx.b.phrase})
-    record.evidence["phase"] = "denial probes"
-    selector = await raw_mcp_post(ctx.resolver, token=ctx.b.client.access_token, headers={"x-cell-id": ctx.a.cell_id})
-    forged = await raw_mcp_post(ctx.resolver, token=secrets.token_urlsafe(32))
-    anonymous = await raw_mcp_post(ctx.resolver, token=None)
+    denials: dict[str, Any] = {"selector": {}, "forged": {}, "anonymous": {}}
+    record.evidence["denial_probes"] = denials
+    record.evidence["phase"] = "selector header denial"
+    selector = await raw_mcp_post(ctx.resolver, token=ctx.b.client.access_token,
+                                  headers={"x-cell-id": ctx.a.cell_id}, observation=denials["selector"])
+    record.evidence["phase"] = "forged bearer denial"
+    forged = await raw_mcp_post(ctx.resolver, token=secrets.token_urlsafe(32), observation=denials["forged"])
+    record.evidence["phase"] = "anonymous bearer denial"
+    anonymous = await raw_mcp_post(ctx.resolver, token=None, observation=denials["anonymous"])
+    record.evidence["phase"] = "cross-cell network denial"
     # Network: B's cell pod cannot open A's Service (NetworkPolicy, D5).
     a_service_ip = ctx.kube_json("get", "service", "cell", "--namespace", namespace_name(ctx.a.cell_id))["spec"]["clusterIP"]
     b_pod = ctx.runtime_pod(ctx.b.cell_id)

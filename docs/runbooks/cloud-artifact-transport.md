@@ -23,7 +23,8 @@ The dedicated Ed25519 pair is held by the exact BWS entries in
 `secret_handoff.py` using the `cloud_artifact_signing_key` and
 `cloud_artifact_public_key` routes in `secret-destinations-v1.json`, source `bws`,
 and the next unused destination version. The PEM values use file shape; the
-private half goes only to the gateway and the public half only to the broker.
+private half goes only to the gateway. The public half goes to the broker and, when
+`cloudGateway.uploadCellIds` is set, to cellctl for the cells it lists.
 Seal their separate SOPS artifacts, verify the pair in memory, and apply only
 those destinations through the existing static-secret deployment procedure.
 Refreshing this matrix also requires refreshing its signed active-secret
@@ -34,7 +35,8 @@ registry before any subsequent registry-based apply. The gateway alone receives 
 `artifactBroker.publicKeySecretName` / `publicKeySecretKey`
 (defaults: `exomem-artifact-broker-public-key` / `public-key`), exposed as
 `EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY`. Both Secrets belong in `exomem-cloud`.
-Neither cellctl nor a cell receives signing material. Do not reuse the Cloud
+Neither cellctl nor a cell receives the private PEM. The upload handoff
+(`cloud-upload-handoff.md`) gives cellctl the same public PEM for the cells it lists. Do not reuse the Cloud
 cell-token root or a database credential. Keep key bytes and temporary file
 handles out of release receipts, manifests committed to Git and command output.
 

@@ -7,3 +7,8 @@ exact deletion and the 31-day lifecycle is only a cleanup backstop. It must neve
 own or reference the Hetzner server, network, firewall, Cloudflare ingress,
 Kubernetes objects, or tenant application records. Production changes use the
 `durability/` remote-state key.
+
+The optional Cloud media bucket keeps all completed versions without Object Lock.
+Its edge key can read and write that bucket, but cannot destroy versions or reach backup buckets.
+The edge must filter operations because B2's `writeFiles` capability also permits hiding an object.
+Enabling this Terraform option creates storage only; the separate media canary and fleet switches control offload.

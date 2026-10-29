@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import archive_members, import_stage, state_paths
 from .cell_init import _ensure_private_directory
+from .cloud_cell import CELL_ID_PATTERN
 from .cloud_import import DEFAULT_MAX_MEMBERS, ArchiveRefused, reserve_bytes_from_env, unpack_stream
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 
@@ -74,7 +75,7 @@ def _check_cell(data_root: Path, cell_id: str) -> None:
     from .cloud_cell import cloud_mode_enabled
 
     # C1 defines a 16-character base32 cell identifier.
-    if not re.fullmatch(r"[a-z2-7]{16}", cell_id) or not cloud_mode_enabled() or os.environ.get("EXOMEM_CLOUD_CELL_ID") != cell_id:
+    if not re.fullmatch(CELL_ID_PATTERN, cell_id) or not cloud_mode_enabled() or os.environ.get("EXOMEM_CLOUD_CELL_ID") != cell_id:
         raise ArchiveRefused("IMPORT_CELL_MISMATCH", "configuration")
 
 

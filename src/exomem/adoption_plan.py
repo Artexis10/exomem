@@ -477,7 +477,9 @@ def read_facts(
 
     text: str | None = None
     try:
-        with reserved_paths.open_generic_binary(root, original_path, physical=True) as source:
+        from .media_store import open_original
+
+        with open_original(root, original_path, physical=True) as source:
             size = source.version.size
             if size > ceiling:
                 return {"code": OVER_CEILING, "reason": f"original exceeds the {ceiling:,} byte adoption ceiling"}
@@ -823,7 +825,10 @@ def artifact_of(root: Path, page_path: str) -> str | None:
     candidate = page_path[: -len(".md")]
     if candidate != page_path:
         try:
-            reserved_paths.inspect_generic_file(root, candidate, physical=True)
+            from .originals import original_state
+
+            if not original_state(root, candidate).present:
+                return None
         except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
             return None
         return candidate

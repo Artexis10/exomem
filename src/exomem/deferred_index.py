@@ -2489,6 +2489,26 @@ def semantic_debt_status(vault_root: Path | None) -> dict[str, Any]:
         return unknown
 
 
+def exact_full_status(vault_root: Path, relative: str) -> dict[str, Any]:
+    """Read one full-index demand without repair; absence does not prove freshness."""
+    result = {
+        "source": "full_upserts", "coverage": "exact-path", "state": "unavailable",
+        "count": None, "paths": [], "freshness": "unknown",
+    }
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            row = conn.execute(
+                "SELECT rel_path FROM full_upserts WHERE rel_path = ?", (relative,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return {**result, "state": "available", "count": int(row is not None),
+                "paths": [relative] if row is not None else []}
+    except (OSError, sqlite3.Error, ValueError):
+        return result
+
+
 def full_status(vault_root: Path | None) -> dict[str, Any]:
     result = _status(vault_root, table="full_upserts")
     command = (

@@ -40,6 +40,7 @@ from . import (
     media_brakes,
     media_engines,
     media_jobs,
+    media_slot_client,
     preserve,
     provenance,
     recall_policy,
@@ -132,6 +133,10 @@ _MEMORY_WAIT_EXIT_CODE = 78
 #: stop mid-job, repeating it at a fixed pace spawns a process every few seconds for
 #: as long as the writer lease is elsewhere, so the supervisor backs off.
 _AUTHORITY_UNAVAILABLE_EXIT_CODE = 79
+#: The child claimed a job that needs more anonymous memory than the node slot it was
+#: started under reserves (an interrupted job it recovered, say). It ran nothing and
+#: counted no stop; the supervisor gives the slot back and asks for the right size.
+_SLOT_TOO_SMALL_EXIT_CODE = 80
 #: Relaunch delay after consecutive authority refusals: from the follower cadence,
 #: doubling to this ceiling, so a lease that frees up still starts work within it.
 _AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
@@ -327,6 +332,10 @@ class MediaWorker:
         self._wake = threading.Event()
         self._stop_event = threading.Event()
         self._child: subprocess.Popen | None = None
+        # The node media-slot lease: None unless cellctl rendered its URL into this cell.
+        self._slot = media_slot_client.SlotClient.from_env()
+        #: The anonymous bytes of the slot the next child is started under.
+        self._leased_anon_bytes: int | None = None
         self._asr_runtime_failure: str | None = None
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
@@ -467,15 +476,45 @@ class MediaWorker:
                 self._q.task_done()
 
     def _process(self, job: _Job) -> _ProcessOutcome:
-        if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-            if job.binary_path.exists():  # a removal's transcript went with it, in the deletion fan-out
-                self._discard_speech_progress(job)
+        from . import held_fs, media_store, originals, reserved_paths
+
+        offload_error = None
+        # Offload runs before extraction can hand a blocked result to the parent.
+        # A store outage leaves its generation pending while extraction continues.
+        if job.do_offload:
+            try:
+                media_store.offload(self._vault_root, job.binary_path)
+            except (media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OSError) as error:
+                offload_error = error
+            else:
+                if self._store is not None:
+                    self._store.complete_offload(job)
+        admitted = self._is_recall_admitted_media_sidecar(job.sidecar_path)
+        if not admitted and job.binary_path.exists():  # a removal's transcript went with it, in the deletion fan-out
+            self._discard_speech_progress(job)
+        if not admitted and not job.do_offload:
             if self._store is not None:
                 self._store.complete(job)
             return _ProcessOutcome(_COMPLETE)
         outcome = _ProcessOutcome(_COMPLETE)
-        # A stage whose engine is switched off is dropped unrun: its media keeps a
-        # pending sidecar and is queued again once the engine is enabled.
+        if admitted:
+            # The read pin spans all processing, including child result capture.
+            # Re-embedding reads only the sidecar and needs no original bytes.
+            if job.do_ocr or job.do_clip:
+                original = (media_store.open_original(self._vault_root, job.binary_path)
+                            if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
+                with original:
+                    outcome = self._process_original(job)
+            elif job.do_reembed:
+                self._run_reembed(job)
+        if outcome.state == _HANDOFF:
+            return outcome
+        if offload_error is not None:
+            raise offload_error
+        return outcome
+
+    def _process_original(self, job: _Job) -> _ProcessOutcome:
+        outcome = _ProcessOutcome(_COMPLETE)
         if job.do_ocr and media_engines.stage_enabled(job.media_type):
             outcome = self._run_extraction(job)
         if outcome.state == _HANDOFF:
@@ -1439,6 +1478,8 @@ class MediaWorker:
             "--idle-seconds",
             str(self._idle_seconds),
         ]
+        if self._leased_anon_bytes is not None:
+            args += ["--leased-anon-bytes", str(self._leased_anon_bytes)]
         log.info("media worker: starting disposable child")
         env = asr_runtime.cuda_runtime_child_env(os.environ)
         if media_brakes.enabled():
@@ -1522,6 +1563,7 @@ class MediaWorker:
                     returncode = child.returncode
                     child_pid = child.pid
                     self._child = None
+                    self._release_slot()
                     idle_signature = None
                     owns_runtime = self._store.worker_pid() == child_pid
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
@@ -1532,6 +1574,9 @@ class MediaWorker:
                     elif returncode == _MEMORY_WAIT_EXIT_CODE:
                         delay = _MEMORY_WAIT_SECONDS
                         log.info("media child found no memory room; retrying after %.1fs", delay)
+                    elif returncode == _SLOT_TOO_SMALL_EXIT_CODE:
+                        delay = 0.5  # the slot is already released; the next ask is sized again
+                        log.info("media child found its node slot too small; asking again")
                     elif returncode == _AUTHORITY_UNAVAILABLE_EXIT_CODE:
                         delay = self._authority_backoff
                         self._authority_backoff = min(delay * 2, _AUTHORITY_BACKOFF_MAX_SECONDS)
@@ -1596,11 +1641,15 @@ class MediaWorker:
                             relaunch_after = _clock() + _authority_recheck_seconds(
                                 refusal
                             )
+                        elif brakes and self._slot is not None and not self._ask_slot():
+                            # No node slot yet, or no answer: wait as a memory-blocked job waits.
+                            relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
                         else:
                             try:
                                 self._child = self._launch_child()
                                 self._child_started_at = _clock()
                             except OSError:
+                                self._release_slot()
                                 log.exception("media worker: could not start child")
                                 relaunch_after = _clock() + 5.0
                     elif not settled:
@@ -1628,11 +1677,50 @@ class MediaWorker:
         finally:
             child = self._child
             if child is not None and child.poll() is None:
-                with contextlib.suppress(OSError):
-                    child.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    child.wait(timeout=5)
+                if brakes and self._slot is not None:
+                    # The node slot goes back to another cell next, and the child's tools share
+                    # its session and keep their memory until killed. Kill the group while its
+                    # leader is still unreaped, so the group ID cannot belong to another process.
+                    with contextlib.suppress(OSError):
+                        os.killpg(child.pid, signal.SIGKILL)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=5)
+                    if child.returncode is not None:
+                        _reap_group(child.pid)
+                else:
+                    with contextlib.suppress(OSError):
+                        child.terminate()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=5)
             self._child = None
+            self._release_slot()
+
+    def _ask_slot(self) -> bool:
+        """Whether the node lease holds a slot for the job the next child will claim.
+
+        The job is the one `claim_next` takes (`next_pending` is its read-only twin). The
+        child recovers interrupted jobs first, so it may claim a heavier one than this
+        sees; it then refuses it (`_SLOT_TOO_SMALL_EXIT_CODE`) and this asks again.
+        """
+        assert self._store is not None and self._slot is not None
+        config = media_brakes.settings(cell=media_brakes.read_cell())
+        job = self._store.next_pending()
+        budget = config.default_budget if job is None else _budget_for(job, config)
+        # The names only reach the service log; the bytes and the timeout are what it grants.
+        engines = "-".join(
+            name or media_brakes.DEFAULT_BUDGET_KEY for name in ([] if job is None else _engines_loaded(job))
+        )
+        if self._slot.acquire(
+            engines or media_brakes.DEFAULT_BUDGET_KEY, budget.anon_bytes, config.job_timeout_seconds
+        ):
+            self._leased_anon_bytes = budget.anon_bytes
+            return True
+        return False
+
+    def _release_slot(self) -> None:
+        self._leased_anon_bytes = None
+        if self._slot is not None:
+            self._slot.release()
 
     def _drain_parent_results(self) -> None:
         """Publish bounded child results while the disposable child remains alive."""
@@ -1921,11 +2009,15 @@ class MediaWorker:
 
     def scan_pending(self) -> int:
         """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""
-        return self._scan_pending_ocr() + self._scan_unindexed_images()
+        from . import media_store
+
+        queued = media_store.enqueue_offloads(self._vault_root) + self._scan_pending_ocr() + self._scan_unindexed_images()
+        media_store.evict_to_target(self._vault_root)
+        return queued
 
     def _scan_pending_ocr(self) -> int:
         """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
-        from . import media_processing
+        from . import media_processing, originals
 
         kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
@@ -1965,7 +2057,7 @@ class MediaWorker:
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if not media_engines.stage_enabled(media_type):
                 continue  # the engine is off: the sidecar waits without a job
-            if media_type and binary.exists():
+            if media_type and (binary.exists() or originals.evicted(self._vault_root, binary)):
                 existing = (
                     self._store.get_by_binary(binary)
                     if self._store is not None
@@ -1984,7 +2076,7 @@ class MediaWorker:
             for parent_rel in pending_parents:
                 parent_sidecar = self._vault_root / (parent_rel + ".md")
                 parent_binary = self._vault_root / parent_rel
-                if parent_sidecar.exists() and parent_binary.exists():
+                if parent_sidecar.exists() and (parent_binary.exists() or originals.evicted(self._vault_root, parent_binary)):
                     self.enqueue(
                         binary_path=parent_binary,
                         sidecar_path=parent_sidecar,
@@ -2017,7 +2109,13 @@ class MediaWorker:
             return 0
         clip_enabled = embeddings.clip_enabled()
         n = 0
-        for f in iter_kb_files(kb):
+        from itertools import chain
+
+        from . import media_store, originals
+
+        evicted = (item.path for item in media_store.bound_originals(self._vault_root)
+                   if item.state == "evicted") if originals.binding_for(self._vault_root) else ()
+        for f in chain(iter_kb_files(kb), evicted):
             mt = extract.media_type_for(f)
             if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue
@@ -2110,8 +2208,18 @@ def _idle_seconds() -> float:
         return 300.0
 
 
-def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
-    """Claim and process durable jobs until idle or the parent disappears."""
+def run_child(
+    vault_root: Path,
+    *,
+    parent_pid: int,
+    idle_seconds: float,
+    leased_anon_bytes: int | None = None,
+) -> int:
+    """Claim and process durable jobs until idle or the parent disappears.
+
+    `leased_anon_bytes`, set when the parent holds a node media slot, is what that slot
+    reserves; the child claims no job that needs more.
+    """
     store = MediaJobStore(vault_root)
     store.recover_interrupted()
     recovered_compute = store.recover_compute_runtime_failures()
@@ -2140,8 +2248,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
         store.mark(job, FAILED, error)
 
     def admit(job: _Job) -> bool:
-        """Claim only what fits in the cell now; the supervisor checked before spawning."""
+        """Claim only what fits the node slot and the cell now; the supervisor checked before spawning."""
         assert config is not None
+        if leased_anon_bytes is not None and budget_of(job).anon_bytes > leased_anon_bytes:
+            refusal.append(_SLOT_TOO_SMALL_EXIT_CODE)
+            return False
         if not media_brakes.admits(media_brakes.read_cell(), budget_of(job), config):
             refusal.append(_MEMORY_WAIT_EXIT_CODE)
             return False
@@ -2166,7 +2277,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
             )
             job = None if settled else store.claim_next(admit if brakes else None)
             if refusal:
-                log.info("media worker: memory admission refused the next job; child exiting")
+                log.info("media worker: admission refused the next job (exit %d); child exiting", refusal[0])
                 return refusal[0]
             if job is None:
                 if not settled:

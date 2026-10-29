@@ -54,7 +54,6 @@ import datetime as dt
 import logging
 import os
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,6 +73,7 @@ from .vault import (
     read_guarded_text,
     render_frontmatter_document,
     render_wikilink_target,
+    vault_name_key,
 )
 
 log = logging.getLogger(__name__)
@@ -407,10 +407,7 @@ def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
     portable_destinations: dict[str, str] = {}
     for write in (write for group in groups for write in group):
         destination = os.path.abspath(write.path)
-        portable = "/".join(
-            unicodedata.normalize("NFC", part).casefold()
-            for part in Path(destination).parts
-        )
+        portable = "/".join(vault_name_key(part) for part in Path(destination).parts)
         existing = portable_destinations.get(portable)
         if existing is not None and existing != destination:
             raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")

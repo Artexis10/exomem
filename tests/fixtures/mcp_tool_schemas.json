@@ -360,7 +360,7 @@
     }
   },
   "capture_source": {
-    "description": "Save Source text or original files.\n\nNever retype originals: use files, or transfer_artifact(upload, lane=source,\nhold=true, expected_sha256=...) then exomem attach --handoff-file on personal HTTP.\nCloud needs handles; stdio needs HTTP MCP. source_kind is required.",
+    "description": "Save Source text or original files.\n\nNever retype originals: use files, or transfer_artifact(upload, lane=source,\nhold=true, expected_sha256=...) then exomem attach --handoff-file or the same\nPOST on HTTP MCP. A Cloud cell without transfer_artifact needs handles; stdio\nneeds HTTP MCP. source_kind is required.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4796,7 +4796,7 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client file handles as append-only Evidence.\n\nAttachments or single-use exomem attach handles; else\ntransfer_artifact(operation=\"upload\") then /upload. Keep the original,\nnot only a transcription. No model-visible base64.\nPer handle: stored, already_stored (exact bytes present; no write), or failed.\nLost replies replay on retry.",
+    "description": "Preserve client file handles as append-only Evidence.\n\nAttachments or single-use exomem attach handles; else a held transfer_artifact\nupload. Keep the original, not only a transcription. No model-visible base64.\nPer handle: stored, already_stored (exact bytes present; no write), or failed.\nLost replies replay on retry.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -8594,7 +8594,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare an original upload or download; a handoff does not prove custody.\n\nUpload: hold=true with expected_sha256, then exomem attach --handoff-file.\nCapture the returned handle. Download: supply artifact; use MCP or HTTPS delivery.",
+    "description": "Prepare an upload or download; a handoff does not prove custody.\n\nUpload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.\nCapture its handle. Download: supply artifact; use MCP or HTTPS delivery.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

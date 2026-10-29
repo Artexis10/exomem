@@ -1842,8 +1842,8 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             "warn",
             "The durable media job store is unreadable.",
             "Check permissions on .media-jobs.sqlite in the state root (see the "
-            "state.placement check) or remove the derived sidecar and restart so "
-            "pending evidence can be reconstructed.",
+            "state.placement check). Preserve this database: pending media-store "
+            "protections are authoritative. Restore or repair it before retrying.",
             details=status,
         )
     counts = status["counts"]

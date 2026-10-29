@@ -19,6 +19,9 @@ CLOUD_MODE_ENV = "EXOMEM_CLOUD_CELL"
 CLOUD_READ_ONLY_ENV = "EXOMEM_CLOUD_READ_ONLY"
 RESOURCE_POLICY_ENV = "EXOMEM_CLOUD_RESOURCE_POLICY"
 CLOUD_CELL_ISSUER = "exomem-cloud-cell"
+#: The canonical shape of a cell ID: sixteen base32 characters. Shape only;
+#: the control plane decides which cells exist.
+CELL_ID_PATTERN = r"[a-z2-7]{16}"
 #: The gateway names the authenticated OAuth client of each request here. A
 #: stateless request from a handshake-protocol client carries no `clientInfo`,
 #: and the gateway forwards no `User-Agent`, so without it every such call looks

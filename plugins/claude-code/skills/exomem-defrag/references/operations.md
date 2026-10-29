@@ -519,8 +519,8 @@ preservation.
 
 ### Inputs to gather
 - The artifact (text to inline, or a binary delivered out-of-band — see below)
-- Scope — the top-level subfolder under `Evidence/` (e.g., a contract name, an incident name)
-- Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit.
+- Scope — the top-level subfolder under `Evidence/` (e.g., a contract name, an incident name). Reuse the spelling of an existing folder; `food` and `Food` are one folder, and the vault re-spells to the existing one.
+- Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit, spelled as they exist.
 - Optional: a descriptive filename if the original is generic.
 
 ### Delivering the bytes — direct handles first, never inline through the model
@@ -546,11 +546,20 @@ cannot be undone.
   whole batch. A successful response contains the stored path, `size`, and
   `hash`; never treat an upload token as proof that bytes landed.
 
-- **Without file handles (including Claude web):** (1) call **`transfer_artifact(operation="upload")`** →
-  a short-lived `{token, ttl_seconds, upload_url}`; (2) only where the runtime
-  holding the file can reach `upload_url`, multipart-POST each attached file with `Authorization: Bearer
-  <token>` and form fields `file` / `scope` / `category` (optional `filename`,
-  `description`, **`text`**); (3) **searchability is automatic** — the server
+- **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
+  `operation-routing.md` ("A shared file that is evidence"). It needs no user token
+  and works on Exomem Cloud, which accepts no other upload, and on a personal server.
+
+- **Without file handles, on a personal server:** request
+  `transfer_artifact(operation="upload", lane="source")` for raw material, or
+  `lane="evidence"` for proof. The short-lived token fixes that lane.
+  Only where the runtime holding the file can reach `upload_url`, multipart-POST
+  each attached file there with `Authorization: Bearer <token>`.
+  For Source, send `file`, `source_kind`, and a clear `domain` when known;
+  `title` and `filename` are optional. Omitting `source_kind` leaves the capture
+  unclassified. For Evidence, send `file`, `scope`, and `category`, with optional
+  `filename`, `description`, and **`text`**.
+  **Searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
   (pymupdf), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
   txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video
@@ -565,13 +574,14 @@ cannot be undone.
   sandbox can't reach the returned URL, report that transport limitation and use
   a supported attachment channel. Never guess an upload endpoint or read a
   credential from the user's environment or machine.
-- **Phone / curl / a shortcut:** multipart-POST to the exact `upload_url`
+- **Phone / curl / a shortcut (personal server only; a Cloud cell accepts only the held
+  upload above):** multipart-POST to the exact `upload_url`
   returned by `transfer_artifact(operation="upload")`
   (`file`, `scope`, `category`, optional `filename`, `description`, `text`) with
   `Authorization: Bearer <returned short-lived token>` (the token is **always** required).
   Lands straight in `Evidence/<scope>/<category>/`, zero token cost.
 - **Claude Code / desk-side:** the file is already on local disk — write it
-  straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync).
+  straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync). Copy the spelling of the folders already there.
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
 
@@ -662,8 +672,9 @@ Supply `expected_sha256` when a particular version is required. A prepared hando
 proves no consumption. The link delegates only the named artifact version until
 expiry; current session and disclosure checks still apply. A changed or withheld
 original requires a fresh authorized handoff. Large payloads use HTTPS before
-base64 encoding. Desktop/personal endpoints serve recovery; Cloud outbound delivery
-remains unavailable. Native attachment rendering in other clients remains unverified.
+base64 encoding. Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
+blob; run its `next_step`, `exomem cloud download -- '<path>'`, which fetches the exact
+original over the owner's sign-in and keeps it only if its size and SHA-256 match. Native attachment rendering in other clients remains unverified.
 
 Legacy automation can still omit `path` and use the returned token in an
 Authorization header with `download_url?path=...`. Broad legacy tokens remain

@@ -10,7 +10,7 @@
 
 - [x] 2.1 Add default-off broker deployment, literal endpoint configuration and matching cell/admission network rules; verify rendered allowed broker access and denied DNS/public/metadata/cross-cell paths in isolated policy acceptance.
 - [x] 2.2 Document key ownership, endpoint preflight, staged rollout and rollback; independent review must approve the actual integrated diff and scoped reproductions.
-- [ ] 2.3 Add the fleet switch so every cell, including cells created later, receives the broker; verify an unlisted cell is selected, a listed cell keeps its digest, the switch off renders as before, and admission refuses any wider egress.
+- [x] 2.3 Add the fleet switch so every cell, including cells created later, receives the broker; verify an unlisted cell is selected, a listed cell keeps its digest, the switch off renders as before, and admission refuses any wider egress.
 
 ## 3. Delivery and directory closure
 

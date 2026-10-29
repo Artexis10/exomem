@@ -823,13 +823,17 @@ def _apply_pending_identity(
     back a path the canonical tree no longer has. Both are exact: the projection
     only holds generations whose after state was proven.
     """
-    projection = projection if projection is not None else _pending_reference_projection(vault_root)
+    if projection is None:
+        projection = _settled_projection(
+            Path(vault_root), _pending_reference_projection(vault_root)
+        )
     if projection is None or projection.empty:
         return rows
     if projection.blocked_paths:
-        # Unknown pending identities can conceal a duplicate of any identifier.
-        # Refusing exact resolution costs a retry; claiming uniqueness can send
-        # a governed mutation to the wrong page. Path-based recall stays usable.
+        # A pending path whose bytes cannot be read stays unknown, and it can
+        # conceal a duplicate of any identifier. Refusing exact resolution costs
+        # a retry; claiming uniqueness can send a governed mutation to the wrong
+        # page. Path-based recall stays usable.
         from .find import RetrievalIndexWarming
 
         call_spans.measure("pending_identity_unknown")
@@ -962,14 +966,15 @@ def reference_owner_lookup(
     caller borrowed. The returned function answers one identity: every page holding
     it once committed-but-unpublished custody is applied, or None when pending
     identity is unknown and the answer cannot be trusted. It never raises
-    `RetrievalIndexWarming`, and it never looks at the sidecar or scans the vault.
+    `RetrievalIndexWarming`, and it never looks at the sidecar or scans the vault;
+    it reads only the pending pages whose bodies custody could not prove.
 
     The pending projection is read once, on the first identity asked, so a caller
     that asks none never opens the deferred store. When that projection is not
     servable, every identity answers None: an optional reference is withheld, never
     turned into a warming error. `admit_pending_paths` keeps the pending paths the
-    caller cannot prove hidden, as in `paths_for_ids_read_only`; an unknown identity
-    on a page the caller may see leaves every identity unanswered.
+    caller cannot prove hidden, as in `paths_for_ids_read_only`; an unreadable
+    pending page the caller may see leaves every identity unanswered.
     """
     from .find import RetrievalIndexWarming
 
@@ -980,9 +985,9 @@ def reference_owner_lookup(
     def owners_of(identity: str) -> tuple[str, ...] | None:
         if not read:
             try:
-                read.append((True, _admitted_projection(
+                read.append((True, _settled_projection(root, _admitted_projection(
                     _pending_reference_projection(root), admit_pending_paths
-                )))
+                ))))
             except RetrievalIndexWarming:
                 read.append((False, None))
         servable, projection = read[0]
@@ -1013,6 +1018,43 @@ def _admitted_projection(
     return replace(
         projection,
         blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
+    )
+
+
+def _settled_projection(
+    root: Path, projection: ReferenceProjection | None
+) -> ReferenceProjection | None:
+    """Resolve the blocked paths from their canonical bytes, once per projection.
+
+    Pending custody could not prove these pages' bodies, but a page's identity
+    is whatever its bytes hold now, read with the scan's own rule. A page with no
+    well-formed id owns none. A page whose bytes cannot be read stays blocked, as
+    does everything when more are blocked than one hydration holds. Every blocked
+    page is read whichever ids were asked, so the work depends on vault state only.
+    """
+    from .pending_recall import PENDING_HYDRATION_LIMIT
+
+    if projection is None or not projection.blocked_paths:
+        return projection
+    if len(projection.blocked_paths) > PENDING_HYDRATION_LIMIT:
+        return projection
+    paths_by_id = {ref: list(paths) for ref, paths in projection.paths_by_id.items()}
+    refs_by_path = dict(projection.refs_by_path)
+    unreadable: set[str] = set()
+    for rel in sorted(projection.blocked_paths):
+        row = _identity_or_unreadable(root, root.joinpath(*rel.split("/")))
+        if row is not None and row[4] == _UNREADABLE:
+            unreadable.add(rel)
+            continue
+        ref = memory_ref(row[1]) if row is not None and row[4] == "valid" and row[1] else None
+        refs_by_path[rel] = ref
+        if ref is not None:
+            paths_by_id.setdefault(ref, []).append(rel)
+    return replace(
+        projection,
+        paths_by_id={ref: tuple(sorted(paths)) for ref, paths in paths_by_id.items()},
+        refs_by_path=refs_by_path,
+        blocked_paths=frozenset(unreadable),
     )
 
 
@@ -1163,7 +1205,7 @@ def _reference_owner_view_read_only(
         return _ReferenceOwnerView({}, None, frozenset())
     projection = _pending_reference_projection(root)
     unprovable = frozenset() if projection is None else projection.blocked_paths
-    projection = _admitted_projection(projection, admit_pending_paths)
+    projection = _settled_projection(root, _admitted_projection(projection, admit_pending_paths))
     return _ReferenceOwnerView(_prepared_owners.owners, projection, unprovable)
 
 
@@ -1429,14 +1471,34 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
     return rel
 
 
+#: Row status for a page the scan would read whose bytes could not be observed.
+_UNREADABLE = "unreadable"
+
+
 def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, str, str] | None:
+    row = _identity_or_unreadable(vault_root, path)
+    return None if row is not None and row[4] == _UNREADABLE else row
+
+
+def _identity_or_unreadable(
+    vault_root: Path, path: Path
+) -> tuple[str, str | None, str, str, str] | None:
+    """`_read_identity`, except an unobservable page is a row with status
+    `_UNREADABLE` instead of None. None still means the scan reads no identity
+    here: the page is not a member, or it is gone.
+    """
     rel = _relative_markdown(vault_root, path)
-    if rel is None or not path.exists():
+    if rel is None:
         return None
+    # Read first instead of checking `exists()`: from Python 3.14 `exists()`
+    # returns False on PermissionError, which would turn an unreadable page
+    # into a gone one.
     try:
         raw = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except (OSError, UnicodeDecodeError):
+        return rel, None, "", "", _UNREADABLE
     # Parse what text mode reads (universal newlines) but hash the bytes as
     # stored: recall custody proves a page by the digest of its bytes, so a
     # CRLF page hashed after newline translation could never be proven.
