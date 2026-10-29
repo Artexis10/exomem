@@ -92,7 +92,10 @@ def test_remote_repair_discovery_keeps_the_existing_maintenance_admission():
     variants = [variant.action for command in commands.product_commands_for("mcp")
                 for rendering in command.renderings if rendering.name == "repair_memory"
                 for variant in rendering.variants]
-    assert set(variants) == {"structured-files", "tag-variants"}
+    from exomem.writer_lease import REMOTE_WRITE_MAINTENANCE_MODES
+
+    # Remote discovery publishes exactly the maintenance writes remote admission accepts.
+    assert set(variants) == REMOTE_WRITE_MAINTENANCE_MODES
 
 
 def test_dataset_tier_and_video_exclusion_apply_to_contributors():

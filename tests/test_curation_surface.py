@@ -122,10 +122,8 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
             if isinstance(item, dict) and isinstance(item.get("enum"), list)
         )
 
-    # Remote admission advertises only reads until the governed curation write lane ships.
-    from exomem.curation import READ_ONLY_ACTIONS
-
-    assert curation_kinds == {f"curation-{action}" for action in READ_ONLY_ACTIONS}
+    # Remote clients get the whole curation workflow, as local ones do.
+    assert curation_kinds == {f"curation-{action}" for action in expected}
     assert enum_values(openapi_property) == expected
     assert parsed.curation_action == "status"
 
@@ -367,3 +365,55 @@ def test_standalone_writer_executes_curation_with_digest_operation_identity(
     ).read_text(encoding="utf-8").endswith(
         "- [finding] Säilytä tämä täsmälleen — 記憶を守る。 ^unicode\n"
     )
+
+
+def test_remote_client_runs_the_whole_curation_workflow(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A remote MCP client once got MAINTENANCE_REQUIRES_CLI on propose, so it
+    # could not repair a misfiled note it had found itself.
+    from exomem import capabilities, writer_lease
+
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "state"))
+    command = _command()
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="test",
+        tier2_enabled=True,
+        product_commands=("maintain_memory",),
+    )
+    plan = {
+        "version": 1,
+        "title": "Move course access into its own note",
+        "steps": [
+            {
+                "step_id": "course-access",
+                "kind": "create-note",
+                "args": {
+                    "title": "Course access",
+                    "slug": "remote-curation-course-access",
+                    "content": "## Observations\n\n- [course_access] Enrolled in the course. ^access\n",
+                    "relation_disposition": "reviewed_none",
+                    "relation_review_reason": "No honest relation exists for this isolated fixture.",
+                },
+            }
+        ],
+    }
+
+    with capabilities.active_surface(descriptor):
+        proposed = writer_lease.invoke_command(
+            command, vault, mode="curation", curation_action="propose", plan=plan
+        )
+        applied = writer_lease.invoke_command(
+            command,
+            vault,
+            mode="curation",
+            curation_action="apply",
+            run_id=proposed["run_id"],
+            plan_id=proposed["plan_id"],
+            expected_plan_fingerprint=proposed["plan_fingerprint"],
+            why="Approve the reviewed plan.",
+        )
+
+    assert applied["phase"] == "completed"
+    assert (vault / "Knowledge Base/Notes/Insights/remote-curation-course-access.md").exists()
