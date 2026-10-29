@@ -75,8 +75,9 @@ def test_worker_hands_migrated_file_custody_to_sql_and_restores_reference_reads(
     """Old file hashes must not block every UUID after SQL view rendering or a lost callback."""
     root = env
     migrated_receipt(root, capsys, completed=completed)
-    with pytest.raises(RetrievalIndexWarming):
-        memory_refs.resolve_identifier_read_only(root, memory_refs.memory_ref(NOTE_ID))
+    # The rendered views are readable, so their identities settle from the bytes
+    # before the worker has retired the stale file receipts.
+    assert memory_refs.resolve_identifier_read_only(root, memory_refs.memory_ref(NOTE_ID)) == NOTE
     for turn in range(4):
         derived_drain.drain_once(root, dispatch=lambda *_: False,
             observe_current_generation=lambda _: "sql-generation", visibility_publisher=pending_recall.publish,
@@ -94,8 +95,9 @@ def test_sql_handoff_keeps_an_unknown_ordinary_sibling_and_its_duplicate_refusal
             observe_current_generation=lambda _: "sql-generation", visibility_publisher=pending_recall.publish,
             limit=1, now=1000 + turn)
     assert derived_receipts.snapshot_pending_visibility(env, limit=10).paths == {UNKNOWN}
-    with pytest.raises(RetrievalIndexWarming):
+    with pytest.raises(memory_refs.ReferenceError) as refused:
         memory_refs.resolve_identifier_read_only(env, memory_refs.memory_ref(NOTE_ID))
+    assert refused.value.code == "AMBIGUOUS_REFERENCE"
 
 
 @pytest.mark.parametrize("damage", ["original-path", "receipt-hash", "checkpoint"])
@@ -122,8 +124,7 @@ def test_unverified_migration_evidence_keeps_file_custody(env, capsys, damage):
             conn.commit()
     derived_receipts.retire_imported_visibility(env, limit=10)
     assert ITEM in derived_receipts.snapshot_pending_visibility(env, limit=10).paths
-    with pytest.raises(RetrievalIndexWarming):
-        memory_refs.resolve_identifier_read_only(env, memory_refs.memory_ref(NOTE_ID))
+    assert memory_refs.resolve_identifier_read_only(env, memory_refs.memory_ref(NOTE_ID)) == NOTE
 
 
 def test_changed_receipt_revision_cannot_be_retired_by_an_earlier_proof(env, capsys, monkeypatch):

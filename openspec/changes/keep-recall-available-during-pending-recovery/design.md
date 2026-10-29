@@ -42,6 +42,7 @@ The metadata cost grows with active pending identities; content reads remain bou
 Lexical, keyword, vector, graph, CLIP, browse, filter, and unit paths apply the same suppression before ranking and limits.
 Reference projection removes covered persistent mappings before adding proven mappings.
 Exact identifier resolution retains an explicit unavailable state when incomplete identity coverage prevents uniqueness proof.
+Identity coverage for a pending page whose body is unproven comes from its canonical bytes, read once per lookup with the canonical scan's rule. Only unreadable pages, unknown custody, and more such pages than one hydration holds keep the unavailable state.
 Current access, policy, catalogue identity, and terminal byte checks remain mandatory.
 
 Public diagnostics stay content-free and preserve restricted callers' existing suppression.

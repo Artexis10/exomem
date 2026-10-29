@@ -92,14 +92,24 @@ Pending content hydration SHALL remain bounded. A legitimate pending burst beyon
 
 #### Scenario: Pending references cannot prove current identity
 
-- **WHEN** a pending identity lacks a proven current reference mapping
+- **WHEN** a pending identity lacks a proven current reference mapping and its canonical bytes cannot be read
 - **THEN** reference lookup cannot revive its persistent mapping or claim an unresolved identifier is unique
 - **AND** unrelated released recall hits remain available
+
+#### Scenario: A pending page body is unproven but readable
+
+- **WHEN** a pending page's body cannot be proven against its receipt but its canonical bytes can be read
+- **THEN** exact reference lookup takes that page's identity from those bytes, as the canonical scan does, and reads every such page whichever identifiers were asked
+- **AND** a page with no well-formed identifier owns none, so an ordinary write by reference proceeds
+- **AND** a page holding the requested identifier beside another owner refuses as ambiguous
+- **AND** more such pages than one hydration holds refuse the lookup with the warming outcome
+- **AND** recall keeps suppressing that page's persistent evidence; only exact reference lookups, including the response gate that checks memory references in governed output, read identities
 
 #### Scenario: Concurrent writes invalidate body hydration
 
 - **WHEN** ordinary pending writes invalidate a body-hydration fence
 - **THEN** recall obtains a fresh complete path footprint and serves degraded unaffected results without repeating full body hydration
+- **AND** the next request re-hydrates once, re-reading only bodies without retained proof, instead of serving the footprint until custody next changes
 
 #### Scenario: A hidden page is pending
 
