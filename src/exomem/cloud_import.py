@@ -60,6 +60,7 @@ IMPORT_STAGING_UNAVAILABLE = "IMPORT_STAGING_UNAVAILABLE"
 
 DEFAULT_MAX_MEMBERS = 500_000
 DEFAULT_RESERVE_BYTES = 256 * 1024 * 1024
+RESERVE_BYTES_ENV = "EXOMEM_IMPORT_RESERVE_BYTES"
 
 _NAME_MAX_BYTES = 255
 _PATH_MAX_BYTES = 4096
@@ -99,6 +100,12 @@ class UnpackResult:
     files: int
     directories: int
     bytes: int
+
+
+def reserve_bytes_from_env() -> int:
+    """The free space an import keeps back: the operator's setting, else the default."""
+    raw = os.environ.get(RESERVE_BYTES_ENV, "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() else DEFAULT_RESERVE_BYTES
 
 
 def free_bytes(path: Path) -> int:

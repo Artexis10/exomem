@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import archive_members, import_stage, state_paths
 from .cell_init import _ensure_private_directory
-from .cloud_import import DEFAULT_MAX_MEMBERS, DEFAULT_RESERVE_BYTES, ArchiveRefused, unpack_stream
+from .cloud_import import DEFAULT_MAX_MEMBERS, ArchiveRefused, reserve_bytes_from_env, unpack_stream
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 
 CHUNK_BYTES = 1024 * 1024
@@ -185,7 +185,7 @@ def run_import(
                         process.stdout, staging, max_bytes=request.declared_bytes,
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
                         max_members=int(os.environ.get("EXOMEM_IMPORT_MAX_MEMBERS", DEFAULT_MAX_MEMBERS)),
-                        reserve_bytes=int(os.environ.get("EXOMEM_IMPORT_RESERVE_BYTES", DEFAULT_RESERVE_BYTES)),
+                        reserve_bytes=reserve_bytes_from_env(),
                         on_file=(
                             (lambda path, size, digest: members.append(import_stage.member(path, size, digest)))
                             if request.kind == "adopt" else None

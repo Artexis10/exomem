@@ -1,9 +1,11 @@
-"""A large staged artifact adopts in one streamed pass; a file over the ceiling stays in the residual."""
+"""A large staged artifact adopts in one streamed pass, a file over the ceiling stays in the residual, and a chunk that does not fit waits."""
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import hashlib
 import json
+import shutil
 import tracemalloc
 import uuid
 from pathlib import Path
@@ -156,3 +158,39 @@ def test_a_staged_file_over_the_ceiling_stays_in_the_residual_with_a_code_that_n
     assert residual["by_reason"] == {"over_ceiling": {"files": 1, "bytes": 3 * MIB}}
     assert residual["ceiling_bytes"] == 2 * MIB
     assert next((vault / stage).rglob("long.bin")).stat().st_size == 3 * MIB
+
+
+def test_apply_stops_before_a_chunk_that_does_not_fit_the_free_space_and_a_later_call_continues_from_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reserve, size = 100_000, 4000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)
+    vault = _vault(tmp_path)
+    capacity = [reserve + 2 * size]  # after one filed copy a second fits the space, but not the space and the reserve
+
+    def free_bytes() -> int:
+        filed = sum(path.stat().st_size for path in (vault / "Knowledge Base" / "Sources").rglob("*") if path.is_file())
+        return capacity[0] - filed
+
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage(capacity[0] * 2, 0, free_bytes()))
+    stage = _stage(vault, {f"scans/{n}.bin": bytes([65 + n]) * size for n in range(3)})
+    run = adoption_run.start(vault, path=stage, consume=False, today=TODAY)
+    plan_id = _plan(vault, run, stage)
+
+    stopped = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)
+
+    items = [item["original_path"] for item in stopped["plan"]["items"]]
+    assert [(stopped["outcomes"].get(path) or {}).get("status") for path in items] == ["applied", None, None]
+    assert len(list((vault / "Knowledge Base" / "Sources").rglob("*.bin"))) == 1
+    space = stopped.get("apply_stop")
+    assert space is not None and space["code"] == "INSUFFICIENT_SPACE"
+    assert (space["chunk_bytes"], space["reserve_bytes"], space["free_bytes"]) == (size, reserve, free_bytes())
+    assert stopped["phase"] == "applying"
+
+    capacity[0] += 10 * size
+    resumed = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)
+
+    assert len(list((vault / "Knowledge Base" / "Sources").rglob("*.bin"))) == 3
+    assert "apply_stop" not in resumed and resumed["phase"] == "applied"

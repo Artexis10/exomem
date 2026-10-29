@@ -24,6 +24,7 @@ import json
 import os
 import posixpath
 import secrets
+import shutil
 import stat
 import threading
 import time
@@ -827,9 +828,11 @@ def _next_actions(run: dict) -> list[dict]:
              "description": "Commit exactly the previewed imports (echo the plan_id)."}
         )
     elif phase == "applying":
+        stop = run.get("apply_stop")
         actions.append(
             {"action": "apply", "status": "available",
-             "description": "Apply stopped with work left; call apply again with the continuation."}
+             "description": stop["next"] if stop else
+             "Apply stopped with work left; call apply again with the continuation."}
         )
     elif phase in ("applied", "partial"):
         actions.append(
@@ -1668,6 +1671,25 @@ def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
     return chunk
 
 
+def _space_shortfall(root: Path, chunk: list[dict]) -> dict | None:
+    """Why the chunk cannot start: its bytes and the import reserve do not fit the vault's free space.
+
+    The reserve is the one setting an import already keeps (`cloud_import.reserve_bytes_from_env`); it also
+    stands for the chunk's derived state (index, graph and sidecars), which is small beside the copy itself.
+    """
+    from . import cloud_import
+
+    needed = sum(planned["original_bytes"] for planned in chunk)
+    reserve = cloud_import.reserve_bytes_from_env()
+    free = shutil.disk_usage(root).free
+    if needed + reserve <= free:
+        return None
+    return {
+        "code": "INSUFFICIENT_SPACE", "chunk_bytes": needed, "reserve_bytes": reserve, "free_bytes": free,
+        "next": "Free space on the vault's volume, then call apply again: it resumes at this chunk.",
+    }
+
+
 def _request_extraction(root: Path, planned: dict, budget: request_budget.RequestBudget,
                         stats: Counter) -> float | None:
     """Ask for text extraction of a committed media artifact; finish repairs what is missed.
@@ -2169,6 +2191,7 @@ def apply(
                     _settle_staged(root, run, reads, by_path[path], outcomes[path], stats)
         run["outcomes"] = outcomes
 
+        run.pop("apply_stop", None)
         budget = _call_budget()
         ceiling = client_artifacts.adoption_ceiling()
         written: list[str] = []
@@ -2185,6 +2208,11 @@ def apply(
         while pending:
             chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
+                stopped = True
+                break
+            shortfall = _space_shortfall(root, chunk)
+            if shortfall is not None:
+                run["apply_stop"] = shortfall
                 stopped = True
                 break
             started = time.monotonic()
