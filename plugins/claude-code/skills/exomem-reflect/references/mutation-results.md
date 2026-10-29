@@ -30,7 +30,7 @@ with the former raw result. Response detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
 terminal.
 
-A selected media process/retry request can finish without changing canonical
+A selected media process/retry/reprocess request can finish without changing canonical
 bytes: it returns `state: settled`, `status: settled`, `terminal: true`, and
 `mutated: false`, with request identity and bounded `media_results`. This means
 the request has completed, not that a new content commit or extraction has
