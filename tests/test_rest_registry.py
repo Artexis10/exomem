@@ -1129,7 +1129,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
         "requestBody"
     ]["content"]["application/json"]["schema"]
     assert set(schema["properties"]) == {
-        "path", "paths", "operation", "language", "response_detail",
+        "path", "paths", "operation", "language", "multilingual", "response_detail",
     }
     assert schema["properties"]["response_detail"]["enum"] == [
         "compact",

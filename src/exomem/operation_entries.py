@@ -586,9 +586,9 @@ _REMAINING = {
     "read_media": (None, (_row("video", "read_media"),)),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
-        _row("process", "change_media", ("path", "paths")),
+        _row("process", "change_media", ("path", "paths", "language", "multilingual")),
         _row("retry", "change_media", ("path", "paths")),
-        _row("reprocess", "change_media", ("path", "paths", "language")),
+        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual")),
     )),
     "triage_memory": (None, (_row("decision", "triage_memory"),)),
     "review_item_context": (None, (_row("item-context", "read_review"),)),

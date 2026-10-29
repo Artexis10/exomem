@@ -15,6 +15,11 @@ LANGUAGE_CONFIGURED = "configured"
 LANGUAGE_DETECTED = "detected"
 LANGUAGE_SOURCES = frozenset({LANGUAGE_REQUESTED, LANGUAGE_CONFIGURED, LANGUAGE_DETECTED})
 
+#: Whether the engine read one language for the whole file or detected the language per window.
+LANGUAGE_MODE_SINGLE = "single"
+LANGUAGE_MODE_MULTILINGUAL = "multilingual"
+LANGUAGE_MODES = frozenset({LANGUAGE_MODE_SINGLE, LANGUAGE_MODE_MULTILINGUAL})
+
 
 @dataclass
 class AsrFacts:
@@ -24,6 +29,8 @@ class AsrFacts:
     language_source: str | None = None
     #: The language the caller pinned, kept so a later run on the same recording reuses it.
     language_requested: str | None = None
+    #: The mode the engine ran in. In `multilingual` mode `language` is the engine's report for the file.
+    language_mode: str | None = None
     #: Seconds of audio that held speech, after the engine removed silence.
     speech_seconds: float | None = None
     duration_seconds: float | None = None
@@ -46,7 +53,7 @@ class AsrFacts:
         """Rebuild facts from a job result; a value of the wrong type is a corrupt result."""
         if not isinstance(value, dict) or set(value) - set(cls.__dataclass_fields__):
             raise ValueError("ASR facts must be a mapping of the known fields")
-        texts = ("language", "language_source", "language_requested", "policy")
+        texts = ("language", "language_source", "language_requested", "language_mode", "policy")
         numbers = ("language_probability", "speech_seconds", "duration_seconds")
         for key in texts:
             if value.get(key) is not None and not isinstance(value[key], str):
@@ -57,4 +64,6 @@ class AsrFacts:
                 raise ValueError(f"ASR fact {key!r} must be a number")
         if value.get("language_source") not in (None, *LANGUAGE_SOURCES):
             raise ValueError("ASR fact 'language_source' is not a known source")
+        if value.get("language_mode") not in (None, *LANGUAGE_MODES):
+            raise ValueError("ASR fact 'language_mode' is not a known mode")
         return cls(**value)

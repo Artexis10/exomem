@@ -8912,6 +8912,7 @@ def op_process_media(
     paths: list[str] | None = None,
     operation: ProcessMediaOperation = "process",
     language: str | None = None,
+    multilingual: bool = False,
 ) -> dict:
     """Check governed media; retry after remediation; extract again.
 
@@ -8922,8 +8923,11 @@ def op_process_media(
         path: Governed KB media path; omit for bounded all-media work.
         paths: 1-32 unique governed paths, not for status.
         language: Speech language code; omit to detect.
+        multilingual: Detect the language per window (slower); not with language.
     """
     from . import due_state as due_state_module
+    from . import media_processing
+    from .asr_facts import LANGUAGE_MODE_MULTILINGUAL
     from .cli_ops import OpError
 
     validate_process_media_operation(operation)
@@ -8931,8 +8935,19 @@ def op_process_media(
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
     if operation == "reprocess" and path is None and paths is None:
         raise OpError("MEDIA_PATH_REQUIRED", "reprocess needs the path or paths of the media to extract again")
-    if language is not None and operation != "reprocess":
-        raise OpError("LANGUAGE_NOT_APPLICABLE", "language applies to the reprocess operation only")
+    try:
+        language, mode = media_processing.declared_language(language, multilingual)
+    except media_processing.MediaProcessingError as error:
+        raise OpError(error.code, error.reason) from error
+    multilingual = mode == LANGUAGE_MODE_MULTILINGUAL
+    if mode is not None and operation not in {"process", "reprocess"}:
+        raise OpError(
+            "LANGUAGE_NOT_APPLICABLE", "language and multilingual apply to process and reprocess only"
+        )
+    if mode is not None and path is None and paths is None:
+        raise OpError(
+            "MEDIA_PATH_REQUIRED", "a language or multilingual mode needs the path or paths of the media it applies to"
+        )
     if operation == "status":
         # Reads only, so there is no batch to scope.
         return _process_media(vault_root, path=path, paths=paths, operation=operation)
@@ -8940,7 +8955,12 @@ def op_process_media(
     # form is a batch and must not deliver one counters block per artifact.
     with due_state_module.batch_scope(vault_root):
         result = _process_media(
-            vault_root, path=path, paths=paths, operation=operation, language=language
+            vault_root,
+            path=path,
+            paths=paths,
+            operation=operation,
+            language=language,
+            multilingual=multilingual,
         )
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
@@ -8955,6 +8975,7 @@ def _process_media(
     paths: list[str] | None,
     operation: str,
     language: str | None = None,
+    multilingual: bool = False,
 ) -> dict:
     from . import index_sync, media_jobs
     from .cli_ops import OpError
@@ -9055,7 +9076,9 @@ def _process_media(
         results: list[dict[str, object]] = []
         for binary, relative in selected_paths:
             try:
-                result = _run_media_operation(vault_root, binary, operation, language, _commit_guard)
+                result = _run_media_operation(
+                    vault_root, binary, operation, language, multilingual, _commit_guard
+                )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
             except media_processing.MediaProcessingError as error:
@@ -9146,7 +9169,9 @@ def _process_media(
         raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
 
     try:
-        result = _run_media_operation(vault_root, binary, operation, language, _commit_guard)
+        result = _run_media_operation(
+            vault_root, binary, operation, language, multilingual, _commit_guard
+        )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
 
@@ -9170,17 +9195,23 @@ def _process_media(
 _MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
 
 
-def _run_media_operation(vault_root: Path, binary: Path, operation: str, language, commit_guard):
+def _run_media_operation(
+    vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard
+):
     """Run one explicit media operation on one governed binary."""
     from . import media_processing
 
+    if operation == "process" and (language is not None or multilingual):
+        return media_processing.process_declared_media(
+            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+        )
     if operation == "process":
         return media_processing.reconcile_media(
             vault_root, binary, explicit=True, commit_guard=commit_guard
         )
     if operation == "reprocess":
         return media_processing.reprocess_media(
-            vault_root, binary, language=language, commit_guard=commit_guard
+            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
         )
     return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 
@@ -9239,13 +9270,15 @@ def _media_remediation(code: str) -> str:
     if code == "INVALID_LANGUAGE":
         return "Give the language as the short alphabetic code the speech model uses, or omit it."
     if code == "LANGUAGE_NOT_APPLICABLE":
-        return "Omit the language, or select audio or video media."
+        return "Omit the language and the multilingual mode, or select audio or video media."
+    if code == "TRANSCRIPT_COMPLETE":
+        return "Use the reprocess operation to extract the recording again with the declared language."
     if code == "MEDIA_ENGINE_DISABLED":
-        return "Enable the extraction engine for this media type, then reprocess."
+        return "Enable the extraction engine for this media type, then ask again."
     if code == "MEDIA_BUSY":
-        return "Wait for the current processing run to end, then reprocess again."
+        return "Wait for the current processing run to end, then ask again."
     if code == "MEDIA_RUNTIME_UNAVAILABLE":
-        return "Restore the media runtime, then reprocess again."
+        return "Restore the media runtime, then ask again."
     return "Inspect the media artifact and retry processing."
 
 

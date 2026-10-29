@@ -31,6 +31,7 @@ from . import (
     recall_policy,
     reserved_paths,
 )
+from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .vault import (
@@ -1173,36 +1174,86 @@ def retry_all_media(
 _LANGUAGE_CODE_RE = re.compile(r"[a-z]{2,16}")
 
 
+def declared_language(language: str | None, multilingual: bool) -> tuple[str | None, str | None]:
+    """The speech language or mode a request declares, as the job stores it: `(code, mode)`.
+
+    A request gives one language code or the multilingual mode, never both. It declares
+    nothing when both are empty, and the mode is then None.
+    """
+    from . import extract
+
+    hint = extract.language_code(language)
+    if hint is not None and multilingual:
+        raise MediaProcessingError(
+            "LANGUAGE_MODE_CONFLICT",
+            "give either one language code or the multilingual mode, not both",
+        )
+    if hint is not None and _LANGUAGE_CODE_RE.fullmatch(hint) is None:
+        raise MediaProcessingError(
+            "INVALID_LANGUAGE", "language must be a short alphabetic code, as the speech model names it"
+        )
+    if multilingual:
+        return None, LANGUAGE_MODE_MULTILINGUAL
+    return (hint, LANGUAGE_MODE_SINGLE) if hint is not None else (None, None)
+
+
 def reprocess_media(
     vault_root: Path,
     binary_path: str | Path,
     *,
     language: str | None = None,
+    multilingual: bool = False,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
-    """Queue one explicit second extraction of a media file, optionally with a language hint.
+    """Queue one explicit second extraction of a media file, optionally with a language or mode.
 
     Only this call extracts over a completed transcript. The job keeps the old text
     on a page next to the sidecar when the new text is ready, and leaves the sidecar
     as it is when the new extraction fails. A file that is being processed right now
     is refused, so the caller asks again when that run ends.
     """
-    from . import extract
+    return _queue_extraction(
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True
+    )
 
+
+def process_declared_media(
+    vault_root: Path,
+    binary_path: str | Path,
+    *,
+    language: str | None = None,
+    multilingual: bool = False,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    """Process a media file whose transcript is not complete yet, with the language or mode declared.
+
+    A complete transcript is refused: it keeps its text until `reprocess_media` replaces it,
+    and a declaration that was ignored would read as one that was applied.
+    """
+    return _queue_extraction(
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=False
+    )
+
+
+def _queue_extraction(
+    vault_root: Path,
+    binary_path: str | Path,
+    language: str | None,
+    multilingual: bool,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None,
+    *,
+    reprocess: bool,
+) -> ReconcileResult:
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
     if not binary.is_absolute():
         binary = vault / binary
     binary = Path(os.path.abspath(binary))
-    hint = extract.language_code(language)
-    if hint is not None and _LANGUAGE_CODE_RE.fullmatch(hint) is None:
-        raise MediaProcessingError(
-            "INVALID_LANGUAGE", "language must be a short alphabetic code, as the speech model names it"
-        )
+    hint, mode = declared_language(language, multilingual)
     media_type = classify_media(binary)
-    if hint is not None and media_engines.engine_for(media_type) != media_engines.SPEECH:
+    if mode is not None and media_engines.engine_for(media_type) != media_engines.SPEECH:
         raise MediaProcessingError(
-            "LANGUAGE_NOT_APPLICABLE", "a language hint applies to audio and video only"
+            "LANGUAGE_NOT_APPLICABLE", "a language or mode applies to speech media (audio and video) only"
         )
     if media_type is not None and not media_engines.stage_enabled(media_type):
         raise MediaProcessingError(
@@ -1215,20 +1266,27 @@ def reprocess_media(
     result = reconcile_media(vault, binary, commit_guard=commit_guard)
     if result is None:  # an explicit request is never skipped; this narrows the type
         raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
+    if not reprocess and result.state == "completed":
+        raise MediaProcessingError(
+            "TRANSCRIPT_COMPLETE",
+            "the transcript is already complete; reprocess replaces it with the declared language",
+        )
     boundary = commit_guard() if commit_guard is not None else nullcontext()
     with boundary:
         store = media_jobs.MediaJobStore(vault)
-        queued = store.request_reprocess(
+        queued = store.request_extraction(
             media_jobs.MediaJob(
                 binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type
             ),
             hint,
+            mode,
+            reprocess=reprocess,
         )
         job = store.get_by_binary(binary)
     if not queued:
         raise MediaProcessingError(
             "MEDIA_BUSY",
-            "the file is being processed now; reprocess it again when that run ends",
+            "the file is being processed now; ask again when that run ends",
         )
     return ReconcileResult(
         result.media_type,

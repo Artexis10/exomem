@@ -30,3 +30,9 @@ A processing or reprocess request SHALL accept either one language code or a mul
 - **WHEN** a request carries a language code and the multilingual mode together
 - **THEN** the request is refused with a reason that names the conflict
 - **AND** no job is queued
+
+#### Scenario: An engine that reads one language per file
+
+- **WHEN** a caller declares the multilingual mode and the configured speech engine cannot detect the language per decoding window
+- **THEN** the job fails with a next action that names the two ways out: give a language code or use the faster-whisper engine
+- **AND** the existing sidecar is left unchanged

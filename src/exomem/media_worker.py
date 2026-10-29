@@ -50,7 +50,7 @@ from . import (
     semantic_segments,
     temporal,
 )
-from .asr_facts import AsrFacts
+from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
 from .cli_ops import OpError
 from .governance import projected_retrieval
@@ -637,8 +637,11 @@ class MediaWorker:
         if completed and not reprocessing:
             return _ProcessOutcome(_COMPLETE)
         replaces = prior_extraction.extraction_digest(claimed_content) if reprocessing else None
-        # A request names the language; failing that, the sidecar keeps the last request's.
-        language = job.language or preserve.asr_language_pin(claimed_content)
+        # A request names the language or the multilingual mode; failing that, the sidecar keeps the last request's.
+        if job.language is not None or job.language_mode == LANGUAGE_MODE_MULTILINGUAL:
+            language, multilingual = job.language, job.language_mode == LANGUAGE_MODE_MULTILINGUAL
+        else:
+            language, multilingual = preserve.asr_language_pin(claimed_content)
         expected_sidecar = guard.expected_content_hash
         expected_evidence_version = _evidence_version_or_none(claimed_content)
         expected_binary = _binary_identity(job.binary_path)
@@ -665,6 +668,8 @@ class MediaWorker:
                 kwargs["timestamps"] = job.media_type in {"audio", "video"}
             if language is not None:
                 kwargs["language"] = language
+            if multilingual:
+                kwargs["multilingual"] = True
             result = extract.extract_text(job.binary_path, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
             error = f"{type(e).__name__}: {e}"
@@ -710,7 +715,7 @@ class MediaWorker:
                 presented_pending=True,
             )
             return self._publication_outcome(committed, BLOCKED, error)
-        except extract.UnsupportedLanguage as e:
+        except (extract.UnsupportedLanguage, extract.MultilingualUnsupported) as e:
             error = f"{type(e).__name__}: {e}"
             log.warning("unsupported language for %s: %s", job.binary_path.name, e)
             committed = self._commit_processing_failure(

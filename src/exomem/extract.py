@@ -52,6 +52,8 @@ from . import accel, asr_runtime, runtime_resources
 from .asr_facts import (
     LANGUAGE_CONFIGURED,
     LANGUAGE_DETECTED,
+    LANGUAGE_MODE_MULTILINGUAL,
+    LANGUAGE_MODE_SINGLE,
     LANGUAGE_REQUESTED,
     AsrFacts,
 )
@@ -132,6 +134,20 @@ class UnsupportedLanguage(Exception):
         )
 
 
+class MultilingualUnsupported(Exception):
+    """The speech engine reads one language for a whole file, so it cannot honour the multilingual mode.
+
+    The job fails and says so; it never reads the file as one language, because that returns
+    the wrong-language text the caller declared several languages to avoid.
+    """
+
+    def __init__(self, engine: str) -> None:
+        super().__init__(
+            f"the {engine} speech engine reads one language per file; give a language code "
+            "or use the faster-whisper engine for a recording in several languages"
+        )
+
+
 class TimestampRenderingUnavailable(Exception):
     """ASR succeeded but the required canonical timestamp rendering did not."""
 
@@ -186,6 +202,7 @@ def extract_text(
     vault_root: Path | None = None,
     timestamps: bool = False,
     language: str | None = None,
+    multilingual: bool = False,
 ) -> ExtractResult:
     """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
 
@@ -193,7 +210,9 @@ def extract_text(
     store to match against; without it attribution falls back to env resolution
     (`EXOMEM_VAULT_PATH`), which the CLI does not populate from `--vault`.
 
-    `language` is a code the caller asks the speech engine to use; only audio and video read it.
+    `language` is a code the caller asks the speech engine to use, and `multilingual` asks it to
+    detect the language per decoding window instead; only audio and video read either, and a
+    caller gives at most one.
     """
     p = Path(path)
     mt = media_type or media_type_for(p)
@@ -201,6 +220,8 @@ def extract_text(
         options: dict[str, object] = {"timestamps": True} if timestamps else {}
         if language is not None:
             options["language"] = language
+        if multilingual:
+            options["multilingual"] = True
         return _transcribe(p, mt, vault_root=vault_root, **options)
     if mt == "image":
         return _ocr_image(p)
@@ -425,14 +446,16 @@ class TranscriptionBackend(Protocol):
         *,
         vault_root: Path | None = None,
         language: str | None = None,
+        multilingual: bool = False,
         report: AsrFacts | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         """Transcribe `path` → ``(segments, engine_label)``.
 
         ``vault_root`` lets a backend that resumes keep this input's progress in
         the vault's state directory; other backends ignore it. ``language`` is a code
-        to force instead of detecting one, and ``report`` receives what the engine
-        decided once the segments have been read.
+        to force instead of detecting one. ``multilingual`` detects the language per
+        decoding window, and a backend that cannot raises `MultilingualUnsupported`.
+        ``report`` receives what the engine decided once the segments have been read.
 
         ``segments`` yields objects exposing ``.text`` / ``.start`` / ``.end``;
         ``engine_label`` is the provenance string stored on the sidecar (e.g.
@@ -461,6 +484,35 @@ def _seconds(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
+def _runs_on_cuda(model) -> bool:
+    """Whether the loaded model decodes on a GPU; the engine itself reports where it runs."""
+    return getattr(getattr(model, "model", None), "device", None) == "cuda"
+
+
+def _start_decoding(model, policy: dict, audio, *, language: str | None, multilingual: bool):
+    """Begin one decode under the policy: batched windows on CUDA, one window after another on CPU.
+
+    The batched pipeline ignores `condition_on_previous_text` and `hallucination_silence_threshold`,
+    so its options (`batched` in media_models.json) leave both out.
+    """
+    if _runs_on_cuda(model):
+        from faster_whisper import BatchedInferencePipeline
+
+        batched = policy["batched"]
+        return BatchedInferencePipeline(model).transcribe(
+            audio,
+            language=language,
+            multilingual=multilingual,
+            batch_size=batched["batch_size"],
+            **batched["options"],
+        )
+    options = dict(policy["options"])
+    # The library needs word timestamps to apply the hallucination guard, so the two go together.
+    if options.get("hallucination_silence_threshold") is not None:
+        options["word_timestamps"] = True
+    return model.transcribe(audio, language=language, multilingual=multilingual, **options)
+
+
 class FasterWhisperBackend:
     """CTranslate2 faster-whisper — CUDA or CPU (never Metal). Device and compute_type
     live in `_get_whisper`; this wrapper keeps the loader seam that tests patch."""
@@ -471,6 +523,7 @@ class FasterWhisperBackend:
         *,
         vault_root: Path | None = None,
         language: str | None = None,
+        multilingual: bool = False,
         report: AsrFacts | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         # The policy is data (media_models.json): its VAD makes the language be detected
@@ -485,8 +538,12 @@ class FasterWhisperBackend:
                     model = _get_whisper()
                     if language is not None and language not in (supported := model.supported_languages):
                         raise UnsupportedLanguage(language, supported)
-                    segments, info = model.transcribe(
-                        _decode_audio_float32(path), language=language, **policy["options"]
+                    segments, info = _start_decoding(
+                        model,
+                        policy,
+                        _decode_audio_float32(path),
+                        language=language,
+                        multilingual=multilingual,
                     )
                     if report is not None:
                         report.language = getattr(info, "language", None)
@@ -549,8 +606,11 @@ class MlxWhisperBackend:
         *,
         vault_root: Path | None = None,
         language: str | None = None,
+        multilingual: bool = False,
         report: AsrFacts | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
+        if multilingual:
+            raise MultilingualUnsupported("mlx-whisper")
         mlx_whisper = self._require_mlx()
         # mlx-whisper rejects a code it does not know; with none it detects the language.
         options = {"language": language} if language is not None else {}
@@ -651,12 +711,15 @@ def language_code(value: str | None) -> str | None:
     return (value or "").strip().lower() or None
 
 
-def _resolve_language(requested: str | None) -> tuple[str | None, str]:
+def _resolve_language(requested: str | None, multilingual: bool) -> tuple[str | None, str]:
     """The language to force and where it came from; `(None, detected)` leaves it to the engine.
 
     A caller's request (or the pin an earlier request left on the sidecar) beats the
-    deployment's `EXOMEM_ASR_LANGUAGE`; with neither, the engine detects on speech.
+    deployment's `EXOMEM_ASR_LANGUAGE`; with neither, the engine detects on speech. The
+    multilingual mode is a request too: it forces no language, and the engine detects per window.
     """
+    if multilingual:
+        return None, LANGUAGE_REQUESTED
     if requested := language_code(requested):
         return requested, LANGUAGE_REQUESTED
     if configured := language_code(os.environ.get(ASR_LANGUAGE_ENV)):
@@ -671,19 +734,20 @@ def _transcribe(
     *,
     timestamps: bool = False,
     language: str | None = None,
+    multilingual: bool = False,
 ) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
     # per-keyframe CLIP (embeddings.embed_video_frames). A video IS a sequence of images.
     if media_type == "video" and not _has_audio_stream(path):
         return ExtractResult(text="", media_type=media_type, engine="no-audio")
-    forced, source = _resolve_language(language)
+    forced, source = _resolve_language(language, multilingual)
     report = AsrFacts()
     segments, engine = get_transcriber().transcribe(
-        path, vault_root=vault_root, language=forced, report=report
+        path, vault_root=vault_root, language=forced, multilingual=multilingual, report=report
     )
     seg_list = list(segments)  # materialize once: diarization needs per-segment timing
-    asr = _asr_facts(report, forced, source)
+    asr = _asr_facts(report, forced, source, multilingual)
 
     # OPTIONAL speaker diarization (EXOMEM_DIARIZE, default OFF). A pretrained
     # clustering model (deterministic transduction, not an LLM) labels who-spoke-when
@@ -793,12 +857,15 @@ def _transcribe(
     )
 
 
-def _asr_facts(report: AsrFacts, forced: str | None, source: str) -> AsrFacts | None:
+def _asr_facts(
+    report: AsrFacts, forced: str | None, source: str, multilingual: bool
+) -> AsrFacts | None:
     """The engine's report plus where the language came from; None when the engine reported nothing."""
     if not report.reported:
         return None
     report.language_source = source
     report.language_requested = forced if source == LANGUAGE_REQUESTED else None
+    report.language_mode = LANGUAGE_MODE_MULTILINGUAL if multilingual else LANGUAGE_MODE_SINGLE
     if source != LANGUAGE_DETECTED:
         report.language_probability = None  # a language that was asked for was not measured
         report.language = report.language or forced

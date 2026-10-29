@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import types
+from importlib.machinery import ModuleSpec
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -291,10 +294,13 @@ class _FakeSeg:
 
 
 class _FakeWhisper:
-    def __init__(self, segs: list, *, info: object | None = None, supported=("en", "et")) -> None:
+    def __init__(
+        self, segs: list, *, info: object | None = None, supported=("en", "et"), device: str = "cpu"
+    ) -> None:
         self._segs = segs
         self._info = info
         self.supported_languages = supported
+        self.model = SimpleNamespace(device=device)  # where CTranslate2 reports that it runs
         self.calls: list[tuple[object, dict]] = []
 
     def transcribe(self, audio, **options):  # faster-whisper returns (segments_generator, info)
@@ -319,6 +325,120 @@ def test_transcribe_plain_when_diarize_off(monkeypatch: pytest.MonkeyPatch) -> N
     assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
 
 
+@pytest.fixture
+def batched_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, object, dict]]:
+    """faster-whisper's batched pipeline, recording the model, audio and options it is given."""
+    calls: list[tuple[object, object, dict]] = []
+
+    class _Pipeline:
+        def __init__(self, model) -> None:
+            self.model = model
+
+        def transcribe(self, audio, **options):
+            calls.append((self.model, audio, options))
+            return iter(self.model._segs), self.model._info
+
+    module = types.ModuleType("faster_whisper")
+    module.__spec__ = ModuleSpec("faster_whisper", loader=None)  # engine selection asks importlib for it
+    module.BatchedInferencePipeline = _Pipeline
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+    return calls
+
+
+def test_a_gpu_decodes_in_batches_and_keeps_segment_timestamps(
+    monkeypatch: pytest.MonkeyPatch, decoded_audio: list[float], batched_calls: list
+) -> None:
+    from exomem import media_models
+
+    monkeypatch.delenv(extract.ASR_LANGUAGE_ENV, raising=False)
+    info = SimpleNamespace(language="et", language_probability=0.91, duration=61.5, duration_after_vad=40.25)
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 4.0)], info=info, device="cuda")
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    result = extract._transcribe(Path("x.wav"), "audio")
+
+    policy = media_models.model_spec("speech")["faster_whisper"]
+    ((used, audio, options),) = batched_calls
+    assert used is model and audio is decoded_audio
+    assert options == {
+        "language": None, "multilingual": False, "batch_size": policy["batched"]["batch_size"],
+        **policy["batched"]["options"],
+    }
+    assert options["without_timestamps"] is False  # the pipeline's own default gives one line per window
+    assert model.calls == []
+    assert result.text == "tere" and result.asr.policy == policy["revision"]
+
+
+def test_a_cpu_run_decodes_sequentially_even_where_the_batched_pipeline_exists(
+    monkeypatch: pytest.MonkeyPatch, batched_calls: list
+) -> None:
+    from exomem import media_models
+
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 4.0)], device="cpu")
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    extract._transcribe(Path("x.wav"), "audio")
+
+    policy = media_models.model_spec("speech")["faster_whisper"]
+    assert batched_calls == []
+    assert model.calls[0][1] == {"language": None, "multilingual": False, **policy["options"]}
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_the_multilingual_mode_reaches_the_engine_in_either_pipeline_and_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, batched_calls: list, device: str
+) -> None:
+    monkeypatch.setenv(extract.ASR_LANGUAGE_ENV, "fi")  # the mode is a request, so it beats the default
+    info = SimpleNamespace(language="et", language_probability=0.6, duration=30.0, duration_after_vad=20.0)
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 4.0)], info=info, device=device)
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    result = extract.extract_text(Path("x.wav"), media_type="audio", multilingual=True)
+
+    options = batched_calls[0][2] if device == "cuda" else model.calls[0][1]
+    assert options["multilingual"] is True and options["language"] is None
+    facts = result.asr
+    assert (facts.language_mode, facts.language_source, facts.language) == ("multilingual", "requested", "et")
+    assert facts.language_requested is None and facts.language_probability is None
+
+
+def test_a_declared_hallucination_guard_travels_with_the_word_timestamps_it_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import copy
+
+    from exomem import media_models
+
+    spec = copy.deepcopy(media_models.model_spec("speech"))
+    spec["faster_whisper"]["options"]["hallucination_silence_threshold"] = 2.0
+    monkeypatch.setattr(media_models, "model_spec", lambda _name: spec)
+    model = _FakeWhisper([_FakeSeg("tere", 0.0, 4.0)])
+    monkeypatch.setattr(extract, "_get_whisper", lambda: model)
+
+    extract._transcribe(Path("x.wav"), "audio")
+
+    options = model.calls[0][1]
+    assert options["hallucination_silence_threshold"] == 2.0 and options["word_timestamps"] is True
+
+
+def test_the_shipped_policy_leaves_the_hallucination_guard_off() -> None:
+    from exomem import media_models
+
+    options = media_models.model_spec("speech")["faster_whisper"]["options"]
+    assert options["hallucination_silence_threshold"] is None
+    assert "word_timestamps" not in options  # a cross-attention pass the guard alone needs
+
+
+@pytest.mark.parametrize("engine", ["mlx", "onnx"])
+def test_an_engine_that_reads_one_language_per_file_refuses_the_multilingual_mode(engine: str) -> None:
+    from exomem import onnx_asr_runtime
+
+    backend = extract.MlxWhisperBackend() if engine == "mlx" else onnx_asr_runtime.OnnxWhisperBackend()
+
+    with pytest.raises(extract.MultilingualUnsupported):
+        backend.transcribe(Path("x.wav"), multilingual=True)
+
+
 def test_the_speech_policy_reaches_the_model_and_the_engine_decisions_are_recorded(
     monkeypatch: pytest.MonkeyPatch, decoded_audio: list[float]
 ) -> None:
@@ -338,10 +458,10 @@ def test_the_speech_policy_reaches_the_model_and_the_engine_decisions_are_record
     policy = media_models.model_spec("speech")["faster_whisper"]
     audio, options = model.calls[0]
     assert audio is decoded_audio
-    assert options == {"language": None, **policy["options"]}
+    assert options == {"language": None, "multilingual": False, **policy["options"]}
     assert options["vad_filter"] is True  # language is detected on speech, not on a quiet opening
     assert result.asr == asr_facts.AsrFacts(
-        language="et", language_probability=0.91, language_source="detected",
+        language="et", language_probability=0.91, language_source="detected", language_mode="single",
         speech_seconds=40.25, duration_seconds=61.5, policy=policy["revision"],
     )
 

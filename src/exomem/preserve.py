@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import IO, BinaryIO
 
 from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
-from .asr_facts import AsrFacts
+from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import kb_prefix
 from .source_inspection import Inspection, inspect_source
 from .vault import (
@@ -1700,18 +1700,31 @@ def render_sidecar_extraction(
 
 #: The pin a caller left asks for the same language on every later run, so it outlives a new extraction.
 _ASR_PIN_FIELD = "asr_language_requested"
+_ASR_MODE_FIELD = "asr_language_mode"
 
 
-def asr_language_pin(content: str) -> str | None:
-    """The speech language a caller pinned on this sidecar, or None."""
-    pinned = parse_frontmatter(content)[0].get(_ASR_PIN_FIELD)
-    return pinned if isinstance(pinned, str) and pinned else None
+def asr_language_pin(content: str) -> tuple[str | None, bool]:
+    """The speech language a caller pinned on this sidecar, and whether the pin is the multilingual mode.
+
+    The multilingual mode pins through the recorded `asr_language_mode`: only a caller's
+    request can make it `multilingual`, because no configuration sets that mode.
+    """
+    fields = parse_frontmatter(content)[0]
+    pinned = fields.get(_ASR_PIN_FIELD)
+    if isinstance(pinned, str) and pinned:
+        return pinned, False
+    return None, fields.get(_ASR_MODE_FIELD) == LANGUAGE_MODE_MULTILINGUAL
 
 
 def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
-    """Replace the `asr_*` fields with the new extraction's facts; keep the caller's language pin."""
+    """Replace the `asr_*` fields with the new extraction's facts, and with them the caller's pin.
+
+    Facts that name no request clear the old pin, so a later multilingual request replaces a
+    language pin. An extraction that reports nothing leaves the pin as it was.
+    """
     content = _remove_frontmatter_fields(
-        content, lambda key: key.startswith(_ASR_FIELD_PREFIX) and key != _ASR_PIN_FIELD
+        content,
+        lambda key: key.startswith(_ASR_FIELD_PREFIX) and (asr is not None or key != _ASR_PIN_FIELD),
     )
     if asr is None:
         return content
@@ -1726,6 +1739,7 @@ def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
         ("asr_language", text(asr.language)),
         ("asr_language_probability", number(asr.language_probability, 4)),
         ("asr_language_source", text(asr.language_source)),
+        (_ASR_MODE_FIELD, text(asr.language_mode)),
         ("asr_speech_seconds", number(asr.speech_seconds, 2)),
         ("asr_duration_seconds", number(asr.duration_seconds, 2)),
         ("asr_policy", text(asr.policy)),

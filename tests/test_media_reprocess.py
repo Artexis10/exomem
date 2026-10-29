@@ -39,26 +39,36 @@ class _Engine:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.languages: list[str | None] = []
+        self.multilingual: list[bool] = []
         self.fail_with: Exception | None = None
         self.during_run = lambda: None
         monkeypatch.setattr(extract, "extract_text", self)
 
-    def __call__(self, path, *, media_type=None, vault_root=None, timestamps=False, language=None):
+    def __call__(
+        self, path, *, media_type=None, vault_root=None, timestamps=False, language=None, multilingual=False
+    ):
         self.languages.append(language)
+        self.multilingual.append(multilingual)
         self.during_run()
         if self.fail_with is not None:
             raise self.fail_with
         if media_type == "pdf":
             return extract.ExtractResult(text="[page 1]\nnew words", media_type="pdf", engine="pymupdf")
+        if multilingual:
+            facts = AsrFacts(
+                language="et", language_source="requested", language_mode="multilingual",
+                speech_seconds=40.0, duration_seconds=61.5, policy="fw-policy-2",
+            )
+            return extract.ExtractResult(f"{RIGHT} (several)", "audio", "faster-whisper:test+timed", asr=facts)
         if language is None:
             facts = AsrFacts(
-                language="en", language_probability=0.35, language_source="detected",
+                language="en", language_probability=0.35, language_source="detected", language_mode="single",
                 speech_seconds=40.0, duration_seconds=61.5, policy="fw-policy-1",
             )
             return extract.ExtractResult(WRONG, "audio", "faster-whisper:test+timed", asr=facts)
         facts = AsrFacts(
             language=language, language_source="requested", language_requested=language,
-            speech_seconds=40.0, duration_seconds=61.5, policy="fw-policy-1",
+            language_mode="single", speech_seconds=40.0, duration_seconds=61.5, policy="fw-policy-1",
         )
         return extract.ExtractResult(f"{RIGHT} ({language})", "audio", "faster-whisper:test+timed", asr=facts)
 
@@ -149,6 +159,88 @@ def test_a_language_hint_is_pinned_until_a_later_request_replaces_it(
     assert len(prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))) == 3
 
 
+def test_the_multilingual_mode_is_pinned_until_a_later_language_replaces_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+
+    media_processing.reprocess_media(vault, binary, multilingual=True)
+    _run_to_idle(vault, worker)
+    facts = _frontmatter(sidecar)
+    assert (facts["asr_language_mode"], facts["asr_language_source"]) == ("multilingual", "requested")
+    assert facts["asr_language"] == "et" and facts.get("asr_language_requested") is None
+
+    media_processing.reprocess_media(vault, binary)  # no declaration: the pinned mode carries over
+    _run_to_idle(vault, worker)
+    assert engine.multilingual == [False, True, True]
+
+    media_processing.reprocess_media(vault, binary, language="fi")
+    _run_to_idle(vault, worker)
+    facts = _frontmatter(sidecar)
+    assert (engine.languages[-1], engine.multilingual[-1]) == ("fi", False)
+    assert (facts["asr_language_mode"], facts["asr_language_requested"]) == ("single", "fi")
+
+
+def test_a_recording_can_be_declared_multilingual_before_the_pipeline_reads_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _Engine(monkeypatch)
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="audio", filename="rec.mp3", data=b"FAKEBYTES"
+    )
+    binary, sidecar = vault / stub.path, vault / stub.sidecar_path
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    media_processing.process_declared_media(vault, binary, multilingual=True)
+    _run_to_idle(vault, worker)
+
+    assert (engine.languages, engine.multilingual) == ([None], [True])
+    assert _frontmatter(sidecar)["asr_language_mode"] == "multilingual"
+
+
+def test_a_language_and_the_multilingual_mode_together_are_refused_before_any_work(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.cli_ops import OpError
+
+    engine = _Engine(monkeypatch)
+    binary, _sidecar, _worker = _completed(vault, "rec.mp3")
+    relative = binary.relative_to(vault).as_posix()
+
+    for operation in ("process", "reprocess"):
+        with pytest.raises(OpError) as refused:
+            commands.op_process_media(
+                vault, path=relative, operation=operation, language="et", multilingual=True
+            )
+        assert refused.value.code == "LANGUAGE_MODE_CONFLICT"
+
+    assert media_jobs.status(vault)["jobs"] == [] and engine.languages == [None]
+
+
+def test_a_declaration_the_process_operation_cannot_apply_is_refused_not_ignored(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.cli_ops import OpError
+
+    _Engine(monkeypatch)
+    pdf = preserve.preserve_bytes(
+        vault, scope="Rental", category="documents", filename="case.pdf", data=b"%PDF-1.4 fake"
+    )
+    binary, _sidecar, _worker = _completed(vault, "rec.mp3")
+
+    with pytest.raises(OpError) as on_pdf:
+        commands.op_process_media(vault, path=pdf.path, operation="process", multilingual=True)
+    with pytest.raises(OpError) as on_complete:
+        commands.op_process_media(
+            vault, path=binary.relative_to(vault).as_posix(), operation="process", language="et"
+        )
+
+    assert on_pdf.value.code == "LANGUAGE_NOT_APPLICABLE"
+    assert on_complete.value.code == "TRANSCRIPT_COMPLETE"
+    assert media_jobs.status(vault)["jobs"] == []
+
+
 def test_an_unsupported_language_fails_the_job_and_leaves_the_transcript_alone(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -165,6 +257,23 @@ def test_an_unsupported_language_fails_the_job_and_leaves_the_transcript_alone(
     assert job["state"] == media_jobs.FAILED
     assert "xx" in job["error"] and "language" in job["next_action"]
     assert not list(sidecar.parent.glob("*.prior-*.md"))
+
+
+def test_an_engine_that_cannot_detect_per_window_fails_the_multilingual_job_and_leaves_the_transcript_alone(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    before = sidecar.read_bytes()
+    engine.fail_with = extract.MultilingualUnsupported("onnx-asr")
+
+    media_processing.reprocess_media(vault, binary, multilingual=True)
+    _run_to_idle(vault, worker)
+
+    assert sidecar.read_bytes() == before
+    (job,) = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.FAILED and job["retryable"] is False
+    assert "onnx-asr" in job["error"] and "language" in job["next_action"]
 
 
 def test_a_transcript_edited_during_the_run_is_not_replaced(
@@ -228,9 +337,28 @@ def test_a_job_store_from_before_reprocessing_opens_and_takes_a_request(vault) -
 
     upgraded = media_jobs.MediaJobStore(vault)
 
-    assert upgraded.request_reprocess(job, "et")
+    assert upgraded.request_extraction(job, "et", "single", reprocess=True)
     claimed = upgraded.claim_next()
     assert claimed is not None and (claimed.reprocess, claimed.language) == (True, "et")
+
+
+def test_a_job_store_from_before_the_language_mode_opens_and_takes_a_declaration(vault) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    with store._connect() as conn:  # the schema of the release that added `language`
+        conn.execute("ALTER TABLE jobs DROP COLUMN language_mode")
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="audio", filename="rec.mp3", data=b"FAKEBYTES"
+    )
+    job = media_jobs.MediaJob(
+        binary_path=vault / stub.path, sidecar_path=vault / stub.sidecar_path, media_type="audio"
+    )
+
+    upgraded = media_jobs.MediaJobStore(vault)
+
+    assert upgraded.request_extraction(job, None, "multilingual", reprocess=False)
+    claimed = upgraded.claim_next()
+    assert claimed is not None
+    assert (claimed.reprocess, claimed.language, claimed.language_mode) == (False, None, "multilingual")
 
 
 def test_a_prior_page_owes_no_compilation_and_a_deleted_page_number_is_not_reused(

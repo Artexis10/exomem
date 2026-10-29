@@ -443,9 +443,11 @@ class MediaJob:
     blocked_reason: str | None = None
     blocked_context: str | None = None
     # An explicit request to extract again over a completed transcript. `language` is the
-    # speech language the requester asked for; both belong to the extraction stage.
+    # speech language the requester asked for and `language_mode` is `single` or `multilingual`;
+    # all three belong to the extraction stage.
     reprocess: bool = False
     language: str | None = None
+    language_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -664,6 +666,7 @@ class MediaJobStore:
                 self._migrate_claim_revision(conn)
                 self._migrate_blocked_reasons(conn)
                 self._migrate_reprocess(conn)
+                self._migrate_language_mode(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS media_job_results (
@@ -800,6 +803,12 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN reprocess INTEGER NOT NULL DEFAULT 0")
         if "language" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN language TEXT")
+
+    @staticmethod
+    def _migrate_language_mode(conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "language_mode" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN language_mode TEXT")
 
     @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
@@ -1014,13 +1023,17 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def request_reprocess(self, job: MediaJob, language: str | None) -> bool:
-        """Queue an explicit second extraction of a media file whose transcript is complete.
+    def request_extraction(
+        self, job: MediaJob, language: str | None, language_mode: str | None, *, reprocess: bool
+    ) -> bool:
+        """Queue a speech extraction that carries the language or mode a caller declared.
 
-        The row carries the request, so the worker may extract over the completed text
-        for this run only. A failed or blocked row of the same file starts again from
-        pending. A claimed row, or one whose result waits for the parent, is already
-        deciding the transcript, so it refuses and the caller asks again later.
+        With `reprocess`, the transcript is already complete: the row carries the request, so
+        the worker may extract over the completed text for this run only. Without it, the
+        transcript is not complete yet and the row only gains the declaration. A failed or
+        blocked row of the same file starts again from pending. A claimed row, or one whose
+        result waits for the parent, is already deciding the transcript, so it refuses and
+        the caller asks again later.
         """
         key = self._key(self._relative(job.binary_path), job.media_type)
         now = time.time()
@@ -1039,16 +1052,18 @@ class MediaJobStore:
                 conn.execute(
                     """
                     INSERT INTO jobs (
-                        job_key, binary_rel, sidecar_rel, media_type, do_ocr, state,
-                        attempts, ocr_generation, reprocess, language, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, 1, ?, ?, ?)
+                        job_key, binary_rel, sidecar_rel, media_type, do_ocr, state, attempts,
+                        ocr_generation, reprocess, language, language_mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?)
                     """,
                     (
                         key,
                         self._relative(job.binary_path),
                         self._relative(job.sidecar_path),
                         job.media_type,
+                        int(reprocess),
                         language,
+                        language_mode,
                         now,
                         now,
                     ),
@@ -1056,13 +1071,13 @@ class MediaJobStore:
             else:
                 conn.execute(
                     """
-                    UPDATE jobs SET do_ocr = 1, reprocess = 1, language = ?, state = 'pending',
-                        ocr_generation = ocr_generation + 1, last_error = NULL,
+                    UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
+                        state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
                         blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
                         memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
                     WHERE id = ?
                     """,
-                    (language, now, row["id"]),
+                    (int(reprocess), language, language_mode, now, row["id"]),
                 )
             conn.commit()
             return True
@@ -1141,7 +1156,7 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
-                        reprocess = 0, language = NULL,
+                        reprocess = 0, language = NULL, language_mode = NULL,
                         state = 'pending', updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
                     """,
@@ -1761,6 +1776,7 @@ class MediaJobStore:
                         UPDATE jobs SET do_ocr = ?, state = 'pending', last_error = NULL,
                             reprocess = CASE WHEN ? THEN reprocess ELSE 0 END,
                             language = CASE WHEN ? THEN language ELSE NULL END,
+                            language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
                             updated_at = ? WHERE id = ? AND state IN (""" + state_placeholders + """)
                             AND claim_revision = ?
                         """,
@@ -1768,6 +1784,7 @@ class MediaJobStore:
                             remaining_ocr,
                             # A published extraction consumes a reprocess request; only a
                             # result that leaves the stage queued leaves the request with it.
+                            int(bool(remaining_ocr) and result.kind != "extraction"),
                             int(bool(remaining_ocr) and result.kind != "extraction"),
                             int(bool(remaining_ocr) and result.kind != "extraction"),
                             time.time(),
@@ -2292,6 +2309,7 @@ class MediaJobStore:
             blocked_context=row["blocked_context"] if "blocked_context" in row.keys() else None,
             reprocess=bool(row["reprocess"]) if "reprocess" in row.keys() else False,
             language=row["language"] if "language" in row.keys() else None,
+            language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
         )
 
     def _row_to_result(self, row: Any) -> MediaJobResult | None:
@@ -2708,7 +2726,9 @@ def _status_job(row: Any) -> dict[str, Any]:
     reprocess_failed = reprocess_stopped and state == FAILED
     if reprocess_stopped and state == BLOCKED:
         actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
-    unsupported_language = state == FAILED and (error or "").startswith("UnsupportedLanguage:")
+    unsupported_language = state == FAILED and (error or "").startswith(
+        ("UnsupportedLanguage:", "MultilingualUnsupported:")
+    )
     if unsupported_language:
         actions[FAILED] = (
             "choose a language the speech model supports and "

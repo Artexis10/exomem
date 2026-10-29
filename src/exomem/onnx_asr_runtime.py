@@ -423,12 +423,17 @@ class OnnxWhisperBackend:
         *,
         vault_root: Path | None = None,
         language: str | None = None,
+        multilingual: bool = False,
         report: AsrFacts | None = None,
     ) -> tuple[Iterator[Segment], str]:
         """Transcribe by seeking through the audio; with a vault, a stopped run resumes at its last seek.
 
         A `language` code replaces detection for the whole file. `report` receives what the engine decided.
         """
+        if multilingual:  # one language serves the whole file here, so the mode cannot be honoured
+            from .extract import MultilingualUnsupported
+
+            raise MultilingualUnsupported("onnx-asr")
         label = (
             f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
             f":decoding-{self.spec['decoding']['revision']}"
