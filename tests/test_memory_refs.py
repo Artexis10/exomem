@@ -521,7 +521,10 @@ def test_backfill_is_dry_run_by_default_and_preserves_content(tmp_path: Path) ->
 def test_backfill_gives_an_empty_frontmatter_block_a_resolvable_identity(
     tmp_path: Path, newline: str
 ) -> None:
-    """An empty block shares the opening fence's line break, so no break precedes its closing fence."""
+    """An empty block shares the opening fence's line break.
+
+    No line break precedes its closing fence.
+    """
     vault = tmp_path / "vault"
     path = vault / "Knowledge Base" / "Notes" / "empty.md"
     path.parent.mkdir(parents=True)

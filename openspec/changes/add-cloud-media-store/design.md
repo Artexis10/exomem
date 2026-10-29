@@ -312,7 +312,7 @@ Registry-owned private state stays excluded.
 Ordinary aliases, incomplete enumeration, invalid placement or malformed potential companions make usage unknown.
 Closing checks compare the complete namespace and the versions of selected headers and used placement files.
 These witnesses detect changes across the census; they do not create an atomic snapshot against external writers.
-The shared frontmatter reader gives custody readers a `custody` mode that distinguishes absent frontmatter from an unterminated block and rejects non-mapping roots.
+The shared frontmatter reader gives custody readers a `custody` mode that distinguishes absent frontmatter from an unterminated block; strict reads already reject a non-mapping root, and an empty or null root holds no fields.
 Ordinary strict readers keep their meaning, so a plain note that opens with a thematic break never blocks a governed write.
 Unknown usage defers offload, while local bytes and core operations remain available.
 This prevents unmetered uploads; its cost is a retry after reference custody is repaired.

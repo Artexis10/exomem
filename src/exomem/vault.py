@@ -6640,7 +6640,8 @@ def frontmatter_line_break(text: str, match: re.Match[str]) -> str:
     It is empty for an empty block, which shares the opening fence's line break.
     """
     end = match.end(1)
-    return next((line_break for line_break in ("\r\n", "\n") if text.startswith(line_break, end)), "")
+    breaks = ("\r\n", "\n")
+    return next((line_break for line_break in breaks if text.startswith(line_break, end)), "")
 
 
 def parse_frontmatter(
@@ -6652,8 +6653,8 @@ def parse_frontmatter(
     `body` has no leading newline (mirrors find._parse_page).
 
     `custody` is for a reader that accounts for stored originals. It implies `strict` and
-    also refuses a header it cannot prove holds no governed fields: an opening fence with no
-    closing fence, or a scalar root. Ordinary strict readers treat such a document as a
+    also refuses an opening fence with no closing fence, which could hide governed fields.
+    Ordinary strict readers treat such a document as a
     plain note, so one stray note never blocks a vault-wide write.
     """
     strict = strict or custody
@@ -6678,11 +6679,6 @@ def parse_frontmatter(
             )
         else:
             fm = yaml_safe_load(fm_text)
-        # Empty YAML and comments are allowed; any other non-mapping root, even a falsy one, is a scalar.
-        if custody and not isinstance(fm, dict) and (
-            fm is not None or yaml.compose(fm_text, Loader=_UniqueKeySafeLoader) is not None
-        ):
-            raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")
         fm = fm or {}
         if not isinstance(fm, dict):
             if strict:
