@@ -16,7 +16,6 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO, Literal
@@ -24,7 +23,7 @@ from urllib.request import urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import archive_members, import_stage, state_paths
+from . import archive_members, import_stage, state_paths, vault
 from .cell_init import _ensure_private_directory
 from .cloud_cell import CELL_ID_PATTERN
 from .cloud_import import DEFAULT_MAX_MEMBERS, ArchiveRefused, reserve_bytes_from_env, unpack_stream
@@ -48,7 +47,7 @@ class CloudImportRequest(BaseModel):
 
 
 def _id(value: str) -> str:
-    if str(uuid.UUID(value)) != value:
+    if not vault.is_import_id(value):
         raise ValueError("noncanonical import UUID")
     return value
 
