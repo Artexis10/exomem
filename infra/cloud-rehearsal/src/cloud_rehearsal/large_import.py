@@ -755,7 +755,10 @@ def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
 
 
 async def keep_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
-    """Save the app log, or report why not: a log that could not be read never fails or delays the run's verdict."""
+    """Save the app log, or report why not: a log that could not be read never fails the run's verdict.
+
+    A hung exec can still delay the run by up to the exec's own timeout.
+    """
     try:
         return await asyncio.to_thread(save_cell_app_logs, ctx, label)
     except Exception as error:  # noqa: BLE001 - reported in the result, as an unread value stays unknown
@@ -857,6 +860,8 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
         folder = await generate(ctx, plan, name)
     out["folders"][name] = folder.report
     criteria: dict[str, list[str]] = {}
+    # The import Job holds the volume, so the upload replaces the cell pod and its log folder.
+    folder.report["cell_app_logs_before_upload"] = await keep_cell_app_logs(ctx, f"{name}-before-upload")
     with phase("upload"):
         row = await upload(ctx, plan, folder)
     folder.report["import_row"] = import_summary(row)
