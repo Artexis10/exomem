@@ -72,6 +72,7 @@ from .kbdir import kb_prefix
 from .vault import (
     MISSING_CONTENT_HASH,
     InvalidSlugError,
+    LogEntry,
     PlannedWrite,
     WikilinkResolver,
     append_frontmatter_list_item,
@@ -86,7 +87,7 @@ from .vault import (
     normalize_body_wikilinks,
     normalize_wikilink,
     parse_frontmatter,
-    plan_log_writes,
+    plan_log_entries,
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
@@ -305,6 +306,48 @@ class NoteError(Exception):
 
 
 @dataclass(frozen=True)
+class _NavigationEntry:
+    """What one new note adds to `index.md` and `log.md`."""
+
+    rel_path_no_ext: str
+    render_date: str
+    activity_summary: str
+    stamp_iso: str
+    log_body: str
+    operation_token: str
+    preflight: semantic_writes.CreationPreflight
+    predecessor_path: str | None = None
+    predecessor_content_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class _NavigationPlan:
+    writes: tuple[PlannedWrite, ...]
+    #: Missing-file warnings that every note of the update carries.
+    warnings: tuple[str, ...]
+    rotation_note: str | None
+
+
+@dataclass(frozen=True)
+class _NoteFinish:
+    """What the reply of a committed note needs beyond the commit itself."""
+
+    note_type: str
+    slug: str
+    status: str
+    tags: list[str]
+    sources_norm: list[str]
+    body_clean: str
+    body_warnings: list[str]
+    source_warnings: list[str]
+    backrefs_planned: int
+    suggestions: bool
+    feedback_registry: relation_registry.RelationRegistry
+    advisory_inputs: corpus_aware.WriteAdvisoryInputs
+    preflight_ms: float
+
+
+@dataclass(frozen=True)
 class _PreparedNote:
     preflight: semantic_writes.CreationPreflight
     auxiliary_writes: tuple[PlannedWrite, ...]
@@ -312,6 +355,68 @@ class _PreparedNote:
     identity: str
     destination: str
     draft_token: str
+    #: Set when navigation is deferred; `commit_prepared_notes` plans it for the whole batch.
+    navigation: _NavigationEntry | None = None
+    finish: _NoteFinish | None = None
+
+
+def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _NavigationPlan:
+    """Plan the index and log updates for one note or for a batch of notes, once.
+
+    Each entry adds one Recent-activity bullet and one log entry, oldest first, so the
+    files end as they do after one commit per note. The counts and the log rotation are
+    decided once for the whole update.
+    """
+    from .relation_census import operation_provenance
+
+    writes: list[PlannedWrite] = []
+    warnings: list[str] = []
+    top_index = kb_root(root) / "index.md"
+    if top_index.is_file():
+        top_text, top_guard = read_guarded_text(root, top_index)
+        new_top = top_text
+        for entry in entries:
+            new_top, _ = indexes._prepend_recent_activity(
+                new_top, date_iso=entry.render_date, summary=entry.activity_summary
+            )
+        sub_writes, counted_top = indexes.compute_subindex_writes(
+            root,
+            top_index_text=new_top,
+            pending_paths=[entry.rel_path_no_ext for entry in entries],
+            include_unchanged=True,
+        )
+        writes.append(PlannedWrite(top_index, counted_top or new_top, guard=top_guard))
+        writes.extend(sub_writes)
+    else:
+        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+    try:
+        log_plan = plan_log_entries(
+            root,
+            [
+                LogEntry(
+                    entry.stamp_iso,
+                    "note",
+                    entry.rel_path_no_ext,
+                    entry.log_body,
+                    entry.operation_token,
+                    operation_provenance(
+                        entry.preflight,
+                        predecessor_path=entry.predecessor_path,
+                        predecessor_content_hash=entry.predecessor_content_hash,
+                    ),
+                )
+                for entry in entries
+            ],
+            operation_token="\n".join(entry.operation_token for entry in entries),
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise NoteError(
+            "LOG_PLAN_CONFLICT", [], "note log update could not be planned safely"
+        ) from error
+    writes.extend(log_plan.writes)
+    if log_plan.warning is not None:
+        warnings.append(log_plan.warning)
+    return _NavigationPlan(tuple(writes), tuple(warnings), log_plan.rotation_note)
 
 
 def _build_write_feedback(
@@ -1804,6 +1909,7 @@ def note(
     summary: str | None = None,
     topics: str | list[str] | None = None,
     _return_prepared: bool = False,
+    _defer_navigation: bool = False,
     _supersedes_target: str | None = None,
     _extra_frontmatter: Mapping[str, str | Sequence[str]] | None = None,
     _verbatim_body: bool = False,
@@ -2121,76 +2227,7 @@ def note(
     # this facade a second resolver and let Tier-2 writers behave differently.
     backrefs_planned = len(sources_norm)
 
-    kb = kb_root(root)
     canonical_domain = domain_binding.canonical if domain_binding is not None else domain
-    activity_summary = _activity_summary(
-        rel_note_no_ext=rel_note_no_ext,
-        title=title,
-        note_type=note_type,
-        project=project,
-        projects=projects,
-        severity=severity,
-        pattern_type=pattern_type,
-        domain=canonical_domain,
-        medium=medium,
-        status=status,
-    )
-    top_index = kb / "index.md"
-    if top_index.is_file():
-        top_text, top_guard = read_guarded_text(root, top_index)
-        new_top, _ = indexes._prepend_recent_activity(
-            top_text,
-            date_iso=render_date,
-            summary=activity_summary,
-        )
-        sub_writes, counted_top = indexes.compute_subindex_writes(
-            root,
-            top_index_text=new_top,
-            pending_paths=[rel_note_no_ext],
-            include_unchanged=True,
-        )
-        auxiliary.append(PlannedWrite(top_index, counted_top or new_top, guard=top_guard))
-        auxiliary.extend(sub_writes)
-    else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
-    try:
-        from .relation_census import operation_provenance
-
-        log_plan = plan_log_writes(
-            root,
-            date_iso=stamp_iso,
-            op="note",
-            rel_path_no_ext=rel_note_no_ext,
-            body=_log_entry_body(
-                note_type=note_type,
-                title=title,
-                project=project,
-                projects=projects,
-                tags=tags_clean,
-                sources=sources_norm,
-                severity=severity,
-                pattern_type=pattern_type,
-                domain=canonical_domain,
-                medium=medium,
-                status=status,
-                started=started,
-                duration=duration,
-            ),
-            operation_token=encoded_token,
-            provenance=operation_provenance(
-                preflight, predecessor_path=_predecessor_path,
-                predecessor_content_hash=_predecessor_content_hash,
-            ),
-        )
-    except (OSError, UnicodeError, ValueError) as error:
-        raise NoteError(
-            "LOG_PLAN_CONFLICT", [], "note log update could not be planned safely"
-        ) from error
-    auxiliary.extend(log_plan.writes)
-    if log_plan.warning is not None:
-        warnings.append(log_plan.warning)
-    if log_plan.rotation_note is not None:
-        warnings.append(log_plan.rotation_note)
     if validate_only:
         log.info(
             "note write timings mode=validate note_type=%s preflight_ms=%.1f",
@@ -2198,15 +2235,57 @@ def note(
             preflight_ms,
         )
         return preflight
-    if _return_prepared:
-        return _PreparedNote(
-            preflight,
-            tuple(auxiliary),
-            tuple(warnings),
-            identity,
-            destination,
-            encoded_token,
-        )
+    navigation = _NavigationEntry(
+        rel_note_no_ext,
+        render_date,
+        _activity_summary(
+            rel_note_no_ext=rel_note_no_ext,
+            title=title,
+            note_type=note_type,
+            project=project,
+            projects=projects,
+            severity=severity,
+            pattern_type=pattern_type,
+            domain=canonical_domain,
+            medium=medium,
+            status=status,
+        ),
+        stamp_iso,
+        _log_entry_body(
+            note_type=note_type,
+            title=title,
+            project=project,
+            projects=projects,
+            tags=tags_clean,
+            sources=sources_norm,
+            severity=severity,
+            pattern_type=pattern_type,
+            domain=canonical_domain,
+            medium=medium,
+            status=status,
+            started=started,
+            duration=duration,
+        ),
+        encoded_token,
+        preflight,
+        _predecessor_path,
+        _predecessor_content_hash,
+    )
+    if not _defer_navigation:
+        plan = _plan_navigation(root, [navigation])
+        auxiliary.extend(plan.writes)
+        warnings.extend(plan.warnings)
+        if plan.rotation_note is not None:
+            warnings.append(plan.rotation_note)
+        if _return_prepared:
+            return _PreparedNote(
+                preflight,
+                tuple(auxiliary),
+                tuple(warnings),
+                identity,
+                destination,
+                encoded_token,
+            )
     # Feedback shares the candidate's selected definitions, without a post-commit page reread.
     feedback_registry = semantic_contract._authored_relations(
         preflight.semantic_state,
@@ -2214,21 +2293,47 @@ def note(
             root, destination, preflight.semantic_state.frontmatter,
         ),
     )
+    finish = _NoteFinish(
+        note_type,
+        filename_slug,
+        status,
+        tags_clean,
+        sources_norm,
+        body_clean,
+        body_warnings,
+        source_warnings,
+        backrefs_planned,
+        suggestions,
+        feedback_registry,
+        corpus_aware.WriteAdvisoryInputs(
+            route="remember",
+            target_rel_path=destination,
+            self_path=rel_note_no_ext,
+            title=title,
+            body=body_clean,
+            note_type=note_type,
+        ),
+        preflight_ms,
+    )
+    if _defer_navigation:
+        # The caller commits a batch of notes and plans one navigation update for all of them.
+        return _PreparedNote(
+            preflight,
+            tuple(auxiliary),
+            tuple(warnings),
+            identity,
+            destination,
+            encoded_token,
+            navigation,
+            finish,
+        )
     commit_started = time.perf_counter()
     from . import writer_lease
 
-    advisory_inputs = corpus_aware.WriteAdvisoryInputs(
-        route="remember",
-        target_rel_path=destination,
-        self_path=rel_note_no_ext,
-        title=title,
-        body=body_clean,
-        note_type=note_type,
-    )
     try:
-        # Under fast acknowledgement the default sweep below is handed to the
+        # Under fast acknowledgement the default sweep after the commit is handed to the
         # batch's `write_advisory` component with these exact inputs.
-        with writer_lease.declare_write_advisory(advisory_inputs):
+        with writer_lease.declare_write_advisory(finish.advisory_inputs):
             committed = semantic_writes.commit_creation(
                 root,
                 preflight=preflight,
@@ -2245,7 +2350,33 @@ def note(
             error.reason,
             dict(getattr(error, "details", None) or {}),
         ) from error
-    commit_ms = (time.perf_counter() - commit_started) * 1000.0
+    return _finish_note(
+        root,
+        finish,
+        preflight=preflight,
+        identity=identity,
+        destination=destination,
+        warnings=warnings,
+        committed=committed,
+        commit_ms=(time.perf_counter() - commit_started) * 1000.0,
+        total_started=write_started,
+    )
+
+
+def _finish_note(
+    root: Path,
+    finish: _NoteFinish,
+    *,
+    preflight: semantic_writes.CreationPreflight,
+    identity: str,
+    destination: str,
+    warnings: list[str],
+    committed: semantic_writes.CreationCommit,
+    commit_ms: float,
+    total_started: float,
+) -> NoteResult:
+    """Answer for one committed note: the advisory sweep, the write feedback and the result."""
+    from . import writer_lease
 
     advisory_started = time.perf_counter()
     corpus_suggestions: list[dict] = []
@@ -2264,18 +2395,18 @@ def note(
     # `write_advisory` component runs it with the same inputs, and the terminal
     # carries its exact result reference.
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and not (
-        writer_lease.write_advisory_deferred(root, advisory_inputs)
+        writer_lease.write_advisory_deferred(root, finish.advisory_inputs)
     ):
         try:
-            if suggestions:
+            if finish.suggestions:
                 corpus_suggestions = [
                     item.as_dict()
                     for item in corpus_aware.suggest_related(
                         root,
-                        title=title,
-                        body=body_clean,
-                        self_path=rel_note_no_ext,
-                        existing_links=set(sources_norm),
+                        title=finish.advisory_inputs.title,
+                        body=finish.body_clean,
+                        self_path=finish.advisory_inputs.self_path,
+                        existing_links=set(finish.sources_norm),
                         limit=6,
                     )
                     if item.path != destination
@@ -2284,7 +2415,7 @@ def note(
             # so the sweep reads them back instead of encoding the draft again.
             advisory_warnings = [
                 emitted.warning
-                for emitted in corpus_aware.write_advisory_for(root, advisory_inputs)
+                for emitted in corpus_aware.write_advisory_for(root, finish.advisory_inputs)
             ]
         except Exception:  # noqa: BLE001 — optional suggestions are best-effort
             log.debug("corpus-aware nudges failed (non-fatal)", exc_info=True)
@@ -2292,27 +2423,27 @@ def note(
     log.info(
         "note write timings mode=commit note_type=%s preflight_ms=%.1f "
         "commit_ms=%.1f advisory_ms=%.1f total_ms=%.1f suggestions=%s",
-        note_type,
-        preflight_ms,
+        finish.note_type,
+        finish.preflight_ms,
         commit_ms,
         (time.perf_counter() - advisory_started) * 1000.0,
-        (time.perf_counter() - write_started) * 1000.0,
-        suggestions,
+        (time.perf_counter() - total_started) * 1000.0,
+        finish.suggestions,
     )
     feedback = _build_write_feedback(
         vault_root=root,
-        registry=feedback_registry,
-        note_type=note_type,
+        registry=finish.feedback_registry,
+        note_type=finish.note_type,
         rel_path=destination,
-        status=status,
-        tags=tags_clean,
-        sources_norm=sources_norm,
-        body_clean=body_clean,
-        body_warnings=body_warnings,
-        source_warnings=source_warnings,
-        backrefs_planned=backrefs_planned,
+        status=finish.status,
+        tags=finish.tags,
+        sources_norm=finish.sources_norm,
+        body_clean=finish.body_clean,
+        body_warnings=finish.body_warnings,
+        source_warnings=finish.source_warnings,
+        backrefs_planned=finish.backrefs_planned,
         suggestions_count=len(corpus_suggestions),
-        suggestions_requested=suggestions,
+        suggestions_requested=finish.suggestions,
     )
     return NoteResult(
         destination,
@@ -2321,5 +2452,56 @@ def note(
         corpus_suggestions,
         feedback,
         committed.as_dict(),
-        slug=filename_slug,
+        slug=finish.slug,
     )
+
+
+def commit_prepared_notes(root: Path, prepared: Sequence[_PreparedNote]) -> list[NoteResult]:
+    """Commit notes that `note(..., _return_prepared=True, _defer_navigation=True)` returned.
+
+    The notes commit as one canonical batch with one navigation update: one Recent-activity
+    bullet and one log entry per note, in one write each. A refusal raises `NoteError`
+    before any write, and the caller may commit each note alone instead.
+    """
+    root = Path(root)
+    if not prepared or any(item.navigation is None or item.finish is None for item in prepared):
+        raise ValueError("commit_prepared_notes needs notes prepared with deferred navigation")
+    started = time.perf_counter()
+    navigation = _plan_navigation(root, [item.navigation for item in prepared])
+    try:
+        commits = semantic_writes.commit_creations(
+            root,
+            creations=[
+                semantic_writes.BatchCreation(item.preflight, item.auxiliary_writes)
+                for item in prepared
+            ],
+            shared_writes=navigation.writes,
+            operation="create",
+        )
+    except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
+        raise NoteError(
+            error.code,
+            [],
+            error.reason,
+            dict(getattr(error, "details", None) or {}),
+        ) from error
+    commit_ms = (time.perf_counter() - started) * 1000.0 / len(prepared)
+    results = []
+    for index, (item, committed) in enumerate(zip(prepared, commits, strict=True)):
+        warnings = [*item.warnings, *navigation.warnings]
+        if navigation.rotation_note is not None and index == len(prepared) - 1:
+            warnings.append(navigation.rotation_note)
+        results.append(
+            _finish_note(
+                root,
+                item.finish,
+                preflight=item.preflight,
+                identity=item.identity,
+                destination=item.destination,
+                warnings=warnings,
+                committed=committed,
+                commit_ms=commit_ms,
+                total_started=started,
+            )
+        )
+    return results
