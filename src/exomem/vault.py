@@ -7843,7 +7843,7 @@ class WikilinkResolver:
 
         Mirrors `_build`'s historical per-file body exactly: the path + stem
         edges are added even for an unreadable file (title read failed), the
-        title edge only when a non-empty frontmatter `title:` was read.
+        title edge only when a display title (`resolve_display_title`) was read.
         """
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)

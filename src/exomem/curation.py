@@ -1705,11 +1705,13 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
             if entry.get("absent") is True and entry["path"] in after
         )
         if step["kind"] == "supersede":
-            from .vault import parse_frontmatter
+            from .vault import parse_frontmatter, resolve_display_title
 
-            fields, _body, _raw = parse_frontmatter(str(item["preimage"] or ""))
-            old_title = fields.get("title")
-            superseded.append((str(item["path"]), old_title if isinstance(old_title, str) else None))
+            # The resolver indexes a page by the title read surfaces show, not only `title:`.
+            fields, body, _raw = parse_frontmatter(str(item["preimage"] or ""))
+            superseded.append(
+                (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
+            )
     return manifest
 
 
