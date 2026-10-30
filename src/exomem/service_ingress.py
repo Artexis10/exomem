@@ -207,7 +207,33 @@ async def _undispatched(send: Send, status: int, reason: str, body: bytes | None
         await _reply(send, status, b"Request not dispatched", b"text/plain; charset=utf-8")
 
 
-async def _body_stream(receive: Receive, completed: asyncio.Event) -> AsyncIterator[bytes]:
+_WORKER_STOPPED_MESSAGE = (
+    "The Exomem worker stopped before this call finished. Retry the identical call. "
+    "A write is never applied twice: the retry returns its committed result, or says "
+    "that its outcome needs checking."
+)
+
+
+def _worker_stopped(request_id: object) -> bytes:
+    """The JSON-RPC answer for a call whose worker died before it could answer."""
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32000,
+                "message": _WORKER_STOPPED_MESSAGE,
+                "data": {"status": "retryable"},
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+
+
+async def _body_stream(
+    receive: Receive, completed: asyncio.Event, seen: bytearray, keep_bytes: int
+) -> AsyncIterator[bytes]:
+    """Stream the request body, keeping up to `keep_bytes` of it to answer by request id."""
     while True:
         message = await receive()
         if message["type"] == "http.disconnect":
@@ -216,6 +242,8 @@ async def _body_stream(receive: Receive, completed: asyncio.Event) -> AsyncItera
             continue
         chunk = message.get("body", b"")
         if chunk:
+            if len(seen) <= keep_bytes:
+                seen.extend(chunk)
             yield chunk
         if not message.get("more_body", False):
             completed.set()
@@ -447,17 +475,30 @@ class ServiceIngress:
         body_complete = asyncio.Event()
         if body is not None:
             body_complete.set()
+        seen = bytearray()
         request = httpx.Request(
             scope["method"],
             url,
             headers=headers,
-            content=body if body is not None else _body_stream(receive, body_complete),
+            content=body
+            if body is not None
+            else _body_stream(receive, body_complete, seen, self.limits.body_bytes),
         )
+
+        def request_id() -> object:
+            if not body_complete.is_set():
+                return _MISSING
+            return _request_id(body if body is not None else bytes(seen))
+
         try:
             response = await client.send(request, stream=True, follow_redirects=False)
         except Exception:  # noqa: BLE001 - transport failure has ambiguous dispatch status
+            answered = request_id()
             try:
-                await _reply(send, 503, b"Worker unavailable", b"text/plain; charset=utf-8")
+                if answered is _MISSING:
+                    await _reply(send, 503, b"Worker unavailable", b"text/plain; charset=utf-8")
+                else:
+                    await _reply(send, 200, _worker_stopped(answered), b"application/json")
             except Exception:  # noqa: BLE001 - downstream is gone
                 pass
             return
@@ -493,13 +534,34 @@ class ServiceIngress:
                     if response.is_stream_consumed
                     else response.aiter_raw()
                 )
-                async for chunk in chunks:
+                try:
+                    async for chunk in chunks:
+                        if deliver:
+                            try:
+                                await send(
+                                    {"type": "http.response.body", "body": chunk, "more_body": True}
+                                )
+                            except Exception:  # noqa: BLE001 - keep draining after disconnect
+                                deliver = False
+                except httpx.TransportError:
+                    # The worker died mid-response. An event stream can still carry the
+                    # call's answer; a partial JSON body cannot, so that one stays broken.
+                    answered = request_id()
+                    if not _is_sse(response) or answered is _MISSING:
+                        raise
+                    logger.warning("worker stopped before answering a streamed call")
                     if deliver:
                         try:
                             await send(
-                                {"type": "http.response.body", "body": chunk, "more_body": True}
+                                {
+                                    "type": "http.response.body",
+                                    "body": b"event: message\ndata: "
+                                    + _worker_stopped(answered)
+                                    + b"\n\n",
+                                    "more_body": True,
+                                }
                             )
-                        except Exception:  # noqa: BLE001 - keep draining after disconnect
+                        except Exception:  # noqa: BLE001 - downstream is gone
                             deliver = False
             if deliver:
                 try:
