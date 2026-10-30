@@ -32,4 +32,4 @@
 - [x] 4.5 Load the generated collection fixture through both arms' own tools and complete one reduced paired smoke on the managed workers; verify the summary against `summary.schema.json` with the profile and case digests.
 - [x] 4.6 Fill the contract's `fixture_profile_sha256` from the loaded profile.
 - [ ] 4.7 Dispatch the CI jobs once and record the A/A intervals that set the first allowances.
-- [ ] 4.8 Return the MCP read latency jobs to the required CI gate, and remove their `continue-on-error`, once a full dispatched run completes inside the 40-minute compare step; verify the run's per-step progress lines and its summary.
+- [ ] 4.8 Run the MCP read latency jobs in their own nightly and on-demand workflow (`.github/workflows/mcp-read-latency.yml`), outside the Full CI gate and release evidence. Remove their `continue-on-error` once a nightly or dispatched run of that workflow completes every shard inside the 40-minute compare step; verify the run's per-step progress lines and its summary. Gating pull requests or releases on these jobs is a later decision with its own time budget.
