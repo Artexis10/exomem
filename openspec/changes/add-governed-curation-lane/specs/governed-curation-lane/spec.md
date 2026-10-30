@@ -29,8 +29,8 @@ The system SHALL accept an ordered agent-authored forward plan only through a
 strict schema, canonicalize it to immutable JSON, and derive `plan_id` as the
 SHA-256 digest of the canonical bytes. Proposal validation SHALL capture an
 ordered target manifest, expected present content hashes, expected absent
-paths, semantic draft or transition identities, relevant registry
-fingerprints, deterministic postconditions, and sealed compensation material.
+paths, semantic draft identities, edit transitions with their reviewed
+postconditions, relevant registry fingerprints, deterministic postconditions, and sealed compensation material.
 An agent-supplied binding that does not match current state MUST be refused and
 MUST NOT be silently refreshed. A stored plan MUST be create-only; the same id
 with different bytes MUST be refused as a collision.
@@ -56,7 +56,12 @@ the matching existing governed leaf. A plan MUST NOT contain a command name,
 raw filesystem operation, callable, shell fragment, or free-form patch program.
 All existing leaf confirmation, draft, content-hash, relation, source/evidence,
 protected-tree, and path-confinement checks SHALL remain authoritative at plan
-validation and immediately before commit.
+validation and immediately before commit. An edit's transition alone SHALL be
+minted when its step runs, never taken from the plan, so the edited page
+carries the commit instant in `updated` and the transition's age never refuses
+an approved edit. Before any byte is written, the executor SHALL refuse with
+`CURATION_BINDING_STALE` a planned page that, with `updated` set back to the
+reviewed instant, differs from the sealed postcondition.
 
 #### Scenario: Plan requests an arbitrary command
 
@@ -70,6 +75,20 @@ validation and immediately before commit.
   semantic draft, or registry changes before apply
 - **THEN** the canonical leaf refuses the step and curation cannot bypass or
   weaken that refusal
+
+#### Scenario: Edit approved days after proposal
+
+- **WHEN** an edit step is applied more than a day after proposal and its
+  target and link targets are unchanged
+- **THEN** the edit applies the reviewed change and the page's `updated` is the
+  commit instant
+
+#### Scenario: Edit renders differently at approval
+
+- **WHEN** another writer changes what an approved edit step renders, such as
+  creating the target of one of its links
+- **THEN** the step refuses with `CURATION_BINDING_STALE`, nothing is written,
+  and the run records the refusal as not retryable
 
 ### Requirement: Curation leaves typed administrative domains to their owners
 
@@ -110,17 +129,20 @@ approved forward or compensation plan.
   plan whose approval is stored
 - **THEN** the request is refused and neither plan advances
 
-### Requirement: A plan's later steps may depend on its own earlier steps
+### Requirement: A plan's later steps may link to its own earlier pages
 
-Proposal SHALL prepare each step against the vault as the plan's earlier steps
-leave it: a link in a later step to a page an earlier step creates SHALL be
-rendered as it will be once that page exists, so the sealed draft matches at
-execution. Only the plan's own earlier steps SHALL be projected. A page that
-another writer creates, edits or removes after proposal SHALL still make the
-affected step refuse through its canonical leaf. Proposal SHALL refuse with
-`CURATION_STEP_CONFLICT` a plan in which a later step is bound to a path that
-an earlier step of the same plan writes, because that step could never run as
-sealed.
+Proposal SHALL render a later step's links to a page that an earlier step of
+the same plan creates as the writer renders a link to an existing page, so the
+sealed draft matches at execution. Only that rendering SHALL be projected;
+every other check SHALL read the vault as it is, and a page that another writer
+creates, edits or removes after proposal SHALL still make the affected step
+refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT` a
+plan that could not then run as sealed:
+
+- a later step bound to a path that an earlier step writes;
+- a step that links to a page an earlier step supersedes;
+- a step that gives a relation disposition while it links to a page an earlier
+  step creates, because that link is its relation once the page exists.
 
 #### Scenario: Split note links its second page to its first
 
@@ -135,34 +157,12 @@ sealed.
   that no earlier step of its plan creates, and another writer creates it
 - **THEN** that step refuses through its leaf and writes nothing
 
-#### Scenario: Two steps bind the same page
+#### Scenario: Plan a projection cannot make run
 
-- **WHEN** a later step is bound to the content hash or absence of a path that
-  an earlier step of the same plan writes
+- **WHEN** a later step is bound to a path an earlier step writes, links to a
+  page an earlier step supersedes, or gives a relation disposition while it
+  links to a page an earlier step creates
 - **THEN** proposal refuses with `CURATION_STEP_CONFLICT` and stores no plan
-
-### Requirement: An approved edit applies whenever approval comes
-
-The executor SHALL mint an edit step's transition when the step runs, so the
-edited page carries the commit instant in `updated`. Before any byte is
-written, the executor SHALL compare the leaf's planned page, with `updated`
-set back to the reviewed instant, against the sealed postcondition, and SHALL
-refuse with `CURATION_BINDING_STALE` when they differ. The reviewed transition's
-age SHALL NOT refuse an approved edit.
-
-#### Scenario: Edit approved days after proposal
-
-- **WHEN** an edit step is approved and applied more than a day after proposal
-  and its target and link targets are unchanged
-- **THEN** the edit applies the reviewed change and the page's `updated` is the
-  commit instant
-
-#### Scenario: Edit renders differently at approval
-
-- **WHEN** another writer changes what an approved edit step renders, such as
-  creating the target of one of its links
-- **THEN** the step refuses with `CURATION_BINDING_STALE`, the page is
-  unchanged, and the run records the refusal as not retryable
 
 ### Requirement: Every committed step has exact reconstructible commit evidence
 

@@ -87,6 +87,16 @@ def _edit_step(vault: Path, path: str, operation: dict[str, object]) -> dict[str
     }
 
 
+def _knowledge_base_files(vault: Path) -> dict[str, bytes]:
+    """Every Knowledge Base file except the curation run store, which records the refusal."""
+    runs = vault / "Knowledge Base" / "_Governance" / "curation"
+    return {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in (vault / "Knowledge Base").rglob("*")
+        if path.is_file() and runs not in path.parents
+    }
+
+
 def _days_later(monkeypatch: pytest.MonkeyPatch, days: int) -> None:
     later = temporal.now() + dt.timedelta(days=days)
     monkeypatch.setattr(temporal, "now", lambda: later)
@@ -140,26 +150,60 @@ def test_a_page_created_by_another_writer_after_proposal_still_refuses(vault: Pa
     assert not (vault / "Knowledge Base/Notes/Insights/curation-branch.md").exists()
 
 
+@pytest.mark.parametrize(
+    ("operation", "reviewed"),
+    [
+        (
+            {"kind": "replace_string", "old_string": "Keep old text.", "new_string": "Keep new text."},
+            "Keep new text.",
+        ),
+        (
+            {"kind": "batch_replace", "edits": [{"old_string": "old text", "new_string": "new text"}]},
+            "Keep new text.",
+        ),
+        (
+            {"kind": "patch_frontmatter", "field": "summary", "value": "Keeps the target."},
+            "summary: Keeps the target.",
+        ),
+    ],
+    ids=["edit", "multi-edit", "frontmatter"],
+)
 def test_an_edit_approved_days_after_proposal_applies_the_reviewed_change(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch, operation: dict[str, object], reviewed: str
 ) -> None:
     path = _seed_note(vault, "curation-target", "## Observations\n\n- [finding] Keep old text. ^target\n")
-    proposed = _propose(
-        vault,
-        _edit_step(
-            vault,
-            path,
-            {"kind": "replace_string", "old_string": "Keep old text.", "new_string": "Keep new text."},
-        ),
-    )
+    proposed = _propose(vault, _edit_step(vault, path, operation))
     _days_later(monkeypatch, 5)
 
     applied = _apply(vault, proposed)
 
     assert applied["phase"] == "completed"
     edited = (vault / path).read_text(encoding="utf-8")
-    assert "Keep new text." in edited
+    assert reviewed in edited
     assert f"updated: {temporal.stamp(temporal.now())}" in edited
+
+
+def test_a_late_edit_ignores_a_transition_token_copied_into_the_plan(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _seed_note(vault, "curation-target", "## Observations\n\n- [finding] Keep old text. ^target\n")
+    step = _edit_step(
+        vault,
+        path,
+        {"kind": "replace_string", "old_string": "Keep old text.", "new_string": "Keep new text."},
+    )
+    validated = commands.op_edit_memory(
+        vault,
+        path=path,
+        why="Tighten the finding.",
+        operation={**step["args"]["operation"], "validate_only": True},
+    )
+    step["args"]["operation"]["transition_token"] = validated["semantic"]["transition_token"]
+    proposed = _propose(vault, step)
+    _days_later(monkeypatch, 3)
+
+    assert _apply(vault, proposed)["phase"] == "completed"
+    assert "Keep new text." in (vault / path).read_text(encoding="utf-8")
 
 
 def test_an_edit_whose_link_resolves_differently_at_approval_refuses_before_writing(
@@ -179,15 +223,15 @@ def test_an_edit_whose_link_resolves_differently_at_approval_refuses_before_writ
             },
         ),
     )
-    before = (vault / path).read_bytes()
     _seed_note(vault, "curation-elsewhere", "## Observations\n\n- [finding] Elsewhere. ^else\n")
+    before = _knowledge_base_files(vault)
     _days_later(monkeypatch, 2)
 
     with pytest.raises(curation.CurationError) as refused:
         _apply(vault, proposed)
 
     assert refused.value.code == "CURATION_BINDING_STALE"
-    assert (vault / path).read_bytes() == before
+    assert _knowledge_base_files(vault) == before
     state = curation.status(vault, run_id=proposed["run_id"])
     assert (state["phase"], state["failed_step"], state["retryable"]) == ("failed", "rewrite", False)
 
@@ -210,5 +254,54 @@ def test_a_step_bound_to_a_page_an_earlier_step_changes_is_refused_at_proposal(
 
     with pytest.raises(curation.CurationError) as refused:
         _propose(vault, first, second)
+
+    assert refused.value.code == "CURATION_STEP_CONFLICT"
+
+
+def test_a_relation_disposition_on_a_step_linking_to_an_earlier_page_is_refused_at_proposal(
+    vault: Path,
+) -> None:
+    _open_obsidian_at_the_kb(vault)
+    branch = _create_step(
+        "branch",
+        "curation-branch",
+        "## Observations\n\n- [finding] The branch splits off. ^branch\n\n"
+        "## Connections\n\n- [[Curation curation-home]]\n",
+    )
+    branch["args"].update(
+        relation_disposition="reviewed_none",
+        relation_review_reason="The home does not exist yet.",
+    )
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _home_step(), branch)
+
+    assert refused.value.code == "CURATION_STEP_CONFLICT"
+    assert not (vault / HOME).exists()
+
+
+def test_a_link_to_a_page_an_earlier_step_supersedes_is_refused_at_proposal(vault: Path) -> None:
+    old = _seed_note(vault, "curation-shared", "## Observations\n\n- [finding] First reading. ^first\n")
+    supersede = {
+        "step_id": "successor",
+        "kind": "supersede",
+        "args": {
+            "old_path": old,
+            "title": "Curation curation-shared",
+            "slug": "curation-shared-successor",
+            "note_type": "insight",
+            "content": "## Observations\n\n- [finding] Second reading. ^second\n",
+            "reason": "The reading changed.",
+        },
+    }
+    citing = _create_step(
+        "citing",
+        "curation-citing",
+        "## Observations\n\n- [finding] Cites the reading. ^citing\n\n"
+        "## Connections\n\n- [[Curation curation-shared]]\n",
+    )
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, supersede, citing)
 
     assert refused.value.code == "CURATION_STEP_CONFLICT"
