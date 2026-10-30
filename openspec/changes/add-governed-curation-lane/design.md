@@ -352,19 +352,26 @@ days later. Two leaf guards then refused runs the plan itself made valid:
 
 Proposal therefore prepares step `k` with a private resolver seam
 (`find.planned_pages`) that registers the pages steps `0..k-1` create, with the
-titles their leaves register. Only creations are projected; relocation steps
-are refused before any step runs. A later step bound to a path an earlier step
-writes is refused at proposal (`CURATION_STEP_CONFLICT`), because it would
-always stop part-way. A foreign change still alters the render, and the leaf
-still refuses it.
+titles their leaves register. Only link rendering is projected: the semantic
+checks still read the vault as it is, and an earlier supersession changes a
+page's status, which a resolver entry cannot carry. Proposal refuses
+(`CURATION_STEP_CONFLICT`) the plans that projection cannot make run: a later
+step bound to a path an earlier step writes, a link to a page an earlier step
+supersedes, and a relation disposition on a step that links to a page an
+earlier step creates, since that link is its relation once the page exists.
+Relocation steps are refused before any step runs. A foreign change still
+alters the render, and the leaf still refuses it. Projecting planned pages into
+the semantic corpus would accept more plans; it needs sealed post-step bytes
+for every step kind, which supersede and create-entity do not produce today.
 
 At execution an edit step re-runs its leaf's validation for a fresh
-transition. Exactness moves to the witness batch, which already sees the
-leaf's planned bytes before anything is written: the planned page, with
-`updated` put back to the reviewed instant by the edit writer's own helper,
-must hash to the sealed postcondition. The edit therefore records its real
-commit instant and still writes exactly the approved change. Creates keep
-their reviewed render instant, because it can decide the destination path.
+transition, ignoring any token copied into the plan. Exactness moves to the
+witness batch, which already sees the leaf's planned bytes before anything is
+written: the planned page, with `updated` put back to the reviewed instant by
+the edit writer's own helper, must hash to the sealed postcondition. The edit
+therefore records its real commit instant and still writes exactly the
+approved change. Creates keep their reviewed render instant, because it can
+decide the destination path.
 
 ## Risks / Trade-offs
 

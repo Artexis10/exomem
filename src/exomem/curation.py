@@ -1272,17 +1272,6 @@ def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
     return _guarded_text(Path(vault_root), path, stale=True)
 
 
-def _leaf_error(error: Exception) -> CurationError:
-    """A leaf's refusal under its own stable code."""
-    if isinstance(error, CurationError):
-        return error
-    code = getattr(error, "code", None)
-    reason = getattr(error, "reason", None)
-    message = str(reason or error)
-    if not isinstance(code, str):
-        code = str(error).split(":", 1)[0] if ":" in str(error) else "CURATION_STEP_INVALID"
-    return _error(code, message)
-
 
 def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
@@ -1627,8 +1616,15 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 {"path": path, "absent": True},
                 {"path": destination, "content_hash": before_hash},
             ]
+    except CurationError:
+        raise
     except Exception as error:
-        raise _leaf_error(error) from error
+        code = getattr(error, "code", None)
+        reason = getattr(error, "reason", None)
+        message = str(reason or error)
+        if not isinstance(code, str):
+            code = str(error).split(":", 1)[0] if ":" in str(error) else "CURATION_STEP_INVALID"
+        raise _error(code, message) from error
 
     return {
         "ordinal": ordinal,
@@ -1645,26 +1641,50 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
     }
 
 
-# The argument holding the title a creating step gives its page; the leaf registers the same value.
+# The argument a creating step's leaf registers as its page's title (note.py, link.py `add_pending`).
 _CREATED_TITLE_ARGUMENT = {"create-note": "title", "supersede": "title", "create-entity": "name"}
 
 
 def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Prepare each step against the vault as the plan's earlier steps leave it.
+    """Prepare each step with links to the pages the plan's earlier steps create.
 
     A later step may link to a page an earlier step creates, so its links are
-    rendered as they will be once that page exists. A later step bound to a path
-    an earlier step writes could never run as sealed, so the plan is refused here
-    instead of stopping part-way. Relocation steps, which remove pages, are
+    rendered as they will be once that page exists. Only that rendering is
+    projected; the semantic checks still read the vault as it is. A plan that
+    projection cannot make run as sealed is refused here instead of stopping
+    part-way: a later step bound to a path an earlier step writes, a step that
+    links to a page an earlier step supersedes, and a step that gives a relation
+    disposition while it links to a page an earlier step creates (that link is
+    its relation once the page exists). Relocation steps, which remove pages, are
     refused before any step runs (`_require_plan_relocation_history`).
     """
     from . import find as find_module
 
     manifest: list[dict[str, Any]] = []
-    planned: list[tuple[str, str | None]] = []
+    created: list[tuple[str, str | None]] = []
+    superseded: list[tuple[str, str | None]] = []
     written: set[str] = set()
     for ordinal, step in enumerate(steps):
-        with find_module.planned_pages(vault_root, planned):
+        args = step["args"]
+        retired = _planned_link_targets(vault_root, args, superseded)
+        if retired:
+            raise _error(
+                "CURATION_STEP_CONFLICT",
+                f"step {step['step_id']!r} links to {retired[0]!r}, which an earlier step "
+                "supersedes; link its successor",
+            )
+        operation = args.get("operation")
+        disposition = args.get("relation_disposition") or (
+            operation.get("relation_disposition") if isinstance(operation, Mapping) else None
+        )
+        related = _planned_link_targets(vault_root, args, created) if disposition else []
+        if related:
+            raise _error(
+                "CURATION_STEP_CONFLICT",
+                f"step {step['step_id']!r} links to {related[0]!r}, which an earlier step "
+                "creates; that link is its relation, so it takes no relation disposition",
+            )
+        with find_module.planned_pages(vault_root, created):
             item = _prepare_step(vault_root, step, ordinal)
         conflicts = sorted(
             {str(expected["path"]) for expected in _binding_expectations(item)} & written
@@ -1679,13 +1699,53 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
         after = {str(entry["path"]) for entry in item["effect_after"]}
         written |= after
         title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
-        title = step["args"].get(title_argument) if title_argument else None
-        planned.extend(
+        title = args.get(title_argument) if title_argument else None
+        created.extend(
             (str(entry["path"]), title if isinstance(title, str) else None)
             for entry in item["effect_before"]
             if entry.get("absent") is True and entry["path"] in after
         )
+        if step["kind"] == "supersede":
+            from .vault import parse_frontmatter
+
+            fields, _body, _raw = parse_frontmatter(str(item["preimage"] or ""))
+            old_title = fields.get("title")
+            superseded.append((str(item["path"]), old_title if isinstance(old_title, str) else None))
     return manifest
+
+
+def _planned_link_targets(
+    vault_root: Path, args: Mapping[str, Any], pages: Sequence[tuple[str, str | None]]
+) -> list[str]:
+    """The `pages` that a step's authored wikilinks resolve to, by path or by title."""
+    from .vault import (
+        WikilinkError,
+        WikilinkResolver,
+        find_body_wikilinks,
+        normalize_wikilink,
+    )
+
+    if not pages:
+        return []
+    resolver = WikilinkResolver.from_entries(vault_root, pages)
+    found: set[str] = set()
+    texts: list[Any] = [args]
+    while texts:
+        value = texts.pop()
+        if isinstance(value, Mapping):
+            texts.extend(value.values())
+        elif isinstance(value, list):
+            texts.extend(value)
+        elif isinstance(value, str):
+            for match in find_body_wikilinks(value):
+                try:
+                    target, _warning = normalize_wikilink(
+                        match.group(0), vault_root, resolver=resolver, strict=True
+                    )
+                except WikilinkError:
+                    continue
+                found.add(target)
+    return sorted(found)
 
 
 def _validate_entity_candidate_plan(
@@ -2237,14 +2297,12 @@ def _finalize_witness_batch(
 def _require_reviewed_edit(binding: Mapping[str, Any], planned: str) -> None:
     """Refuse, before any byte lands, an edit that differs from the approved one.
 
-    Only the `updated:` instant may differ: the transition is minted at execution.
+    Only the `updated:` instant may differ: `_dispatch_step` mints the transition at execution.
     """
     from . import edit as edit_module
     from . import semantic_writes
 
-    reviewed = semantic_writes.transition_token_stamp(
-        binding["prepared"].get("reviewed_transition_token")
-    )
+    reviewed = semantic_writes.transition_token_stamp(binding["prepared"].get("transition_token"))
     rendered = edit_module.reviewed_render(planned, reviewed) if reviewed is not None else planned
     if text_content_hash(rendered) != binding["postcondition"]["content_hash"]:
         raise _error("CURATION_BINDING_STALE", "the edit no longer writes the approved content")
@@ -2643,10 +2701,23 @@ def _dispatch_step(
     if kind == "accept-relation":
         return commands.op_connect_memory(vault_root, operation="accept-relation", **args)
     if kind == "edit":
-        operation = dict(args["operation"])
-        operation.pop("validate_only", None)
-        operation["transition_token"] = prepared["transition_token"]
-        operation["relation_review_hash"] = prepared["relation_review_hash"]
+        # The sealed transition pins the reviewed `updated:` instant, which the writer refuses once
+        # it is a day old, and approval often comes later. The transition is minted now, never from
+        # a token copied into the plan; `_require_reviewed_edit` proves the approved bytes land.
+        operation = {
+            key: value
+            for key, value in args["operation"].items()
+            if key not in {"validate_only", "transition_token", "relation_review_hash"}
+        }
+        validation = commands.op_edit_memory(
+            vault_root,
+            path=args["path"],
+            why=args["why"],
+            operation={**operation, "validate_only": True},
+        )
+        semantic = dict(validation.get("semantic") or {})
+        operation["transition_token"] = semantic.get("transition_token")
+        operation["relation_review_hash"] = semantic.get("relation_review_hash")
         return commands.op_edit_memory(
             vault_root, path=args["path"], why=args["why"], operation=operation
         )
@@ -2782,29 +2853,6 @@ def _runtime_execution_binding(
                 "trash_meta_path": validation.result.trash_meta_path,
             }
         )
-    elif step["kind"] == "edit":
-        from . import commands
-
-        # The sealed transition pins the reviewed `updated:` instant, which the writer refuses
-        # once it is a day old, and approval often comes later. The transition is minted now;
-        # `_require_reviewed_edit` proves the leaf still writes the approved bytes.
-        args = step["args"]
-        try:
-            validation = commands.op_edit_memory(
-                vault_root,
-                path=args["path"],
-                why=args["why"],
-                operation={**args["operation"], "validate_only": True},
-            )
-        except Exception as error:
-            raise _leaf_error(error) from error
-        semantic = dict(validation.get("semantic") or {})
-        execution["prepared"] = {
-            **execution["prepared"],
-            "transition_token": semantic.get("transition_token"),
-            "relation_review_hash": semantic.get("relation_review_hash"),
-            "reviewed_transition_token": binding["prepared"].get("transition_token"),
-        }
     elif step["kind"] == "move":
         effect.update(
             {
@@ -3250,21 +3298,9 @@ def _execute_next(
             retryable=False,
         )
         raise _error(blocker["code"], blocker["reason"])
-    try:
-        execution_binding, prepared_effect, runtime_args = _runtime_execution_binding(
-            vault_root, step, binding
-        )
-    except CurationError as error:
-        _record_failed_attempt(
-            store,
-            run_identity,
-            ordinal=ordinal,
-            step_id=step["step_id"],
-            operation_identity=operation_identity,
-            code=error.code,
-            retryable=False,
-        )
-        raise
+    execution_binding, prepared_effect, runtime_args = _runtime_execution_binding(
+        vault_root, step, binding
+    )
     prepared_state = {
         "version": 1,
         "run_id": run_identity,

@@ -59,9 +59,9 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 admission and pac
 
 ## 10. Intra-plan dependencies and late approval
 
-- [ ] 10.1 Prepare each proposed and compensation step with the pages the plan's earlier steps create, and refuse a step bound to a path an earlier step writes (`CURATION_STEP_CONFLICT`).
-- [ ] 10.2 Mint an edit step's transition at execution and refuse, before any write, a planned page that differs from the sealed postcondition apart from the reviewed `updated` instant.
-- [ ] 10.3 Prove both end to end: a two-page split linked by path and by title applies; a foreign link target still refuses; an edit approved days later applies; an edit whose render changed refuses unchanged; a conflicting plan is refused at proposal.
+- [ ] 10.1 Render each proposed and compensation step's links to pages the plan's earlier steps create, and refuse with `CURATION_STEP_CONFLICT` a step bound to a path an earlier step writes, a link to a page an earlier step supersedes, and a relation disposition on a step that links to a page an earlier step creates.
+- [ ] 10.2 Mint an edit step's transition at execution, never from the plan, and refuse before any write a planned page that differs from the sealed postcondition apart from the reviewed `updated` instant.
+- [ ] 10.3 Prove both end to end: a two-page split linked by path and by title applies; a foreign link target still refuses; an edit approved days later applies through each edit writer and with a copied token; an edit whose render changed refuses with nothing written; each conflicting plan is refused at proposal.
 
 ## 9. Completion and OpenSpec closure
 
