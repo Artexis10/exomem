@@ -8705,6 +8705,24 @@ def read_operation_log(vault_root: Path) -> dict[str, Any]:
     }
 
 
+def latest_operation_id(vault_root: Path, path: str) -> str | None:
+    """The `operation_id` of the newest logged write to `path`, or None when none carries one.
+
+    "Newest" is the largest server time among the log's provenance fences, so a rotated
+    archive and the live log answer alike.
+    """
+    newest: tuple[str, str] | None = None
+    for entry in read_operation_log(vault_root)["entries"]:
+        data = entry.get("provenance")
+        if not isinstance(data, dict) or data.get("path") != path:
+            continue
+        stamp, operation_id = data.get("server_at"), data.get("operation_id")
+        if isinstance(stamp, str) and isinstance(operation_id, str) and operation_id:
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, operation_id)
+    return newest[1] if newest else None
+
+
 def plan_log_writes_many(
     vault_root: Path,
     *,

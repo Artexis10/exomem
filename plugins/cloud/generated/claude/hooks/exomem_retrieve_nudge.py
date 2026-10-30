@@ -171,6 +171,9 @@ _WORKING_SET_HEADER = (
 )
 # One default with an environment override, no per-prominence table (design D9).
 _WORKING_SET_MAX_CHARS = 4000
+# The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
+_VOCABULARY_DELTA_MAX_CHARS = 900
+_VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
 # The one thing a hook can ask of the agent, and the whole reason an abstention is
 # rendered at all: the agent is the only party allowed to choose a sense. Both
 # rendered abstentions end with this exact string; each gets its own lead, because
@@ -1545,6 +1548,20 @@ def _activation_map_overhead_path(session_id: str) -> Path:
     )
 
 
+def _activation_vocabulary_path(session_id: str) -> Path:
+    """The last vocabulary delta this session was shown, kept so one compaction can show it again."""
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
+        _state_core().ACTIVATION_VOCABULARY_DELTA_SUFFIX
+    )
+
+
+def _activation_vocabulary_shown_path(session_id: str) -> Path:
+    """Present while the live context holds that delta; the checkpoint hook drops it on every lifecycle event."""
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
+        _state_core().ACTIVATION_VOCABULARY_SHOWN_SUFFIX
+    )
+
+
 def _read_map_request_max_chars(session_id: str) -> int | None:
     """A prior map uses the reduced cap; missing or malformed state uses the original."""
     try:
@@ -1689,6 +1706,74 @@ def _upkeep_lines(packet: dict) -> list[str]:
         ref = str(args.get("ref") or item.get("ref") or "")
         lines.append(_packet_line(f"upkeep ({label})", text, ref))
     return lines
+
+
+def _vocabulary_delta_rows(delta: object) -> tuple[list[dict], int]:
+    """The delta's entries and its not-shown count, or nothing when its shape is not the server's."""
+    if not isinstance(delta, dict) or not isinstance(delta.get("entries"), list):
+        return [], 0
+    rows = [entry for entry in delta["entries"][:5] if isinstance(entry, dict) and entry.get("key")]
+    more = delta.get("more")
+    return rows, (more if type(more) is int and more > 0 else 0)
+
+
+def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
+    """New vocabulary as whole lines under one header, or `""` when none fits.
+
+    The server marked this delta delivered when it sent it, so the hook renders it
+    before the rest of the block and cuts the rest around it, never the delta.
+    """
+    rows, more = _vocabulary_delta_rows(delta)
+    lines = []
+    for entry in rows:
+        label = str(entry.get("label") or "").strip()
+        text = str(entry["key"]) + (f" ({label})" if label and label != str(entry["key"]) else "")
+        if entry.get("description"):
+            text += f" — {entry['description']}"
+        if entry.get("parent"):
+            text += f"; parent {entry['parent']}"
+        lines.append(_packet_line(str(entry.get("registry") or "vocabulary"), text, ""))
+    if not lines:
+        return ""
+    if more:
+        lines.append(f"- … {more} more added, not shown.")
+    text = "\n".join([_VOCABULARY_DELTA_HEADER, *lines])
+    return text if len(text) <= max_chars else ""
+
+
+def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
+    """The delta this prompt shows and whether the server just delivered it.
+
+    The server sends a delta once. After a compaction or a resume that once is
+    gone from the context, so the hook shows its kept copy one more time, on the
+    first prompt after the checkpoint hook dropped the shown marker.
+    """
+    delivered = packet.get("vocabulary_delta")
+    if _vocabulary_delta_rows(delivered)[0]:
+        return delivered, True
+    try:
+        kept = _read_activation_value(_activation_vocabulary_path(session_id))
+        if not kept or _read_activation_value(_activation_vocabulary_shown_path(session_id)):
+            return None, False
+        delta = json.loads(kept)
+    except (AttributeError, OSError, ValueError):
+        return None, False
+    return (delta, False) if _vocabulary_delta_rows(delta)[0] else (None, False)
+
+
+def _record_vocabulary_delta_shown(session_id: str, delta: dict, delivered: bool) -> None:
+    """Keep what the context now holds. A shown copy is dropped, so a second compaction shows nothing stale."""
+    try:
+        if delivered:
+            _write_activation_value(
+                _activation_vocabulary_path(session_id),
+                json.dumps(delta, ensure_ascii=False, separators=(",", ":")),
+            )
+        _write_activation_value(_activation_vocabulary_shown_path(session_id), "1")
+        if not delivered:
+            _state_core().unlink_nudge_file(_activation_vocabulary_path(session_id))
+    except (AttributeError, OSError, ValueError):
+        pass
 
 
 def _relevant_due_lines(packet: dict) -> list[str]:
@@ -3356,8 +3441,11 @@ def main(argv: list[str] | None = None) -> int:
             packet = packet if isinstance(packet, dict) else {}
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
+            delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
+            delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
+            render_cap = max(0, _working_set_max_chars() - (len(delta_text) + 1 if delta_text else 0))
             if isinstance(packet.get("map"), dict):
-                block, complete = _format_map_with_slice(packet, _working_set_max_chars(), last_generation)
+                block, complete = _format_map_with_slice(packet, render_cap, last_generation)
                 if generation_path is not None and overhead_path is not None:
                     try:
                         overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
@@ -3382,7 +3470,10 @@ def main(argv: list[str] | None = None) -> int:
                         _state_core().unlink_nudge_file(overhead_path)
                     except (AttributeError, OSError, ValueError):
                         pass
-                block = _format_working_set_block(packet, _working_set_max_chars())
+                block = _format_working_set_block(packet, render_cap)
+            if delta_text:
+                block = f"{block}\n{delta_text}" if block else delta_text
+                _record_vocabulary_delta_shown(session_id, delta, delta_delivered)
             keep_reminder = _block_keeps_the_reminder(packet)
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
             lane, hit_count, block, keep_reminder, packet_available = "none", 0, "", False, False

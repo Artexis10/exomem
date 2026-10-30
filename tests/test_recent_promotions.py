@@ -6,6 +6,7 @@ writers and the real due-state carrier and change only the caller identity.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -167,6 +168,12 @@ def _ledger(vault: Path) -> list[dict]:
     return list(review_state.ReviewStateStore(vault).load()["promotions"].values())
 
 
+def _ledger_ids(vault: Path) -> list[str]:
+    from exomem import review_state
+
+    return list(review_state.ReviewStateStore(vault).load()["promotions"])
+
+
 def test_an_edge_between_two_entities_is_an_entry_and_one_from_a_note_is_not(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -210,6 +217,81 @@ def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
 
     _as(monkeypatch, "session-b")
     assert _count(vault) == 1
+
+
+def test_a_parentless_type_leads_the_served_notice_and_carries_new_family(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new family root outranks an older ordinary entry in the notice a reader sees."""
+    from exomem.governance.principal import library_scope
+
+    _as(monkeypatch, "session-a")
+    _create_entity(vault)
+    with library_scope():
+        inspected = commands.op_schema_memory(vault, subject="entity-types", operation="inspect")
+        saved = commands.op_schema_memory(
+            vault, subject="entity-types", operation="save",
+            proposal={"upsert": {"venue": {
+                "label": "Venue", "guidance": "A synthetic meeting place.", "attributes": {"folder": "Venues"},
+            }}},
+            expected_hash=inspected["content_hash"], why="Register a synthetic root type.",
+        )
+    assert saved["valid"], saved
+
+    _as(monkeypatch, "session-b")
+    top = due_state_module.served(vault)["top"]
+    promoted = [row for row in top if row["category"] == CATEGORY]
+    assert len(promoted) == 2
+    assert promoted[0].get("new_family") is True, "the root type is served ahead of the older entity"
+    assert "new_family" not in promoted[1]
+
+
+def test_a_public_entry_dismissed_through_the_triage_door_is_settled(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _as(monkeypatch, "session-a")
+    _create_entity(vault)
+    (promotion_id,) = [row for row in _ledger_ids(vault)]
+    ref = promotions.promotion_ref(promotion_id)
+
+    _as(monkeypatch, "session-b")
+    assert _count(vault) == 1
+    commands.op_triage_memory(
+        vault, ref=ref, action="dismiss", why="Not worth tracking.",
+        expected_fingerprint=promotions.identity_fingerprint(promotion_id),
+    )
+
+    assert _count(vault) == 0
+    assert promotions.served_rows(vault) == []
+
+
+def test_a_dismissed_entry_stays_dismissed_when_its_page_is_edited_and_linked_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review fingerprint is the promotion's identity, not a hash of the page or its dependants."""
+    from exomem.vault import parse_frontmatter
+
+    _as(monkeypatch, "session-a")
+    entity = _create_entity(vault, "Tidal Ledger")
+    (promotion_id,) = _ledger_ids(vault)
+    fingerprint = promotions.identity_fingerprint(promotion_id)
+    assert re.fullmatch(r"[0-9a-f]{24}", fingerprint)
+    _as(monkeypatch, "session-b")
+    commands.op_triage_memory(
+        vault, ref=promotions.promotion_ref(promotion_id), action="dismiss", why="Not worth tracking.",
+        expected_fingerprint=fingerprint,
+    )
+
+    _frontmatter, body, _text = parse_frontmatter((vault / entity).read_text(encoding="utf-8"))
+    commands.op_edit_memory(
+        vault, entity, "Edit the promoted page.",
+        operation={"kind": "replace_body", "new_body": f"{body.rstrip()}\nA later synthetic sentence.\n"},
+    )
+    _add_relation(vault, NOTE, f"- supports [[{entity.removesuffix('.md')}]]")
+
+    assert promotions.identity_fingerprint(promotion_id) == fingerprint
+    _as(monkeypatch, "session-c")
+    assert _count(vault) == 0, "the edit and the new inbound link did not reopen the entry"
 
 
 def _record_after_loading(vault: Path, loaded, finish, ready, proceed) -> None:

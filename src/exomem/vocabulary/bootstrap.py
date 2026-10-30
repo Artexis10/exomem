@@ -29,24 +29,43 @@ TOP_KEYS = 12
 NEW_WINDOW_DAYS = 14
 NEW_KEYS = 3
 
+
+def added_entries(
+    vault_root: Path, spec: registry.RegistrySpec, snapshot: registry.Snapshot,
+    *, since: dt.date | None = None, after: str = "",
+) -> list[tuple[str, str]]:
+    """`(stamp, key)` of the active keys a save added, newest save first.
+
+    The one reader of the history `added` marker: the bootstrap `new` list and the
+    vocabulary-delta carrier both take their rows from it. `stamp` is the save's
+    UTC moment, sortable as text. `since` keeps saves from that day on and `after`
+    only saves later than that stamp.
+    """
+    from .. import registry_history
+
+    found: dict[str, str] = {}
+    # Bounded history reads retain current authority; an overlay hash cannot validate a snapshot.
+    for item in registry_history.versions(vault_root, stem=spec.stem):
+        stamp = str(item.get("version") or "").partition("-")[0]
+        if since is not None and str(item.get("at") or "")[:10] < since.isoformat():
+            continue
+        if stamp <= after:
+            continue
+        for key in (item.get("added") or {}).get(spec.name, ()):
+            entry = snapshot.entries.get(key)
+            if entry is not None and entry.status == "active" and stamp > found.get(key, ""):
+                found[key] = stamp
+    # Newest save first, then key order: a stable reverse sort keeps the key order of equal stamps.
+    rows = [(stamp, key) for key, stamp in sorted(found.items())]
+    rows.sort(key=lambda row: row[0], reverse=True)
+    return rows
+
+
 def recently_added(
     vault_root: Path, spec: registry.RegistrySpec, snapshot: registry.Snapshot, *, since: dt.date
 ) -> list[str]:
     """Active keys of one registry that a write added on or after `since`."""
-    from .. import registry_history
-
-    found: list[str] = []
-    # Bounded history reads retain current authority; an overlay hash cannot validate a snapshot.
-    for item in registry_history.versions(vault_root, stem=spec.stem):
-        at = str(item.get("at") or "")
-        added = item.get("added") or {}
-        if at[:10] < since.isoformat():
-            continue
-        for key in added.get(spec.name, ()):
-            entry = snapshot.entries.get(key)
-            if entry is not None and entry.status == "active" and key not in found:
-                found.append(key)
-    return sorted(found)
+    return sorted(key for _stamp, key in added_entries(vault_root, spec, snapshot, since=since))
 
 
 def block(

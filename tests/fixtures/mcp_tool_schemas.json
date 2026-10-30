@@ -633,6 +633,7 @@
                   },
                   "type": "array"
                 },
+                "ref": {},
                 "identity_decision": {
                   "additionalProperties": false,
                   "properties": {
@@ -706,9 +707,7 @@
                 "requested_relation": {
                   "type": "string"
                 },
-                "ref": {
-                  "type": "string"
-                },
+                "ref": {},
                 "expected_hash": {
                   "description": "Target `content_hash`; required for accept-relation.",
                   "type": "string"
@@ -740,6 +739,11 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
           }
         },
         "response_detail": {

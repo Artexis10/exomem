@@ -142,6 +142,7 @@ from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import vocabulary_delta as vocabulary_delta_module
 from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
@@ -185,6 +186,7 @@ from .kbdir import kb_dirname
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
+    latest_operation_id,
     resolve_under_vault,
 )
 from .viewer_map import op_viewer_map
@@ -5040,9 +5042,13 @@ def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None]
             path = resolved
     except Exception:  # noqa: BLE001 - what cannot be read is an unknown origin, whatever the cause
         path = None
-    from .writer_lease import active_mutation_request_id
-
-    operation_id = active_mutation_request_id() if path else None
+    operation_id: str | None = None
+    if path:
+        try:
+            # The originating write's own logged id, not this creation's request id.
+            operation_id = latest_operation_id(vault_root, path)
+        except Exception:  # noqa: BLE001 - an unreadable log leaves the origin path without an id
+            operation_id = None
     return {"path": path, "operation_id": operation_id}
 
 
@@ -6797,6 +6803,9 @@ def op_activate_context(
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
                         due_state_module.for_activation(vault_root, packet, purpose=purpose)
+                        # Vocabulary added since this conversation was last told, once per admitted
+                        # digest change and counted inside the packet's own `limit_chars`.
+                        vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:
@@ -9797,15 +9806,42 @@ def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
     return {**result, "capture_sweep": block}
 
 
-def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
-    """Both post-batch advisories, in one place, for every operation leaf.
+def _carrying_undeclared_referents(vault_root: Path, result: Any) -> Any:
+    """Attach the names a batch's pages newly linked with no page behind them, each once.
 
-    One seam rather than two call chains: the two carriers answer different
+    Inside `due_state.batch_scope` the page seam holds these names rather than delivering
+    them (`capture_sweep.undeclared_referents`), so a name that several pages link is listed
+    once, here. Gated on an actual commit like the carriers beside it.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "undeclared_referents" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import capture_sweep as capture_sweep_module
+
+        block = capture_sweep_module.batch_referents(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("undeclared-referents batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "undeclared_referents": block}
+
+
+def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
+    """The post-batch advisories, in one place, for every operation leaf.
+
+    One seam rather than several call chains: the carriers answer different
     questions but they attach at exactly the same moment — after the batch scope
     has exited and the deltas have been applied — and a leaf that acquired one
     but not the other would be a silent coverage gap rather than a visible one.
     """
-    return _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    return _carrying_undeclared_referents(
+        vault_root, _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    )
 
 
 def _set_family_disposition(

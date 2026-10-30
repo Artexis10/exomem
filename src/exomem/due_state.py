@@ -2829,10 +2829,34 @@ _BATCH_PATHS: ContextVar[dict[str, set[str]] | None] = ContextVar(
 )
 
 
+# The names this batch's pages newly link with no page behind them, keyed by vault and then by
+# name identity (`capture_sweep.undeclared_referents`). Fresh per outermost scope like
+# `_BATCH_PATHS`, so a name two pages of one batch link is held once.
+_BATCH_REFERENTS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+    "exomem_due_state_batch_referents", default=None,
+)
+
+
 def _track_batch_path(vault_root: Path, path: str) -> None:
     tracked = _BATCH_PATHS.get()
     if tracked is not None:
         tracked.setdefault(str(vault_root), set()).add(path)
+
+
+def note_batch_referent(vault_root: Path, identity: str, entry: dict[str, Any], *, limit: int) -> None:
+    """Hold the first `limit` distinct names a batch's pages link, for the post-batch carrier."""
+    held = _BATCH_REFERENTS.get()
+    if held is None:
+        return
+    names = held.setdefault(str(vault_root), {})
+    if identity not in names and len(names) < limit:
+        names[identity] = entry
+
+
+def take_batch_referents(vault_root: Path) -> list[dict[str, Any]]:
+    """The names a finished batch's pages linked, once; the batch holds none afterwards."""
+    held = _BATCH_REFERENTS.get()
+    return list(held.pop(str(vault_root), {}).values()) if held is not None else []
 
 
 @contextmanager
@@ -2852,6 +2876,7 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     """
     if not _IN_BATCH.get():
         _BATCH_PATHS.set({})
+        _BATCH_REFERENTS.set({})
     depth = _IN_BATCH.set((*_IN_BATCH.get(), str(vault_root or "")))
     try:
         yield
@@ -4151,27 +4176,44 @@ def block_for_batch(
 # --------------------------------------------------------------------------
 
 
-def emission_key(vault_root: Path | None = None) -> tuple[str, str, str]:
+def conversation_session(session: str | None = None) -> str | None:
+    """The session an MCP call belongs to, or the caller's own id outside one; None when neither exists.
+
+    The transport's session wins: a client that also sends its own `session` string
+    (the hook door does) must not become two conversations on one ledger. Outside
+    an MCP call (the REST and CLI doors) a valid caller `session` stands in, hashed
+    so the raw id is never kept.
+    """
+    try:
+        from .command_surface import mcp_caller_identity
+
+        value = mcp_caller_identity().get("session_id")
+        if value:
+            return f"session:{value}"
+    except Exception:  # noqa: BLE001 — outside an MCP call there is simply no session
+        pass
+    from .query_log import SESSION_MAX_CHARS
+
+    if isinstance(session, str) and 0 < len(session) <= SESSION_MAX_CHARS:
+        return "caller:" + hashlib.sha256(session.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+    return None
+
+
+def emission_key(vault_root: Path | None = None, *, session: str | None = None) -> tuple[str, str, str]:
     """(session, audience, vault) — the scope one "already told them" fact belongs to.
 
     Session identity comes from the MCP transport when it supplies one; stdio and
     CLI have no session concept, so the process lifetime IS the conversation and a
-    per-process key is the honest equivalent rather than a degraded one.
+    per-process key is the honest equivalent rather than a degraded one. A caller
+    that names its own conversation (`session`, the hook door) is keyed by it when
+    the transport supplies none (`conversation_session`).
 
     The vault is part of the key because one process can serve more than one of
     them: without it, telling a principal about vault A's four overdue items would
     silence vault B's identical-looking four, which is a wrong answer rather than
     a quiet one.
     """
-    session = _PROCESS_SESSION_KEY
-    try:
-        from .command_surface import mcp_caller_identity
-
-        value = mcp_caller_identity().get("session_id")
-        if value:
-            session = f"session:{value}"
-    except Exception:  # noqa: BLE001 — outside an MCP call there is simply no session
-        pass
+    conversation = conversation_session(session) or _PROCESS_SESSION_KEY
     audience = "unknown"
     try:
         from .governance.principal import effective_principal
@@ -4179,7 +4221,7 @@ def emission_key(vault_root: Path | None = None) -> tuple[str, str, str]:
         audience = str(effective_principal().audience_id or "unknown")
     except Exception:  # noqa: BLE001
         pass
-    return session, audience, str(vault_root or "")
+    return conversation, audience, str(vault_root or "")
 
 
 def _digest(payload: dict[str, Any]) -> str:
@@ -4191,6 +4233,41 @@ def _digest(payload: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _remember_emission(key: tuple[str, str, str, str], digest: str) -> bool:
+    """Record `digest` for `key` under `_LOCK`; False when it already held it."""
+    if _EMISSION.get(key) == digest:
+        return False
+    if len(_EMISSION) >= _EMISSION_CAP:
+        # Bounded rather than unbounded: a long-lived server must not
+        # accumulate one entry per session it has ever seen. Evicting the
+        # oldest costs at worst one extra emission for a stale session.
+        _EMISSION.pop(next(iter(_EMISSION)), None)
+    _EMISSION[key] = digest
+    return True
+
+
+def acknowledged(scope: str, *, vault_root: Path, session: str | None = None) -> str | None:
+    """What this (session, audience, vault) was last told under `scope`, or None.
+
+    For a carrier that is not a due-state block but is acknowledged on the same
+    ledger: the value is the carrier's own, and `scope` keeps it apart from the
+    due-state digests.
+    """
+    with _LOCK:
+        return _EMISSION.get((*emission_key(vault_root, session=session), scope))
+
+
+def claim(scope: str, value: str, *, vault_root: Path, session: str | None = None) -> bool:
+    """Record `value` under `scope` for this caller; True only for the call that changed it.
+
+    Decide and record in one step, for a carrier that hands the block over in the
+    same breath. It writes only the in-process ledger: no due-state counter moves,
+    because the delivery is not a due-state emission.
+    """
+    with _LOCK:
+        return _remember_emission((*emission_key(vault_root, session=session), scope), value)
 
 
 def would_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> bool:
@@ -4229,14 +4306,8 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
     key = (*emission_key(vault_root), str(payload.get("scope") or ""))
     digest = _digest(payload)
     with _LOCK:
-        if _EMISSION.get(key) == digest:
+        if not _remember_emission(key, digest):
             return
-        if len(_EMISSION) >= _EMISSION_CAP:
-            # Bounded rather than unbounded: a long-lived server must not
-            # accumulate one entry per session it has ever seen. Evicting the
-            # oldest costs at worst one extra emission for a stale session.
-            _EMISSION.pop(next(iter(_EMISSION)), None)
-        _EMISSION[key] = digest
     # Outside the lock: the ledger write reads and replaces the projection file,
     # and `_remember_unpersisted` takes this same non-reentrant lock.
     _record_emission(vault_root, digest, due_total=int(payload.get("total") or 0))
@@ -4271,3 +4342,4 @@ def reset_emission_state() -> None:
         _EMISSION.clear()
         _UNPERSISTED.clear()
     _BATCH_PATHS.set(None)
+    _BATCH_REFERENTS.set(None)
