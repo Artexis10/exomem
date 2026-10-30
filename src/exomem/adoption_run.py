@@ -2625,9 +2625,6 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
             "unresolved": sum(len((item.get("links") or {}).get("unresolved") or []) for item in applied_text),
         },
         "recall": _recall_sample(root, run),
-        "limits": [
-            "Inline #tags in a note body are not read; only front-matter tags and aliases are kept."
-        ],
     }
 
 

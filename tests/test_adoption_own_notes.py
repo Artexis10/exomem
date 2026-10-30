@@ -89,6 +89,25 @@ def test_a_mixed_collection_becomes_draft_notes_beside_their_sources_and_keeps_t
     assert len(_notes(vault)) == 2  # the Exports file is a Source only
 
 
+def test_a_body_tag_joins_the_front_matter_tags_and_a_hash_in_code_does_not(
+    tmp_path: Path,
+) -> None:
+    original = (
+        "---\ntags: [travel]\n---\n# Trip\n\nPacked for #hiking today.\n\n"
+        "Run `#inline-code` first.\n\n```\n#fenced-code\n```\n"
+    )
+    vault = _vault(tmp_path, {"Coll/Journal/trip.md": original})
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    note_path = applied["outcomes"]["Coll/Journal/trip.md"]["note"]["target_path"]
+    assert _page(vault, note_path)[0]["tags"] == ["travel", "hiking"]
+    assert _page(vault, _copy(applied, "Coll/Journal/trip.md"))[0]["tags"] == [
+        "imported", "travel", "hiking",
+    ]
+
+
 def test_a_note_keeps_its_original_body_when_it_links_a_note_made_after_it(
     tmp_path: Path,
 ) -> None:
