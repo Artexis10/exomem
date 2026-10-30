@@ -37,7 +37,7 @@ def _state(root: Path, parsed: Any) -> Any:
     from .vault import yaml_safe_dump_for_parse
 
     # The text is parsed straight back and never hashed into a descriptor, so the
-    # libyaml emitter is exact here; the pure-Python one was most of a full build.
+    # libyaml emitter is exact here; the pure-Python one was a third of a full build.
     return semantic_contract._parse_page_state(
         root,
         parsed.rel_path,
