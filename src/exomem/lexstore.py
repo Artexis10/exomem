@@ -9260,18 +9260,21 @@ class LexicalStore:
     ) -> dict[str, bool]:
         """Compare stored rows against the exact bytes each identity names.
 
-        The catalogue stores no content digest, so the comparison is made
-        against everything it derives from a page's bytes and then serves:
-        title, ``updated``, the emitted-parent link, and the trigram lane's
-        lowercased title and body. Naming the expected sha256 keeps that exact
-        -- the file must hash to it before its parse is compared -- so a row
-        built from a different generation cannot answer yes.
+        The comparison covers everything the catalogue derives from a page's
+        bytes and then serves: title, ``updated``, the emitted-parent link,
+        every eligibility column with ``content_hash`` (the row
+        `_catalogue_custody_verify` compares), and the trigram lane's
+        lowercased title and body. The file must hash to the expected sha256
+        before its parse is compared, so a row built from a different
+        generation cannot answer yes -- including one that differs only in a
+        filter column such as ``status``, which no text column shows.
         """
         answers = dict.fromkeys(expected, False)
         if self._failed or not self.path.exists():
             return answers
         from . import find_corpus
 
+        eligibility = ", ".join(f"p.{column}" for column in (*_ELIGIBILITY_COLUMNS, "content_hash"))
         try:
             conn = self._connect()
         except sqlite3.Error as error:
@@ -9282,8 +9285,8 @@ class LexicalStore:
                 return answers
             for rel, digest in expected.items():
                 row = conn.execute(
-                    "SELECT p.rowid, p.title, p.updated, p.emitted_parent_path "
-                    "FROM pages AS p WHERE p.path = ?",
+                    "SELECT p.rowid, p.title, p.updated, p.emitted_parent_path, "  # noqa: S608 - fixed names
+                    f"{eligibility} FROM pages AS p WHERE p.path = ?",
                     (rel,),
                 ).fetchone()
                 if digest is None:
@@ -9307,10 +9310,12 @@ class LexicalStore:
                     continue
                 expected_title = page.title
                 expected_parent = page.parent_media + ".md" if page.parent_media else None
+                stored_eligibility = tuple(None if value is None else str(value) for value in row[4:])
                 if (
                     row[1] != expected_title
                     or str(row[2]) != (page.updated or "0000-00-00")
                     or row[3] != expected_parent
+                    or stored_eligibility != (*_eligibility_columns(page), digest)
                 ):
                     continue
                 if fts5_available():
