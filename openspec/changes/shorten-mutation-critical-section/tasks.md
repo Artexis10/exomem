@@ -287,3 +287,22 @@ authority and can be rolled back independently.
 - [ ] 12.3 Live: after deploy, an installed curation proposal on a large vault
       no longer makes concurrent governed writes wait or fail with
       `MUTATION_BUSY`.
+
+## 13. Store-routed writes wait on the request thread
+
+- [x] 13.1 Move the contention wait of a store-routed write from the collection
+      store thread to the request thread. The store thread makes one attempt
+      and hands back a refusal raised before anything committed
+      (`LeaseManager._run_store_attempt`); the request thread routes, waits in
+      line and submits again (`LeaseManager._attempt_store_write`). A write the
+      store has not taken keeps its place while its budget allows
+      (`StoreServer.call(extend=...)`). Red-first in
+      `tests/test_collection_store_service.py`:
+      `test_a_keyed_write_waiting_its_turn_leaves_the_store_thread_free` and
+      `test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread`
+      (hold at routing and after routing); `test_queued_mutation_timeout_never_executes`
+      and `test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay`
+      keep the refusals that must not run again.
+- [ ] 13.2 Live: after deploy, no `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`
+      reaches a caller of a store-routed write while the store or the boundary
+      is busy for less than the request budget.

@@ -400,3 +400,35 @@ and registry that the plan binds is verified under the boundary. Derived
 verdicts, such as the entity-candidate validation, are current as of
 preparation, and apply re-proves them under its own boundary before it approves
 or writes anything. A sealed plan is inert until apply.
+
+## Store-routed writes wait on the request thread
+
+A write routed to a collection store runs on that store's one thread. When such
+a write waited out contention there, in line or between attempts, every other
+request for the store queued behind it. A read then failed with
+`COLLECTION_STORE_BUSY` although the store itself was free.
+
+The store thread now makes each attempt once. It hands a refusal back to the
+request thread only when the refusal proves that nothing committed:
+
+- a `MUTATION_BUSY` that is eligible for absorption and observed no commit;
+- a store handoff that refused the guard before the leaf started;
+- a preparation retry that would have had to wait in line;
+- a keyed write that arrived behind waiting writes, which it hands back without running.
+
+The decision is made where the commit state is known. The request thread checks
+the handed-back error by identity, never by its `committed` field: some busy
+refusals are stamped `committed: false` after a commit. The request thread then
+waits in line under the existing bounds and waiter cap, routes again and
+submits again. Every attempt keeps one request id, and only the final refusal
+writes a journal row.
+
+Routing proves collection ownership under the boundary and changes nothing.
+Its busy refusal is therefore waited out too. A write that the store queue has
+not taken never ran, so it keeps its place while its request budget leaves room
+for one attempt. The two refusals that may hide a commit still reach the
+caller: `MUTATION_ACKNOWLEDGEMENT_PENDING` and a closed server.
+`EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the earlier path.
+
+A store read that meets a hold at routing longer than the guard bound is still
+refused as `MUTATION_BUSY`. That read path is outside this change.
