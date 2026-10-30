@@ -433,6 +433,9 @@ class _Supervisor:
     async def start(self) -> None:
         self.phase = "ready"
 
+    async def restart_worker(self) -> str | None:
+        return "the worker exited too often"
+
 
 def test_serve_runs_both_listeners_on_one_ingress_and_stops_them_together(
     manager, tmp_path
@@ -479,9 +482,10 @@ def test_serve_runs_both_listeners_on_one_ingress_and_stops_them_together(
                 {},
                 {INGRESS_STAMP_HEADER.decode(): "local", INGRESS_PROOF_HEADER.decode(): KEY},
             ]
-            # A crashed worker stops the supervisor; both doors close with it.
+            # A worker that cannot be restarted stops the supervisor; both doors close with it.
             supervisor.runtime.pid = 0
-            await asyncio.wait_for(serving, 20)
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(serving, 20)
             with socket.socket() as probe:
                 assert probe.connect_ex(("127.0.0.1", local_port)) != 0
 

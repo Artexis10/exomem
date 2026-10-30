@@ -234,6 +234,100 @@ def test_supervisor_start_with_receipt_does_not_launch_a_worker(tmp_path):
     asyncio.run(scenario())
 
 
+class _ExitedRuntime(_Runtime):
+    """A worker that exited on its own; its next `failures` replacements exit before readiness."""
+
+    def __init__(self, failures=0):
+        super().__init__()
+        self.pid = 0
+        self.returncode = -11
+        self.failures = failures
+
+    async def stop(self, timeout):
+        self.events.append("stop")
+        self.returncode = None
+
+    async def start(self, target, timeout):
+        self.events.append("start")
+        if self.failures:
+            self.failures -= 1
+            self.returncode = 2
+            raise RuntimeError("candidate worker exited before readiness")
+        self.pid = 200
+        return "new-upstream"
+
+
+def _restarting_supervisor(tmp_path, runtime, clock):
+    module = _manager()
+    ingress = _Ingress()
+    manager = module.Supervisor(
+        module.private_directory(tmp_path / "managed"),
+        initial_target={"python": sys.executable, "version": "1.2.3"},
+        ingress=ingress,
+        runtime=runtime,
+        identity={"unit": "sample.service", "invocation": "abc", "boot": "boot"},
+        clock=clock,
+    )
+    manager.phase = "ready"
+    return manager, ingress
+
+
+def test_crashes_minutes_apart_are_each_restarted_in_place(tmp_path):
+    # The 2026-10-30 incident: five native crashes about six minutes apart.
+    async def scenario():
+        now = [0.0]
+        runtime = _ExitedRuntime()
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: now[0])
+        for _ in range(5):
+            runtime.pid, runtime.returncode = 0, -11
+            assert await manager.restart_worker() is None
+            assert manager.phase == "ready"
+            now[0] += 360.0
+        assert runtime.events == ["stop", "start"] * 5
+        assert ingress.events == ["pause", ("resume", "new-upstream")] * 5
+
+    asyncio.run(scenario())
+
+
+def test_a_worker_that_keeps_exiting_spends_the_restart_budget(tmp_path):
+    async def scenario():
+        runtime = _ExitedRuntime(failures=10)
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        assert await manager.restart_worker() is not None
+        # Every replacement started only after the previous tree's exit was proven.
+        assert runtime.events == ["stop", "start"] * 3
+        assert ingress.events == ["pause"]
+        status = manager.status()
+        assert status["phase"] == "unavailable"
+        assert status["worker_restarts"] == {
+            "in_window": 3,
+            "limit": 3,
+            "window_seconds": 600.0,
+            "last_exit_code": 2,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_a_descendant_that_outlives_the_stop_allowance_blocks_the_restart(tmp_path):
+    async def scenario():
+        runtime = _ExitedRuntime()
+
+        async def stop(timeout):
+            runtime.events.append("stop")
+            raise TimeoutError("managed upgrade deadline expired")
+
+        runtime.stop = stop
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        assert await manager.restart_worker() is not None
+        # No second worker beside a surviving descendant; the unit cleans it.
+        assert runtime.events == ["stop"]
+        assert ingress.events == ["pause"]
+        assert manager.phase == "unavailable"
+
+    asyncio.run(scenario())
+
+
 class _ColdRuntime(_Runtime):
     def __init__(self):
         super().__init__()

@@ -658,6 +658,38 @@ instead of being closed on the first non-success. A replacement that refuses the
 original credential (401 or 403) is a definitive answer and still closes the
 stream.
 
+## When the worker crashes
+
+A worker that exits outside a transition no longer stops the supervisor. The
+public listener, the local listener and the control socket stay open, and the
+supervisor replaces the worker in place:
+
+1. The supervisor sets the phase to `restarting` and pauses ingress. New calls
+   queue under the admission budgets below.
+2. The supervisor proves that the exited worker and every descendant it left
+   have exited. A child that called `setsid()` is included.
+3. The supervisor starts the active release under the cold-start window.
+4. When the replacement reports ready, ingress resumes and the phase returns to
+   `ready`.
+
+A call that the dead worker was answering gets the retryable error described
+in the managed-service spec. A call that arrives during the restart is held
+and served by the replacement when the replacement is ready inside the queue
+budget. Otherwise the call is answered as not dispatched.
+
+The supervisor restarts a worker in place at most 3 times in any 10 minutes.
+A replacement that fails to report ready counts against that limit. The
+supervisor stops with a failed exit status in two cases:
+
+- A further exit inside the window.
+- A descendant of the exited worker is still alive after 10 seconds.
+
+systemd then cleans the unit's cgroup and applies `Restart=`, as it did for
+every crash before this change. `--status` reports the restarts inside the
+window, the limit, the window and the last exit status under
+`worker_restarts`. The journal records each restart with the worker's exit
+status. A negative status is the signal that killed the worker.
+
 ## Admission budgets
 
 Admission during handoff allows at most 64 queued requests, 64 MiB total and
