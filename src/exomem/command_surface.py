@@ -1073,7 +1073,10 @@ _STDIO_SESSION_ID = str(uuid.uuid4())
 def _mcp_transport(headers: Mapping[str, str]) -> str:
     """`http` or `stdio` for one MCP call: request headers exist only on the HTTP transports.
 
-    The single transport signal; `mcp_caller_identity` and `mcp_session_id` both read it.
+    The single transport signal; `mcp_caller_identity` and `mcp_session_id` both read it,
+    and both pass `get_http_headers(include_all=True)`. FastMCP's default call strips
+    `host` and `accept` among others, so a request carrying only those would read as
+    stdio and share the process-wide session id.
     """
     return "http" if headers else "stdio"
 
@@ -1088,7 +1091,7 @@ def mcp_session_id() -> str | None:
         from fastmcp.server.dependencies import get_context, get_http_headers
 
         context = get_context()
-        if _mcp_transport(get_http_headers()) == "stdio":
+        if _mcp_transport(get_http_headers(include_all=True)) == "stdio":
             return _STDIO_SESSION_ID
         return str(context.session_id)
     except (AttributeError, ImportError, LookupError, RuntimeError, ValueError):
@@ -1189,7 +1192,7 @@ def mcp_caller_identity() -> dict[str, str | None]:
         pass
     identity["session_id"] = mcp_session_id()
     try:
-        headers = get_http_headers()
+        headers = get_http_headers(include_all=True)
         identity["transport"] = _mcp_transport(headers)
         from . import cloud_cell
 

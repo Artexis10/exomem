@@ -1437,11 +1437,11 @@ def test_a_gateway_actor_is_independent_of_the_handshake_and_absent_without_head
     assert command_surface.mcp_caller_identity()["app_id"] is None
 
     monkeypatch.setattr(
-        dependencies, "get_http_headers", lambda: {cloud_cell.GATEWAY_APP_ID_HEADER: actor}
+        dependencies, "get_http_headers", lambda **_kw: {cloud_cell.GATEWAY_APP_ID_HEADER: actor}
     )
     assert command_surface.mcp_caller_identity()["app_id"] == actor
 
-    def unavailable():
+    def unavailable(**_kw):
         raise LookupError("no HTTP request")
 
     monkeypatch.setattr(dependencies, "get_http_headers", unavailable)

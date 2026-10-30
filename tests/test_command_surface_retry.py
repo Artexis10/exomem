@@ -877,6 +877,21 @@ def test_mcp_retry_scope_on_stdio_ignores_the_per_call_session_id(monkeypatch) -
     assert "call-" not in scopes[0]
 
 
+def test_an_http_call_with_only_host_and_accept_headers_keeps_its_own_session(monkeypatch) -> None:
+    from starlette.requests import Request
+
+    request = Request(
+        {"type": "http", "headers": [(b"host", b"memory.example"), (b"accept", b"application/json")]}
+    )
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_request", lambda: request)
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_context",
+        lambda: SimpleNamespace(session_id="http-session-1"),
+    )
+    assert command_surface.mcp_session_id() == "http-session-1"
+    assert command_surface.mcp_caller_identity()["transport"] == "http"
+
+
 def test_mcp_retry_scope_uses_stable_verified_principal_across_bearer_rotation(
     monkeypatch,
 ) -> None:
