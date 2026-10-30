@@ -235,8 +235,11 @@ def test_only_the_advisory_is_added_to_the_packet(
     assert "episode_due" not in packets[6]
     assert packets[7]["episode_due"]["activations"] == 8
     strip = {"episode_due", "continuity"}
-    assert json.dumps(
-        {key: value for key, value in packets[7].items() if key not in strip}, sort_keys=True
-    ) == json.dumps(
-        {key: value for key, value in packets[6].items() if key not in strip}, sort_keys=True
-    )
+
+    def without_advisory(packet: dict) -> str:
+        kept = {key: value for key, value in packet.items() if key not in strip}
+        # `serialized_chars` is the packet's size as sent, which the advisory itself adds to.
+        kept["budget"] = {key: value for key, value in packet["budget"].items() if key != "serialized_chars"}
+        return json.dumps(kept, sort_keys=True)
+
+    assert without_advisory(packets[7]) == without_advisory(packets[6])

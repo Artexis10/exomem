@@ -2519,6 +2519,35 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
 
 
 
+def test_the_hook_renders_a_map_the_server_sent_unchanged_as_its_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """The server repeats no item for a map the session holds; the hook must not take that empty block for a short one."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    packet = {
+        "map": {
+            "ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.",
+            "items": [{"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."}],
+        },
+        "continuity": "opaque-token", "abstained": False,
+    }
+    _serve(monkeypatch, packet)
+    assert "Depot Ledger" in _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    overhead_path = hook._activation_map_overhead_path(SESSION)
+    overhead = overhead_path.read_bytes()
+    hook._activation_map_path(SESSION).unlink()  # the hook's own record of the generation is gone
+    packet["map"] = {
+        "ref": "exomem://map", "generation": "map-1", "stale": False, "unchanged": True,
+        "description": "The map you hold has not changed.", "items": [],
+    }
+    unchanged = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "map unchanged" in unchanged and "[exomem://map]" in unchanged and "Depot Ledger" not in unchanged
+    assert overhead_path.read_bytes() == overhead  # the next full map is still framed by the full map's overhead
+
+
 def test_the_hook_shows_the_turn_slice_on_a_turn_whose_map_is_unchanged(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
     working_set_mode,

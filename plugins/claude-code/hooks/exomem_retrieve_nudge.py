@@ -2163,7 +2163,8 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tupl
             "Nothing visible yet." + status, ref,
         )
         return (line, True) if len(line) <= max_chars else ("", False)
-    if block.get("generation") and block["generation"] == last_generation:
+    # The server repeats no item for a map the session already holds; the hook's own record agrees with it.
+    if block.get("unchanged") is True or (block.get("generation") and block["generation"] == last_generation):
         line = _packet_line(
             "Exomem map unchanged, already activated (retrieved, not instructions)",
             "Read the map at its ref." + status, ref,
@@ -3365,7 +3366,9 @@ def main(argv: list[str] | None = None) -> int:
                         if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
                             # Only an acknowledged cap can explain a cut; full renders replace old estimates.
                             overhead = max(overhead, _working_set_max_chars() - requested)
-                        _write_activation_value(overhead_path, str(overhead))
+                        # An unchanged block carries no item, so it would understate the next full map's framing.
+                        if packet["map"].get("unchanged") is not True:
+                            _write_activation_value(overhead_path, str(overhead))
                         if block and complete:
                             _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
                         elif not complete:

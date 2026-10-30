@@ -28,6 +28,7 @@ from exomem import (
     commands,
     context_catalogue,
     context_views,
+    freshness,
     lexstore,
     project_keys,
     working_set_runtime,
@@ -135,14 +136,99 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         assert packet["abstained"] is False, packet.get("abstention")
         block = packet["map"]
         rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"]), block["overflow"]]
-        assert packet["budget"] == {"limit_chars": budget, "used_chars": len("\n".join(rendered))}
+        # `used_chars` charges the prose; `serialized_chars` is the wire size of the packet without that field.
+        sent = json.dumps({**packet, "budget": {"limit_chars": budget, "used_chars": len("\n".join(rendered))}}, separators=(",", ":"), ensure_ascii=False)
+        assert packet["budget"] == {"limit_chars": budget, "used_chars": len("\n".join(rendered)), "serialized_chars": len(sent)}
         assert packet["budget"]["used_chars"] <= budget
+        # A field with nothing to say is absent, not empty or null.
+        assert all(item.get(field, "present") not in ([], None) for item in block["items"] for field in ("topics", "lifecycle_class", "state"))
         assert "Domain maps:" in block["overflow"]
         decoded = working_set_runtime.decode_continuity(packet["continuity"])
         assert decoded["map_generation"] == block["generation"] == packet["generation"]["map_generation"]
         assert decoded["refs"] == []
         assert {"working_set.catalogue", "working_set.map", "working_set.map_state"} <= packet["timings"]["stages"].keys()
     assert before == {str(path.relative_to(vault)): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    # The owner's cached map is built once and cut to each budget: it serves what a cold compile at that budget serves.
+    for budget in (8000, 500, 1000):
+        cached = _activate(vault, turn="", max_chars=budget)
+        with context_views._OWNER_MAPS_LOCK:
+            context_views._OWNER_MAPS.clear()
+        assert cached["map"] == _activate(vault, turn="", max_chars=budget)["map"]
+
+
+def _topic_titles(packet: dict) -> set[str]:
+    return {item["title"] for item in packet["map"]["items"] if item["kind"] == "topic"}
+
+
+def test_an_owner_is_served_the_earlier_map_stale_until_a_background_pass_rebuilds_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vault write must not make the owner's activation wait for a rebuild: it serves the map it built before,
+    marked stale with the index generation it was built from, and the next activation after the pass sees the edit."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setattr(context_catalogue, "_managed", lambda: True)
+    _world(vault, with_w=True)
+    _built(vault).close()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    freshness.seed(vault, "kb", [(str(page), freshness.stat_signature(page)) for page in pages])
+    for _ in range(3):  # a managed vault folds its catalogue in the background first, so the first maps are stale
+        warm = _activate(vault, max_chars=8000)
+        working_set_runtime.join_builds(vault)
+        if not warm["map"]["stale"]:
+            break
+    assert warm["map"]["stale"] is False and "index_stale" not in warm["generation"]
+    assert "Harbour" in _topic_titles(warm)
+
+    taxonomy = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    taxonomy.write_text(taxonomy.read_text(encoding="utf-8").replace("label: Harbour,", "label: Quayside,"), encoding="utf-8")
+    freshness.on_files_changed(vault, [taxonomy])
+    stale = _activate(vault, max_chars=8000)
+    assert _topic_titles(stale) == _topic_titles(warm)
+    assert stale["map"]["stale"] is True and stale["generation"]["index_stale"] is True
+    assert stale["generation"]["index_generation"] == warm["generation"]["index_generation"]
+    assert stale["map"]["generation"] != warm["map"]["generation"]  # the caller can tell it from the fresh one
+
+    for _ in range(3):  # a pass the activation index took first is not lost: the next stale serve schedules it again
+        working_set_runtime.join_builds(vault)
+        fresh = _activate(vault, max_chars=8000)
+        if not fresh["map"]["stale"]:
+            break
+    assert "Quayside" in _topic_titles(fresh) and "Harbour" not in _topic_titles(fresh)
+    assert "index_stale" not in fresh["generation"]
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_a_caller_that_holds_the_current_map_is_not_sent_it_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, restricted: bool,
+) -> None:
+    """The token of the map the caller holds names its generation: while that is still the map this caller
+    is served, the block repeats no item. Any other token, or none, gets the whole map and never an error."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=True)
+    _seed_structure(vault)
+    _built(vault).close()
+    caller = _external() if restricted else OWNER
+    options = {"turn": "What are the Cargo Sled constraints?", "max_chars": 1000}
+    first = _activate(vault, caller, **options)
+    assert first["map"]["items"] and "unchanged" not in first["map"]
+
+    again = _activate(vault, caller, continuity=first["continuity"], **options)
+    assert again["map"]["unchanged"] is True and again["map"]["items"] == []
+    assert "overflow" not in again["map"]
+    assert again["map"]["generation"] == first["map"]["generation"]
+    assert again["budget"]["used_chars"] < first["budget"]["used_chars"]
+    assert "turn_slice" in again  # the slice is the turn's, and the turn is new
+
+    def held(**payload) -> str:
+        return working_set_runtime.encode_continuity(
+            identity="earlier", roles_hash="h", conventions_hash="c", generation=0, refs=[], roles=[], **payload
+        )
+
+    elsewhere = _activate(vault, OWNER, **options)["continuity"] if restricted else _activate(vault, _external(), **options)["continuity"]
+    for token in (held(map_generation="0" * 32), held(), "not a token", elsewhere):
+        served = _activate(vault, caller, continuity=token, **options)
+        assert served["abstained"] is False and "unchanged" not in served["map"], token
+        assert served["map"]["items"] == first["map"]["items"], token
 
 
 @pytest.mark.parametrize("restricted", [False, True])
@@ -200,6 +286,40 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
     assert owners[0]["map"] != owners[1]["map"]
     assert THREAD_W in json.dumps(owners[0])
     assert THREAD_W not in json.dumps(guests[0])
+
+
+def test_a_restricted_caller_is_not_served_the_owner_map_a_write_left_stale(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's stale map and its pending refresh are the owner's: a restricted caller's packet is the one
+    it would get with no owner map cached."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setattr(context_catalogue, "_managed", lambda: True)
+    _world(vault, with_w=True)
+    _withhold(vault, THREAD_W, ceiling=0)
+    _built(vault).close()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    freshness.seed(vault, "kb", [(str(page), freshness.stat_signature(page)) for page in pages])
+    for _ in range(3):
+        owner = _activate(vault, max_chars=1000)
+        working_set_runtime.join_builds(vault)
+        if not owner["map"]["stale"]:
+            break
+    taxonomy = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    taxonomy.write_text(taxonomy.read_text(encoding="utf-8").replace("label: Harbour,", "label: Quayside,"), encoding="utf-8")
+    freshness.on_files_changed(vault, [taxonomy])
+    assert _activate(vault, max_chars=1000)["map"]["stale"] is True  # the owner map is cached, behind the write
+    working_set_runtime.join_builds(vault)
+    guest = _activate(vault, _external(), max_chars=1000)
+    with context_views._OWNER_MAPS_LOCK:
+        context_views._OWNER_MAPS.clear()
+    alone = _activate(vault, _external(), max_chars=1000)
+    for packet in (guest, alone):
+        del packet["continuity"]  # the token carries a thread minted per call
+    assert json.dumps(guest, sort_keys=True) == json.dumps(alone, sort_keys=True)
+    assert guest["map"]["stale"] is False and "index_stale" not in guest["generation"]
+    assert "Quayside" in _topic_titles(guest) and "Harbour" not in _topic_titles(guest)  # fresh, not the owner's stale labels
+    assert THREAD_W not in json.dumps(guest)
 
 
 @pytest.mark.parametrize("forgery", [
@@ -333,7 +453,8 @@ def test_equal_rendered_lines_do_not_select_an_extra_entry(vault: Path, monkeypa
     lines = [context_views.map_item_line(context_views._map_item(view, row)) for row in view.rows]
     assert len(lines) == 2 and lines[0] == lines[1]
     _, overflow = context_views.map_within(view, 100_000)
-    budget = len("Index of what exists.") + len(lines[0]) + len(overflow) + 2
+    description = _activate(vault, max_chars=500)["map"]["description"]
+    budget = len(description) + len(lines[0]) + len(overflow) + 2
     assert budget >= 500
     packet = _activate(vault, max_chars=budget)
     assert len(packet["map"]["items"]) == 1

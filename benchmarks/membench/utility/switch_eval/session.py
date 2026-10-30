@@ -59,6 +59,7 @@ from .state import (
     Slot,
     StateError,
     mcp_server_entry,
+    prepare_bare_slot,
     prepare_session_slot,
     product_env,
     recover_session_custody,
@@ -195,12 +196,20 @@ def arm_files(layout: Layout, spec: ArmSpec) -> ArmFiles:
 
     slot = Slot(layout.slot)
     base = layout.arm_dir(spec.arm_id) / "session-inputs"
-    entry = mcp_server_entry(
-        slot, spec, log=slot.runtime / "tap.jsonl", server_stderr=slot.runtime / "server.stderr"
+    # An arm with no Exomem gets an empty config, which `--strict-mcp-config` holds to no server.
+    servers = (
+        {
+            SERVER_NAME: mcp_server_entry(
+                slot,
+                spec,
+                log=slot.runtime / "tap.jsonl",
+                server_stderr=slot.runtime / "server.stderr",
+            )
+        }
+        if spec.exomem
+        else {}
     )
-    contents = {
-        "mcp.json": json.dumps({"mcpServers": {SERVER_NAME: entry}}, indent=2, sort_keys=True)
-    }
+    contents = {"mcp.json": json.dumps({"mcpServers": servers}, indent=2, sort_keys=True)}
     contents["instructions.md"] = client_instructions(spec)[0]
     settings = hook_settings(spec, hook_home=slot.hook_home)
     if settings is not None:
@@ -244,6 +253,10 @@ def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[st
 
     floor, _removed = environment_floor(parent)
     env = {key: value for key, value in floor.items() if not key.startswith(PRODUCT_ENV_PREFIXES)}
+    if not spec.exomem:
+        # No server, hook or credential file is wired, so nothing of Exomem is set.
+        env.update(CLIENT_PINS)
+        return env
     env.update(product_env(slot, spec))
     env["EXOMEM_RETRIEVE_INJECT_CLI"] = "1"
     env.update(CLIENT_PINS)
@@ -524,7 +537,7 @@ def classify(
                 if not (isinstance(plugin, dict) and plugin.get("path") == "builtin")
             ],
             "memory": init.get("memory_paths"),
-            "mcp_servers": sorted(set(servers) - {SERVER_NAME}),
+            "mcp_servers": sorted(set(servers) - ({SERVER_NAME} if spec.exomem else set())),
         }
         checks.update(api_key_source=init.get("apiKeySource") == "none")
         for name, found in loaded.items():
@@ -607,18 +620,19 @@ def classify(
         tools=sorted(init.get("tools") or []) == expected_tools,
         model=init.get("model") == model,
         client_version=str(init.get("claude_code_version")) == client_version,
-        server_connected=servers.get(SERVER_NAME) == "connected",
     )
-    if not checks["server_connected"]:
-        started = any(e.get("event") == "server_started" for e in tap_events)
-        return AttemptResult(
-            HARNESS_FAULT,
-            SERVER_START,
-            f"server status {servers.get(SERVER_NAME)!r}"
-            + ("" if started else "; the tap never started the server"),
-            turns=list(turn_records),
-            checks=checks,
-        )
+    if spec.exomem:
+        checks.update(server_connected=servers.get(SERVER_NAME) == "connected")
+        if not checks["server_connected"]:
+            started = any(e.get("event") == "server_started" for e in tap_events)
+            return AttemptResult(
+                HARNESS_FAULT,
+                SERVER_START,
+                f"server status {servers.get(SERVER_NAME)!r}"
+                + ("" if started else "; the tap never started the server"),
+                turns=list(turn_records),
+                checks=checks,
+            )
     for name in ("tools", "model", "client_version"):
         if not checks[name]:
             return AttemptResult(
@@ -863,8 +877,12 @@ class ClaudeSessionExecutor:
     def __call__(self, inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:
         spec = self.specs[inputs.planned.arm]
         try:
-            slot = prepare_session_slot(
-                self.layout, spec.arm_id, inputs.tree, inputs.planned.session_id
+            slot = (
+                prepare_session_slot(
+                    self.layout, spec.arm_id, inputs.tree, inputs.planned.session_id
+                )
+                if spec.exomem
+                else prepare_bare_slot(self.layout)
             )
             try:
                 result = self.execute_prepared(inputs, attempt_dir, slot)

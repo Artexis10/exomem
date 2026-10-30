@@ -7,11 +7,14 @@ whose configuration can withhold nothing ranks on the maintained catalogue's
 statistics instead of rebuilding them from every page after each write. Each
 case below proves one of them changes no answer, and that any admission that
 can withhold a page ranks only on the pages it admits, whether one is
-withheld or none. Invented, generic vocabulary throughout.
+withheld or none. A fourth bound, the request deadline, ends a query that is already
+running. Invented, generic vocabulary throughout.
 """
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -458,6 +461,76 @@ def test_a_reader_rebuilds_statistics_only_when_its_admitted_inputs_change(vault
     assert _statistics_rebuilt(vault, reader) == 0, "once per changed input, not per turn"
 
 
+def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_delete() -> None:
+    """The figures built from the previous corpus's pages equal `CorpusStatistics.of` over the new corpus: the same
+    counts, the same first-seen order of words (the idf floor sums in it) and the same page lengths."""
+    from exomem import bm25
+
+    texts = {
+        "a.md": "alpha beta gamma beta",
+        "b.md": "beta delta delta epsilon",
+        "c.md": "gamma zeta eta zeta",
+        "d.md": "theta alpha iota",
+    }
+
+    def digests(rows: dict[str, str]) -> dict[str, bytes]:
+        return {path: lexstore._text_digest(text) for path, text in rows.items()}
+
+    def snapshot(rows: dict[str, str], base):
+        return lexstore._admitted_corpus(rows, digests(rows), base)
+
+    _statistics, _postings, base = snapshot(texts, None)
+    later = {
+        **texts,
+        "a.md": "kappa alpha beta",  # an edit earlier in path order: `kappa` is now the first word seen
+        "e.md": "beta lambda",  # an add
+    }
+    del later["c.md"]  # a delete: `zeta` and `eta` leave the vocabulary
+    statistics, postings, retained = snapshot(later, base)
+    oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in later.items()})
+
+    assert statistics.pages == oracle.pages and statistics.average_length == oracle.average_length
+    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    assert "zeta" not in statistics.document_frequency
+    assert statistics.idf_floor == oracle.idf_floor
+    assert dict(postings.lengths) == {path: len(text.split()) for path, text in later.items()}
+    assert retained is not None and set(retained.pages) == set(later)
+    # A page the later corpus shares with the base is the base's entry, not read again.
+    assert retained.pages["b.md"] is base.pages["b.md"]
+    assert retained.pages["a.md"] is not base.pages["a.md"]
+
+
+def test_an_admitted_ranking_after_a_write_equals_the_ranking_of_a_fresh_process(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page added, one edited and one deleted between two rankings of the same admitted view: the second
+    tokenizes the two pages whose text is new, and ranks exactly as a process that counts every page."""
+    held = _seed_ranked(vault)
+    hidden = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
+
+    def ranked() -> tuple[list[tuple[str, float]], int]:
+        context = lexstore.RequestQueryContext(
+            vault, lambda path: path != hidden, lifecycle_statuses.Basis(vault)
+        )
+        with call_spans.meter(call_spans.STATS_REBUILT) as measured:
+            result = _ranked(vault, 1000, query_context=context)
+        return result, int(measured[call_spans.STATS_REBUILT])
+
+    assert ranked()[1] == 1
+    _research_page(vault, "ranked-added", "plimsett zorvane arrives late")
+    _research_page(vault, "ranked-plimsett-3", "plimsett quaddle revised at length")
+    (vault / f"{RESEARCH}/ranked-quaddle-5.md").unlink()
+    _settle(vault)
+    tokenized: list[str] = []
+    page_terms = lexstore._page_terms
+    monkeypatch.setattr(lexstore, "_page_terms", lambda text: tokenized.append(text) or page_terms(text))
+
+    warm, rebuilt = ranked()
+    assert rebuilt == 1 and len(tokenized) == 2
+    lexstore.clear_stores()
+    assert ranked()[0] == warm
+
+
 def test_snapshot_aliases_do_not_evict_another_readers_unchanged_statistics(vault: Path) -> None:
     held = _seed_ranked(vault)
     common = f"{RESEARCH}/ranked-plimsett-0.md"
@@ -618,3 +691,38 @@ def test_an_owner_rule_withholds_a_page_from_the_owners_carry(vault: Path, rival
     absent = _owner_packet(vault)
 
     assert present == absent
+
+
+def test_a_catalogue_query_in_a_carry_scope_stops_when_the_request_budget_is_spent() -> None:
+    """A running query ends within milliseconds of the deadline, with no value and a `deadline` status, instead
+    of scanning on after the client has gone. Outside the scope a spent budget changes nothing, and a budget
+    with time left stops nothing inside it."""
+    from exomem import request_budget
+
+    scan = (
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000000) SELECT count(*) FROM n"
+    )
+    readiness = lexstore.CatalogReadiness("available", True, "python")
+    conn = sqlite3.connect(":memory:")
+
+    def run(statement: str):
+        return lexstore.LexicalStore._query_within_budget(conn, lambda c: c.execute(statement).fetchone(), readiness)
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=0.3))
+    try:
+        started = time.monotonic()
+        with lexstore.stopping_at_budget() as stop:
+            stopped = run(scan)
+        elapsed = time.monotonic() - started
+        assert stopped.value is None and stopped.readiness.status == lexstore.DEADLINE_STATUS and stop.hit
+        assert elapsed < 2.0, "a scan of seconds must be cut at the 0.3 s budget"
+        assert run("SELECT 1").value == (1,), "outside the scope a spent budget stops nothing"
+    finally:
+        request_budget.reset_current(token)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=60))
+    try:
+        with lexstore.stopping_at_budget() as stop:
+            assert run(scan.replace("30000000", "300000")).value == (300000,)
+        assert not stop.hit
+    finally:
+        request_budget.reset_current(token)

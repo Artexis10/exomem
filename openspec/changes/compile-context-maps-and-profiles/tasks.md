@@ -33,7 +33,11 @@
 - [ ] 5.4 Optional, later, and not a gate: run the frozen held-out evaluation once, blind, on the sealed split. Report each comparison. No result changes the default by itself.
 - [ ] 5.5 Switch the default of `EXOMEM_ACTIVATION_PACKET` to `maps` by operator ruling (design amendment 12) through the release line. Document `EXOMEM_ACTIVATION_PACKET=anchors` as the rollback. Replay field reports on the installed release.
 
-- [ ] 5.6 Build the turn slice, shipped on by default with `EXOMEM_ACTIVATION_TURN_SLICE=off` as the rollback, over the one guarded anchors compile (design D13, amendment 13). Prove it on the activation audit fixtures, with the caller-view twins, the failure-keeps-the-map case, the packet-restored case with the setting off, and the paired latency gate (design D13).
+- [x] 5.6 Build the turn slice, shipped on by default with `EXOMEM_ACTIVATION_TURN_SLICE=off` as the rollback, over the one guarded anchors compile (design D13, amendment 13). Prove it on the activation audit fixtures, with the caller-view twins, the failure-keeps-the-map case, the packet-restored case with the setting off, and the paired latency gate (design D13).
+
+- [ ] 5.7 Serve the owner's earlier map marked stale after a write, and rebuild it off the request thread with the catalogue fold (design, amendment 14). Prove the stale serve, then the refresh, and that a restricted caller's packet does not change. Compare the call ledger's activation latency before and after on the installed release.
+- [x] 5.8 Charge only prose to `max_chars`, report `serialized_chars`, omit empty item fields, name the read call in the map description, and send an unchanged map as a ref with `unchanged: true` (design, amendment 14). Prove each on the activation fixtures.
+- [x] 5.9 Add development arm N, with no Exomem, to the switch harness without changing the hashes of arms A, M and P (design, amendment 15).
 
 ## 6. Preparation recovery
 

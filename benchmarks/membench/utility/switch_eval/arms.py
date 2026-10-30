@@ -17,6 +17,12 @@ captures from the server itself (see :mod:`.state`).
   without ``recall_context`` and shares M's pull instruction without the map
   line.
 
+- N is the development arm of design Amendment 15: no Exomem at all. It has no
+  server, no tools, no push and no Exomem instruction line, so its actor
+  configuration holds only the actor line. It is not in ``protocol.ARM_IDS``,
+  so no frozen protocol digest or arm hash of A, M or P names it, and a run
+  prepares it only beside development cases (``__main__.cmd_prepare``).
+
 The hook command is rendered by the product's own installer, from the build's
 own hook sources, so the push is the deployed shape and not a copy of it. In
 the deployed ``mcp`` hook mode the push is a reminder to activate: A and M
@@ -107,6 +113,8 @@ class ArmSpec:
     #: The retrieval profile, the same on every arm: a run input, carried here
     #: because every server environment of the arm is built from its spec.
     profile: str = DEFAULT_PROFILE
+    #: ``False`` for the arm with no Exomem server, state or hook (arm N).
+    exomem: bool = True
 
     def allowed_tools_flag(self, server_name: str) -> str:
         return " ".join(f"mcp__{server_name}__{tool}" for tool in self.tools)
@@ -125,6 +133,9 @@ def arm_specs(
         "A": ArmSpec("A", "anchors", hook_mode, read, ("doc", "balanced"), profile),
         "M": ArmSpec("M", "maps", hook_mode, read, maps, profile),
         "P": ArmSpec("P", "anchors", None, p_tools, pull, profile),
+        # Amendment 15: the development arm without Exomem. The packet mode is a
+        # server setting, and N runs no server.
+        "N": ArmSpec("N", "none", None, (), (), profile, exomem=False),
     }
 
 
@@ -135,6 +146,11 @@ def client_instructions(spec: ArmSpec) -> tuple[str, str]:
     its tools in the answer.
     """
 
+    actor = (TEXTS / "actor.md").read_text(encoding="utf-8").strip()
+    if not spec.instruction_source:
+        # The current client instructions (docs/prominence.md) are Exomem's alone,
+        # so with the Exomem lines removed only the actor line stays.
+        return actor + "\n", "switch_eval/texts/actor.md"
     if spec.instruction_source[0] == "doc":
         body, source = custom_instructions_block(spec.instruction_source[1])
     else:
@@ -143,7 +159,6 @@ def client_instructions(spec: ArmSpec) -> tuple[str, str]:
         ]
         body = "\n\n".join(parts) + "\n"
         source = ", ".join(f"switch_eval/texts/{name}" for name in spec.instruction_source)
-    actor = (TEXTS / "actor.md").read_text(encoding="utf-8").strip()
     return body.rstrip("\n") + "\n\n" + actor + "\n", source + ", switch_eval/texts/actor.md"
 
 
@@ -211,7 +226,8 @@ def arm_hashes(spec: ArmSpec, *, hook_home: Path, surface: Mapping[str, str] | N
 
     ``surface`` carries the server-instruction and tool-description hashes the
     state stage captured; before that stage runs they are reported as pending,
-    never as an empty hash.
+    never as an empty hash. An arm with no Exomem has no server and no tap, so
+    those three components read ``none`` and its hash is complete without a stage.
     """
 
     text, source = client_instructions(spec)
@@ -229,16 +245,18 @@ def arm_hashes(spec: ArmSpec, *, hook_home: Path, surface: Mapping[str, str] | N
         "client_instructions": sha256_text(text),
         "hook_output_format": sha256_text(canonical_json(hook)) if hook is not None else "none",
         "tool_filter": sha256_text(canonical_json(sorted(spec.tools))),
-        "harness_refusals": sha256_text(BUDGET_REFUSAL + "\n" + FILTER_REFUSAL),
+        "harness_refusals": sha256_text(BUDGET_REFUSAL + "\n" + FILTER_REFUSAL)
+        if spec.exomem
+        else "none",
         "packet_mode": spec.packet_mode,
         "server_instructions": (surface or {}).get(
-            "server_instructions", "pending: state stage not run"
+            "server_instructions", "pending: state stage not run" if spec.exomem else "none"
         ),
         "tool_descriptions": (surface or {}).get(
-            "tool_descriptions", "pending: state stage not run"
+            "tool_descriptions", "pending: state stage not run" if spec.exomem else "none"
         ),
     }
-    complete = surface is not None
+    complete = surface is not None or not spec.exomem
     return {
         "arm": spec.arm_id,
         "components": components,

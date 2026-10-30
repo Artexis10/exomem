@@ -208,6 +208,31 @@ def test_the_component_waits_for_a_graph_that_is_still_building(vault: Path) -> 
     assert catalogue.membership_edges()[new] == (f"{NOTES}/berth-hub.md",)
 
 
+def test_a_request_path_fold_does_not_wait_for_another_readers_graph_proof(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proof of the graph sidecar has no timeout, so a fold that a request waits on must skip the pull while
+    another reader proves it, keep the stored edges, and say the edges are warming."""
+    _seed(vault)
+    _plain_pages(vault)
+    catalogue = _built(vault)
+    page = f"{NOTES}/dock-log.md"
+    _write(vault, page, "---\nstatus: active\n---\n\n# Dock log\n\nEdited.\n\n## Relations\n\n" + f"- member_of [[{NOTES}/berth-hub]]\n")
+    real = epistemic_graph.cache_token
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()  # the graph moved, so the next fold must pull
+    monkeypatch.setattr(
+        epistemic_graph, "cache_token",
+        lambda root, prove=True: epistemic_graph.UNPROVEN_TOKEN if prove == epistemic_graph.SINGLE_FLIGHT else real(root, prove=prove),
+    )
+
+    catalogue.update([page], prove=epistemic_graph.SINGLE_FLIGHT)
+
+    assert catalogue.graph_state() == cc.EDGES_WARMING
+    assert catalogue.membership_edges()[page] == (f"{NOTES}/berth-hub.md",)  # the stored edges stay
+    catalogue.update([page])  # the background fold proves it
+    assert catalogue.graph_state() == cc.EDGES_AVAILABLE
+
+
 def test_the_graph_is_not_pulled_again_while_it_has_not_moved(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,7 +241,7 @@ def test_the_graph_is_not_pulled_again_while_it_has_not_moved(
     catalogue = _built(vault)
     pulls: list[str] = []
     pull = cc._membership_edges
-    monkeypatch.setattr(cc, "_membership_edges", lambda root: pulls.append("pull") or pull(root))
+    monkeypatch.setattr(cc, "_membership_edges", lambda root, prove=True: pulls.append("pull") or pull(root, prove))
     page = f"{NOTES}/dock-log.md"
     _write(vault, page, "---\nstatus: active\n---\n\n# Dock log\n\nEdited, relation kept.\n\n## Relations\n\n" + f"- member_of [[{NOTES}/berth-hub]]\n")
 

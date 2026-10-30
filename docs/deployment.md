@@ -1389,6 +1389,23 @@ Any value other than `off` serves the slice. A value other than `on` or `off`
 also logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using on`. The
 setting has no effect in the `anchors` mode.
 
+### The map while the vault changes
+
+A managed service that holds the owner's map does not rebuild it on the thread that serves the call.
+When the vault changed since that build, the packet serves the earlier map with `map.stale` set to
+`true`, `generation.index_stale` set to `true`, and `generation.index_generation` set to the index
+generation the map was built from. One background pass rebuilds the map, and the next call serves
+the new one. A restricted caller never gets the owner's map: its packet is built in the call.
+
+The `budget` block has two sizes. `used_chars` is the prose the packet charges against `max_chars`.
+`serialized_chars` is the length of the packet as sent, in compact JSON, without the
+`serialized_chars` field itself. A map item omits `topics` when it has none, and omits
+`lifecycle_class` and `state` when they are unset.
+
+A client that holds the current map can send its `continuity` token back. When the map that the
+call would serve has the generation in that token, the `map` block has `unchanged: true` and no
+items. A token from the `anchors` mode, an older token and a malformed token get the whole map.
+
 ## Reranking and languages
 
 The cross-encoder reranker reorders a query's top candidates. It runs on explicit

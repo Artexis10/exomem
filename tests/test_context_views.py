@@ -488,7 +488,7 @@ def test_a_caller_who_may_not_read_the_domain_registry_learns_nothing_from_it(
     pages = _pages(vault, cv.MAP_REF, _external())
     items = [item for page in pages for item in page["items"]]
     assert any(item.get("path") == THREAD_R1 for item in items)  # the map itself is still served
-    assert all(item["kind"] != "topic" and not item["topics"] for item in items)
+    assert all(item["kind"] != "topic" and not item.get("topics") for item in items)
     assert "Quays and moorings." not in json.dumps(pages)
 
     # A topic item forged into a real page leaves the guard with nothing of the registry.

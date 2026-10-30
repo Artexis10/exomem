@@ -50,7 +50,7 @@ Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected b
 - **THEN** activation returns the disabled abstention and no map
 
 ### Requirement: The maps packet
-In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT call a model other than retrieval scorers, or write to the vault. It SHALL NOT resolve anchors, except for the turn slice, which the setting `EXOMEM_ACTIVATION_TURN_SLICE` turns off and which "The turn slice" governs. The map, any attached profile and the turn slice SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. `conversation`, `focus` and `trigger` SHALL NOT change the map, and neither SHALL the turn: the turn changes only the turn slice. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
+In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT call a model other than retrieval scorers, or write to the vault. It SHALL NOT resolve anchors, except for the turn slice, which the setting `EXOMEM_ACTIVATION_TURN_SLICE` turns off and which "The turn slice" governs. The map, any attached profile and the turn slice SHALL share the request's `max_chars` cap. The cap SHALL charge the packet's prose: the map's description line, one rendered line for each map and slice item, and the overflow line. It SHALL NOT charge structure fields: refs given as fields, paths, profile routes, topics, dates, the generation blocks, the continuity token and timings. The budget report SHALL carry `serialized_chars`, the length of the packet's compact JSON form without that field. A map item SHALL omit `topics` when it is empty and `lifecycle_class` and `state` when they have no value. The map's description SHALL name the read call for a map ref. When the owner's map inputs changed after an earlier map for the same owner was built, activation MAY serve that earlier map marked `stale: true`, with `generation.index_stale: true` and the index generation it was built from, and SHALL then rebuild the map off the request thread. A restricted caller's map SHALL NOT be served from an earlier build. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. When a request carries a `continuity` token from a `maps` packet whose map generation equals the generation of the map that activation would serve to that caller, the map block SHALL carry its ref, generation, stale flag, `unchanged: true` and a one-line description, and no items. `conversation`, `focus` and `trigger` SHALL NOT change the map, and neither SHALL the turn: the turn changes only the turn slice. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
 
 #### Scenario: An empty vault returns an empty map
 - **WHEN** no context-catalogue entry is visible to the caller
@@ -59,6 +59,21 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 #### Scenario: The map fits the budget
 - **WHEN** the caller sets `max_chars`
 - **THEN** the map and any attached profile together fit within it
+
+#### Scenario: The budget charges prose and reports the serialized size
+- **WHEN** activation serves a `maps` packet for `max_chars` 8,000
+- **THEN** `budget.used_chars` is at most 8,000 and counts only the prose lines
+- **AND** `budget.serialized_chars` equals the length of the packet's compact JSON form without that field
+
+#### Scenario: An unchanged map is not sent again
+- **WHEN** a caller passes the `continuity` token of its last `maps` packet and the map it would be served has the same generation
+- **THEN** the map block carries `unchanged: true` and no items
+- **AND** a call with no token, or with a token of an older generation, receives the full map
+
+#### Scenario: A write does not hold the owner's activation
+- **WHEN** the owner's map was built and a vault write then changes its inputs
+- **THEN** the next activation serves the earlier map with `stale: true`, `generation.index_stale: true` and the index generation it was built from
+- **AND** after the rebuild finishes, an activation serves the new map with `stale: false`
 
 #### Scenario: Conversation does not change the map
 - **WHEN** two `maps`-mode calls differ only in `conversation`

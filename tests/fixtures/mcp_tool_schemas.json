@@ -1337,7 +1337,7 @@
     }
   },
   "change_media": {
-    "description": "Process media or retry failed extraction. Select one operation.kind.",
+    "description": "Process, retry or reprocess media. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1352,7 +1352,9 @@
                   "type": "string"
                 },
                 "path": {},
-                "paths": {}
+                "paths": {},
+                "language": {},
+                "multilingual": {}
               },
               "required": [
                 "kind"
@@ -1373,6 +1375,23 @@
                 "kind"
               ],
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "reprocess",
+                  "type": "string"
+                },
+                "path": {},
+                "paths": {},
+                "language": {},
+                "multilingual": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
             }
           ],
           "discriminator": {
@@ -1388,7 +1407,16 @@
                 "type": "string"
               },
               "type": "array",
-              "description": "1-32 unique governed paths for process/retry."
+              "description": "1-32 unique governed paths, not for status."
+            },
+            "language": {
+              "type": "string",
+              "description": "Speech language code; omit to detect."
+            },
+            "multilingual": {
+              "description": "Detect language per window (slower).",
+              "type": "boolean",
+              "default": false
             }
           }
         },
@@ -5571,7 +5599,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "1-32 unique governed paths for process/retry."
+                  "description": "1-32 unique governed paths, not for status."
                 }
               },
               "required": [

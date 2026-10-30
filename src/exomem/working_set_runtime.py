@@ -54,8 +54,9 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
+from functools import wraps
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 from . import (
     activation_conventions,
@@ -1706,6 +1707,52 @@ def _pair_has_letter(pair: tuple[str, str]) -> bool:
     return any(character.isalpha() for term in pair for character in term)
 
 
+def _stopping_at_budget(function):
+    """Run a carry entry point with its catalogue queries stopped at the request budget (`lexstore.stopping_at_budget`).
+
+    A stopped query answers nothing, which the carry's own code reads as "no page" or "unavailable"; the
+    stop is read here instead, so the carry never returns a partial answer as the turn's.
+    """
+    @wraps(function)
+    def bounded(*args, **kwargs):
+        from . import lexstore
+
+        with lexstore.stopping_at_budget() as stop:
+            result = function(*args, **kwargs)
+        if stop.hit:
+            _carry_stopped()
+        return result
+    return bounded
+
+
+def _carry_stopped() -> NoReturn:
+    """Leave the carry because the request budget is spent.
+
+    `BudgetExhausted` reaches the compile's own handler, which abstains `unavailable` with the budget's
+    report, as for any stage; a carry that returned nothing would read as "the turn names nothing".
+    """
+    from . import request_budget
+
+    if (budget := request_budget.current()) is not None:
+        budget.note_skipped(working_set.CARRY_STAGE)
+    raise working_set.BudgetExhausted(working_set.CARRY_STAGE)
+
+
+def _carry_search(*args, **kwargs):
+    """`lexstore.search_bm25_result` for the carry, which does not start past the deadline.
+
+    A query already running is stopped by `_stopping_at_budget`; this also spares the statistics
+    work that precedes it. A turn that is still inside its budget never meets either stop.
+    """
+    from . import lexstore, request_budget
+
+    budget = request_budget.current()
+    if budget is not None and budget.remaining() <= 0:
+        _carry_stopped()
+    return lexstore.search_bm25_result(*args, **kwargs)
+
+
+@_stopping_at_budget
 def carry_named_groups(
     vault_root: Path,
     turn: str,
@@ -1741,7 +1788,7 @@ def carry_named_groups(
     its own snapshot whether that admission lets it rank on the catalogue.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    from . import find, lexstore
+    from . import find
 
     # The resolver's own reading of the turn (`analyze_turn`): pair positions
     # are kept in its token coordinates, so both must read the same text.
@@ -1784,7 +1831,7 @@ def carry_named_groups(
         sentences = _positioned_words(turn)
         for component in components:
             fetch = working_set.carry_fetch_size(corpus_pages) if limit is None else limit
-            result = lexstore.search_bm25_result(
+            result = _carry_search(
                 vault_root,
                 content_words(turn),
                 fetch,
@@ -1862,6 +1909,8 @@ def carry_named_groups(
         from .governance import egress
 
         raise egress.ReaderViewUnavailable("status classification is unavailable") from error
+    except working_set.BudgetExhausted:
+        raise
     except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
         log.debug("activation carry recall unavailable", exc_info=True)
         return (), "unavailable"
@@ -1897,7 +1946,6 @@ def _carry_title_groups(
     phrase rule found no page.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    from . import lexstore
 
     sentences = _positioned_words(turn)
     strict = set(pairs)
@@ -1910,7 +1958,7 @@ def _carry_title_groups(
     if not loose:
         return []
     fetch = working_set.carry_fetch_size(corpus_pages) if limit is None else limit
-    result = lexstore.search_bm25_result(
+    result = _carry_search(
         vault_root,
         content_words(turn),
         fetch,
@@ -2168,6 +2216,7 @@ def title_named_pages(
     return listing.named, listing.state
 
 
+@_stopping_at_budget
 def title_listing(
     vault_root: Path,
     turn: str,
@@ -2206,7 +2255,6 @@ def title_listing(
     a caller that lists a page from it checks that the page is current.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    from . import lexstore
     from .governance import egress
 
     # The resolver's reading of the turn, as the carry reads it.
@@ -2220,7 +2268,7 @@ def title_listing(
         units = bm25_module.token_units(turn, query=True)
         if len({unit for unit in units}) < 2:
             return TitleListing((), (), "available")
-        result = lexstore.search_bm25_result(
+        result = _carry_search(
             vault_root,
             turn,
             # Sized on the pages the request admits, counted in the ranking's own snapshot.
@@ -2259,6 +2307,8 @@ def title_listing(
         )
     except lifecycle_statuses.ClassificationUnavailable as error:
         raise egress.ReaderViewUnavailable("status classification is unavailable") from error
+    except working_set.BudgetExhausted:
+        raise
     except Exception:  # noqa: BLE001 - a listing is additive; it lists nothing, never raises
         log.debug("activation title listing unavailable", exc_info=True)
         return TitleListing((), (), "unavailable")

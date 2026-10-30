@@ -826,7 +826,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.149.0" # x-release-please-version
+version = "0.150.0" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -947,7 +947,7 @@ requires-dist = [
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'embeddings'" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'media-cpu'" },
     { name = "exomem", extras = ["media-cpu"], marker = "extra == 'media'" },
-    { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.0" },
+    { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.1" },
     { name = "fastmcp", specifier = "==4.0.3" },
     { name = "filelock", specifier = ">=3.29,<4" },
     { name = "fsspec", extras = ["http"], specifier = "==2026.4.0" },

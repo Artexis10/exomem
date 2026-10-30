@@ -29,6 +29,7 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
               "name_key_path": str(name_key), "enabled": True, "eviction_enabled": True,
               "max_temporary_bytes": 10_000_000, "max_hydrations": 2,
               "minimum_idle_seconds": 0, "eviction_target": 0.7, "eviction_margin": 0.1}
+    values["allowance_bytes"] = 10_000_000
     config = tmp_path / "media.json"
     config.write_text(json.dumps({"vaults": {str(vault): values}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
@@ -1132,8 +1133,18 @@ def test_offload_demand_does_not_hide_pending_extraction(vault: Path, selected_s
     assert ledger.has_pending_ocr(path)
 
 
-def test_explicit_trash_removes_the_stored_binding(vault: Path, selected_store):
-    from exomem import delete_file, media_jobs, media_processing, media_store, preserve
+def test_trash_keeps_a_stored_version_accounted_until_its_original_recovers(vault: Path, selected_store):
+    from exomem import (
+        delete_file,
+        list_trash,
+        media_allowance,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        recover_from_trash,
+        trash_metadata,
+    )
 
     path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
     path.parent.mkdir(parents=True)
@@ -1141,11 +1152,25 @@ def test_explicit_trash_removes_the_stored_binding(vault: Path, selected_store):
     media_processing.reconcile_media(vault, path)
     preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
     media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
-    _offload(vault, path)
+    reference = _offload(vault, path)
     assert media_store.evict(vault, path)
+    assert media_allowance.reference_usage(vault).used_bytes == len(b"original bytes")
     trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
     assert originals.original_state(vault, path).state == "missing"
     assert (vault / trashed.trash_path).read_bytes() == b"original bytes"
+    assert media_allowance.reference_usage(vault).used_bytes == len(b"original bytes")
+    listing = list_trash.list_trash(vault)
+    assert [entry.trash_path for entry in listing.entries] == [trashed.trash_path]
+    assert not listing.orphan_files and not listing.orphan_sidecars
+
+    recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path)
+
+    assert path.read_bytes() == b"original bytes"
+    assert originals.original_state(vault, path).state == "local"
+    assert media_allowance.reference_usage(vault).used_bytes == 0
+    assert not originals.sidecar_path(vault / trashed.trash_path).exists()
+    assert not (vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).exists()
+    assert (Path(selected_store[0]["root"]) / reference.object / reference.version).exists()
 
 
 def test_original_states_use_only_the_bound_store(tmp_path: Path, monkeypatch):
@@ -1268,3 +1293,342 @@ def test_captured_source_original_reconciles_and_recovers_without_metadata_rewri
     assert media_processing.reconcile_all_media(vault) == 0
     assert page.read_bytes() == published
     assert not media_jobs.MediaJobStore(vault).has_pending_ocr(path)
+
+
+def test_reference_usage_counts_live_and_trash_versions_once(vault: Path, selected_store):
+    """Archived and Trash companions count once, while a retained unreferenced object does not count."""
+    from exomem import media_allowance, move_file, preserve
+    from exomem.vault import parse_frontmatter
+
+    path = _preserved(vault)
+    expected = len(path.read_bytes())
+    reference = _offload(vault, path)
+    sidecar = path.with_name(path.name + ".md")
+    fields, body, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    archive_binary = "Knowledge Base/_archive/retained.txt"
+    archive = vault / (archive_binary + ".md")
+    archive.parent.mkdir(parents=True)
+    archive.write_text(move_file._repoint_artifact(path.relative_to(vault).as_posix(), archive_binary)(sidecar.read_text()))
+    trash_root = "Knowledge Base/_trash/2026-10-28/bundle"
+    trash_sidecar = vault / trash_root / sidecar.name
+    trash_sidecar.parent.mkdir(parents=True)
+    trash_sidecar.write_bytes(sidecar.read_bytes())
+    metadata = vault / (trash_root + ".meta.json")
+    metadata.write_text(json.dumps({"original_path": path.parent.relative_to(vault).as_posix()}))
+
+    captured = preserve.preserve(vault, scope="Test", category="retained", filename="other.txt",
+                                content="A distinct original retained only in provider history.")
+    other = vault / captured.path
+    preserve.update_sidecar_extraction(vault, vault / captured.sidecar_path, text="Retained history.", engine="text")
+    from exomem import media_jobs
+
+    media_jobs.MediaJobStore(vault).retire_ocr(other, "text")
+    unreferenced = _offload(vault, other)
+    (vault / captured.sidecar_path).unlink()
+    assert (Path(selected_store[0]["root"]) / unreferenced.object / unreferenced.version).exists()
+    usage = media_allowance.reference_usage(vault)
+    assert usage.used_bytes == expected
+    assert len(usage.versions) == 1
+    assert media_allowance.projected_bytes(usage, originals.BinaryBinding("another.txt", fields["binary_sha256"], expected), reference) == expected
+
+    # Once only historical Trash placement remains, unreadable metadata makes its custody unknown.
+    sidecar.unlink()
+    archive.unlink()
+    metadata.write_text("not JSON")
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    metadata.write_text(json.dumps({"original_path": path.parent.relative_to(vault).as_posix()}))
+    assert media_allowance.reference_usage(vault).used_bytes == expected
+    trash_sidecar.unlink()
+    assert media_allowance.reference_usage(vault).used_bytes == 0
+
+
+def test_reference_usage_does_not_hide_a_malformed_potential_companion(vault: Path, selected_store):
+    """An unfinished header cannot become a false zero; ordinary body examples do not affect custody."""
+    from exomem import media_allowance
+
+    path = _preserved(vault)
+    expected = len(path.read_bytes())
+    _offload(vault, path)
+    note = vault / "Knowledge Base/Notes/incomplete.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\nevidence_file: unresolved\n")
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    note.write_text("An ordinary example in the body:\n\n```yaml\nstored_object: invalid example\n```\n")
+    assert media_allowance.reference_usage(vault).used_bytes == expected
+
+
+def test_a_companion_candidate_with_an_unterminated_header_is_refused_not_skipped(vault: Path):
+    """Custody readers refuse a header they cannot prove empty; ordinary strict readers treat it as prose."""
+    from exomem.vault import FrontmatterError
+
+    path = _preserved(vault)
+    relative = path.relative_to(vault).as_posix()
+    assert originals.bound_companion(vault, relative) is not None
+    originals.sidecar_path(path).write_text("---\nevidence_file: unresolved\n")
+    with pytest.raises(FrontmatterError):
+        originals.bound_companion(vault, relative)
+
+
+def test_reference_usage_rejects_conflicting_sizes_and_ignores_a_foreign_store(vault: Path, selected_store):
+    """One version has one original size; a foreign store never spends this cell's allowance."""
+    from exomem import media_allowance, move_file
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    path = _preserved(vault)
+    expected = len(path.read_bytes())
+    _offload(vault, path)
+    sidecar = path.with_name(path.name + ".md")
+    fields, body, _ = parse_frontmatter(sidecar.read_text(), strict=True)
+    other_rel = "Knowledge Base/Evidence/other.txt"
+    other = vault / (other_rel + ".md")
+    other.parent.mkdir(parents=True, exist_ok=True)
+    moved, body, _ = parse_frontmatter(
+        move_file._repoint_artifact(path.relative_to(vault).as_posix(), other_rel)(sidecar.read_text()), strict=True,
+    )
+    copy = {**moved, "binary_size": expected + 1}
+    other.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
+    assert media_allowance.reference_usage(vault).used_bytes is None
+    copy["stored_object"] = {**fields["stored_object"], "store": "foreign-store"}
+    other.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
+    assert media_allowance.reference_usage(vault).used_bytes == expected
+
+
+@pytest.mark.parametrize("recovery", ["free", "raise"])
+def test_allowance_worker_retains_demand_until_current_quota_admits_it(vault: Path, selected_store, monkeypatch, recovery):
+    """Quota must refuse before encryption, retain demand, and recover without changing the original's SHA."""
+    import os
+
+    from exomem import media_allowance, media_jobs, media_store, media_worker, preserve
+
+    values, config = selected_store
+    first = _preserved(vault, category="quota-first")
+    size = len(first.read_bytes())
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": size}}}))
+    _offload(vault, first)  # The exact allowance admits the first original.
+    trash = vault / "Knowledge Base/_trash/retained.txt.md"
+    trash.parent.mkdir()
+    trash.write_bytes(first.with_name(first.name + ".md").read_bytes())
+    trash.with_name("retained.txt.meta.json").write_text(json.dumps({"original_path": first.relative_to(vault).as_posix()}))
+    assert media_allowance.reference_usage(vault).used_bytes == size
+    captured = preserve.preserve(vault, scope="Test", category="quota-next", filename="next.bin", content="Another original.")
+    path = vault / captured.path
+    original = path.read_bytes()
+    digest = originals.original_state(vault, path).binary_sha256
+    ledger = media_jobs.MediaJobStore(vault)
+
+    with monkeypatch.context() as refused:
+        run = media_store.subprocess.run
+
+        def no_encrypt(command, *args, **kwargs):
+            if command[0] == "age":
+                pytest.fail("quota refusal reached encryption")
+            return run(command, *args, **kwargs)
+
+        def no_upload(*args, **kwargs):
+            pytest.fail("quota refusal reached the provider")
+
+        refused.setattr(media_store.subprocess, "run", no_encrypt)
+        refused.setattr(media_store.FilesystemStore, "upload", no_upload)
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+        assert media_store.enqueue_offloads(vault) == 0
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    pending = ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
+    assert pending.do_offload and "MEDIA_ALLOWANCE_EXCEEDED" in pending.last_error
+    assert path.read_bytes() == original
+    [row] = media_jobs.tool_status(vault)["offload_refusals"]
+    assert row["code"] == "MEDIA_ALLOWANCE_EXCEEDED" and row["ciphertext_size"] is None
+    assert set(row) == {"path", "original_state", "code", "ciphertext_size"}
+    if recovery == "free":
+        first.with_name(first.name + ".md").unlink()
+        trash.unlink()
+    else:
+        config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": size + len(original)}}}))
+    assert media_store.enqueue_offloads(vault) == 1
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    stored = originals.original_state(vault, path)
+    assert stored.state == "cached" and stored.binary_sha256 == digest
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    assert media_jobs.tool_status(vault)["offload_refusals"] == []
+
+
+def test_allowance_refusal_reports_the_current_unknown_or_exceeded_code(vault: Path, selected_store):
+    import os
+
+    from exomem import media_jobs, media_store, media_worker
+
+    values, config = selected_store
+    path = _preserved(vault)
+    without_allowance = {key: value for key, value in values.items() if key != "allowance_bytes"}
+    config.write_text(json.dumps({"vaults": {str(vault): without_allowance}}))
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    [row] = media_jobs.tool_status(vault)["offload_refusals"]
+    assert row["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    note = vault / "Knowledge Base/Notes/broken.md"
+    note.parent.mkdir(exist_ok=True)
+    note.write_text("---\nunterminated: custody\n")
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": 0}}}))
+    assert media_jobs.tool_status(vault)["offload_refusals"][0]["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    note.write_text("Ordinary prose.\n")
+    assert media_jobs.tool_status(vault)["offload_refusals"][0]["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert media_store.enqueue_offloads(vault) == 0
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    assert media_store.enqueue_offloads(vault) == 1
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):
+    from exomem import media_jobs, media_store
+
+    values, config = selected_store
+    path = _preserved(vault)
+    original = path.read_bytes()
+    upload = media_store.FilesystemStore.upload
+
+    def lower_after_upload(*args, **kwargs):
+        version = upload(*args, **kwargs)
+        config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": 0}}}))
+        return version
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", lower_after_upload)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert path.read_bytes() == original
+    assert originals.original_state(vault, path).reference is None
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+        assert connection.execute("SELECT ciphertext_size FROM media_offload_refusals").fetchone()[0] is None
+
+
+def test_stored_companion_stays_live_when_trash_placement_cannot_be_written(vault: Path, selected_store, monkeypatch):
+    from exomem import (
+        delete_file,
+        media_allowance,
+        media_jobs,
+        media_processing,
+        preserve,
+        reserved_paths,
+    )
+
+    path = vault / "Knowledge Base/Notes/Media/clip.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"original bytes")
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, originals.sidecar_path(path), text="searchable text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    companion = originals.sidecar_path(path)
+    before = companion.read_bytes()
+    publish = reserved_paths.publish_generic_bytes
+
+    def fail_placement(root, name, data, **kwargs):
+        if str(name).endswith(".meta.json"):
+            raise OSError("placement write failed")
+        return publish(root, name, data, **kwargs)
+
+    monkeypatch.setattr(reserved_paths, "publish_generic_bytes", fail_placement)
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(vault, path=companion.relative_to(vault).as_posix(), confirm=True)
+    assert refused.value.code == "DELETE_FAILED"
+    assert companion.read_bytes() == before
+    assert media_allowance.reference_usage(vault).used_bytes == len(path.read_bytes())
+
+
+def test_reference_restored_during_final_census_cannot_publish_over_quota(vault: Path, selected_store, monkeypatch):
+    from exomem import media_allowance, media_jobs, media_store
+
+    values, config = selected_store
+    retained = _preserved(vault, category="retained-version")
+    _offload(vault, retained)
+    companion = originals.sidecar_path(retained)
+    saved = companion.read_bytes()
+    companion.unlink()
+    candidate = _preserved(vault, category="new-version")
+    expected = candidate.read_bytes()
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": len(expected)}}}))
+    marker = candidate.parent / "z-marker.md"
+    marker.write_text("---\ncensus_marker: true\n---\n")
+    upload = media_store.FilesystemStore.upload
+    uploaded, restored = [], []
+
+    def record_upload(*args, **kwargs):
+        version = upload(*args, **kwargs)
+        uploaded.append(version)
+        return version
+
+    parse = media_allowance.parse_frontmatter
+
+    def restore_reference(text, **kwargs):
+        parsed = parse(text, **kwargs)
+        if uploaded and parsed[0].get("census_marker") and not restored:
+            companion.write_bytes(saved)
+            restored.append(True)
+        return parsed
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", record_upload)
+    monkeypatch.setattr(media_allowance, "parse_frontmatter", restore_reference)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, candidate)
+    assert restored and refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert candidate.read_bytes() == expected
+    assert originals.original_state(vault, candidate).reference is None
+    assert media_allowance.reference_usage(vault).used_bytes == len(retained.read_bytes())
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+
+
+def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Path, selected_store, monkeypatch):
+    from dataclasses import replace
+
+    from exomem import media_allowance, media_jobs, media_store, move_file
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    values, config = selected_store
+    first = _preserved(vault, category="archive-reuse")
+    reference = _offload(vault, first)
+    backend = media_store.store_for(vault)
+    with backend.open(reference.object, reference.version) as stream:
+        retained = replace(reference, version=backend.upload(reference.object, stream, size=reference.ciphertext_size, sha256=reference.ciphertext_sha256))
+    sidecar = first.with_name(first.name + ".md")
+    archive_path = "Knowledge Base/_archive/retained.txt"
+    archive = vault / (archive_path + ".md")
+    archive.parent.mkdir()
+    archive.write_text(move_file._repoint_artifact(first.relative_to(vault).as_posix(), archive_path)(sidecar.read_text()))
+    trash = vault / "Knowledge Base/_trash/retained.txt.md"
+    trash.parent.mkdir()
+    trash.write_bytes(sidecar.read_bytes())
+    trash.with_name("retained.txt.meta.json").write_text(json.dumps({"original_path": first.relative_to(vault).as_posix()}))
+    sidecar.unlink()
+    usage = media_allowance.reference_usage(vault)
+    assert usage.used_bytes == len(first.read_bytes())
+    assert list(usage.live_paths.values()) == [archive_path]
+    path = _preserved(vault, category="archive-duplicate")
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": len(path.read_bytes())}}}))
+    ledger = media_jobs.MediaJobStore(vault)
+    head = media_store.FilesystemStore.head
+    changed = []
+
+    def change_during_protected_confirmation(*args, **kwargs):
+        result = head(*args, **kwargs)
+        with sqlite3.connect(ledger.path) as connection:
+            protected = connection.execute("SELECT 1 FROM media_protections WHERE binary_rel = ?", (path.relative_to(vault).as_posix(),)).fetchone()
+        if protected and not changed:
+            fields, body, _marker = parse_frontmatter(archive.read_text(), strict=True)
+            fields["stored_object"] = retained.fields()
+            archive.write_text(render_frontmatter_document(serialize_frontmatter(fields), body))
+            trash.unlink()
+            changed.append(True)
+        return result
+
+    monkeypatch.setattr(media_store.FilesystemStore, "head", change_during_protected_confirmation)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path)
+    assert changed and refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert path.exists() and originals.original_state(vault, path).reference is None
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import IO, BinaryIO
 
 from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
+from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import kb_prefix
 from .source_inspection import Inspection, inspect_source
 from .vault import (
@@ -1509,19 +1510,54 @@ _LEGACY_ARTIFACT_BLOCK_RE = re.compile(
 )
 
 
+#: What ends the extracted text. The sentinels and the legacy artifact block are machine-owned;
+#: a legacy `## Preserved notes` title carries no proof of who owns what follows it.
+_END_NOTES_SENTINEL = "notes-sentinel"
+_END_ARTIFACT_SENTINEL = "artifact-sentinel"
+_END_LEGACY_ARTIFACT = "legacy-artifact"
+_END_LEGACY_NOTES = "legacy-notes"
+_END_OF_FILE = "end-of-file"
+
+
+def _extraction_end(content: str, start: int) -> tuple[int, str]:
+    """Where the extracted text that starts at `start` ends, and what ends it.
+
+    The offset is that of the newline before the boundary, or the end of the content.
+    """
+    boundaries = (
+        content.rfind(f"\n{SIDECAR_PRESERVED_NOTES_SENTINEL}\n", start),
+        content.rfind(f"\n{SIDECAR_ARTIFACT_SENTINEL}\n", start),
+    )
+    after = max(boundaries)
+    if after != -1:
+        return after, _END_NOTES_SENTINEL if after == boundaries[0] else _END_ARTIFACT_SENTINEL
+    legacy_artifact = _LEGACY_ARTIFACT_BLOCK_RE.search(content, start)
+    if legacy_artifact is not None:
+        return legacy_artifact.start() - 1, _END_LEGACY_ARTIFACT
+    notes = content.find("\n## Preserved notes\n", start)
+    if notes != -1:
+        return notes, _END_LEGACY_NOTES
+    return len(content), _END_OF_FILE
+
+
+def extracted_text(content: str) -> str:
+    """The text under `## Extracted text`, up to the sidecar's machine-owned boundary."""
+    content = with_newline(content, "\n")
+    heading = content.find(_EXTRACTED_HEADING)
+    if heading == -1:
+        return ""
+    start = heading + len(_EXTRACTED_HEADING)
+    return content[start : _extraction_end(content, start)[0]].strip()
+
+
 def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
     """Whether a nonempty legacy notes block lacks an ownership boundary."""
-    extraction = content.find(_EXTRACTED_HEADING)
-    if extraction == -1:
+    heading = content.find(_EXTRACTED_HEADING)
+    if heading == -1:
         return False
-    start = extraction + len(_EXTRACTED_HEADING)
-    if any(
-        content.rfind(f"\n{sentinel}\n", start) != -1
-        for sentinel in (SIDECAR_PRESERVED_NOTES_SENTINEL, SIDECAR_ARTIFACT_SENTINEL)
-    ) or _LEGACY_ARTIFACT_BLOCK_RE.search(content, start) is not None:
-        return False
-    notes = content.find("\n## Preserved notes\n", start)
-    return notes != -1 and bool(content[start:notes].strip())
+    start = heading + len(_EXTRACTED_HEADING)
+    after, kind = _extraction_end(content, start)
+    return kind == _END_LEGACY_NOTES and bool(content[start:after].strip())
 
 
 def _is_repeated_extraction_residual(boundary: str, text: str) -> bool:
@@ -1586,6 +1622,21 @@ def update_sidecar_extraction(
     )
 
 
+#: Frontmatter that describes one extraction rather than the recording. A reprocess moves these
+#: with the old text. They are the sidecar schema's own field names, a closed set.
+_SPEAKER_FIELDS = ("speakers", "speaker_verification")
+_ASR_FIELD_PREFIX = "asr_"
+_EXTRACTION_FIELDS = frozenset({
+    "extracted_by", "processing_state", "processing_attempts", "processing_error",
+    "processing_retryable", "processing_next_action", *_SPEAKER_FIELDS,
+})
+
+
+def is_extraction_field(key: str) -> bool:
+    """Whether a sidecar frontmatter key describes the extraction held under `## Extracted text`."""
+    return key in _EXTRACTION_FIELDS or key.startswith(_ASR_FIELD_PREFIX)
+
+
 def render_sidecar_extraction(
     before: str,
     *,
@@ -1594,8 +1645,18 @@ def render_sidecar_extraction(
     speakers: list[dict] | None = None,
     speaker_verification: str | None = None,
     attempts: int | None = None,
+    asr: AsrFacts | None = None,
+    prior_extractions: tuple[str, ...] = (),
+    reset_speakers: bool = False,
 ) -> str:
-    """Render an extraction sidecar without touching canonical or derived state."""
+    """Render an extraction sidecar without touching canonical or derived state.
+
+    `asr` records what the speech engine decided; facts of an earlier extraction never
+    survive into the new one. `prior_extractions` lists, in order, the vault-relative
+    paths (no extension) of the pages that hold the extractions this one replaced.
+    `reset_speakers` drops the speaker fields of the replaced transcript, whose labels
+    do not describe the new one.
+    """
     newline = document_newline(before)
     before = with_newline(before, "\n")
     if _has_ambiguous_legacy_preserved_notes(before):
@@ -1604,7 +1665,10 @@ def render_sidecar_extraction(
             missing=[],
             reason="unmarked nonempty preserved notes have no machine-owned boundary",
         )
-    content = _set_frontmatter_field(before, "extracted_by", engine)
+    content = before
+    if reset_speakers:
+        content = _remove_frontmatter_fields(content, lambda key: key in _SPEAKER_FIELDS)
+    content = _set_frontmatter_field(content, "extracted_by", engine)
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
     content = _set_frontmatter_field(content, "processing_retryable", "false")
@@ -1626,8 +1690,95 @@ def render_sidecar_extraction(
                 labels.append(label)
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
+    content = _set_asr_facts(content, asr)
+    if prior_extractions:
+        links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
+        content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
     return with_newline(content, newline)
+
+
+#: The pin a caller left asks for the same language on every later run, so it outlives a new extraction.
+_ASR_PIN_FIELD = "asr_language_requested"
+_ASR_MODE_FIELD = "asr_language_mode"
+
+
+def asr_language_pin(content: str) -> tuple[str | None, bool]:
+    """The speech language a caller pinned on this sidecar, and whether the pin is the multilingual mode.
+
+    The multilingual mode pins through the recorded `asr_language_mode`: only a caller's
+    request can make it `multilingual`, because no configuration sets that mode.
+    """
+    fields = parse_frontmatter(content)[0]
+    pinned = fields.get(_ASR_PIN_FIELD)
+    if isinstance(pinned, str) and pinned:
+        return pinned, False
+    return None, fields.get(_ASR_MODE_FIELD) == LANGUAGE_MODE_MULTILINGUAL
+
+
+def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
+    """Replace the `asr_*` fields with the new extraction's facts, and with them the caller's pin.
+
+    Facts that name no request clear the old pin, so a later multilingual request replaces a
+    language pin. An extraction that reports nothing leaves the pin as it was, the language and
+    the multilingual mode alike.
+    """
+    pinned_multilingual = asr is None and asr_language_pin(content) == (None, True)
+    content = _remove_frontmatter_fields(
+        content,
+        lambda key: key.startswith(_ASR_FIELD_PREFIX) and (asr is not None or key != _ASR_PIN_FIELD),
+    )
+    if asr is None:
+        if pinned_multilingual:
+            content = _set_frontmatter_field(content, _ASR_MODE_FIELD, yaml_scalar(LANGUAGE_MODE_MULTILINGUAL))
+        return content
+
+    def number(value: float | None, places: int) -> str:
+        return "null" if value is None else repr(round(float(value), places))
+
+    def text(value: str | None) -> str:
+        return "null" if value is None else yaml_scalar(value)
+
+    fields = [
+        ("asr_language", text(asr.language)),
+        ("asr_language_probability", number(asr.language_probability, 4)),
+        ("asr_language_source", text(asr.language_source)),
+        (_ASR_MODE_FIELD, text(asr.language_mode)),
+        ("asr_decoding", text(asr.decoding)),
+        ("asr_speech_seconds", number(asr.speech_seconds, 2)),
+        ("asr_duration_seconds", number(asr.duration_seconds, 2)),
+        ("asr_policy", text(asr.policy)),
+    ]
+    if asr.language_requested is not None:
+        fields.append((_ASR_PIN_FIELD, yaml_scalar(asr.language_requested)))
+    for field, value in fields:
+        content = _set_frontmatter_field(content, field, value)
+    return content
+
+
+def _remove_frontmatter_fields(content: str, selected: Callable[[str], bool]) -> str:
+    """Drop the single-line frontmatter fields whose key `selected` accepts."""
+    if not content.startswith("---"):
+        return content
+    original = content
+    newline = document_newline(content)
+    content = with_newline(content, "\n")
+    end = content.find("\n---", 3)
+    if end == -1:
+        return original
+    kept: list[str] = []
+    dropping = False
+    for line in content[:end].split("\n"):
+        continuation = line[:1] in (" ", "\t") or line.startswith("- ")
+        if continuation:
+            if not dropping:
+                kept.append(line)  # a nested value belongs to the field above it
+            continue
+        dropping = selected(line.partition(":")[0])
+        if not dropping:
+            kept.append(line)
+    updated = "\n".join(kept) + content[end:]
+    return original if updated == content else with_newline(updated, newline)
 
 
 def commit_media_sidecar_writes(
@@ -1821,32 +1972,18 @@ def _set_extracted_text(content: str, text: str) -> str:
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block
     start = idx + len(_EXTRACTED_HEADING)
-    boundaries = (
-        content.rfind(f"\n{SIDECAR_PRESERVED_NOTES_SENTINEL}\n", start),
-        content.rfind(f"\n{SIDECAR_ARTIFACT_SENTINEL}\n", start),
-    )
-    after = max((boundary for boundary in boundaries if boundary != -1), default=-1)
-    legacy_preserved = False
-    if after == -1:
-        legacy_artifact = _LEGACY_ARTIFACT_BLOCK_RE.search(content, start)
-        if legacy_artifact is not None:
-            after = legacy_artifact.start() - 1
-        else:
-            legacy_preserved = content.find("\n## Preserved notes\n", start)
-            if legacy_preserved != -1:
-                if not content[start:legacy_preserved].strip():
-                    after = legacy_preserved
-                else:
-                    # A nonempty, unmarked notes title has no ownership proof.
-                    return content
-    if after == -1:
+    after, kind = _extraction_end(content, start)
+    if kind == _END_OF_FILE:
         return content[:idx] + block
+    if kind == _END_LEGACY_NOTES and content[start:after].strip():
+        # A nonempty, unmarked notes title has no ownership proof.
+        return content
     boundary = content[after + 1 :]
-    if (after == boundaries[0] or legacy_preserved) and _is_repeated_extraction_residual(
+    if kind in (_END_NOTES_SENTINEL, _END_LEGACY_NOTES) and _is_repeated_extraction_residual(
         boundary, text
     ):
         return content[:idx] + block
-    if legacy_preserved:
+    if kind == _END_LEGACY_NOTES:
         boundary = f"{SIDECAR_PRESERVED_NOTES_SENTINEL}\n{boundary}"
     return content[:idx] + block + "\n" + boundary
 

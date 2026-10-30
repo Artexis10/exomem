@@ -509,6 +509,29 @@ class SemanticPreparation:
             _preparation_bytes += extra
             _preparation_peak = max(_preparation_peak, _preparation_bytes)
 
+    def reserve_source(self, source_bytes: int, *, source_limit: int | None = None) -> None:
+        maximum = min(SEMANTIC_SOURCE_MAX_BYTES, source_limit) if source_limit is not None else SEMANTIC_SOURCE_MAX_BYTES
+        if source_bytes > maximum:
+            raise PreparationBudgetExceeded("semantic source budget exceeded")
+        self.reserve(8 * source_bytes + 65536)
+        self.source_bytes = source_bytes
+
+    def reserve_parser(self, source: str, *, yaml_text: str | None = None, json_bytes: int = 0) -> None:
+        # YAML's dense nodes and alias expansion need their existing larger charge.
+        # JSON has no aliases; its node/string copies use a separate conservative charge.
+        yaml_bytes = len(yaml_text.encode("utf-8")) if yaml_text is not None else 0
+        self.parser_bytes = (
+            8 * len(source.encode("utf-8")) + 4096 * _source_line_bound(source)
+            + 512 * yaml_bytes + 64 * json_bytes
+        )
+        self.reserve(self.parser_bytes)
+        if yaml_text is not None:
+            expanded = _yaml_expanded_cost(
+                yaml_text, maximum=(self.limit - self.parser_bytes) // 2, check=self.check,
+            )
+            self.parser_bytes += 2 * expanded
+            self.reserve(self.parser_bytes)
+
     def check_page(self, page: Any, *, vector_dim: int) -> None:
         # Before the existing chunker/parser allocates: count an upper bound
         # of paragraphs, hard-split pieces and one possible unit per line.
@@ -544,6 +567,23 @@ class SemanticPreparation:
 
 
 @contextlib.contextmanager
+def parser_preparation(
+    source_bytes: int, *, limit_bytes: int | None = None,
+    check: Callable[[], None] | None = None,
+):
+    """Hold the shared reservation while a bounded source is read and parsed.
+
+    The full file size selects the existing policy; only bytes read are charged.
+    """
+    bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
+    preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check)
+    try:
+        yield preparation
+    finally:
+        preparation.release()
+
+
+@contextlib.contextmanager
 def semantic_preparation(
     vault_root: Path, path: Path, *, source_limit: int | None = None,
     limit_bytes: int | None = None, check: Callable[[], None] | None = None,
@@ -556,13 +596,8 @@ def semantic_preparation(
         check()
     signature = freshness.stat_signature(path)
     source_bytes = path.stat().st_size
-    bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
-    preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check)
-    try:
-        maximum_source = min(SEMANTIC_SOURCE_MAX_BYTES, source_limit) if source_limit is not None else SEMANTIC_SOURCE_MAX_BYTES
-        if source_bytes > maximum_source:
-            raise PreparationBudgetExceeded("semantic source budget exceeded")
-        preparation.reserve(8 * source_bytes + 65536)
+    with parser_preparation(source_bytes, limit_bytes=limit_bytes, check=check) as preparation:
+        preparation.reserve_source(source_bytes, source_limit=source_limit)
         source, preparation.guard = vault.read_bounded_guarded_bytes(
             vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes,
             **({"expected_hash": expected_hash} if expected_hash is not None else {}),
@@ -571,27 +606,11 @@ def semantic_preparation(
             raise OSError("semantic input changed during preparation")
         preparation.source = source.decode("utf-8")
         preparation.signature = signature
-        # Dense inline YAML has many nodes even on one line. Charge before
-        # either existing page/unit parser constructs them. The conservative
-        # 512-byte-per-input-byte charge includes simultaneous parser copies;
-        # measured dense valid frontmatter needed over 120 bytes per byte for
-        # just one parse. Body parsing remains separately line-bounded.
         frontmatter = find_corpus.FRONTMATTER_PATTERN.match(preparation.source)
-        yaml_bytes = len(frontmatter.group(1).encode("utf-8")) if frontmatter else 0
-        preparation.parser_bytes = (
-            8 * source_bytes + 4096 * _source_line_bound(preparation.source) + 512 * yaml_bytes
+        preparation.reserve_parser(
+            preparation.source, yaml_text=frontmatter.group(1) if frontmatter else None,
         )
-        preparation.reserve(preparation.parser_bytes)
-        if frontmatter:
-            expanded = _yaml_expanded_cost(
-                frontmatter.group(1), maximum=(preparation.limit - preparation.parser_bytes) // 2,
-                check=check,
-            )
-            preparation.parser_bytes += 2 * expanded
-            preparation.reserve(preparation.parser_bytes)
         yield preparation
-    finally:
-        preparation.release()
 
 
 def semantic_preparation_status() -> dict[str, int]:

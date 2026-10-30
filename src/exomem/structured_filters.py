@@ -126,7 +126,8 @@ class FilterError(ValueError):
         self.remediation = remediation
         super().__init__(f"{code} at {path}: {message}")
 
-    def to_dict(self) -> dict[str, str]:
+    def as_public_dict(self) -> dict[str, str]:
+        """The client refusal block; `cli_ops.public_refusal` finds it by this name."""
         return {
             "code": self.code,
             "path": self.path,

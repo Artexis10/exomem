@@ -143,6 +143,18 @@ SPEC = registry.RegistrySpec(
 )
 
 
+def pack_status_for_class(lifecycle_class: str) -> str:
+    """The shipped status label that stands for a lifecycle class, for a writer that must stamp one.
+
+    The pack's canonical statuses cannot be changed, so the label is stable; a vault
+    overlay adds labels but never redefines these.
+    """
+    for entry in registry.pack_entries("statuses.yaml"):
+        if entry.status == "active" and entry.attributes.get("class") == lifecycle_class:
+            return entry.key
+    raise LookupError(f"the shipped statuses define no label for the {lifecycle_class!r} class")
+
+
 class ClassificationUnavailable(OpError):
     """A dependent operation needs a page lifecycle class that no admitted definition supplies."""
 

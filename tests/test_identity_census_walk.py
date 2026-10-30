@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import activation_manifest, semantic_contract
+from exomem import activation_manifest, create_file, semantic_contract
 
 KB = "Knowledge Base"
 PAGE_REL = f"{KB}/Notes/Insights/page.md"
@@ -332,6 +332,20 @@ def test_a_malformed_canonical_page_still_fails_closed(tmp_path: Path) -> None:
         semantic_contract.build_stable_identity_census(tmp_path)
 
     assert raised.value.code == "INVALID_FRONTMATTER"
+
+
+def test_a_note_opening_with_a_thematic_break_does_not_block_governed_writes(vault: Path) -> None:
+    """A plain note that opens with `---` and never closes it has no frontmatter;
+    it must not make the identity census refuse the corpus build or an unrelated create."""
+    _write(vault, f"{KB}/Notes/ruled.md", "---\nA note that opens with a thematic break.\n")
+
+    semantic_contract.build_corpus_context(vault)
+    created = create_file.create_file(
+        vault, path=f"{KB}/Notes/new.md", content="# New\n\nHello.\n"
+    )
+
+    assert created.path == f"{KB}/Notes/new.md"
+    assert (vault / KB / "Notes/new.md").is_file()
 
 
 def test_a_well_formed_trash_page_is_absent_from_the_census_either_way(tmp_path: Path) -> None:

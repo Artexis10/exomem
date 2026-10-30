@@ -127,6 +127,28 @@
       "compression_ratio_threshold": 2.4,
       "logprob_threshold": -1.0
     },
+    "faster_whisper": {
+      "revision": "fw-policy-2",
+      "source": "faster-whisper 1.2.x; WhisperModel.transcribe on CPU and BatchedInferencePipeline.transcribe on CUDA; the library's default VadOptions, so language is detected on speech and a quiet opening does not decide it; options (sequential) and batched.options are tuned separately on purpose, because the two pipelines accept different options and a CUDA run that runs out of memory before its first segment falls back to options",
+      "options": {
+        "vad_filter": true,
+        "condition_on_previous_text": false,
+        "hallucination_silence_threshold": null,
+        "beam_size": 5,
+        "language_detection_segments": 3,
+        "language_detection_threshold": 0.5
+      },
+      "batched": {
+        "batch_size": 16,
+        "options": {
+          "vad_filter": true,
+          "without_timestamps": false,
+          "beam_size": 5,
+          "language_detection_segments": 3,
+          "language_detection_threshold": 0.5
+        }
+      }
+    },
     "metadata_files": [
       "config.json",
       "vocab.json",

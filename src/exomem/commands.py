@@ -36,7 +36,7 @@ from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NamedTuple, NotRequired
+from typing import Annotated, Any, Literal, NamedTuple, NotRequired, get_args
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -7472,6 +7472,9 @@ def _op_activate_context_body(
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
             return context_views_module.turn_leads(compiled.packet)
 
+        # The map generation the caller holds. A token from anchors mode, an older one or a malformed one
+        # carries none, and the caller then gets the whole map.
+        held_map = working_set_runtime_module.decode_continuity(continuity)
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
@@ -7483,6 +7486,7 @@ def _op_activate_context_body(
                         "index_generation": evidence_token[1] if evidence_token else 0,
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
+                    known_generation=(held_map or {}).get("map_generation"),
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
@@ -7506,9 +7510,17 @@ def _op_activate_context_body(
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
             )
+        if packet.get("abstained") is False:
+            # A map whose turn slice yielded to the deadline names the skipped stage, as a served packet does.
+            active_budget = request_budget_module.current()
+            block = active_budget.as_response_block() if active_budget is not None else None
+            if block is not None:
+                packet["request_budget"] = block
         _attach_episode_advice(vault_root, packet)
         if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()
+        if not packet.get("abstained"):
+            packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
         return packet
 
     def read_caller_thread() -> _ThreadRead:
@@ -8903,34 +8915,65 @@ def op_transfer_artifact(
     return handoff
 
 
+ProcessMediaOperation = Literal["process", "status", "retry", "reprocess"]
+
+
 def op_process_media(
     vault_root: Path,
     path: str | None = None,
     paths: list[str] | None = None,
-    operation: Literal["process", "status", "retry"] = "process",
+    operation: ProcessMediaOperation = "process",
+    language: str | None = None,
+    multilingual: bool = False,
 ) -> dict:
-    """Check governed media; retry after remediation.
+    """Check governed media; retry after remediation; extract again.
 
-    Status reads; process/retry change extraction state. Extraction normally runs automatically.
+    Status reads; other operations change extraction state. Extraction normally runs
+    automatically. Reprocess keeps the old text on a prior page.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work.
-        paths: 1-32 unique governed paths for process/retry.
-        operation: process, status or retry.
+        paths: 1-32 unique governed paths, not for status.
+        language: Speech language code; omit to detect.
+        multilingual: Detect language per window (slower).
     """
     from . import due_state as due_state_module
+    from . import media_processing
+    from .asr_facts import LANGUAGE_MODE_MULTILINGUAL
     from .cli_ops import OpError
 
     validate_process_media_operation(operation)
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
+    if operation == "reprocess" and path is None and paths is None:
+        raise OpError("MEDIA_PATH_REQUIRED", "reprocess needs the path or paths of the media to extract again")
+    try:
+        language, mode = media_processing.declared_language(language, multilingual)
+    except media_processing.MediaProcessingError as error:
+        raise OpError(error.code, error.reason) from error
+    multilingual = mode == LANGUAGE_MODE_MULTILINGUAL
+    if mode is not None and operation not in {"process", "reprocess"}:
+        raise OpError(
+            "LANGUAGE_NOT_APPLICABLE", "language and multilingual apply to process and reprocess only"
+        )
+    if mode is not None and path is None and paths is None:
+        raise OpError(
+            "MEDIA_PATH_REQUIRED", "a language or multilingual mode needs the path or paths of the media it applies to"
+        )
     if operation == "status":
         # Reads only, so there is no batch to scope.
         return _process_media(vault_root, path=path, paths=paths, operation=operation)
     # Bounded all-media work writes one transcript per artifact, so the no-path
     # form is a batch and must not deliver one counters block per artifact.
     with due_state_module.batch_scope(vault_root):
-        result = _process_media(vault_root, path=path, paths=paths, operation=operation)
+        result = _process_media(
+            vault_root,
+            path=path,
+            paths=paths,
+            operation=operation,
+            language=language,
+            multilingual=multilingual,
+        )
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
@@ -8943,6 +8986,8 @@ def _process_media(
     path: str | None,
     paths: list[str] | None,
     operation: str,
+    language: str | None = None,
+    multilingual: bool = False,
 ) -> dict:
     from . import index_sync, media_jobs
     from .cli_ops import OpError
@@ -8966,7 +9011,7 @@ def _process_media(
         if paths is not None:
             raise OpError(
                 "MEDIA_PATHS_UNSUPPORTED_FOR_STATUS",
-                "process_media paths is only supported for process or retry",
+                "process_media paths is only supported for process, retry or reprocess",
             )
         selected = _selected_media_paths(vault_root, path=None, paths=[path]) if path is not None else None
         if selected is not None:
@@ -9043,19 +9088,8 @@ def _process_media(
         results: list[dict[str, object]] = []
         for binary, relative in selected_paths:
             try:
-                result = (
-                    media_processing.reconcile_media(
-                        vault_root,
-                        binary,
-                        explicit=True,
-                        commit_guard=_commit_guard,
-                    )
-                    if operation == "process"
-                    else media_processing.retry_media(
-                        vault_root,
-                        binary,
-                        commit_guard=_commit_guard,
-                    )
+                result = _run_media_operation(
+                    vault_root, binary, operation, language, multilingual, _commit_guard
                 )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
@@ -9077,7 +9111,7 @@ def _process_media(
                 continue
             row: dict[str, object] = {
                 "path": relative,
-                "outcome": "processed" if operation == "process" else "retried",
+                "outcome": _MEDIA_OUTCOMES[operation],
                 "state": state,
                 "media_type": result.media_type,
                 "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
@@ -9147,19 +9181,9 @@ def _process_media(
         raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
 
     try:
-        if operation == "process":
-            result = media_processing.reconcile_media(
-                vault_root,
-                binary,
-                explicit=True,
-                commit_guard=_commit_guard,
-            )
-        else:
-            result = media_processing.retry_media(
-                vault_root,
-                binary,
-                commit_guard=_commit_guard,
-            )
+        result = _run_media_operation(
+            vault_root, binary, operation, language, multilingual, _commit_guard
+        )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
 
@@ -9173,11 +9197,35 @@ def _process_media(
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
-    if operation == "retry":
+    if operation in {"retry", "reprocess"}:
         payload["requeued"] = result.requeued
     payload["index_refreshed"] = 0
     payload["index_refresh_remaining"] = _index_refresh_remaining()
     return payload
+
+
+_MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+
+
+def _run_media_operation(
+    vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard
+):
+    """Run one explicit media operation on one governed binary."""
+    from . import media_processing
+
+    if operation == "process" and (language is not None or multilingual):
+        return media_processing.process_declared_media(
+            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+        )
+    if operation == "process":
+        return media_processing.reconcile_media(
+            vault_root, binary, explicit=True, commit_guard=commit_guard
+        )
+    if operation == "reprocess":
+        return media_processing.reprocess_media(
+            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+        )
+    return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 
 
 def _selected_media_paths(
@@ -9231,6 +9279,18 @@ def _media_remediation(code: str) -> str:
         return "Restore write access to the governed media path, then retry processing."
     if code == "UNSUPPORTED_MEDIA":
         return "Select a supported governed media artifact."
+    if code == "INVALID_LANGUAGE":
+        return "Give the language as the short alphabetic code the speech model uses, or omit it."
+    if code == "LANGUAGE_NOT_APPLICABLE":
+        return "Omit the language and the multilingual mode, or select audio or video media."
+    if code == "TRANSCRIPT_COMPLETE":
+        return "Use the reprocess operation to extract the recording again with the declared language."
+    if code == "MEDIA_ENGINE_DISABLED":
+        return "Enable the extraction engine for this media type, then ask again."
+    if code == "MEDIA_BUSY":
+        return "Wait for the current processing run to end, then ask again."
+    if code == "MEDIA_RUNTIME_UNAVAILABLE":
+        return "Restore the media runtime, then ask again."
     return "Inspect the media artifact and retry processing."
 
 
@@ -13071,12 +13131,12 @@ _MISSING_SELECTOR_DEFAULT = object()
 
 def validate_process_media_operation(operation: Any) -> None:
     """Raise the product command's existing public selector error."""
-    if operation not in {"process", "status", "retry"}:
+    if operation not in get_args(ProcessMediaOperation):
         from .cli_ops import OpError
 
         raise OpError(
             "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, or retry",
+            "process_media operation must be process, status, retry, or reprocess",
         )
 
 

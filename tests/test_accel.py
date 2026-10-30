@@ -299,10 +299,11 @@ def test_get_transcriber_is_faster_whisper_and_keeps_engine_label(
         text, start, end = "hi", 0.0, 1.0
 
     class _FakeWhisper:
-        def transcribe(self, _path):  # faster-whisper returns (segments, info)
+        def transcribe(self, _audio, **_options):  # faster-whisper returns (segments, info)
             return [_Seg()], object()
 
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper())
+    monkeypatch.setattr(extract, "_decode_audio_float32", lambda _path: [0.0])
     backend = extract.get_transcriber()
     assert isinstance(backend, extract.FasterWhisperBackend)
     from pathlib import Path
@@ -318,10 +319,11 @@ def _fake_mlx(monkeypatch: pytest.MonkeyPatch, segments: list[dict], capture: di
     """Inject a fake `mlx_whisper` module so the backend runs off Apple Silicon."""
     mlx = types.ModuleType("mlx_whisper")
 
-    def transcribe(audio, path_or_hf_repo=None):
+    def transcribe(audio, path_or_hf_repo=None, **options):
         if capture is not None:
             capture["audio"] = audio
             capture["repo"] = path_or_hf_repo
+            capture["options"] = options
         return {"segments": segments, "text": "", "language": "en"}
 
     mlx.transcribe = transcribe
@@ -361,6 +363,21 @@ def test_mlx_backend_normalizes_segments_and_engine_label(monkeypatch: pytest.Mo
     # PyAV-decoded array is passed to MLX (not the raw path) when faster-whisper is present.
     assert capture["audio"] == [0.0, 0.0, 0.0]
     assert capture["repo"] == extract.MLX_WHISPER_MODEL
+    assert capture["options"] == {}  # no language asked for: the engine detects
+
+
+def test_mlx_backend_forwards_a_requested_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    from exomem import extract
+
+    capture: dict = {}
+    _fake_fw_decode(monkeypatch, [0.0])
+    _fake_mlx(monkeypatch, [], capture)
+
+    extract.MlxWhisperBackend().transcribe(Path("clip.wav"), language="et")
+
+    assert capture["options"] == {"language": "et"}
 
 
 def test_mlx_load_audio_falls_back_to_path_without_faster_whisper(

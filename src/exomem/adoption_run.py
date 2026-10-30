@@ -1881,9 +1881,11 @@ def _apply_chunk(
                 outcomes[path] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
                 )
-                if run.get("consume", True):  # a run that opted out claims no removal
+                if run.get("consume", True):
                     outcomes[path]["consumed"] = True
                     stats["consumed"] += 1
+                else:  # a run that opted out claims no removal, and counts its missing copy as changed
+                    _record_unchanged(root, planned, outcomes[path], stats)
                 continue
         if failure is not None:
             outcomes[path] = failure
@@ -2120,9 +2122,8 @@ def _settle_staged(
         return
     stage = reads.recorded_stage(root, run)
     if not os.path.lexists(root / planned["original_path"]):
-        if _filed_and_gone(root, run, reads, planned) is None or not run.get("consume", True):
-            return  # nothing is left to hash, and a run that opted out claims no removal
-        consumed = True
+        # A run that opted out claims no removal; its missing copy is recorded as changed below.
+        consumed = run.get("consume", True) and _filed_and_gone(root, run, reads, planned) is not None
     else:
         consumed = (
             stage is not None and run.get("consume", True) and planned["form"] == "artifact"
