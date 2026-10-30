@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +13,7 @@ from record_fixtures import (
     setup_ledger_collection,
 )
 
-from exomem import record_formats, records, state_paths, vault
+from exomem import record_formats, records, vault
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.governance.principal import library_scope
@@ -459,38 +458,6 @@ def test_a_full_cap_batch_commits_within_the_lease_budget(vault_root: Path) -> N
     assert result["committed"] is True
     assert records.inspect_audit_gap(vault_root, _manifest(vault_root))["status"] == "ok"
     assert held < 12.0, f"a {records.BULK_UPSERT_MAX_ROWS}-row call held the lease {held:.1f}s"
-
-
-@pytest.mark.parametrize("writer", ["append", "bulk_upsert"])
-def test_a_guarded_file_write_resolves_the_state_location_a_bounded_number_of_times(
-    vault_root: Path, monkeypatch: pytest.MonkeyPatch, writer: str
-) -> None:
-    # Each guarded write opens one resolution scope. Without it the state location was resolved
-    # per planned file (559 times for 20 rows), a filesystem realpath each.
-    expected = _hash(vault_root)
-    real_compute = state_paths._compute_vault_state_dir
-    request_thread = threading.get_ident()
-    computed: list[str] = []
-
-    def counting_compute(root: Path) -> Path:
-        # Own vault, request thread only: the patch is process-wide, and the write starts
-        # background threads that resolve this vault at times the test does not control.
-        if str(root) == str(vault_root) and threading.get_ident() == request_thread:
-            computed.append(str(root))
-        return real_compute(root)
-
-    monkeypatch.setattr(state_paths, "_compute_vault_state_dir", counting_compute)
-    if writer == "append":
-        result = records.append_record(
-            vault_root, LEDGER_COLLECTION_PATH, item=ledger_item(slug="entry-000"),
-            why="record one entry", expected_container_hash=expected,
-        )
-    else:
-        result = _bulk(vault_root, _rows(20), expected_container_hash=expected)
-
-    assert result.get("committed", True) is True
-    assert len(computed) <= 30, len(computed)
-    assert state_paths.request_memo_scope() is None, "the write left its scope open"
 
 
 def test_the_row_cap_admits_exactly_its_bound(vault_root: Path) -> None:

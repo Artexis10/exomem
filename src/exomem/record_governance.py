@@ -1383,7 +1383,8 @@ def resolve_collection_for_mutation(
     it, so a collection that the vault's marker routes to the store refuses both times.
     """
     root = Path(vault_root)
-    # A preflight: its memo ends here, before any mutation boundary; it submits no write and starts no task.
+    # A preflight: its memo ends here, before the write's mutation boundary, which resolves again
+    # inside; it holds only an ownership read guard, submits no write and starts no task.
     with state_paths.resolution_scope():
         require_file_collection(root, selector, authorize_path=lambda relative: _authorize(root, relative))
         return _resolve_released_collection(root, selector, receipt=False)

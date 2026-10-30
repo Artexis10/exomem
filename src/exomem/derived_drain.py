@@ -567,7 +567,8 @@ class DerivedDrain:
                 current = time.time()
                 try:
                     limit = progress_limit(resource_limit=self.resource_limit)
-                    # One tick's placement answers are configuration; an executor thread gets no memo.
+                    # One tick reuses placement and pins the connector ceiling it first reads; admission
+                    # carries that same boundary and egress re-reads it live. Executor threads get no memo.
                     with state_paths.resolution_scope():
                         processed = drain_once(
                             self.vault_root,
