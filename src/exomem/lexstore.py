@@ -70,7 +70,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -79,10 +79,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
-from . import call_spans, foreground_priority, reserved_paths
+from . import call_spans, foreground_priority, request_budget, reserved_paths
 from .find_types import RankingPage
 from .kbdir import kb_dirname
-from .published_admission import Admission, admission_of
+from .published_admission import Admission, admission_of, deciding
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +177,66 @@ def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -
     if view is not None and dict(checkpoints) != view.checkpoints:
         raise ValueError("catalogue admission cannot replace a retained view's checkpoints")
     _ADMITTED_CATALOG.set((root, MappingProxyType(dict(checkpoints)), view))
+
+
+#: `CatalogReadiness.status` of a query that the request budget stopped; see `stopping_at_budget`.
+DEADLINE_STATUS = "deadline"
+#: SQLite calls the budget check once per this many VM instructions: the stop lands within a few
+#: milliseconds, and the check is a clock read.
+_BUDGET_CHECK_INSTRUCTIONS = 1000
+
+
+class BudgetStop:
+    """Whether a catalogue query run inside `stopping_at_budget` was stopped by the request budget."""
+
+    __slots__ = ("hit",)
+
+    def __init__(self) -> None:
+        self.hit = False
+
+
+_STOP_AT_BUDGET: ContextVar[BudgetStop | None] = ContextVar("catalogue_stop_at_budget", default=None)
+
+
+@contextlib.contextmanager
+def stopping_at_budget() -> Iterator[BudgetStop]:
+    """Stop each catalogue query run inside this scope once the request budget has no time left.
+
+    The query answers `CatalogReadiness(DEADLINE_STATUS, False)` and schedules no repair, and the
+    scope's `BudgetStop.hit` records it, so the caller can abstain instead of finishing after the
+    client has gone, however its code between queries read the empty answer. Opt-in, because only a
+    caller with a way to give up (the activation carry) may be handed no answer; with no budget
+    bound the scope changes nothing.
+    """
+    stop = BudgetStop()
+    token = _STOP_AT_BUDGET.set(stop)
+    try:
+        yield stop
+    finally:
+        _STOP_AT_BUDGET.reset(token)
+
+
+@contextlib.contextmanager
+def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[Callable[[], bool]]:
+    """Interrupt the statement `conn` runs once the request budget is spent; yields whether it did."""
+    scope = _STOP_AT_BUDGET.get()
+    budget = request_budget.current() if scope is not None else None
+    interrupted = False
+
+    def check() -> int:
+        nonlocal interrupted
+        if budget.remaining() > 0:
+            return 0
+        interrupted = scope.hit = True
+        return 1
+
+    if budget is not None:
+        conn.set_progress_handler(check, _BUDGET_CHECK_INSTRUCTIONS)
+    try:
+        yield lambda: interrupted
+    finally:
+        if budget is not None:
+            conn.set_progress_handler(None, 0)
 
 
 def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
@@ -1154,7 +1214,8 @@ class CatalogReadiness:
     ``status`` is one of ``available`` (this exact projection is present),
     ``stale`` (well-formed but not yet at the requested freshness, or missing),
     ``unsupported`` (the ``python`` kill switch retired the catalog),
-    ``transient_failure`` (a passing lock/interrupt), ``definitions_unavailable``
+    ``transient_failure`` (a passing lock/interrupt), ``deadline`` (the request budget
+    stopped the query, see ``stopping_at_budget``), ``definitions_unavailable``
     (an admitted page's selected definitions are missing, so dependent unit
     coverage is incomplete), or ``fatal_failure`` (the sidecar proved unusable
     for the process). Only ``available`` is
@@ -2652,6 +2713,79 @@ class _AdmittedStatisticsEntry:
     occurrences: Mapping[str, tuple[tuple[int, str, str], ...]] | None = None
     #: Page lengths and word postings over the same rows as `statistics`; page corpora only.
     postings: Any = None
+
+
+#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes each, so 32 MiB, which
+#: holds about 10,000 pages of 400 distinct words. A corpus past it keeps no base, and its next build counts
+#: every page.
+_ADMITTED_BASE_TERMS_MAX = 4_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmittedBase:
+    """What an admitted corpus's statistics were built from, so the next build re-reads only the pages that differ.
+
+    `pages` maps a page to `(digest of its stemmed text, token count, unique terms in first-seen order)`.
+    A page's entry is a function of its stemmed text alone, so the base serves any later corpus.
+    """
+
+    pages: Mapping[str, tuple[bytes, int, tuple[str, ...]]]
+    frequency: Mapping[str, int]
+
+
+def _text_digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+
+
+def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...]]:
+    """One page's token count and unique terms, interned so the pages of a base share each term."""
+    words = stemmed.split()
+    return len(words), tuple(map(sys.intern, dict.fromkeys(words)))
+
+
+def _admitted_corpus(
+    rows: Mapping[str, str], digests: Mapping[str, bytes], base: _AdmittedBase | None
+) -> tuple[Any, Any, _AdmittedBase | None]:
+    """The Okapi figures, postings and base of the corpus `rows` (page -> stemmed text), which `digests` fingerprints.
+
+    A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
+    and the word counts move by exactly the terms that left or entered. The result equals
+    `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    """
+    from . import bm25 as bm25_module
+
+    held = base.pages if base is not None else {}
+    pages: dict[str, tuple[bytes, int, tuple[str, ...]]] = {}
+    for path, text in rows.items():
+        kept = held.get(path)
+        if kept is not None and kept[0] == digests[path]:
+            pages[path] = kept
+        else:
+            length, terms = _page_terms(text)
+            pages[path] = (digests[path], length, terms)
+    # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
+    ordered = sorted(pages)
+    if base is None:
+        # Counting in that order leaves the counts in the order `of` gives.
+        frequency = dict(Counter(itertools.chain.from_iterable(pages[path][2] for path in ordered)))
+    else:
+        counts = Counter(base.frequency)
+        counts.subtract(itertools.chain.from_iterable(
+            kept[2] for path, kept in held.items() if pages.get(path) is not kept
+        ))
+        counts.update(itertools.chain.from_iterable(
+            page[2] for path, page in pages.items() if held.get(path) is not page
+        ))
+        # The base's order is stale: an edit can bring a word forward, a delete can end one.
+        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path][2] for path in ordered))
+        frequency = {term: counts[term] for term in first_seen}
+    statistics = bm25_module.CorpusStatistics.from_counts(
+        len(pages), sum(page[1] for page in pages.values()), frequency
+    )
+    postings = bm25_module.CorpusPostings({path: page[1] for path, page in pages.items()})
+    kept_terms = sum(len(page[2]) for page in pages.values())
+    retained = _AdmittedBase(pages, statistics.document_frequency) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
+    return statistics, postings, retained
 
 
 @dataclass(frozen=True, slots=True)
@@ -4291,6 +4425,9 @@ class LexicalStore:
         # corpus's Okapi figures. A miss can reuse the math after a complete
         # SQL input check. Each entry holds one vocabulary-sized mapping.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
+        # scope -> the pages the latest admitted corpus of that scope was built from;
+        # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
+        self._admitted_bases: dict[str, _AdmittedBase] = {}
         # (scope, catalogue snapshot generation) -> that snapshot's admitted
         # recall rows, and the lock a miss holds while one request fills it.
         # See `_admitted_recall_rows`.
@@ -8472,8 +8609,6 @@ class LexicalStore:
     ) -> tuple[_AdmittedStatisticsEntry, tuple]:
         """Okapi figures reused only for the same snapshot or complete SQL inputs,
         with the snapshot generation they were read at."""
-        from . import bm25 as bm25_module
-
         owns_snapshot = not conn.in_transaction
         if owns_snapshot:
             conn.execute("BEGIN")
@@ -8495,13 +8630,14 @@ class LexicalStore:
                 "ORDER BY p.path",
                 (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
             ))
+            digests = {path: _text_digest(stemmed) for path, stemmed in rows.items()}
             fingerprint = hashlib.sha256()
-            for path, stemmed in rows.items():
-                for value in (path, stemmed):
-                    encoded = value.encode("utf-8", "surrogatepass")
-                    # Length framing keeps field and row boundaries unambiguous.
-                    fingerprint.update(len(encoded).to_bytes(8, "big"))
-                    fingerprint.update(encoded)
+            for path, page_digest in digests.items():
+                encoded = path.encode("utf-8", "surrogatepass")
+                # Length framing keeps field and row boundaries unambiguous; a digest has a fixed size.
+                fingerprint.update(len(encoded).to_bytes(8, "big"))
+                fingerprint.update(encoded)
+                fingerprint.update(page_digest)
             current_fingerprint = fingerprint.digest()
 
             def same_inputs(retained_key: tuple, entry: _AdmittedStatisticsEntry) -> bool:
@@ -8520,11 +8656,14 @@ class LexicalStore:
                 statistics, postings = retained.statistics, retained.postings
             else:
                 call_spans.measure(call_spans.STATS_REBUILT)
-                documents = {path: stemmed.split() for path, stemmed in rows.items()}
-                statistics = bm25_module.CorpusStatistics.of(documents)
-                postings = bm25_module.CorpusPostings(
-                    {path: len(document) for path, document in documents.items()}
-                )
+                with self._term_frequency_cache_lock:
+                    base = self._admitted_bases.get(scope)
+                statistics, postings, base = _admitted_corpus(rows, digests, base)
+                with self._term_frequency_cache_lock:
+                    if base is None:
+                        self._admitted_bases.pop(scope, None)
+                    else:
+                        self._admitted_bases[scope] = base
             with self._term_frequency_cache_lock:
                 # Equivalent snapshot aliases must not evict another admitted corpus.
                 # Recheck here because another reader can install during aggregation.
@@ -9623,13 +9762,15 @@ class LexicalStore:
         """
         decided: dict[str, bool] = {}
         stored: dict[str, bool] = {}
-        for path in plan.missing:
-            allowed, page_local = admission.decide(path, True)
-            decided[path] = allowed
-            if page_local and path not in plan.live and plan.signatures is not None:
-                signature = plan.signatures.get(path)
-                if signature is not None and self._page_unchanged_since(path, signature):
-                    stored[sys.intern(path)] = allowed
+        # A collection store decides its pages on one thread, so the pages it owns share one store request.
+        with deciding(plan.missing):
+            for path in plan.missing:
+                allowed, page_local = admission.decide(path, True)
+                decided[path] = allowed
+                if page_local and path not in plan.live and plan.signatures is not None:
+                    signature = plan.signatures.get(path)
+                    if signature is not None and self._page_unchanged_since(path, signature):
+                        stored[sys.intern(path)] = allowed
         if stored or not plan.current:
             known = plan.signatures or {}
             allowed_map = {
@@ -9796,8 +9937,7 @@ class LexicalStore:
                     # exactly current, or the full pass runs.
                     _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(None, readiness)
-                with call_spans.span("lexical.query"):
-                    return CatalogQueryResult(query_fn(view.connection), readiness)
+                return self._query_within_budget(view.connection, query_fn, readiness)
             except RegistryError:
                 return CatalogQueryResult(
                     None, CatalogReadiness("definitions_unavailable", False, backend())
@@ -9847,8 +9987,7 @@ class LexicalStore:
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
-                with call_spans.span("lexical.query"):
-                    return CatalogQueryResult(query_fn(conn), readiness)
+                return self._query_within_budget(conn, query_fn, readiness)
             finally:
                 conn.close()
         except RegistryError:
@@ -9860,6 +9999,28 @@ class LexicalStore:
             elif verdict.status == "fatal_failure":
                 log.warning(failure_message, e)
             return CatalogQueryResult(None, verdict)
+
+    @staticmethod
+    def _query_within_budget(
+        conn: sqlite3.Connection,
+        query_fn: Callable[[sqlite3.Connection], _CatalogValue],
+        readiness: CatalogReadiness,
+    ) -> CatalogQueryResult[_CatalogValue]:
+        """`query_fn(conn)`, or `DEADLINE_STATUS` when `stopping_at_budget` ended it.
+
+        A stopped query's value is dropped even when `query_fn` swallowed the interrupt: it may be
+        a partial answer.
+        """
+        with call_spans.span("lexical.query"), _interrupt_at_budget(conn) as stopped:
+            try:
+                value = query_fn(conn)
+            except sqlite3.Error:
+                if not stopped():
+                    raise
+            else:
+                if not stopped():
+                    return CatalogQueryResult(value, readiness)
+        return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, readiness.backend))
 
     def _serve_from_ready_catalog(self, scope, freshness, query_fn, failure_message):
         """Compatibility wrapper retaining the historical list-or-None contract."""

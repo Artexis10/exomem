@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import memory_refs, state_paths
 from .. import structured_collections as collections
+from ..published_admission import pending_decisions
 from .connection import CollectionStoreError, WriterConnection
 
 if TYPE_CHECKING:
@@ -189,6 +190,61 @@ def selected_projection_writer(vault_root, path):
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
+_INDIVIDUALLY = object()
+
+
+def _answer_in_one_round_trip(pending, server, read, vault_root, path, kwargs):
+    """Answer one store-owned path of a publication, deciding its pending siblings in the same store call.
+
+    A publication that names its pages (`published_admission.deciding`) asks for the
+    same read of each one. The first such call runs it for every pending path that
+    routes to the same store, in one read-only, non-waking store request; each later
+    call takes its own path's answer, once. An answer is what that path's own call
+    would return or raise, so a refusal stays that page's refusal (`canonical_read`
+    maps it to `unavailable`). Answers are returned, never kept: they die with the
+    publication's scope. A call that asks anything else (another read, root or
+    arguments), and every call after a refused batch, goes `_INDIVIDUALLY`.
+    """
+    from ..cli_ops import OpError
+    from .runtime import projection_route
+
+    if pending.call is None:
+        pending.call = (read, vault_root, kwargs)
+        siblings = [path]
+        for other in pending.paths:
+            if other == path:
+                continue
+            try:
+                routed = projection_route(vault_root, other)
+            except (CollectionStoreError, OpError):
+                continue  # that page asks for itself and is refused there
+            if routed is server:
+                siblings.append(other)
+
+        def work():
+            answers = {}
+            for candidate in siblings:
+                try:
+                    answers[candidate] = ("value", read(vault_root, candidate, **kwargs))
+                except (CollectionStoreError, OpError) as error:
+                    answers[candidate] = ("refused", error)
+                except Exception as error:  # noqa: BLE001 - raised again at that page's own turn
+                    answers[candidate] = ("raised", error)
+            return answers
+
+        # A refusal of the whole request is this first page's refusal; the others then ask for themselves.
+        pending.answers = server.call(work, read_only=True, wake_maintenance=False)
+    elif pending.call[0] is not read or pending.call[1] != vault_root or pending.call[2] != kwargs:
+        return _INDIVIDUALLY
+    answer = pending.answers.pop(path, None)
+    if answer is None:
+        return _INDIVIDUALLY
+    kind, payload = answer
+    if kind != "value":
+        raise payload
+    return payload
+
+
 def canonical_read(function=None, *, projection=False, unavailable=None,
                    receipt_boundary: str | None = None):
     """Keep a structured consumer's canonical reads under one request snapshot."""
@@ -211,6 +267,11 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             path = value.get("path") if isinstance(value, Mapping) else value
             try:
                 if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
+                    if (pending := pending_decisions()) is not None and len(args) == 1 and args[0] is path \
+                            and path in pending.paths:
+                        answered = _answer_in_one_round_trip(pending, server, read, vault_root, path, kwargs)
+                        if answered is not _INDIVIDUALLY:
+                            return answered
                     return server.call(lambda: read(vault_root, *args, **kwargs))
             except (CollectionStoreError, OpError):
                 if unavailable is None:

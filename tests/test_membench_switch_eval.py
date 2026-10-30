@@ -84,6 +84,41 @@ def test_arm_filters_keep_published_read_tools_and_remove_only_activation_from_p
     assert protocol.ACTIVATION_TOOL == protocol.P_FILTERED_TOOL == activation
 
 
+def test_arm_n_configures_an_actor_with_no_exomem_server_hook_or_instruction_line(tmp_path: Path) -> None:
+    from epistemic.journeys.f27_replay import AgentEnvelope
+    from membench.utility.switch_eval.arms import TEXTS, arm_hashes
+    from membench.utility.switch_eval.session import arm_files, session_argv, session_env
+
+    layout = Layout(tmp_path / "run")
+    spec = arm_specs()["N"]
+    files = arm_files(layout, spec)
+    argv = session_argv(AgentEnvelope(Path("/bin/claude"), "1"), spec, files, model="m")
+    env = session_env({"EXOMEM_VAULT_PATH": "/v", "KB_MODE": "x", "PATH": "/usr/bin"}, Slot(layout.slot), spec)
+    named = arm_hashes(spec, hook_home=layout.slot / "hook-home", surface=None)
+
+    assert json.loads(files.contents["mcp.json"]) == {"mcpServers": {}}
+    assert files.settings is None and "--settings" not in argv
+    assert argv[argv.index("--allowedTools") + 1] == argv[argv.index("--tools") + 1] == ""
+    assert files.contents["instructions.md"] == (TEXTS / "actor.md").read_text(encoding="utf-8").strip() + "\n"
+    assert not [name for name in env if name.startswith(("EXOMEM_", "KB_"))]
+    assert not named["arm_hash"].startswith("pending")
+
+
+def test_arm_n_is_outside_the_protocol_so_the_frozen_digests_and_hashes_of_a_m_and_p_hold() -> None:
+    from membench.utility.switch_eval.arms import arm_hashes, canonical_json, sha256_text
+
+    # Recorded before arm N joined the harness. A moved value means the protocol or a
+    # shared text changed, which invalidates every held-out run prepared on the old one.
+    surface = {"server_instructions": "synthetic-server-instructions", "tool_descriptions": "synthetic-tool-descriptions"}
+    specs = arm_specs()
+    hashes = {arm: arm_hashes(specs[arm], hook_home=Path("/slot/hook-home"), surface=surface) for arm in "MP"}
+
+    assert protocol.ARM_IDS == ("A", "M", "P") and "N" in specs
+    assert sha256_text(canonical_json(protocol.snapshot())) == "d21d7822e563d5fa204c851beb1076066ed8f2de875d3ac9e592b4abc013522b"
+    assert hashes["P"]["arm_hash"] == "472f06bd6d26346b0483d2cb28a559674abd08891981ae599f224cb9369074d4"
+    assert hashes["M"]["components"]["client_instructions"] == "586e0ac64fd4c7210df8f232138bc8f15498c58f7e103ea30956cec67f33c82d"
+
+
 # A stand-in MCP server: answers initialize, tools/list and tools/call; with
 # --crash-on-call exits mid-call, as a crashing server under test would, and
 # with --exit-at-start exits before it reads a message, as a broken build would.
@@ -459,6 +494,22 @@ def test_the_judge_view_masks_every_arms_tool_names_in_an_answer_from_any_arm(tm
     assert item["answer"] == "I had no [tool], so [tool] and [tool] did it. The release is frozen."
 
 
+def test_the_judge_and_the_audit_leave_out_what_an_arm_with_no_exomem_never_had(tmp_path: Path) -> None:
+    from membench.utility.switch_eval.audit import original_items
+
+    layout = Layout(tmp_path)
+    config = layout.arm_dir("N") / "session-inputs" / "mcp.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    layout.judge.mkdir()
+    (layout.judge / "items.jsonl").write_text('{"item_id": "i1"}\n{"item_id": "i2"}\n', encoding="utf-8")
+    arm_key = {"i1": {"arm": "M", "rejudge_of": None}, "i2": {"arm": "N", "rejudge_of": None}}
+
+    # N was shown no tool, so it has no captured surface; the audit guesses among the protocol's arms.
+    assert exomem_tool_names(layout, arms=["N"], trees=["snapshot"]) == ()
+    assert [item["item_id"] for item in original_items(layout, Unblinded(arm_key, ("claude",)))] == ["i1"]
+
+
 def test_a_contamination_verdict_without_its_span_is_refused() -> None:
     item = item_payload(_case("case-1", expects_memory=False), "You said the release ships Friday.", "item-1", tool_names=())
     verdict = {"item_id": "item-1", "required": [], "forbidden": [], "no_memory": {"asserts_unsupplied_user_facts": True, "span": None}}
@@ -526,6 +577,83 @@ with open(sys.argv[1], "wb") as capture:
     }
     assert json.loads(frames[1]) == envelope
 
+
+@pytest.mark.parametrize(
+    ("servers", "outcome"),
+    [([], OK), ([{"name": "exomem", "status": "connected"}], "abort")],
+    ids=["no server", "a leaked Exomem server"],
+)
+def test_an_arm_with_no_exomem_runs_without_a_server_and_stops_on_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, servers: list[dict], outcome: str
+) -> None:
+    from membench.utility.switch_eval import session
+
+    slot = Slot(tmp_path / "slot")
+    slot.runtime.mkdir(parents=True)
+    slot.cwd.mkdir()
+    client = tmp_path / "stand_in_client.py"
+    client.write_text(
+        """
+import json, sys
+print(sys.argv[1], flush=True)
+for line in sys.stdin:
+    print(json.dumps({"type": "result", "subtype": "success", "result": "an answer"}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    init = {"type": "system", "subtype": "init", "apiKeySource": "none", "model": "m",
+            "claude_code_version": "v", "tools": [], "mcp_servers": servers}
+    inputs = replace(_inputs(arm="N"), cwd=slot.cwd, argv=(sys.executable, str(client), json.dumps(init)))
+    monkeypatch.setattr(session, "_USER_STATE_ROOT", tmp_path / "user-state")
+    executor = ClaudeSessionExecutor(Layout(tmp_path), {"N": arm_specs()["N"]}, "m", "v", {}, turn_timeout=5)
+
+    assert executor.execute_prepared(inputs, tmp_path / "attempt", slot).outcome == outcome
+
+
+def test_prepare_runs_the_development_arm_only_beside_development_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval.cases import DEFAULT_TREE
+    from membench.utility.switch_eval.session import API_KEY_VARIABLES
+
+    for name in API_KEY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+    key, cases, vault = tmp_path / "key.jsonl", tmp_path / "cases.jsonl", tmp_path / "vault"
+    key.write_text(
+        json.dumps({"case_id": "case-1", "kind": "miss", "expects_memory": True, "required": []}) + "\n",
+        encoding="utf-8",
+    )
+    cases.write_text(json.dumps({"case_id": "case-1", "turns": ["What did we decide?"]}) + "\n", encoding="utf-8")
+    vault.mkdir()
+    (vault / "page.md").write_text("A page.", encoding="utf-8")
+    client = tmp_path / "claude"
+    client.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        "print('1.0' if '--version' in sys.argv else "
+        "'--strict-mcp-config --mcp-config --setting-sources --input-format --output-format "
+        "--verbose --include-hook-events --allowedTools --tools --model "
+        "--no-session-persistence --append-system-prompt-file --settings')\n",
+        encoding="utf-8",
+    )
+    client.chmod(0o755)
+
+    def prepare(run: str, split: str, arms: str) -> int:
+        return cli.main(["prepare", "--run", str(tmp_path / run), "--key", f"{split}={key}",
+                         "--cases", str(cases), "--tree", f"{DEFAULT_TREE}={vault}", "--actor-model", "m",
+                         "--arms", arms, "--claude", str(client)])  # fmt: skip
+
+    with pytest.raises(SystemExit, match="development arm"):
+        prepare("heldout-run", protocol.SPLIT_HELDOUT, "M,N")
+    assert prepare("dev-run", protocol.SPLIT_DEV, "M,N") == 0
+    assert json.loads((tmp_path / "dev-run" / "inputs.json").read_text())["arms"] == ["M", "N"]
+    # An arm with no Exomem needs no state: its stage builds nothing and its hash is already whole.
+    assert prepare("n-run", protocol.SPLIT_DEV, "N") == 0
+    assert cli.main(["state", "--run", str(tmp_path / "n-run")]) == 0
+    assert not json.loads((tmp_path / "n-run" / "arm-hashes.json").read_text())["N"]["arm_hash"].startswith("pending")
+    assert not (tmp_path / "n-run" / "built-trees").exists()
+    assert cli.main(["run", "--run", str(tmp_path / "n-run"), "--dry-run"]) == 0
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Process custody uses Linux /proc start times")
 def test_prepared_execution_stops_its_server_when_evidence_copy_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

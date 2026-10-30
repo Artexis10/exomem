@@ -41,9 +41,11 @@ from urllib.parse import quote, unquote
 
 from . import (
     activation_conventions,
+    capabilities,
     context_catalogue,
     context_roles,
     find_types,
+    foreground_priority,
     homes,
     lifecycle_statuses,
     project_keys,
@@ -54,6 +56,7 @@ from . import (
     working_set,
     working_set_index,
     working_set_resolve,
+    working_set_runtime,
     working_set_state,
 )
 from .activation_result import AMBIGUOUS, INDEX_WARMING, UNRESOLVED, WITHHELD
@@ -371,10 +374,13 @@ class Row:
             "description": self.description,
             "description_origin": self.description_origin,
             "ref": self.ref,
-            "topics": list(self.topics),
-            "lifecycle_class": self.lifecycle_class,
-            "activity": self.activity or None,
         }
+        # A field with nothing to say is absent: an empty list and a null cost bytes and tell the reader nothing.
+        if self.topics:
+            item["topics"] = list(self.topics)
+        if self.lifecycle_class is not None:
+            item["lifecycle_class"] = self.lifecycle_class
+        item["activity"] = self.activity or None
         if self.anchor_kind:
             item["anchor_kind"] = self.anchor_kind
         if self.kind == KIND_ANCHOR:
@@ -418,7 +424,7 @@ class View:
     #: How far the membership graph is built. Owner-only: a restricted caller is never told.
     graph: str | None = None
     #: The map's current state of each anchor and collection, by entry id, over the caller's view.
-    states: dict[str, dict[str, Any]] | None = None
+    states: dict[str, dict[str, Any] | None] | None = None
     #: False when the map's states could not be read; its items then carry none.
     state_available: bool = True
     #: Profiles expose only truncation and notice markers; maps and warming omit this field.
@@ -520,28 +526,36 @@ class _World:
 
 def _world(
     catalogue: context_catalogue.ContextCatalogue, caller: CallerView,
-    among: Sequence[context_catalogue.Entry] | None = None,
+    among: Sequence[context_catalogue.Entry] | None = None, timings: find_types.FindTimings | None = None,
 ) -> _World:
     """The caller's world over `among`, entries chosen before admission (default: every entry)."""
-    if among is None:
-        among = catalogue.entries()
-        # Every entry is decided here, and each read of the view decides them all again.
-        egress.reserve_decision_memo(len(among))
-    entries = [
-        entry for entry in among
-        if _admits(entry, caller.visible)
-        # A project anchor is the project registry's entry: its title is the registry's folder.
-        and (caller.projects_admitted or entry.anchor_kind != working_set_index.PROJECT_ANCHOR_KIND)
-    ]
+    with find_types.timing_span(timings, "working_set.map_entries"):
+        if among is None:
+            among = catalogue.entries()
+            # Every entry is decided here, and each read of the view decides them all again.
+            egress.reserve_decision_memo(len(among))
+        entries = [
+            entry for entry in among
+            if _admits(entry, caller.visible)
+            # A project anchor is the project registry's entry: its title is the registry's folder.
+            and (caller.projects_admitted or entry.anchor_kind != working_set_index.PROJECT_ANCHOR_KIND)
+        ]
     # The join runs over the visible entries only: a relation to an entry the caller cannot see adds nothing.
     # It resolves through the domain registry, so a caller who may not read the registry joins no topic.
-    joined = (
-        catalogue.memberships(
-            entries, projects=caller.projects_admitted, carriers=caller.carriers_admitted, homes=caller.homes_admitted,
-        ).topics
-        if caller.domains_admitted
-        else {}
-    )
+    with find_types.timing_span(timings, "working_set.map_memberships"):
+        joined = (
+            catalogue.memberships(
+                entries, projects=caller.projects_admitted, carriers=caller.carriers_admitted, homes=caller.homes_admitted,
+            ).topics
+            if caller.domains_admitted
+            else {}
+        )
+    with find_types.timing_span(timings, "working_set.map_world"):
+        return _world_rows(entries, joined)
+
+
+def _world_rows(entries: Sequence[context_catalogue.Entry], joined: Mapping[str, tuple[str, ...]]) -> _World:
+    """The rows of the entries the caller sees, each with the topics it joins."""
     # An entry with no activity of its own (a project anchor) takes its project's newest visible page.
     project_activity: dict[str, str] = {}
     for entry in entries:
@@ -607,9 +621,14 @@ class _Prepared:
 
 def _prepare(
     vault_root: Path, path: str, caller: CallerView | None, purpose: str | None = None,
-    freshness_stamp: str = "",
+    freshness_stamp: str = "", *, timings: find_types.FindTimings | None = None,
+    fold: str = context_catalogue.FOLD_INLINE, keyed: bool = False,
 ) -> _Prepared:
-    """Resolve the ref and bring the catalogue forward. Reads no entry."""
+    """Resolve the ref and bring the catalogue forward. Reads no entry.
+
+    `fold` is how far the catalogue is advanced on this thread (`context_catalogue.FOLD_MODES`).
+    `keyed` reads the registries' digest here, where it is timed: the owner's map cache keys on it.
+    """
     target = parse_view_ref(path)
     if target is None:
         raise not_found()
@@ -617,7 +636,10 @@ def _prepare(
     caller = caller or CallerView.current(root, purpose=purpose)
     # Admission comes before any definition is read, so a registered topic and an unknown one read
     # the same to a caller who may not read the registry, whatever the catalogue's readiness.
-    registries = _Registries(root) if caller.domains_admitted else None
+    with find_types.timing_span(timings, "working_set.catalogue_registries"):
+        registries = _Registries(root) if caller.domains_admitted else None
+        if keyed and registries is not None:
+            registries.digest  # noqa: B018 - computed and kept here, so the key reads it free
     key = ""
     ref = path
     if target.kind in (VIEW_TOPIC, PROFILE_TOPIC):
@@ -632,10 +654,11 @@ def _prepare(
     # The lag is decided with the page filter, which keeps a page that no longer exists:
     # `caller.visible` fails closed on it, and a deleted page would read as withheld.
     lag_visible = None if caller.visible is None else egress.page_filter_over(root, caller.visible)
-    state, catalogue, unlisted = context_catalogue.ensure_unlisted(
-        root, freshness_stamp=freshness_stamp, visible=lag_visible,
-        registry_visible=caller.projects_admitted,
-    )
+    with find_types.timing_span(timings, "working_set.catalogue_ensure"):
+        state, catalogue, unlisted = context_catalogue.ensure_unlisted(
+            root, freshness_stamp=freshness_stamp, visible=lag_visible,
+            registry_visible=caller.projects_admitted, fold=fold,
+        )
     return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 
 
@@ -876,8 +899,9 @@ def map_item_line(item: Mapping[str, Any]) -> str:
 
 def _map_item(view: View, row: Row) -> dict[str, Any]:
     item = row.item()
-    if view.states is not None:
-        item["state"] = view.states.get(row.entry_id)
+    state = None if view.states is None else view.states.get(row.entry_id)
+    if state is not None:
+        item["state"] = state
     return item
 
 
@@ -951,52 +975,239 @@ class _ActivationMap:
     empty: bool
 
 
-def _activation_map(
-    prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None, world: _World,
-) -> _ActivationMap:
-    """Budget before reading state; only candidate rows pay the current-state resolver's cost."""
+@dataclass(frozen=True, slots=True)
+class _OwnerMap:
+    """The owner's map before any budget cuts it: what a request of any budget selects from.
+
+    Immutable once published and shared by every request. A request that reads more states
+    publishes a copy that holds them, and never writes the dict it was given.
+    """
+
+    rows: tuple[Row, ...]
+    world: _World
+    #: The current state of each anchor and collection read so far, by entry id; None where it has none.
+    states: Mapping[str, dict[str, Any] | None]
+    #: How far the membership graph was built when this was made. A stale serve reports it as it was.
+    graph: str | None
+    #: What the build was made from: the activation index generation and the freshness key of its request.
+    index_generation: Any
+    freshness_key: str
+
+
+def _owner_map(
+    prepared: _Prepared, world: _World, timings: find_types.FindTimings | None, *, index_generation: Any,
+    freshness_key: str,
+) -> _OwnerMap:
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None
-    rows = tuple(_view_rows(prepared.target, prepared.key, world, prepared.registries))
-    states: dict[str, dict[str, Any]] = {}
-    view = View(
-        prepared.ref, READY, None, prepared.unlisted or any(caller.sees(path) for path in catalogue.pending()), rows,
-        None if caller.restricted else catalogue.graph_state(), states,
-    )
+    with find_types.timing_span(timings, "working_set.map_rows"):
+        rows = tuple(_view_rows(prepared.target, prepared.key, world, prepared.registries))
+    graph = None if caller.restricted else catalogue.graph_state()
+    return _OwnerMap(rows, world, {}, graph, index_generation, freshness_key)
+
+
+def _lagging(prepared: _Prepared) -> bool:
+    """Whether the catalogue may be behind the vault for this caller."""
+    catalogue = prepared.catalogue
+    assert catalogue is not None
+    return prepared.unlisted or any(prepared.caller.sees(path) for path in catalogue.pending())
+
+
+def _select(
+    owner: _OwnerMap, prepared: _Prepared, max_chars: int, *, stale: bool, graph: str | None,
+    timings: find_types.FindTimings | None, source: str,
+) -> tuple[_ActivationMap, dict[str, dict[str, Any] | None]]:
+    """The lines of `owner` that fit `max_chars`, and the states this selection read that `owner` lacks.
+
+    Budget before reading state: only candidate rows pay the current-state resolver's cost.
+    """
+    caller = prepared.caller
+    # This request's copy: `owner.states` is shared and is never written.
+    states = dict(owner.states)
+    view = View(prepared.ref, READY, None, stale, owner.rows, graph, states)
     available = True
-    index = working_set_index.WorkingSetIndex(prepared.root)
-    anchors = None
+    index: working_set_index.WorkingSetIndex | None = None
+    anchors: dict[str, Any] = {}
 
     def item_for(row: Row) -> Mapping[str, Any]:
-        nonlocal available, anchors
-        if available and row.kind in (KIND_ANCHOR, KIND_COLLECTION):
+        nonlocal available, index, anchors
+        if available and row.kind in (KIND_ANCHOR, KIND_COLLECTION) and row.entry_id not in states:
             try:
-                if anchors is None:
+                if index is None:
+                    index = working_set_index.WorkingSetIndex(prepared.root)
                     anchors = {anchor.anchor_id: anchor for anchor in index.anchors()}
                 anchor = anchors.get(row.entry_id)
                 if anchor is not None:
                     # A single-row batch stops state work as soon as the budget is full.
                     states.update(_anchor_states(prepared.root, (anchor,), caller, index.token()))
+                states.setdefault(row.entry_id, None)  # read: an entry with no state is not read again
             except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
                 states.clear()
                 available = False
         return _map_item(view, row)
 
     try:
-        with find_types.timing_span(timings, "working_set.map_state"):
+        with find_types.timing_span(timings, "working_set.map_state", source=source):
             selected, overflow = map_within(view, max_chars, item_for=item_for)
     finally:
-        index.close()
+        if index is not None:
+            index.close()
     # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
-    items = [_map_item(view, rows[index]) for index in selected]
-    generation = _digest(json.dumps([items, available, overflow, not world.rows, view.stale, view.graph], sort_keys=True))
-    return _ActivationMap(replace(view, generation=generation, state_available=available), world, selected, overflow, not world.rows)
+    items = [_map_item(view, owner.rows[position]) for position in selected]
+    empty = not owner.world.rows
+    generation = _digest(json.dumps([items, available, overflow, empty, view.stale, view.graph], sort_keys=True))
+    read = {key: value for key, value in states.items() if key not in owner.states} if available else {}
+    compiled = _ActivationMap(
+        replace(view, generation=generation, state_available=available), owner.world, selected, overflow, empty
+    )
+    return compiled, read
 
 
-# The bounded owner cache retains the admitted world so warm slices reuse the map's membership joins.
-# Restricted builds never enter it.
-_OWNER_MAPS: OrderedDict[tuple[Any, ...], _ActivationMap] = OrderedDict()
+# The bounded owner cache keeps one map for each family of owner request: the vault, the caller binding and the
+# registries it may read. Its value is the exact key of the build that made the map, and the map. A request whose
+# exact key differs serves that map `stale` while one background pass rebuilds it; an unmanaged runtime rebuilds
+# inline. The map holds the admitted world, so warm slices reuse its membership joins. Restricted builds never enter it.
+_OWNER_MAPS: OrderedDict[tuple[Any, ...], tuple[tuple[Any, ...], _OwnerMap]] = OrderedDict()
 _OWNER_MAPS_LOCK = threading.Lock()
+
+
+def _family_key(root: Path, caller: CallerView) -> tuple[Any, ...]:
+    return (
+        Path(root).absolute(), caller.binding, caller.domains_admitted, caller.projects_admitted,
+        caller.carriers_admitted, caller.homes_admitted,
+    )
+
+
+def _exact_key(prepared: _Prepared, freshness_key: str, index_generation: Any, conventions_hash: str) -> tuple[Any, ...]:
+    """What an owner map was built from. The map reads no role, so neither `roles_hash` nor the budget is in it."""
+    catalogue = prepared.catalogue
+    assert catalogue is not None
+    return (
+        catalogue.token(), prepared.registries.digest if prepared.registries is not None else "",
+        freshness_key, index_generation, conventions_hash, prepared.unlisted, tuple(catalogue.pending()),
+    )
+
+
+def _publish(family: tuple[Any, ...], exact: tuple[Any, ...], owner: _OwnerMap) -> None:
+    with _OWNER_MAPS_LOCK:
+        _OWNER_MAPS[family] = (exact, owner)
+        _OWNER_MAPS.move_to_end(family)
+        while len(_OWNER_MAPS) > CACHE_SIZE:
+            _OWNER_MAPS.popitem(last=False)
+
+
+def _with_states(owner: _OwnerMap, read: Mapping[str, dict[str, Any] | None]) -> _OwnerMap:
+    return replace(owner, states={**owner.states, **read}) if read else owner
+
+
+def _served_map(
+    prepared: _Prepared, family: tuple[Any, ...] | None, deferring: bool, freshness_key: str,
+    metadata: Mapping[str, Any], map_chars: int, purpose: str | None, timings: find_types.FindTimings | None,
+) -> tuple[_ActivationMap, _OwnerMap | None]:
+    """The map this request is served, and the earlier build it came from when that build is stale.
+
+    An owner's request serves the map built for its exact key. When the key differs and a background pass is
+    to rebuild it (`deferring`), the earlier build is served `stale` and that pass is scheduled.
+    """
+    catalogue, caller = prepared.catalogue, prepared.caller
+    assert catalogue is not None
+    index_generation = metadata.get("index_generation")
+    exact = None if family is None else _exact_key(prepared, freshness_key, index_generation, metadata["conventions_hash"])
+    held = None
+    if family is not None:
+        with _OWNER_MAPS_LOCK:
+            held = _OWNER_MAPS.get(family)
+            if held is not None:
+                _OWNER_MAPS.move_to_end(family)
+    hit = held is not None and held[0] == exact
+    stale = held is not None and not hit and deferring
+    with find_types.timing_span(timings, "working_set.map", source="cache" if held and (hit or stale) else "computed"):
+        if held is not None and (hit or stale):
+            owner = held[1]
+        else:
+            world = _world(catalogue, caller, timings=timings)
+            owner = _owner_map(prepared, world, timings, index_generation=index_generation, freshness_key=freshness_key)
+        graph = owner.graph if stale else (None if caller.restricted else catalogue.graph_state())
+        with find_types.timing_span(timings, "working_set.map_stale" if stale else "working_set.map_select"):
+            compiled, read = _select(
+                owner, prepared, map_chars, stale=stale or _lagging(prepared), graph=graph, timings=timings,
+                source="cache" if hit or stale else "computed",
+            )
+    if family is not None and exact is not None and not stale:
+        if hit:
+            # More states were read at this budget: publish a copy that holds them, unless the entry has moved on.
+            if read:
+                with _OWNER_MAPS_LOCK:
+                    if _OWNER_MAPS.get(family) is held:
+                        _OWNER_MAPS[family] = (exact, _with_states(owner, read))
+        elif compiled.view.state_available and catalogue.token() == exact[0]:
+            _publish(family, exact, _with_states(owner, read))
+    if deferring and not hit:
+        _schedule_refresh(prepared.root, caller, purpose, freshness_key, map_chars, family)
+    return compiled, owner if stale else None
+
+
+def _schedule_refresh(
+    root: Path, caller: CallerView, purpose: str | None, freshness_key: str, map_chars: int,
+    family: tuple[Any, ...] | None,
+) -> None:
+    """Hand the owner map's catch-up to the vault's one background pass.
+
+    The catalogue fold and this rebuild are one job in the one slot the vault has for background builds, so
+    a second request while the slot is busy is dropped. That loses nothing: the next request that finds the
+    map out of date schedules it again.
+    """
+    if family is None:
+        return
+    who = principal_module.effective_principal()  # the pass runs on another thread, which has no principal
+
+    def refresh() -> None:
+        started, cpu = time.perf_counter(), time.thread_time()
+        with principal_module.request_scope(who):
+            published = _refresh_owner_map(root, caller, purpose, freshness_key, map_chars, family)
+        log.info(
+            "owner map refresh: %.0f ms wall, %.0f ms thread cpu, published=%s",
+            (time.perf_counter() - started) * 1000.0, (time.thread_time() - cpu) * 1000.0, published,
+        )
+
+    working_set_runtime._schedule_build(root, job=refresh, label="owner map")  # noqa: SLF001 - the vault's one build slot
+
+
+def _refresh_owner_map(
+    root: Path, caller: CallerView, purpose: str | None, freshness_key: str, map_chars: int, family: tuple[Any, ...],
+) -> bool:
+    """Fold the catalogue to the vault and rebuild the owner map from it; True when it was published."""
+    prepared = _prepare(
+        root, MAP_REF, caller, purpose, freshness_key, fold=context_catalogue.FOLD_BACKGROUND, keyed=True
+    )
+    catalogue = prepared.catalogue
+    try:
+        if _usable(prepared) is not None or catalogue is None:
+            return False
+        foreground_priority.check_cancelled()
+        index = working_set_index.WorkingSetIndex(root)
+        try:
+            index_generation = index.token()[1]
+        finally:
+            index.close()
+        exact = _exact_key(
+            prepared, freshness_key, index_generation, activation_conventions.load_conventions(root).conventions_hash
+        )
+        world = _world(catalogue, caller)
+        foreground_priority.check_cancelled()
+        owner = _owner_map(prepared, world, None, index_generation=index_generation, freshness_key=freshness_key)
+        # Selecting at the budget that asked reads its states here, so the request that follows reads none.
+        compiled, read = _select(
+            owner, prepared, map_chars, stale=False, graph=owner.graph, timings=None, source="computed"
+        )
+        # A losing build cannot publish rows from an obsolete catalogue state.
+        if not compiled.view.state_available or catalogue.token() != exact[0]:
+            return False
+        _publish(family, exact, _with_states(owner, read))
+        return True
+    finally:
+        if catalogue is not None:
+            catalogue.close()
 
 
 def map_packet_chars(block: Mapping[str, Any]) -> int:
@@ -1008,10 +1219,24 @@ def map_packet_chars(block: Mapping[str, Any]) -> int:
     return len("\n".join(line for line in lines if line))
 
 
+def serialized_chars(packet: Mapping[str, Any]) -> int:
+    """The length of the packet's compact JSON form, the form the MCP layer sends, without a `serialized_chars` field."""
+    return len(json.dumps(packet, separators=(",", ":"), ensure_ascii=False))
+
+
+def _map_description() -> str:
+    """The map's description line. It names the call that reads a ref, spelled as the serving surface spells it."""
+    return f"Index of what exists. Read a ref with {capabilities.active_call_text('read_memory', {'path': '<ref>'})}."
+
+
+#: The description of a map block that repeats nothing: the caller already holds this generation.
+UNCHANGED_DESCRIPTION = "The map you hold has not changed."
+
+
 def activation_packet(
     vault_root: Path, max_chars: int, *, purpose: str | None = None,
     generation: Mapping[str, Any], timings: find_types.FindTimings | None = None,
-    turn_leads: Callable[[CallerView], TurnLeads] | None = None,
+    turn_leads: Callable[[CallerView], TurnLeads] | None = None, known_generation: str | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1019,19 +1244,37 @@ def activation_packet(
     (so the map is the same on every turn), and it is called once, after the map is compiled, with the
     map's caller view, for what the turn's words reached. A fault in it, or no room for a line, sets the
     slice's state and never changes the map.
+
+    `known_generation` is the map generation the caller holds. When it equals the generation of the map this
+    caller is served now, the block repeats no item (`unchanged`); the slice is still served.
     """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-            return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads)
-    return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads)
+            return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation)
+    return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation)
 
 
 def _activation_packet(
     root: Path, max_chars: int, purpose: str | None, generation: Mapping[str, Any],
     timings: find_types.FindTimings | None, turn_leads: Callable[[CallerView], TurnLeads] | None = None,
+    known_generation: str | None = None,
 ) -> dict[str, Any]:
+    freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
-        prepared = _prepare(root, MAP_REF, None, purpose, str(generation.get("freshness_key") or ""))
+        with find_types.timing_span(timings, "working_set.catalogue_caller"):
+            caller = CallerView.current(root, purpose=purpose)
+        # Only an owner's map is cached: the key reads every registry.
+        family = None if caller.restricted else _family_key(root, caller)
+        with _OWNER_MAPS_LOCK:
+            held = None if family is None else _OWNER_MAPS.get(family)
+        # An owner who holds a map serves it as it stands when the vault moves, and one background pass catches it
+        # up: nothing folds the catalogue on this thread.
+        deferring = held is not None and context_catalogue._managed()  # noqa: SLF001 - the runtime's own test
+        prepared = _prepare(
+            root, MAP_REF, caller, purpose, freshness_key, timings=timings,
+            fold=context_catalogue.FOLD_DEFER if deferring else context_catalogue.FOLD_INLINE,
+            keyed=family is not None,
+        )
     catalogue = prepared.catalogue
     try:
         metadata = {
@@ -1040,49 +1283,39 @@ def _activation_packet(
             **activation_conventions.load_conventions(root).generation_block(),
         }
         view = _usable(prepared)
-        description = "Index of what exists."
+        description = _map_description()
         reserve = 0 if turn_leads is None else _slice_reserve(max_chars)
         map_chars = max_chars - reserve - len(description) - 1
+        compiled = None
         if view is None:
-            assert catalogue is not None
-            # Only a caller who may use the owner cache builds its key: the key reads every registry.
-            key = None if prepared.caller.restricted else (
-                Path(root).absolute(), catalogue.token(), prepared.registries.digest if prepared.registries is not None else "",
-                str(generation.get("freshness_key") or ""), prepared.caller.binding,
-                metadata.get("index_generation"), metadata["roles_hash"], metadata["conventions_hash"],
-                prepared.unlisted, tuple(catalogue.pending()), map_chars,
+            compiled, built_from = _served_map(
+                prepared, family, deferring, freshness_key, metadata, map_chars, purpose, timings
             )
-            with _OWNER_MAPS_LOCK:
-                compiled = None if key is None else _OWNER_MAPS.get(key)
-                if compiled is not None:
-                    _OWNER_MAPS.move_to_end(key)
-            with find_types.timing_span(timings, "working_set.map", source="cache" if compiled else "computed"):
-                if compiled is None:
-                    world = _world(catalogue, prepared.caller)
-                    compiled = _activation_map(prepared, map_chars, timings, world)
-                    if key is not None and compiled.view.state_available and catalogue.token() == key[1]:
-                        with _OWNER_MAPS_LOCK:
-                            _OWNER_MAPS[key] = compiled
-                            _OWNER_MAPS.move_to_end(key)
-                            while len(_OWNER_MAPS) > CACHE_SIZE:
-                                _OWNER_MAPS.popitem(last=False)
-                else:
-                    with find_types.timing_span(timings, "working_set.map_state", source="cache"):
-                        pass
+            if built_from is not None:
+                # A stale serve says what it was built from, and that the index has moved since.
+                metadata.update(
+                    index_generation=built_from.index_generation, freshness_key=built_from.freshness_key,
+                    index_stale=True,
+                )
             view = compiled.view
         metadata["map_generation"] = view.generation
         packet = working_set.abstained_packet(reason=view.state, max_chars=max_chars, generation=metadata)
         if view.state != READY:
             return packet
-        rows = [view.rows[index] for index in compiled.selected]
+        assert compiled is not None
+        unchanged = known_generation is not None and known_generation == view.generation
+        rows = [] if unchanged else [view.rows[index] for index in compiled.selected]
         block = _response(view, [], None)
-        block["description"] = description
-        if compiled.overflow:
-            block["overflow"] = compiled.overflow
-        if compiled.empty:
-            block["reason"] = "empty"
-        if not view.state_available:
-            block["state_available"] = False
+        block["description"] = UNCHANGED_DESCRIPTION if unchanged else description
+        if unchanged:
+            block["unchanged"] = True
+        else:
+            if compiled.overflow:
+                block["overflow"] = compiled.overflow
+            if compiled.empty:
+                block["reason"] = "empty"
+            if not view.state_available:
+                block["state_available"] = False
         block["items"] = served_items(
             root, view, rows, prepared.caller, block=block, limit=packet["budget"]["limit_chars"]
         )
@@ -1528,7 +1761,9 @@ def _items(served: _Served) -> list[dict[str, Any]]:
     items = [row.item() for row in served.rows]
     if served.states is not None:
         for row, item in zip(served.rows, items, strict=True):
-            item["state"] = copy.deepcopy(served.states.get(row.entry_id))
+            state = copy.deepcopy(served.states.get(row.entry_id))
+            if state is not None:
+                item["state"] = state
     if served.extras is not None:
         for row, item in zip(served.rows, items, strict=True):
             item.update(copy.deepcopy(served.extras.get(row.entry_id) or {}))

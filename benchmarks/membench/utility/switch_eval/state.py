@@ -303,14 +303,22 @@ def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str
     return env
 
 
-def prepare_build_slot(
-    layout: Layout, source_vault: Path, *, move_vault: bool = False, custody: Mapping | None = None
-) -> Slot:
+def prepare_bare_slot(layout: Layout) -> Slot:
+    """A fresh slot with its working directories and no vault or state: the
+    slot of a session that has no Exomem (arm N)."""
+
     recover_session_vault(layout)
     slot = Slot(layout.slot)
     slot.wipe()
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True)
+    return slot
+
+
+def prepare_build_slot(
+    layout: Layout, source_vault: Path, *, move_vault: bool = False, custody: Mapping | None = None
+) -> Slot:
+    slot = prepare_bare_slot(layout)
     if custody is not None:
         _write_json_atomically(layout.run / "slot-vault.json", custody)
     if move_vault:

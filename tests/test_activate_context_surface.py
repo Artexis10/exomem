@@ -229,7 +229,11 @@ def test_kill_switch_abstains_with_reason_disabled(
 
 
 def _comparable(packet: dict) -> dict:
-    return {key: packet.get(key) for key in PARITY_BLOCKS}
+    blocks = {key: packet.get(key) for key in PARITY_BLOCKS}
+    # `serialized_chars` is the size of the whole packet as sent, so it moves with the generation metadata that
+    # these blocks leave out.
+    blocks["budget"] = {key: value for key, value in (blocks["budget"] or {}).items() if key != "serialized_chars"}
+    return blocks
 
 
 @pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default

@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, call
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
@@ -50,6 +51,7 @@ from exomem.governance.principal import (
     owner_principal,
     request_scope,
 )
+from exomem.published_admission import deciding
 
 SHARED = "Knowledge Base/Notes/Shared/quorvel-tansid-survey.md"
 TURN = "What did the quorvel tansid survey conclude?"
@@ -512,3 +514,111 @@ def test_a_page_withheld_while_the_collection_store_was_down_returns_when_it_is_
 
     assert state == "available"
     assert manifest in after, "a refusal decided during the outage outlived it"
+
+
+def _enrol_store_collections(root: Path, count: int) -> list[str]:
+    """More collections the store owns; each places its own manifest page in the catalogue."""
+    pages = [manifest_path()]
+    for index in range(count):
+        path = DAILY_PATH.replace("Daily", f"Extra{index}")
+        text = DAILY_TEXT.replace(DAILY, f"7777777{index}-7777-4777-8777-777777777777").replace("Daily", f"Extra{index}")
+        call(root, "record_memory", action="create", manifest_path=path, manifest_text=text, why="more store pages")
+        pages.append(path)
+    return pages
+
+
+@pytest.fixture
+def store_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """The arguments of every request that reaches the collection-store thread."""
+    from exomem.collection_store import runtime
+
+    requests: list[dict] = []
+    real = runtime.StoreServer.call
+
+    def counting(self, work, **kwargs):
+        requests.append(kwargs)
+        return real(self, work, **kwargs)
+
+    monkeypatch.setattr(runtime.StoreServer, "call", counting)
+    return requests
+
+
+def _per_page_verdicts(root: Path, pages: list[str]) -> dict[str, bool]:
+    """What the caller's release filter says for each page asked on its own, outside any publication."""
+    egress.clear_decision_memo()
+    with request_scope(_external()), state_paths.resolution_scope():
+        keep = egress.release_walk_filter(root)
+        return {page: keep(page) for page in pages}
+
+
+def test_a_publication_decides_its_store_owned_pages_in_one_store_request(
+    service, store_requests: list[dict]  # noqa: F811
+) -> None:
+    """Five store-owned pages took five queue entries, each behind the store thread's other work."""
+    root = service.root
+    pages = _enrol_store_collections(root, 4)
+    # One page is withheld by policy: the batch must not release what the page's own decision withholds.
+    write_scope(root, paths="Records/Extra0/**", default_deny=True)
+    write_rule(root, ceiling=0)
+    lexstore.ensure_fresh(root)
+    store_requests.clear()
+    expected = _per_page_verdicts(root, pages)
+    assert sorted(expected.values()) == [False, True, True, True, True]
+    assert len(store_requests) == len(pages), "the per-page path asks the store once for each page"
+
+    store_requests.clear()
+    egress.clear_decision_memo()
+    state, admitted = _carried_pages(root)
+
+    assert state == "available"
+    assert {page: page in admitted for page in pages} == expected
+    assert store_requests == [{"read_only": True, "wake_maintenance": False}]
+
+
+def test_a_page_the_store_refuses_stays_withheld_while_the_others_are_answered(
+    service, store_requests: list[dict], monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    from exomem.cli_ops import OpError
+
+    root = service.root
+    pages = _enrol_store_collections(root, 2)
+    write_scope(root, paths="Unrelated/**")
+    write_rule(root, ceiling=egress.LEVEL_FULL)
+    lexstore.ensure_fresh(root)
+    refused = pages[1]
+    real = egress.projection_decision
+
+    def refusing(vault_root, rel_path, *args, **kwargs):
+        if rel_path == refused:
+            raise OpError("COLLECTION_STORE_UNAVAILABLE", "the store cannot place this page")
+        return real(vault_root, rel_path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "projection_decision", refusing)
+    store_requests.clear()
+    expected = _per_page_verdicts(root, pages)
+    assert expected == {pages[0]: True, refused: False, pages[2]: True}
+
+    store_requests.clear()
+    egress.clear_decision_memo()
+    state, admitted = _carried_pages(root)
+
+    assert state == "available"
+    assert {page: page in admitted for page in pages} == expected
+    assert len(store_requests) == 1
+
+
+def test_a_batched_answer_is_never_given_to_another_caller(service) -> None:  # noqa: F811
+    """A verdict decided for one audience must not answer the next audience's question for the same page."""
+    root = service.root
+    pages = _enrol_store_collections(root, 1)
+    write_scope(root, paths="Records/**", default_deny=True)
+    write_rule(root, ceiling=egress.LEVEL_FULL)
+    lexstore.ensure_fresh(root)
+    egress.clear_decision_memo()
+    stranger = RequestPrincipal(audience_id="stranger", surface="mcp")
+
+    with deciding(pages):
+        with request_scope(_external()), state_paths.resolution_scope():
+            assert egress.release_walk_filter(root)(pages[0])
+        with request_scope(stranger), state_paths.resolution_scope():
+            assert not egress.release_walk_filter(root)(pages[1])

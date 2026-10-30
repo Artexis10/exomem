@@ -42,3 +42,27 @@ def test_edit_refusal_over_mcp_carries_its_code(
 
     assert result.structured_content["success"] is False
     assert result.structured_content["error"]["code"] == "STRING_NOT_FOUND"
+
+
+def test_unknown_filter_field_over_mcp_is_a_refusal_naming_its_path(
+    vault: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(server, "load_dotenv", lambda *_a, **_k: None)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+    mcp = server.build_server(require_auth=False)
+
+    result = asyncio.run(
+        mcp.call_tool(
+            "ask_memory",
+            {"query": "anything", "filters": {"scope": "kb"}},
+            run_middleware=True,
+        )
+    )
+
+    envelope = result.structured_content["result"]
+    error = envelope["error"]
+    assert envelope["success"] is False
+    assert error["code"] == "INVALID_FILTER_FIELD"
+    assert error["path"] == "$.scope"
+    assert error["remediation"]

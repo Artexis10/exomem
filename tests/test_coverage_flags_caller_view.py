@@ -337,7 +337,7 @@ def activation(
     monkeypatch.setattr(
         working_set_runtime,
         "_schedule_build",
-        lambda root, freshness_stamp="": scheduled.append(freshness_stamp),
+        lambda root, freshness_stamp="", **_build: scheduled.append(freshness_stamp),
     )
     # A real repair worker would converge the catalogue mid-test, so a lag would not stay where the test put it.
     monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: False)

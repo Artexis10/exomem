@@ -4740,7 +4740,7 @@ def _guarded_view_item(item: Mapping[str, Any], ctx: _PacketRelease) -> dict[str
         _names_withheld(state.get("path"), ctx.frozen)
         or _value_names_an_invalid_reference(state.get("path"), ctx.invalid_refs)
     ):
-        kept["state"] = None
+        kept.pop("state", None)  # a withheld state reads like no state: the item omits the key either way
     return kept
 
 

@@ -349,6 +349,18 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - The default is on by operator decision, not by a measured gain, and no release note or document may present it as one. Whether the slice adds value over the map alone stays an open question below. The slice is not an arm of the switch evaluation, and the cases, groups, keys, arms, scoring rule, tolerances and decision rule do not change.
    - This changes the `maps` packet unless the setting is `off`. It does not change the governance and egress behaviour of either mode, or the `anchors` packet.
 
+14. **Amendment 14 (2026-10-29, before any held-out generation).** A field report and a service call ledger changed the `maps` packet contract:
+   - **Bounded serving.** On 2026-10-29 a service call ledger showed `maps` activations that took minutes, and some that abstained when the request budget ran out. Every slow call spent its time computing the map or folding the catalogue on the request thread after a vault write, while other work in the same process competed for the interpreter. D5 and the risks section already allow a stale projection that is served marked. When the owner's map inputs changed and an earlier map for the same owner exists, activation now serves that earlier map marked `stale: true`, with `generation.index_stale: true` and the index generation it was built from, and rebuilds it off the request thread. A cold start and a restricted caller still compile on the request thread. In `maps` mode, the next call after a write can therefore return the earlier map marked stale; the scenario "Write invalidates a cached packet" binds `anchors` mode.
+   - **Budget.** The operator ruled (2026-10-29) that `max_chars` caps the packet's prose: the map's description line, one rendered line for each map and slice item, and the overflow line. Structure fields are not charged: refs given as fields, paths, profile routes, topics, dates, the generation blocks, the continuity token and timings. The budget report adds `serialized_chars`, the length of the packet's compact JSON form, so that a caller sees the real size. A map item omits `topics` when it is empty and `lifecycle_class` and `state` when they have no value.
+   - **Unchanged map.** The operator also ruled that a caller does not pay again for a map it already holds. When a request carries a `continuity` token from a `maps` packet and its map generation equals the generation of the map that activation would serve to that caller, the packet carries the map's ref, generation and stale flag, `unchanged: true` and a one-line description, and no items. The turn slice is unchanged by this rule.
+   - **Read hint.** The map's description names the read call for a map ref, so that a caller does not guess the parameter name.
+   - This changes the `maps` packet only. It does not change the cases, groups, keys, arms, scoring rule, tolerances, the governance and egress behaviour of either mode, or the `anchors` packet.
+
+15. **Amendment 15 (2026-10-29, before any held-out generation).** A development arm without Exomem:
+   - The dogfood report asked whether the `maps` packet changes answers compared with no Exomem. Arms A, M and P cannot answer that, because all three have Exomem.
+   - Arm N has no push, no Exomem tools and the current client instructions with the Exomem lines removed. It runs only on development cases, beside M, with the same actor, cases, keys and judging.
+   - N is not an arm of the frozen evaluation. It does not change the held-out split, the groups, the arm hashes of A, M and P, or the decision rule.
+
 ### Ready before held-out generation
 
 1. `maps` mode built, and pinned to one release or commit for every arm.
