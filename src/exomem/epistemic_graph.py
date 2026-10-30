@@ -13278,13 +13278,30 @@ def _nodes_by_keys(conn: sqlite3.Connection, keys: set[str]) -> list[dict[str, A
     return [n for n in nodes if n is not None]
 
 
+def _one_resolver(vault_root: Path) -> Callable[[], vault_module.WikilinkResolver]:
+    """One wikilink resolver for a whole candidate pass, built on first use.
+
+    Without one, `normalize_wikilink` walks the vault for every bare link, so
+    a link-dense page cost one walk per link (a 74-minute call on 2026-10-29).
+    """
+    built: list[vault_module.WikilinkResolver] = []
+
+    def factory() -> vault_module.WikilinkResolver:
+        if not built:
+            built.append(find_module.writer_resolver_snapshot(vault_root))
+        return built[0]
+
+    return factory
+
+
 def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    resolver_factory = _one_resolver(vault_root)
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                _page_target(target), vault_root, strict=False
+                _page_target(target), vault_root, strict=False, resolver_factory=resolver_factory
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
@@ -14031,11 +14048,12 @@ def _draft_wikilink_candidates(
 ) -> list[dict[str, Any]]:
     pseudo = f"draft:{draft_title or 'untitled'}"
     candidates: list[dict[str, Any]] = []
+    resolver_factory = _one_resolver(vault_root)
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                _page_target(target), vault_root, strict=False
+                _page_target(target), vault_root, strict=False, resolver_factory=resolver_factory
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
