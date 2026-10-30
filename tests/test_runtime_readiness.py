@@ -183,6 +183,38 @@ def test_retrieval_admission_withholds_runtime_readiness(
     assert "must-not-leak" not in repr(snapshot)
 
 
+def test_a_served_catalogue_lag_is_ready_and_adds_no_takeover_reason() -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="d" * 64,
+        retrieval={
+            "state": "lagging",
+            "admitted": True,
+            "lagging_scopes": ["kb", "path/must-not-leak"],
+            "catalogue_unchanged_seconds": 12.34567,
+            "query": "must-not-leak-either",
+        },
+    )
+
+    assert snapshot["status"] == "ready"
+    assert snapshot["takeover_eligible"] is True
+    assert snapshot["reasons"] == []
+    # `admitted` keeps meaning strict equality, whatever the caller passed.
+    assert snapshot["retrieval"] == {
+        "state": "lagging",
+        "admitted": False,
+        "lagging_scopes": ["kb"],
+        "catalogue_unchanged_seconds": 12.346,
+    }
+    assert "must-not-leak" not in repr(snapshot)
+
+
 def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:
     snapshot = build_runtime_readiness(
         coordination={
