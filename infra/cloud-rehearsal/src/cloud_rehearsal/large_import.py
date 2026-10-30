@@ -736,11 +736,12 @@ def save_cell_logs(ctx: Context) -> None:
     (ctx.stack.workdir / "diagnostics" / "cell-pod.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
 
 
-def save_cell_app_logs(ctx: Context) -> dict[str, Any]:
+def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
     """Keep the tail of each file in the cell's app log folder with the diagnostics, next to the pod log.
 
     The folder sits on the pod's memory-backed /tmp, so a replaced pod takes its logs with it; this reads the
-    live pod. Returns each file's size and the bytes kept, so a cut tail shows as one.
+    live pod. `label` (a folder name, or "end") keeps one copy from overwriting another. Returns each file's
+    size and the bytes kept, so a cut tail shows as one.
     """
     found = exec_json(ctx, APP_LOG_SCRIPT, str(APP_LOG_TAIL_BYTES), attempts=2)
     diagnostics = ctx.stack.workdir / "diagnostics"
@@ -748,9 +749,17 @@ def save_cell_app_logs(ctx: Context) -> dict[str, Any]:
     kept = {}
     for name, item in found.items():
         tail = gzip.decompress(base64.b64decode(item["tail"]))
-        (diagnostics / f"cell-app-{Path(name).name}").write_bytes(tail)
+        (diagnostics / f"cell-app-{label}-{Path(name).name}").write_bytes(tail)
         kept[name] = {"file_bytes": item["size"], "kept_bytes": len(tail)}
     return kept
+
+
+async def keep_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
+    """Save the app log, or report why not: a log that could not be read never fails or delays the run's verdict."""
+    try:
+        return await asyncio.to_thread(save_cell_app_logs, ctx, label)
+    except Exception as error:  # noqa: BLE001 - reported in the result, as an unread value stays unknown
+        return {"error": f"{type(error).__name__}: {str(error)[:300]}"}
 
 
 async def wait_import_state(ctx: Context, import_id: str, state: str, timeout: float) -> dict:
@@ -773,6 +782,8 @@ async def discard(ctx: Context, agent: Agent, plan: LargeImportPlan, folder: Fol
     listing = await asyncio.to_thread(exec_json, ctx, STAGE_SCRIPT, folder.import_id)
     leftover = fixture.check_stage(folder.entries, {path: (size, digest) for path, (size, digest) in listing.items()})
     folder.report["stage_left_files"] = len(listing)
+    # The discard replaces the cell's pod, and its log folder with it, so the folder's log is kept first.
+    folder.report["cell_app_logs_before_discard"] = await keep_cell_app_logs(ctx, folder.name)
     body, seconds = await agent.call("transfer_memory", {"action": "import_discard", "import_id": folder.import_id,
                                                          "confirm": True}, tolerated=tolerated_refusals())
     folder.report["discard_call"] = {"seconds": seconds, "route": "transfer_memory import_discard",
@@ -969,10 +980,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
             handle.writelines(json.dumps(row) + "\n" for row in sampler.rows)
         with contextlib.suppress(Exception):
             await asyncio.to_thread(save_cell_logs, ctx)
-        try:
-            out["cell_app_logs"] = await asyncio.to_thread(save_cell_app_logs, ctx)
-        except Exception as error:  # noqa: BLE001 - a log that could not be read is reported, and never fails the run
-            out["cell_app_logs"] = {"error": f"{type(error).__name__}: {str(error)[:300]}"}
+        out["cell_app_logs"] = await keep_cell_app_logs(ctx, "end")
     expected = plan.volume_gib
     # Design D7: a local-storage cell publishes no import limits and legacy admission never grows its volume.
     problems = [f"the volume claim was {state['pvc_request']} at the {when}, not {expected}Gi"

@@ -7,8 +7,11 @@ Pure logic and scripted replies only. The run itself needs a K3s cell and is exe
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import time
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -375,3 +378,65 @@ def test_a_gateway_refusal_is_reported_while_the_rehearsal_leaves_the_transfer_t
 def test_a_gateway_refusal_fails_the_run_once_the_rehearsal_turns_the_transfer_tools_on(no_waiting, monkeypatch):
     with pytest.raises(StepFailure, match=large_import.GATEWAY_REQUIRED):
         _prove_stage_after_a_refusal(monkeypatch, transfer_tools_enabled=True)
+
+
+# --- the cell's app log ---------------------------------------------------------------------
+
+
+def _log_in_the_pod(content: bytes):
+    """What APP_LOG_SCRIPT prints for a log folder that holds one file."""
+    packed = base64.b64encode(gzip.compress(content)).decode()
+    return {"exomem.log": {"size": len(content), "tail": packed}}
+
+
+def test_each_folders_app_log_is_kept_under_its_own_name(monkeypatch, tmp_path):
+    ctx = SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path))
+    for label, content in (("notes", b"first pod"), ("media", b"second pod")):
+        monkeypatch.setattr(large_import, "exec_json", lambda *_args, content=content, **_kwargs: _log_in_the_pod(content))
+        asyncio.run(large_import.keep_cell_app_logs(ctx, label))
+
+    kept = {path.name: path.read_bytes() for path in (tmp_path / "diagnostics").iterdir()}
+    assert kept == {"cell-app-notes-exomem.log": b"first pod", "cell-app-media-exomem.log": b"second pod"}
+
+
+def test_an_app_log_that_cannot_be_read_is_reported_and_does_not_fail_the_run(monkeypatch, tmp_path):
+    def unreachable(*_args, **_kwargs):
+        raise StepFailure("the cell's pod did not answer a probe")
+
+    monkeypatch.setattr(large_import, "exec_json", unreachable)
+
+    kept = asyncio.run(large_import.keep_cell_app_logs(SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path)), "end"))
+
+    assert "did not answer" in kept["error"]
+
+
+def test_the_app_log_is_kept_before_the_discard_replaces_the_pod(monkeypatch):
+    events = []
+
+    class Cell:
+        a = SimpleNamespace(cell_id="c")
+
+        async def execute(self, *_args):
+            events.append("discard written")
+
+        async def fetchrow(self, *_args):
+            return {"observed_state": "discarded"}
+
+        async def wait_cell(self, *_args, **_kwargs):
+            return None
+
+    class Refusing:
+        async def call(self, name, *_args, **_kwargs):
+            events.append(name)
+            return {"error_code": large_import.GATEWAY_REQUIRED}, 0.1
+
+    async def kept(_ctx, label):
+        events.append(f"app log kept for {label}")
+        return {}
+
+    monkeypatch.setattr(large_import, "keep_cell_app_logs", kept)
+    monkeypatch.setattr(large_import, "exec_json", lambda _ctx, script, *_args: {} if script == large_import.STAGE_SCRIPT else True)
+
+    asyncio.run(large_import.discard(Cell(), Refusing(), _plan(), _folder()))
+
+    assert events.index("app log kept for notes") < events.index("transfer_memory")
