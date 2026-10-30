@@ -19,8 +19,10 @@ from exomem.cli_ops import OpError
 HELD_DIRECTORY = "Knowledge Base/Records/Publications/Held"
 
 
-def _refuse_through_the_dispatcher(root: Path, *, mutation_request_id: str) -> Exception:
-    """The undeclared-field append every MCP, REST and CLI caller goes through."""
+def _refuse_through_the_dispatcher(
+    root: Path, *, mutation_request_id: str, item: dict | None = None
+) -> Exception:
+    """The refused append every MCP, REST and CLI caller goes through."""
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "record_memory")
     with pytest.raises(Exception) as caught:  # noqa: PT011 - the type is asserted by the caller
         writer_lease.invoke_command(
@@ -28,7 +30,7 @@ def _refuse_through_the_dispatcher(root: Path, *, mutation_request_id: str) -> E
             root,
             action="append",
             collection=LEDGER_COLLECTION_PATH,
-            item=ledger_item(unlisted_channel="digest"),
+            item=item if item is not None else ledger_item(unlisted_channel="digest"),
             why="record a published entry",
             mutation_request_id=mutation_request_id,
         )
@@ -45,10 +47,12 @@ def _stored_items(root: Path) -> int:
     return len(record_formats.load_adapter(root, manifest).read().records)
 
 
-def _assert_refused_with_a_held_reference(error: Exception, root: Path) -> dict:
+def _assert_refused_with_a_held_reference(
+    error: Exception, root: Path, code: str = "SCHEMA_UNKNOWN_FIELD"
+) -> dict:
     # The bug surfaced as MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN, then MUTATION_OUTCOME_UNKNOWN.
     assert isinstance(error, OpError), repr(error)
-    assert error.code == "SCHEMA_UNKNOWN_FIELD", repr(error)
+    assert error.code == code, repr(error)
     assert error.details.get("committed") is not True
     held = error.details["held"]
     assert held["path"] == f"{HELD_DIRECTORY}/{held['held_id']}.md"
@@ -79,3 +83,18 @@ def test_an_identical_retry_of_a_refused_append_refuses_again_with_one_held_file
 
     # The same single Held file, not a second one: the retry ran and rewrote it.
     assert _assert_refused_with_a_held_reference(retried, tmp_path) == held
+
+
+def test_an_identical_retry_whose_natural_key_cannot_be_derived_rewrites_one_held_file(
+    tmp_path: Path,
+) -> None:
+    setup_ledger_collection(tmp_path)
+    # An unparseable date in the natural key leaves the item with no identity to hold it under.
+    item = ledger_item(published_on="garbage")
+
+    first = _refuse_through_the_dispatcher(tmp_path, mutation_request_id="no-key", item=item)
+    held = _assert_refused_with_a_held_reference(first, tmp_path, "SCHEMA_FIELD_TYPE")
+
+    retried = _refuse_through_the_dispatcher(tmp_path, mutation_request_id="no-key", item=item)
+
+    assert _assert_refused_with_a_held_reference(retried, tmp_path, "SCHEMA_FIELD_TYPE") == held
