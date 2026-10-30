@@ -19,6 +19,7 @@ import gzip
 import json
 import shutil
 import time
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -142,7 +143,7 @@ try:
         body = json.loads(refused.read())
     # What readiness waits on, so a slow start shows its cause in the samples.
     ready = {key: body.get(key) for key in ('status', 'reasons')}
-    ready['retrieval'] = {key: (body.get('retrieval') or {}).get(key) for key in ('state',)}
+    ready['retrieval'] = {key: (body.get('retrieval') or {}).get(key) for key in ('state', 'catalogue_unchanged_seconds', 'lagging_scopes')}
     ready['repair'] = {key: (body.get('repair') or (body.get('retrieval') or {}).get('repair') or {}).get(key)
                        for key in ('phase', 'age_seconds', 'last_result', 'last_duration_seconds')}
 except Exception:  # a stopped or starting server leaves the sample without readiness, never without memory
@@ -288,6 +289,9 @@ def peaks(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         values = [row[key] for row in rows if row.get(key) is not None]
         return function(values) if values else None
 
+    retrieval = [(row.get("ready") or {}).get("retrieval") or {} for row in rows]
+    lag_ages = [item["catalogue_unchanged_seconds"] for item in retrieval
+                if item.get("catalogue_unchanged_seconds") is not None]
     return {
         "ticks": len(rows),
         "ticks_with_cell_reading": sum(1 for row in rows if row.get("volume_used") is not None),
@@ -300,6 +304,9 @@ def peaks(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "peak_thin_pool_allocated_bytes": high("thin_pool_allocated"),
         "peak_thin_volume_allocated_bytes": high("thin_volume_allocated"),
         "min_runner_free_bytes": high("runner_free", min),
+        # Ticks per retrieval state of /health/ready; a tick that could not read it counts as "unread".
+        "retrieval_states": dict(Counter(item.get("state") or "unread" for item in retrieval)),
+        "peak_catalogue_unchanged_seconds": max(lag_ages) if lag_ages else None,
     }
 
 
