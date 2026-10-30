@@ -1276,9 +1276,14 @@ def _require_applicable_review(review: Mapping[str, Any], validation: Mapping[st
     """Refuse a relation review the leaf would refuse at commit.
 
     The review is held back from the leaf's validation, so the leaf cannot object
-    to it there; its validation still says whether the page needs one.
+    to it there; its validation still says whether the page needs one. Only a
+    fully governed page is reviewed at commit; the leaf ignores a review elsewhere.
     """
-    if review and not validation.get("reviewed_none_required"):
+    if (
+        review
+        and validation.get("applicability") == "full"
+        and not validation.get("reviewed_none_required")
+    ):
         raise _error(
             "RELATION_REVIEW_NOT_APPLICABLE",
             "the page needs no reviewed-none relation review; drop relation_disposition",

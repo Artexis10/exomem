@@ -63,8 +63,9 @@ an approved edit. Before any byte is written, the executor SHALL refuse with
 `CURATION_BINDING_STALE` a planned page that, with `updated` set back to the
 reviewed instant, differs from the sealed postcondition. Proposal SHALL refuse
 with `RELATION_REVIEW_NOT_APPLICABLE` a step that gives a relation disposition
-when its leaf's validation reports that the page needs none, because the leaf
-refuses that review at commit.
+when its leaf's validation reports a fully governed page that needs none,
+because the leaf refuses that review at commit; it ignores a review on any
+other page.
 
 #### Scenario: Plan requests an arbitrary command
 
