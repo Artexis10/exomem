@@ -423,7 +423,9 @@ def _resolve(session, *, force=False):
                     # BUSY is retried on next use, as Pending does; any other refusal waits until it is due.
                     if error.code != takeover.BUSY:
                         with manager._report_lock:
-                            runtime._refused = takeover.Refused(token, error.code, error.reason, signature, raw)
+                            # A racing resolve may have admitted this token meanwhile; never shadow it.
+                            if runtime._admitted_token != token:
+                                runtime._refused = takeover.Refused(token, error.code, error.reason, signature, raw)
                     raise
             if action == "admitted":
                 return {"status": "admitted"}

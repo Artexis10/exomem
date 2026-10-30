@@ -1601,6 +1601,8 @@ def test_unchanged_settlement_refusal_is_not_resettled_on_every_request(abc, mon
 
     for _ in range(3):
         refused(lambda: abc.write_c(LATER, "Refused"), "COLLECTION_STORE_MARKER_CONFLICT")
+    # The kept refusal admits no reads, unlike a pending takeover.
+    refused(abc.read_c, "COLLECTION_STORE_MARKER_CONFLICT")
     assert len(settled) == 1
 
     recheck = takeover.RECHECK_SECONDS
