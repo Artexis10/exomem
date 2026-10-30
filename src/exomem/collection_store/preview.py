@@ -214,7 +214,8 @@ class Batch:
     pinned: Mapping[str, Callable[[Path], Any]] = field(default_factory=dict)
     #: The keyword that holds the content hash a call expects its page to have, which the read
     #: answers None for when the page differs. The read reports the hash it checked through
-    #: `note_checked_hash`; a call that expects another hash than that one is decided on its own.
+    #: `note_checked_hash`; a call that expects any other hash, or one the read never checked, is
+    #: decided on its own.
     expects_hash: str | None = None
     #: A call that no other page may share: it records an effect, or carries a value of one page.
     alone: Callable[[Mapping[str, Any]], bool] | None = None
@@ -325,10 +326,9 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
                 calls[other] = ((other,), shared)
         answers.update(_request(server, decisions, _Decide(read, vault_root, calls)))
     answer = answers[path]
-    # A caller that expected other bytes than the page was decided on is decided as it asked. A read that
-    # reached its verdict without comparing bytes gave a verdict no expected hash can change.
-    checked = answer[2]
-    return alone() if expected is not None and checked is not None and expected != checked else _replay(answer)
+    # A shared verdict serves an expected hash only when the read checked those same bytes; anything else,
+    # including a read that never compared bytes, is decided as the caller asked.
+    return _replay(answer) if expected is None or expected == answer[2] else alone()
 
 
 def canonical_read(function=None, *, projection=False, unavailable=None,

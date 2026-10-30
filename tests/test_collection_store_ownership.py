@@ -504,7 +504,6 @@ def test_a_read_releases_while_an_unrelated_holder_keeps_the_boundary(service, m
     root = service.root
     _published(SimpleNamespace(meta=lambda: store_meta(root)))
     manager = ownership._manager(root)
-    monkeypatch.setattr(manager, "_mutation_timeout_seconds", 0.2)
     held, release = threading.Event(), threading.Event()
 
     def drain():
@@ -515,14 +514,17 @@ def test_a_read_releases_while_an_unrelated_holder_keeps_the_boundary(service, m
 
     holder = threading.Thread(target=drain)
     holder.start()
-    try:
-        assert held.wait(5)
-        with ownership.read_scope(root) as scope:
-            assert scope.proof().selected(root, CID) is not None
-            scope.finish()
-    finally:
-        release.set()
-        holder.join()
+    # The short timeout covers only the read; the service's own teardown flush keeps its deadline.
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "_mutation_timeout_seconds", 0.2)
+        try:
+            assert held.wait(5)
+            with ownership.read_scope(root) as scope:
+                assert scope.proof().selected(root, CID) is not None
+                scope.finish()
+        finally:
+            release.set()
+            holder.join()
 
 
 def test_recovery_must_cover_later_collections_before_and_after_a_whole_read(service, tmp_path, monkeypatch):
