@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    __version__,
     context_refs,
     memory_refs,
     origin_bindings,
@@ -145,6 +146,10 @@ def plan_entry(
         "affected_units": affected,
         "reason": reason,
         "actor": {"audience": who.audience_id, "surface": who.surface},
+        # The release that wrote this entry, so a later reader can tie an
+        # interpretation change to the writer version. Entries written before
+        # this field existed simply lack it.
+        "exomem_version": __version__,
         "prior": {"source": preflight.exact_before_source},
         "binding": metadata.payload,
     }

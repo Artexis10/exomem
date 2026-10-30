@@ -138,6 +138,21 @@ def test_unusable_history_matches_absence_without_claiming_retention(tmp_path: P
     assert "Second wording." in result["body"]
 
 
+def test_a_revision_names_the_exomem_release_that_wrote_it(tmp_path: Path, owner) -> None:
+    # A reader tracing a bad interpretation needs the writer release, which the
+    # entry did not record before.
+    import exomem
+
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    _correct(tmp_path, "Second wording.", "The first correction.")
+
+    history = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)["revision_history"]
+
+    revision, = history["revisions"]
+    assert "First wording." in revision["prior"]["source"]
+    assert revision["exomem_version"] == exomem.__version__
+
+
 def test_admitted_history_does_not_claim_complete_coverage(tmp_path: Path, owner) -> None:
     _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
     _correct(tmp_path, "Second wording.", "The first correction.")
