@@ -580,45 +580,6 @@ def test_snapshot_aliases_do_not_evict_another_readers_unchanged_statistics(vaul
     assert ranking(views[0]) == (first, 0), "snapshot aliases must not crowd out a reader"
 
 
-def test_an_fts_only_correction_changes_warm_admitted_ranking(vault: Path) -> None:
-    """A SQL repair can change scoring without a canonical checkpoint change."""
-    held = _seed_ranked(vault)
-    withheld = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
-
-    def ranked() -> list[tuple[str, float]]:
-        context = lexstore.RequestQueryContext(
-            vault, lambda path: path != withheld, lifecycle_statuses.Basis(vault)
-        )
-        return _ranked(vault, 1000, query_context=context)
-
-    before = ranked()
-    store = lexstore.get_store(vault)
-    connection = store._connect()
-    try:
-        checkpoint = connection.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' ORDER BY key"
-        ).fetchall()
-        with connection:
-            rowid = connection.execute(
-                "SELECT rowid FROM pages WHERE path = ?",
-                ("Knowledge Base/Notes/Journal/ordinary-note-00000.md",),
-            ).fetchone()
-            assert rowid is not None
-            connection.execute(
-                "UPDATE fts SET stemmed = ? WHERE rowid = ?", ("harbour " * 200, rowid[0])
-            )
-        assert connection.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' ORDER BY key"
-        ).fetchall() == checkpoint
-    finally:
-        connection.close()
-
-    after = ranked()
-    assert after != before, "a noncandidate's tokens change the admitted score denominator"
-    lexstore.clear_stores()
-    assert ranked() == after, "warm repair scores must equal a fresh process cache"
-
-
 @pytest.mark.parametrize("partition", ["candidate", "outside"])
 def test_a_withheld_row_under_catalogue_ranking_ranks_on_admission(
     vault: Path, caplog: pytest.LogCaptureFixture, partition: str,

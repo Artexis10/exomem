@@ -2791,6 +2791,19 @@ def _text_digest(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
+def _page_identity(context: bytes, content_hash: str | None, text: str | None) -> bytes:
+    """What stands for a page's stemmed text, a fixed 17 bytes: change the text and the identity changes.
+
+    `_insert_page` writes `fts.stemmed` and `pages.content_hash` from one parse of one byte string. The text is
+    `tokenize(title + search_body)`, and the title, the body and the origin-carrier rule read only those bytes,
+    the page path and the KB folder name. So, with `context` keying it, the hash of the bytes names the text
+    without reading it. A page with no hash is an unparseable one, whose text is its identity.
+    """
+    if content_hash is None:
+        return b"t" + _text_digest(text or "")
+    return b"h" + hashlib.blake2b(content_hash.encode(), digest_size=16, key=context).digest()
+
+
 def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
     """One page's token count, distinct terms and their counts; the terms are interned so the pages of a base share each."""
     words = stemmed.split()
@@ -2807,20 +2820,20 @@ def _admitted_corpus(
     """The Okapi figures, postings and base of the corpus `rows` (page -> stemmed text), which `digests` fingerprints.
 
     A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
-    and the word counts move by exactly the terms that left or entered. The result equals
-    `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    and the word counts move by exactly the terms that left or entered. `rows` need hold only those pages.
+    The result equals `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
     """
     from . import bm25 as bm25_module
 
     held = base.pages if base is not None else {}
     pages: dict[str, _PageTerms] = {}
-    for path, text in rows.items():
+    for path, digest in digests.items():
         kept = held.get(path)
-        if kept is not None and kept.digest == digests[path]:
+        if kept is not None and kept.digest == digest:
             pages[path] = kept
         else:
-            length, terms, counts = _page_terms(text)
-            pages[path] = _PageTerms(digests[path], length, terms, counts)
+            length, terms, counts = _page_terms(rows[path])
+            pages[path] = _PageTerms(digest, length, terms, counts)
             call_spans.measure(call_spans.PAGES_TOKENIZED)
     # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
     ordered = sorted(pages)
@@ -8687,13 +8700,24 @@ class LexicalStore:
             if cached is not None:
                 return cached, generation
             col = "in_vault" if scope == "vault" else "in_kb"
-            rows = dict(conn.execute(
-                f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
+            stored = dict(conn.execute(
+                f"SELECT p.path, p.content_hash FROM {_FTS_PAGES} "
                 f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?)) "
                 "ORDER BY p.path",
                 (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
             ))
-            digests = {path: _text_digest(stemmed) for path, stemmed in rows.items()}
+            # A page without a content hash has no bytes to name, so its text stands for it: read it now.
+            rows = self._stemmed_texts(conn, col, [path for path, content_hash in stored.items() if content_hash is None])
+            # The catalogue identity and the KB folder name are the only inputs of a page's text beyond its
+            # bytes and path (see `_page_identity`); they key every identity, so a change of either reads as
+            # every page changed.
+            context = hashlib.blake2b(
+                f"{dict(generation[1:]).get('catalog_identity')}\0{kb_dirname()}".encode(), digest_size=16
+            ).digest()
+            digests = {
+                path: _page_identity(context, content_hash, rows.get(path))
+                for path, content_hash in stored.items()
+            }
             fingerprint = hashlib.sha256()
             for path, page_digest in digests.items():
                 encoded = path.encode("utf-8", "surrogatepass")
@@ -8721,6 +8745,12 @@ class LexicalStore:
                 call_spans.measure(call_spans.STATS_REBUILT)
                 with self._term_frequency_cache_lock:
                     base = self._admitted_bases.get(scope)
+                held = base.pages if base is not None else {}
+                # Only a page the base lacks, or holds under another identity, has its text read.
+                rows.update(self._stemmed_texts(conn, col, [
+                    path for path, page_digest in digests.items()
+                    if path not in rows and ((kept := held.get(path)) is None or kept.digest != page_digest)
+                ]))
                 statistics, postings, base = _admitted_corpus(rows, digests, base)
                 with self._term_frequency_cache_lock:
                     if base is None:
@@ -8742,6 +8772,19 @@ class LexicalStore:
         finally:
             if owns_snapshot:
                 conn.rollback()
+
+    @staticmethod
+    def _stemmed_texts(conn: sqlite3.Connection, col: str, paths: list[str]) -> dict[str, str]:
+        """The stemmed text of each of `paths` in the scope."""
+        if not paths:
+            return {}
+        # The pages lead the join: `_FTS_PAGES` leads with the full-text table, which a MATCH needs, but here it
+        # would read every full-text row to keep a few.
+        return dict(conn.execute(
+            f"SELECT p.path, fts.stemmed FROM pages p CROSS JOIN fts ON fts.rowid = p.rowid "
+            f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(paths), ensure_ascii=False),),
+        ))
 
     def _request_admitted_paths(
         self, conn: sqlite3.Connection, context: RequestQueryContext, scope: str = "kb"
