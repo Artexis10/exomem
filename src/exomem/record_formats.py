@@ -2097,6 +2097,19 @@ def _inspect_item_filenames(
     return findings
 
 
+def accepted_filename(
+    manifest: collections.CollectionManifest, desired: str, own: str | None, item_key: str
+) -> str:
+    """The path accepted for an item beside the one item that holds ``desired``.
+
+    ``desired`` is the casefolded group's recipe path and ``own`` this item's own rendering of it.
+    Inspection and structured-files planning both take this path, so an applied plan leaves no drift.
+    """
+    return collections.disambiguate_item_path(
+        manifest, own or desired, item_key, occupied_path_keys={collections._portable_path_key(desired)}
+    )
+
+
 def inspect_filename_group(
     manifest: collections.CollectionManifest,
     group: Sequence[InspectionContribution],
@@ -2123,18 +2136,14 @@ def inspect_filename_group(
             _representation_finding(contribution, "filename_collision", "structured_files_preview")
             for contribution in group
         )
-    occupied = {collections._portable_path_key(desired)} if len(group) > 1 and len(exact) == 1 else ()
     for contribution in group:
         if contribution in exact:
             continue
         accepted = desired
         if len(group) > 1 and len(exact) == 1:
             try:
-                accepted = collections.disambiguate_item_path(
-                    manifest,
-                    contribution.desired_filename or desired,
-                    contribution.identity.key,
-                    occupied_path_keys=occupied,
+                accepted = accepted_filename(
+                    manifest, desired, contribution.desired_filename, contribution.identity.key
                 )
             except collections.CollectionError:
                 pass

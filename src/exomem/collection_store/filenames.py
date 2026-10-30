@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from .. import semantic_writes
+from .. import record_formats, semantic_writes
 from .. import structured_collections as collections
 
-#: Rows one plan may cover, as for file-mode migration.
+#: Rows one structured-files plan may cover and blockers it reports, in file and store mode alike.
 MAX_PLAN_ITEMS = 512
-_MAX_BLOCKERS = 64
+MAX_BLOCKERS = 64
 _REQUEST_PREFIX = b"exomem-structured-files:v1\0"
 
 
@@ -49,19 +49,20 @@ def canonical_hash(value: Any) -> str:
     ).hexdigest()
 
 
-def request_id(plan_id: str, item_key: str) -> str:
-    """The request identity of one item's transition, so an apply replays by its plan."""
-    return hashlib.sha256(_REQUEST_PREFIX + f"{plan_id}\0{item_key}".encode()).hexdigest()
+def request_id(plan_id: str, item_key: str, step: str) -> str:
+    """The request identity of one item's ``move`` or ``relink`` transition, so an apply replays by its plan."""
+    return hashlib.sha256(_REQUEST_PREFIX + f"{plan_id}\0{item_key}\0{step}".encode()).hexdigest()
 
 
-def request_hash(collection_id: str, plan_id: str, source_snapshot: str, why: str, item_key: str) -> str:
+def request_hash(collection_id: str, plan_id: str, source_snapshot: str, why: str, item_key: str,
+                 step: str) -> str:
     return canonical_hash({"action": "structured-files", "collection": collection_id, "plan_id": plan_id,
-                           "source_snapshot": source_snapshot, "why": why, "item_key": item_key})
+                           "source_snapshot": source_snapshot, "why": why, "item_key": item_key, "step": step})
 
 
 def _add_blocker(blockers: list[dict[str, str]], code: str, reason: str) -> None:
     blocker = {"code": code, "reason": reason}
-    if blocker not in blockers and len(blockers) < _MAX_BLOCKERS:
+    if blocker not in blockers and len(blockers) < MAX_BLOCKERS:
         blockers.append(blocker)
 
 
@@ -83,7 +84,8 @@ def _targets(
 
     Rows whose recipe renders the same casefolded path form one group. A row already at that
     path keeps it; otherwise the lowest item key takes it. The others take the identity-suffixed
-    path inspection accepts beside it, so an applied plan leaves no drift or collision behind.
+    path inspection accepts beside it (``record_formats.accepted_filename``), so an applied plan
+    leaves no drift or collision behind.
     """
     targets: dict[str, str] = {}
     groups: dict[str, list[tuple[str, Row]]] = {}
@@ -103,15 +105,13 @@ def _targets(
         exact = [row for base, row in group if row.path.casefold() == base.casefold()]
         keeper = exact[0] if len(exact) == 1 else None
         winner = keeper or group[0][1]
-        occupied = {collections._portable_path_key(group[0][0])}
         for base, row in group:
             if row is winner:
                 # A case-only difference is no drift, and no move.
                 targets[row.key] = row.path if row.path.casefold() == base.casefold() else base
                 continue
             try:
-                targets[row.key] = collections.disambiguate_item_path(
-                    manifest, base, row.key, occupied_path_keys=occupied)
+                targets[row.key] = record_formats.accepted_filename(manifest, group[0][0], base, row.key)
             except collections.CollectionError as error:
                 _add_blocker(blockers, error.code, "an item filename cannot be disambiguated portably")
                 targets[row.key] = row.path
@@ -169,7 +169,8 @@ def plan(
     rerenders: set[str] = set()
     inbound = referrers([source for _key, source, _target in moves]) if moves else {}
     for _key, source, target in moves:
-        for referrer in sorted(set(inbound[source])):
+        # The index omits a file's links to itself, so the moving row's own body is read too.
+        for referrer in sorted({*inbound[source], source}):
             row = by_path.get(referrer)
             if row is None:
                 if not regenerated(referrer):
@@ -220,6 +221,6 @@ def plan(
         "blockers": blockers,
         "totals": {"moves": len(public_moves), "presentations": 0,
                    "inbound_rewrites": len(inbound_rewrites), "blockers": len(blockers)},
-        "truncated": truncated or len(blockers) == _MAX_BLOCKERS,
+        "truncated": truncated or len(blockers) == MAX_BLOCKERS,
     }
     return Plan(public, moves, bodies, frozenset(rerenders))

@@ -81,20 +81,25 @@ def test_apply_moves_uuid_views_to_titles_and_keeps_each_row(store):
     assert len(moves) == 2 and all(actor != "owner:view-edit" for _, actor in moves)
 
 
-def test_a_body_link_to_a_moved_item_follows_it(store):
-    link = f"See [[{ITEMS}/{OTHER}|the runbook]] first.\n"
-    _drifted(store, [(KEY, "Ship the importer", link), (OTHER, "Write the runbook", "")])
+def test_body_links_to_moved_items_follow_them_including_a_link_to_itself(store):
+    # The inbound-link index omits a file's links to itself, so the self-link is the case it cannot find.
+    _drifted(store, [(KEY, "Ship the importer", f"See [[{ITEMS}/{OTHER}|the runbook]] first.\n"),
+                     (OTHER, "Write the runbook", f"Kept in [[{ITEMS}/{OTHER}]].\n")])
 
     plan = store.preview_filenames(CID)
-    assert [(entry["item_key"], entry["links"]) for entry in plan["inbound_rewrites"]] == [(KEY, 1)]
+    assert [(entry["item_key"], entry["links"]) for entry in plan["inbound_rewrites"]] == [(KEY, 1), (OTHER, 1)]
     _apply(store, plan)
     store.reconcile_views()
 
-    body, version = store.connection.execute(
-        "SELECT body, row_version FROM items WHERE item_key=?", (KEY,)).fetchone()
-    assert body == f"See [[{ITEMS}/Write the runbook|the runbook]] first.\n" and version == 2
+    rows = dict(store.connection.execute("SELECT item_key, body FROM items").fetchall())
+    assert rows == {KEY: f"See [[{ITEMS}/Write the runbook|the runbook]] first.\n",
+                    OTHER: f"Kept in [[{ITEMS}/Write the runbook]].\n"}
     assert f"[[{ITEMS}/Write the runbook|the runbook]]" in (store.root / ITEMS / "Ship the importer.md").read_text()
-    assert (store.root / ITEMS / "Write the runbook.md").exists()
+    assert f"[[{ITEMS}/Write the runbook]]" in (store.root / ITEMS / "Write the runbook.md").read_text()
+    # A relinked row still records its move as its own view_move, before the update of its body.
+    assert store.connection.execute(
+        "SELECT operation FROM txns WHERE operation IN ('view_move','update') ORDER BY commit_seq").fetchall() == [
+        ("view_move",), ("update",), ("view_move",), ("update",)]
 
 
 def test_a_link_from_a_note_outside_the_collection_blocks_the_plan(store):

@@ -25,12 +25,12 @@ from . import (
 )
 from . import records as record_events
 from . import structured_collections as collections
+from .collection_store.filenames import MAX_BLOCKERS as _MAX_BLOCKERS
+from .collection_store.filenames import MAX_PLAN_ITEMS as _MAX_PLAN_ITEMS
 
-_MAX_PLAN_ITEMS = 512
 _MAX_CORPUS_FILES = 10_000
 _MAX_CORPUS_BYTES = 128 * 1024 * 1024
 _MAX_FILE_BYTES = 16 * 1024 * 1024
-_MAX_BLOCKERS = 64
 _RECEIPT_VERSION = 1
 _WIKILINK = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 
