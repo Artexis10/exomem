@@ -208,7 +208,7 @@ async def _issue_public(harness: _Harness) -> str:
     return token
 
 
-def _mcp_body(request_id: int) -> dict[str, Any]:
+def _mcp_body(request_id: int, marker: str | None = None) -> dict[str, Any]:
     return {
         "jsonrpc": "2.0",
         "id": request_id,
@@ -220,7 +220,7 @@ def _mcp_body(request_id: int) -> dict[str, Any]:
                 "io.modelcontextprotocol/clientInfo": {"name": "local-client", "version": "1"},
             },
             "name": TOOL_NAME,
-            "arguments": {"marker": str(request_id)},
+            "arguments": {"marker": str(request_id) if marker is None else marker},
         },
     }
 
@@ -230,6 +230,7 @@ async def _post_mcp(
     bearer: str | None,
     request_id: int = 1,
     extra: dict[str, str] | None = None,
+    marker: str | None = None,
 ) -> httpx.Response:
     headers = {
         "accept": "application/json",
@@ -241,7 +242,7 @@ async def _post_mcp(
     }
     if bearer is not None:
         headers["authorization"] = f"Bearer {bearer}"
-    return await client.post("/mcp", headers=headers, json=_mcp_body(request_id))
+    return await client.post("/mcp", headers=headers, json=_mcp_body(request_id, marker))
 
 
 def _seen(response: httpx.Response) -> dict[str, Any]:
@@ -703,6 +704,64 @@ async def test_rest_on_local_ingress_does_not_need_the_rest_key_configured(
     assert local.status_code == 200, local.text
     assert public.status_code == 503
     assert kinds == ["owner-local"]
+
+
+@pytest.mark.anyio
+async def test_a_large_local_body_leaves_no_grant_for_the_next_request_on_its_connection(
+    oauth_worker: _Harness,
+) -> None:
+    """The manager forwards both listeners over one pooled worker connection.
+
+    A local body larger than uvicorn's read buffer pauses the socket reader inside
+    the local request, and the reader resumes in that request's context; the next
+    request on the connection used to start with the local grant. The server here
+    runs without uvicorn's per-request context reset, so only the gate stands
+    between that grant and a public caller.
+    """
+    import asyncio
+    import socket
+
+    import uvicorn
+
+    local_token, _ = await _issue_local(oauth_worker)
+    public_token = await _issue_public(oauth_worker)
+    listening = socket.socket()
+    listening.bind(("127.0.0.1", 0))
+    port = listening.getsockname()[1]
+    worker = uvicorn.Server(
+        uvicorn.Config(oauth_worker.worker, http="h11", access_log=False, reset_contextvars=False)
+    )
+    serving = asyncio.create_task(worker.serve(sockets=[listening]))
+    try:
+        async with asyncio.timeout(30):
+            while not worker.started:
+                await asyncio.sleep(0.01)
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}", limits=httpx.Limits(max_connections=1)
+        ) as upstream:
+            ingress = ServiceIngress(ingress_key=KEY)
+            ingress.resume(upstream)
+            async with (
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=LocalListener(ingress)), base_url=LOCAL_BASE
+                ) as local,
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=ingress), base_url=ISSUER
+                ) as public,
+            ):
+                large = await _post_mcp(local, local_token, 1, marker="x" * (1 << 20))
+                oauth = await _post_mcp(public, public_token, 2)
+                anonymous = await _post_mcp(public, None, 3)
+            await ingress.aclose()
+    finally:
+        worker.should_exit = True
+        await serving
+
+    assert _seen(large)["grant_client"] == "home"
+    after = _seen(oauth)
+    assert after["grant_client"] is None
+    assert after["local_owner"] is False
+    assert anonymous.status_code == 401
 
 
 @pytest.mark.anyio

@@ -1331,10 +1331,14 @@ def run(
         # A managed worker binds privately, but its authentication decision
         # above must still use the public bind intent. UDS is not permission
         # to turn a remote endpoint into unauthenticated local MCP.
-        worker_options = (
-            {"uvicorn_config": {"uds": str(worker_socket)}}
-            if worker_socket is not None else {}
-        )
+        # Every request starts from an empty context: uvicorn otherwise runs a
+        # request in whatever context the connection's reader last kept, which
+        # can be an earlier request's (CPython issue 140947). No lifespan here
+        # sets a context variable that requests read.
+        uvicorn_config: dict[str, object] = {"reset_contextvars": True}
+        if worker_socket is not None:
+            uvicorn_config["uds"] = str(worker_socket)
+        worker_options = {"uvicorn_config": uvicorn_config}
         mcp.run(
             transport=transport,
             host=host,
