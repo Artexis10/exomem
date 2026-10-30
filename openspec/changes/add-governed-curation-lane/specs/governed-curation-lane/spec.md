@@ -61,7 +61,10 @@ minted when its step runs, never taken from the plan, so the edited page
 carries the commit instant in `updated` and the transition's age never refuses
 an approved edit. Before any byte is written, the executor SHALL refuse with
 `CURATION_BINDING_STALE` a planned page that, with `updated` set back to the
-reviewed instant, differs from the sealed postcondition.
+reviewed instant, differs from the sealed postcondition. Proposal SHALL refuse
+with `RELATION_REVIEW_NOT_APPLICABLE` a step that gives a relation disposition
+when its leaf's validation reports that the page needs none, because the leaf
+refuses that review at commit.
 
 #### Scenario: Plan requests an arbitrary command
 
@@ -75,6 +78,13 @@ reviewed instant, differs from the sealed postcondition.
   semantic draft, or registry changes before apply
 - **THEN** the canonical leaf refuses the step and curation cannot bypass or
   weaken that refusal
+
+#### Scenario: Plan gives a review the page does not need
+
+- **WHEN** a step gives `reviewed_none` for a page whose leaf validation does
+  not require it, such as a page that already links to an existing page
+- **THEN** proposal refuses with `RELATION_REVIEW_NOT_APPLICABLE` and stores no
+  plan
 
 #### Scenario: Edit approved days after proposal
 
