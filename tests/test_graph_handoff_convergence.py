@@ -34,6 +34,7 @@ from test_graph_post_handoff_writes import (
     _note,
     _seed_live_freshness,
 )
+from test_records_recall_graph import _manifest as _records_manifest
 
 from exomem import (
     deferred_index,
@@ -973,6 +974,33 @@ def test_a_body_edit_of_a_linked_page_does_not_re_derive_its_linkers(vault: Path
 
     assert report["published"] is True
     assert report["indexed"] == (hub,), "the drain re-derived pages the edit did not move"
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_deleted_page_that_was_never_indexed_still_re_derives_its_linkers(vault: Path) -> None:
+    """A relation to a Records page reads whether the page exists on disk.
+
+    The graph never holds a Records page, so no stored row says it was there.
+    While it exists the edge is suppressed; once an external delete queues it,
+    a rebuild emits that edge as unresolved, and the drain has to re-derive the
+    linker to match.
+    """
+    records = "Knowledge Base/Records/Health/sessions/2026-08-02.md"
+    linker = f"{GENERATED}/records-linker.md"
+    root = _build_small(
+        vault,
+        {
+            "Knowledge Base/Records/Health/_collection.md": _records_manifest(),
+            records: "# Private session\n\nPrivate.\n",
+            linker: _note(600, []) + f"\n## Relations\n- derived_from [[{records.removesuffix('.md')}]]\n",
+        },
+    )
+    (root / records).unlink()
+    freshness.rebaseline(root)
+
+    report = EpistemicGraphIndex(root).drain_paths([root / records])
+
+    assert report["published"] is True
     _assert_matches_a_fresh_rebuild(root)
 
 

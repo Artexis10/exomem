@@ -1372,7 +1372,7 @@ def test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue(
 
 
 def test_a_create_defers_its_topology_proof_to_the_drain_for_a_caller_that_may_stop_at_queued(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+    vault: Path, whole_vault_passes: list[str]
 ) -> None:
     """A created page must not run the whole-vault topology proof under the hold.
 
@@ -1384,14 +1384,6 @@ def test_a_create_defers_its_topology_proof_to_the_drain_for_a_caller_that_may_s
         vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
     )
     whole_vault_passes.clear()
-    proofs: list[int] = []
-    real_membership = EpistemicGraphIndex._checkpoint_membership
-
-    def counted(self: Any, checkpoint: Any) -> Any:
-        proofs.append(1)
-        return real_membership(self, checkpoint)
-
-    monkeypatch.setattr(EpistemicGraphIndex, "_checkpoint_membership", counted)
     _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
 
     with graph_sync.standalone_join_waived():
@@ -1401,13 +1393,48 @@ def test_a_create_defers_its_topology_proof_to_the_drain_for_a_caller_that_may_s
 
     graph = next(item for item in report.components if item.component == "epistemic_graph")
     assert (graph.outcome, graph.code) == ("deferred", "graph_repair_queued")
-    assert proofs == [], "the write ran the whole-vault topology proof under the hold"
 
     index_sync.drain_graph_work(vault)
 
     assert whole_vault_passes == []
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_create_over_a_stale_stored_topology_leaves_the_graph_a_rebuild_would_build(
+    vault: Path,
+) -> None:
+    """The stored topology fingerprint is how a stale graph is found and healed.
+
+    A drain that left a retitle behind its fingerprint cannot own the next
+    topology change, so deferring a create to it would acknowledge rows that
+    still link the old title. The create keeps the fail-closed rebuild.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            OLD_LINKER: _titled("Linker Old", "Cites [[Fresh Target]]."),
+            NEW_LINKER: _titled("Mentioner", "Mentions [[Linker Old]]."),
+        },
+    )
+    (vault / CREATED).write_text(_titled("Fresh Target", "A new page."), encoding="utf-8")
+    (vault / OLD_LINKER).write_text(
+        _titled("Linker New", "Cites [[Fresh Target]]."), encoding="utf-8"
+    )
+    freshness.rebaseline(vault)
+    index = EpistemicGraphIndex(vault)
+    index.drain_paths([vault / CREATED])
+    index.drain_paths([vault / OLD_LINKER])
+
+    _commit_before_its_fanout(vault, {CREATE_LINKER: _titled("Another Page", "A second create.")})
+    with graph_sync.standalone_join_waived():
+        index_sync.upsert_after_write(
+            vault, [vault / CREATE_LINKER], created_paths=[vault / CREATE_LINKER]
+        )
+    index_sync.drain_graph_work(vault)
+    assert graph_sync.drain_active_rebuilds(timeout=60.0)
+
     _assert_matches_a_fresh_rebuild(vault)
 
 

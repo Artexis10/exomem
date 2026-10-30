@@ -81,7 +81,7 @@ the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRES
 when a whole-vault pass is running. Both are healthy. Neither requires rereading
 the written note or running maintenance.
 
-Behind that terminal the dispatch chose one of six repairs, and the log says
+Behind that terminal the dispatch chose one of eight repairs, and the log says
 which:
 
 - `graph dispatch routed an unreadable predecessor to incremental repair` — the
@@ -97,6 +97,15 @@ which:
   `graph_repair_cold_resolver`. No whole-vault pass runs. A run of these means
   start-up never primed the resolver — check for the `graph snapshot adoption`
   line in the warm-up.
+- `graph incremental refresh fell back reason=topology_change_left_to_the_drain` —
+  the write created, removed or retitled a page, and its caller can stop at
+  queued. Proving the new topology in this pass reads every page under the
+  mutation boundary, so the pass queues the delta and a later drain widens to the
+  affected pages from the dependency index, sized by what moved; the dispatch
+  outcome is `graph_repair_queued`. A caller that must see a converged graph
+  keeps the in-pass proof. A stored topology fingerprint that is stale is not
+  deferred: it falls back with `reason=stored_topology_fingerprint_mismatch` and
+  rebuilds. No whole-vault pass runs for the deferral.
 - `graph incremental refresh deferred reason=external_event_covers_these_paths` —
   an unattributed edit covers the very paths this write touched, so the write
   cannot trust its own view of them. It defers, queues exactly those paths as

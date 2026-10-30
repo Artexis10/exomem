@@ -3364,6 +3364,19 @@ class EpistemicGraphIndex:
         return rel.removesuffix(".md") in resolver.full_paths, resolver.title_key_for_path(rel)
 
     @staticmethod
+    def _resolver_before(
+        resolver: vault_module.WikilinkResolver,
+        stored_entries: dict[str, tuple[bool, str | None]],
+    ) -> vault_module.WikilinkResolver:
+        """A fork of `resolver` with each page put back to its stored entry."""
+        before = resolver.fork()
+        before.on_entries_changed(
+            [(rel, title) for rel, (present, title) in stored_entries.items() if present],
+            [rel for rel, (present, _title) in stored_entries.items() if not present],
+        )
+        return before
+
+    @staticmethod
     def _read_topology_carry(
         conn: sqlite3.Connection,
     ) -> dict[str, tuple[bool, str | None]] | None:
@@ -6674,6 +6687,16 @@ class EpistemicGraphIndex:
             # what moved. Queue the delta, as the cold-resolver bail-out does:
             # a stored entry that moved is somewhere in it. A caller that must
             # converge keeps the proof, since its deferral is a whole-vault pass.
+            #
+            # Not past a stale stored fingerprint. A drain cannot own one, so it
+            # would widen unowned and acknowledge rows that the fingerprint
+            # exists to refuse. The same in-memory check as the proof's, without
+            # reading the corpus.
+            if _resolver_topology_fingerprint(
+                self._resolver_before(resolver, stored_entries)
+            ) != graph_values.get(_RESOLVER_TOPOLOGY_KEY):
+                self._mark_unavailable()
+                return fallback("stored_topology_fingerprint_mismatch")
             deferred_scope.update(delta_rels)
             return fallback("topology_change_left_to_the_drain")
         indexed_sources: dict[str, str] = {}
@@ -6693,15 +6716,7 @@ class EpistemicGraphIndex:
                 self._mark_unavailable()
                 return fallback("stored_topology_unreadable")
             indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
-            old_resolver = resolver.fork()
-            old_resolver.on_entries_changed(
-                [
-                    (rel, title)
-                    for rel, (present, title) in stored_entries.items()
-                    if present
-                ],
-                [rel for rel, (present, _title) in stored_entries.items() if not present],
-            )
+            old_resolver = self._resolver_before(resolver, stored_entries)
             if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
                 self._mark_unavailable()
                 return fallback("stored_topology_fingerprint_mismatch")
@@ -7063,8 +7078,11 @@ class EpistemicGraphIndex:
         page, so a queued page whose existence and title the stored row already
         records moved no resolution or existence. Only the pages that moved
         widen to every linker by key; the others widen to their fragment
-        dependants. Without it any difference may be outside `rels`, and every
-        queued page widens by key.
+        dependants. A queued page with no row counts as moved: no row says
+        whether it existed, and a linker's edge to a Records page that exists
+        is suppressed, so the page's later deletion moves that edge. Without
+        `owns_topology` any difference may be outside `rels`, and every queued
+        page widens by key.
         """
         opened_snapshot = not conn.in_transaction
         if opened_snapshot:
@@ -7073,7 +7091,7 @@ class EpistemicGraphIndex:
             if opened_snapshot:
                 conn.rollback()
             return None
-        appeared: set[str] = set()
+        unindexed: set[str] = set()
         vanished: set[str] = set()
         old_titles: dict[str, str] = {}
         for rel in rels:
@@ -7083,10 +7101,9 @@ class EpistemicGraphIndex:
             indexed = row is not None
             if row is not None and row[0] is not None and str(row[0]).strip():
                 old_titles[rel] = str(row[0]).strip().casefold()
-            exists = (self.vault_root / rel).exists()
-            if exists and not indexed:
-                appeared.add(rel)
-            elif indexed and not exists:
+            if not indexed:
+                unindexed.add(rel)
+            elif not (self.vault_root / rel).exists():
                 vanished.add(rel)
 
             # A changed non-KB target that has no persisted file row cannot
@@ -7101,7 +7118,7 @@ class EpistemicGraphIndex:
             rel
             for rel in rels
             if not owns_topology
-            or rel in appeared
+            or rel in unindexed
             or rel in vanished
             or self._stored_resolver_entry(conn, rel) != self._live_resolver_entry(resolver, rel)
         }
