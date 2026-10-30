@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.151.0](https://github.com/Artexis10/exomem/compare/v0.150.0...v0.151.0) (2026-10-30)
+
+
+### Features
+
+* retain media allowance custody through Trash ([#2192](https://github.com/Artexis10/exomem/issues/2192)) ([351cfc4](https://github.com/Artexis10/exomem/commit/351cfc4c7f5fd456aac9d519b81eacdd5bb682d8))
+
+
+### Performance
+
+* **activation:** decide the owner's store-owned carry pages in one store request ([#2210](https://github.com/Artexis10/exomem/issues/2210)) ([decab53](https://github.com/Artexis10/exomem/commit/decab5367a38d844b3a7e9f3331a0d6f418130dd))
+
 ## [0.150.0](https://github.com/Artexis10/exomem/compare/v0.149.0...v0.150.0) (2026-10-30)
 
 
