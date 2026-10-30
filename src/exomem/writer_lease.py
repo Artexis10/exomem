@@ -4409,15 +4409,18 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
 _WARMUP_POLL_SECONDS = 0.25
 
 
-def _wait_out_write_warmup(*, absorb: bool, deadline: float) -> tuple[str | None, str | None]:
-    """The write-gating component still warming when the wait ends, and why it was not waited out.
+def _wait_out_write_warmup(
+    *, absorb: bool, deadline: float
+) -> tuple[str | None, str | None, float]:
+    """The component still warming when the wait ends, why it was not waited out, and seconds waited.
 
     Warm-up ends by itself within seconds (5-20 s per restart on a personal vault,
     2026-10-25..30), so a keyed write waits it out until `deadline`, the same
     deadline its busy-boundary wait uses, and on the same parked-worker cap,
     instead of handing the client a refusal it can only retry. An unkeyed write
     keeps the immediate refusal: a client that gave up during the wait and resent
-    it would run it twice. The cause is None when nothing was warming.
+    it would run it twice. The cause is None when nothing was warming, and the
+    seconds are 0 unless this write actually parked.
     """
     from . import readiness
 
@@ -4430,15 +4433,16 @@ def _wait_out_write_warmup(*, absorb: bool, deadline: float) -> tuple[str | None
 
     warming = still_warming()
     if warming is None:
-        return None, None
+        return None, None, 0.0
     if not absorb:
-        return warming, "unkeyed"
+        return warming, "unkeyed", 0.0
     if not _writes_absorb_contention():
-        return warming, "absorb_disabled"
+        return warming, "absorb_disabled", 0.0
     if time.monotonic() >= deadline:
-        return warming, "warm_wait_exhausted"
+        return warming, "warm_wait_exhausted", 0.0
     if not _take_capture_waiter_slot():
-        return warming, "capture_waiters_full"
+        return warming, "capture_waiters_full", 0.0
+    started = time.monotonic()
     try:
         while warming is not None:
             remaining = deadline - time.monotonic()
@@ -4450,7 +4454,8 @@ def _wait_out_write_warmup(*, absorb: bool, deadline: float) -> tuple[str | None
             warming = still_warming()
     finally:
         _release_capture_waiter_slot()
-    return warming, None if warming is None else "warm_wait_exhausted"
+    waited = time.monotonic() - started
+    return warming, None if warming is None else "warm_wait_exhausted", waited
 
 
 @dataclass(frozen=True)
@@ -5417,8 +5422,10 @@ class LeaseManager:
         # then a busy boundary, so neither restarts the bound or under-reports it.
         wait_started = time.monotonic()
         wait_deadline = wait_started + _capture_wait_seconds(self._mutation_timeout_seconds)
-        warming, warm_cause = _wait_out_write_warmup(absorb=key is not None, deadline=wait_deadline)
-        warm_waited_ms = round((time.monotonic() - wait_started) * 1000)
+        warming, warm_cause, warm_waited = _wait_out_write_warmup(
+            absorb=key is not None, deadline=wait_deadline
+        )
+        warm_waited_ms = round(warm_waited * 1000)
         if warm_waited_ms > 0:
             _log_mutation_event(
                 "warmup_waited",
