@@ -669,15 +669,16 @@ def unchanged(conn, row, version) -> bool:
             and view_basis(conn, row) is None)
 
 
-def changed_views(conn, root, *, after="", limit=None) -> tuple[dict[str, str | None], str | None]:
+def changed_views(conn, root, *, after="", limit=None) -> tuple[dict[str, tuple], str | None]:
     """The views of one page whose file differs from the store's record, found with no writer lease.
 
     ``conn`` is a plain reader of the store file, so nothing here takes the lease or the mutation
     boundary. It applies the stat test of ``observe`` to the next ``limit`` views after ``after``
     and claims no ownership, so a view ``observe`` would skip as unserved can appear here. A
     pending view is publication work, not an edit, and is skipped. Returns each changed path with
-    its stat (None for a file that was published and is gone), and where the next page starts (None
-    at the end of the views).
+    what the sweep saw: the file's stat (None for a file that was published and is gone) and the
+    row's ``stat_identity`` and ``published_sha256``, which move when the store writes the view
+    again; and where the next page starts (None at the end of the views).
     """
     from .runtime import VIEW_BATCH_PATHS
 
@@ -697,12 +698,12 @@ def changed_views(conn, root, *, after="", limit=None) -> tuple[dict[str, str | 
                 opened = _open_view(fs, stack, parents, row["path"])
                 if opened is None:
                     if row["published_sha256"] is not None:
-                        changed[row["path"]] = None
+                        changed[row["path"]] = (None, row["stat_identity"], row["published_sha256"])
                     continue
                 with opened as file:
                     version = file.version()
                     if not unchanged(conn, row, version):
-                        changed[row["path"]] = _stat(version)
+                        changed[row["path"]] = (_stat(version), row["stat_identity"], row["published_sha256"])
             except (held_fs.HeldFsError, OSError):
                 continue  # a view that cannot be read now is read again by the next sweep
     return changed, rows[-1]["path"] if len(rows) == limit else None

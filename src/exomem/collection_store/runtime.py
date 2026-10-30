@@ -1144,10 +1144,12 @@ class StoreServer:
         # The store, instance, release inputs and head whose history pages the drain has queued.
         self._history_policy = None
         # A views tick after an idle release looks for edited view files without the lease: where its
-        # sweep continues (None between sweeps), when the next sweep is due, and each changed view
-        # (path to stat) it already handed to a leased pass, so one that stays changed wakes it once.
+        # sweep continues (None between sweeps), when the next sweep is due, the changes it found that
+        # a leased pass has not yet run on, and the ones a leased pass ran on (path to what the sweep
+        # saw), so a view that stays changed wakes the tick once, and one whose wake failed wakes it again.
         self._sweep_after = None
         self._sweep_due = 0.0
+        self._sweep_pending = {}
         self._sweep_seen = {}
         # False waits for exact-path lookup; True retains an unhandled hint for the census.
         self._view_changes = {}
@@ -1729,6 +1731,8 @@ class StoreServer:
                     started = time.monotonic()
                     wait = self._edit_back.run(writer, now=started, mutate=mutate, limit=VIEW_BATCH_PATHS)
                     self._edit_handle = self.runtime._handle
+                    self._sweep_seen.update(self._sweep_pending)  # a leased pass has now run on what woke it
+                    self._sweep_pending = {}
                     with self._condition:
                         for change in changes:
                             if self._view_changes.get(change) is True:
@@ -1743,6 +1747,7 @@ class StoreServer:
                                                    limit=VIEW_BATCH_PATHS)
             except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
                 logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                self._sweep_pending, self._sweep_seen = {}, {}  # the next sweep finds the edits again
                 wait = IMPORT_RETRY_SECONDS
                 self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
                 with self._condition:
@@ -1846,8 +1851,9 @@ class StoreServer:
 
         It stands in for the leased full pass of edit-back and repeats at the same cadence, so an
         owner's edit is absorbed with the watcher off. It yields to any waiting request between pages and
-        continues from where it stopped. A change found wakes the tick once: a view the leased pass left
-        changed does not wake it again until its file changes."""
+        continues from where it stopped. A change found wakes the tick once, and the tick's leased pass
+        then remembers it: a view that pass left changed does not wake the tick again until its file or
+        its record changes. A wake that fails before that pass runs forgets it, and the next sweep finds it."""
         from . import edit_back
 
         started = time.monotonic()
@@ -1860,10 +1866,9 @@ class StoreServer:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 while self._sweep_after is not None:
                     changed, self._sweep_after = edit_back.changed_views(reader, self.root, after=self._sweep_after)
-                    fresh = {path: stat for path, stat in changed.items()
-                             if path not in self._sweep_seen or self._sweep_seen[path] != stat}
+                    fresh = {path: seen for path, seen in changed.items() if self._sweep_seen.get(path) != seen}
                     if fresh:
-                        self._sweep_seen.update(fresh)
+                        self._sweep_pending = fresh
                         self._sweep_after, found = None, True
                     elif self._sweep_after is not None and (
                             self._aside() or self._stopping() or time.monotonic() - started >= VIEW_SLICE_SECONDS):

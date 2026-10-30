@@ -1,5 +1,6 @@
 """A store the lease manager released on idle takes the lease again only for work it can prove."""
 
+import threading
 import time
 from contextlib import closing
 
@@ -9,6 +10,7 @@ from test_collection_store_service import ON, Service, _served_vault, call, offl
 from test_collection_store_writer import CID, manifest_path
 
 from exomem import writer_lease
+from exomem.cli_ops import OpError
 from exomem.collection_store import capability, connection, edit_back, runtime
 from exomem.collection_store.writer import CollectionWriter
 
@@ -103,7 +105,11 @@ def test_a_released_store_takes_the_lease_only_for_an_edited_view_or_a_request(i
 def test_taking_the_lease_again_queues_no_history_page_but_a_changed_row_still_renders_its_page(
         idle_service, monkeypatch):
     """Defect: every takeover of an unchanged store marks all its history pages pending, so each one is
-    rendered again; or the change that keeps that quiet also keeps a changed row's page from rendering."""
+    rendered again; or the change that keeps that quiet also keeps a changed row's page from rendering.
+
+    The first half asserts that no page was queued, which is a mechanism: a page rendered again without
+    need keeps its inode, mtime and projection rows, so no behaviour-level artifact exists to assert.
+    The second half renders a changed row and does assert the behaviour."""
     root, manager = idle_service.root, idle_service.manager
     appended = call(root, "record_memory", action="append", collection=CID, item={"title": "Initial", "count": 1},
                     item_key=ROW, why="capture")
@@ -134,3 +140,41 @@ def test_taking_the_lease_again_queues_no_history_page_but_a_changed_row_still_r
     call(root, "record_memory", **update, changes={"count": 3}, why="second correction",
          expected_container_hash=corrected["after_container_hash"], expected_item_version=corrected["after_item_hash"])
     _until(lambda: "second correction" in page.read_text())
+
+
+def test_an_edit_whose_wake_could_not_take_the_lease_is_absorbed_by_a_later_sweep(idle_service, monkeypatch):
+    """Defect: the sweep counts an edited view as handled when it wakes the tick, so a wake whose lease
+    request fails leaves the edit unabsorbed, with the watcher off, until some request takes the lease."""
+    root, manager = idle_service.root, idle_service.manager
+    call(root, "record_memory", action="append", collection=CID, item={"title": "Canonical"},
+         item_key=ROW, why="first row")
+    view = root / "Knowledge Base/Records/Work/_collection.md"
+    _until(lambda: rows(root, "SELECT count(*) FROM projection_state WHERE state!='current'") == [(0,)])
+    release_on_idle(manager)
+    store, refused, acquire = runtime._server(root).thread, [], manager.client.acquire
+
+    def refusing_once(*args, **kwargs):
+        if threading.current_thread() is store and not refused:  # only the store thread's first wake
+            refused.append(args)
+            raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "the coordinator did not answer")
+        return acquire(*args, **kwargs)
+
+    monkeypatch.setattr(manager.client, "acquire", refusing_once)
+    view.write_bytes(view.read_bytes().replace(b"title: Work", b"title: Revised work"))
+    _until(lambda: refused)
+    _until(lambda: "title: Revised work" in rows(
+        root, "SELECT manifest_text FROM collection_manifests ORDER BY manifest_version DESC LIMIT 1")[0][0])
+
+
+def test_a_view_deleted_again_after_the_store_restored_it_is_restored_again(idle_service):
+    """Defect: the sweep remembers a deleted view by its missing file alone, so the same deletion after
+    the store restored the view and released the lease again is taken for the one already handled."""
+    root, manager = idle_service.root, idle_service.manager
+    call(root, "record_memory", action="append", collection=CID, item={"title": "Canonical"},
+         item_key=ROW, why="first row")
+    view = root / "Knowledge Base/Records/Work/_collection.md"
+    _until(lambda: rows(root, "SELECT count(*) FROM projection_state WHERE state!='current'") == [(0,)])
+    for _ in range(2):
+        release_on_idle(manager)
+        view.unlink()
+        _until(view.exists)
