@@ -679,9 +679,20 @@ def _build_plan(root: Path, collection: str | Path, *, mutation: bool = False) -
     )
 
 
+def _store_writer(root: Path, collection: str | Path):
+    """The collection store's writer when it owns this collection; its rows never move, only views."""
+    from .collection_store.preview import selected_writer
+
+    return selected_writer(root, collection)
+
+
 def preview(vault_root: Path, collection: str | Path) -> dict[str, Any]:
     """Return one deterministic, read-only structured-file migration plan."""
-    return _build_plan(Path(vault_root), collection).public
+    root = Path(vault_root)
+    writer = _store_writer(root, collection)
+    if writer is not None:
+        return writer.preview_filenames(collection)
+    return _build_plan(root, collection).public
 
 
 def _receipt_path(root: Path, plan_id: str) -> Path:
@@ -828,6 +839,9 @@ def apply(
     """Apply exactly one unchanged preview, or replay its terminal receipt."""
     _validate_apply_inputs(plan_id, source_snapshot, why)
     root = Path(vault_root)
+    writer = _store_writer(root, collection)
+    if writer is not None:
+        return writer.apply_filenames(collection, plan_id=plan_id, source_snapshot=source_snapshot, why=why)
     replay = _load_receipt(root, plan_id, source_snapshot)
     if replay is not None:
         return replay

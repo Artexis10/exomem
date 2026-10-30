@@ -659,7 +659,9 @@ class PageContext:
                 if (not self._allows(subject, readers)
                         or any(not self._allows(subject, readers, path) for path in historical_paths)):
                     return None
-                paths = [original["canonical_path"]]
+                # An item view follows its row through filename maintenance; other layouts keep the event's path.
+                paths = [subject.basis.subject.path if self.layout == "markdown-items" and self.view_mode == "items"
+                         else original["canonical_path"]]
             elif (not self._allows(self.manifest_subject, readers)
                   or any(not self._allows(self.manifest_subject, readers, path) for path in historical_paths)):
                 return None
