@@ -857,8 +857,24 @@ def test_mcp_retry_scope_hashes_bearer_and_falls_back_to_session(monkeypatch) ->
     assert scope.startswith("bearer:")
     assert "super-secret-token" not in scope
 
-    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {"user-agent": "client/1"}
+    )
     assert command_surface.mcp_retry_scope() == "session:session-1"
+
+
+def test_mcp_retry_scope_on_stdio_ignores_the_per_call_session_id(monkeypatch) -> None:
+    monkeypatch.setattr("fastmcp.server.dependencies.get_access_token", lambda: None)
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    scopes = []
+    for per_call_id in ("call-1", "call-2"):
+        monkeypatch.setattr(
+            "fastmcp.server.dependencies.get_context",
+            lambda per_call_id=per_call_id: SimpleNamespace(session_id=per_call_id),
+        )
+        scopes.append(command_surface.mcp_retry_scope())
+    assert scopes[0] == scopes[1] and scopes[0].startswith("session:")
+    assert "call-" not in scopes[0]
 
 
 def test_mcp_retry_scope_uses_stable_verified_principal_across_bearer_rotation(
