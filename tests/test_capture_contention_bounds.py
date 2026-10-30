@@ -102,6 +102,33 @@ def test_a_wait_never_outlives_the_request_budget(
     assert elapsed <= budget - 3.0 + 0.2, elapsed
 
 
+def test_a_slow_attempt_is_not_started_again_past_the_request_budget(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline leaves room for one guard timeout, not for slow preparation."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "40")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path), mutation_timeout_seconds=0.2
+    )
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 1.0)
+    attempts: list[float] = []
+
+    def slow_preparation_then_busy():
+        attempts.append(time.monotonic())
+        time.sleep(1.2)  # preparation before the leaf's own guard
+        raise _busy()
+
+    budget = 3.0
+    started = time.monotonic()
+    with pytest.raises(OpError) as refused:
+        _run(manager, slow_preparation_then_busy, budget=budget)
+    elapsed = time.monotonic() - started
+
+    assert refused.value.details["cause"] == "capture_wait_exhausted"
+    assert len(attempts) == 1
+    assert elapsed <= budget - 1.0, elapsed
+
+
 def test_absorbed_retries_do_not_count_as_client_visible_busy(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

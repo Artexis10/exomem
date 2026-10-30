@@ -4352,9 +4352,11 @@ def _writes_absorb_contention() -> bool:
     }
 
 
-# A waiting capture parks one of the process's sync workers (anyio's limiter,
+# A waiting write parks one of the process's sync workers (anyio's limiter,
 # shared with search and activation). Only half may be parked, so a long
-# holder cannot turn every worker into a sleeping capture and starve reads.
+# holder cannot turn every worker into a sleeping write and starve reads.
+# The `capture` in these names, the env knobs and the refusal causes is
+# historical: they now cover every keyed write.
 _CAPTURE_WAITERS_LOCK = threading.Lock()
 _capture_waiters = 0
 
@@ -4425,7 +4427,7 @@ def _active_capture_preparation_retry() -> _CapturePreparationRetry | None:
 
 
 class _FairCaptureQueue:
-    """First-come-first-served order, within one process, for capture writes
+    """First-come-first-served order, within one process, for keyed writes
     waiting on the boundary.
 
     A write that meets a busy boundary or invalidated preparation joins. A
@@ -6227,12 +6229,18 @@ class LeaseManager:
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
                 )
 
+            from .command_surface import OPEN_WORLD_OPS
+
             result = self._run_absorbing_capture_contention(
                 command,
                 run_idempotent,
                 key=key,
                 commit_state=commit_state,
                 request_id=request_id,
+                # A narrow leaf meets the busy only after its own preparation. When
+                # that preparation fetched caller-supplied temporary handles, the
+                # server cannot fetch them again; only the caller can retry.
+                rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
             )
             if (
                 vocabulary_replay_terminal is not None
@@ -6402,6 +6410,7 @@ class LeaseManager:
         key: str | None,
         commit_state: Mapping[str, bool],
         request_id: str,
+        rerun_safe: bool = True,
     ) -> Any:
         """Run one keyed write, waiting out an ordinary busy boundary.
 
@@ -6412,9 +6421,10 @@ class LeaseManager:
         caller can act on. A retry is safe because a busy refusal is raised
         before the write commits and releases its idempotency claim, so the
         key commits exactly once; anything that observed a commit is never
-        re-run.
+        re-run. A write is attempted again only while the request budget still
+        fits another attempt as long as the last one.
         """
-        if key is None or not _writes_absorb_contention():
+        if key is None or not rerun_safe or not _writes_absorb_contention():
             # An ineligible nested invocation must not borrow its parent's
             # allowance or admission callback.
             token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(None)
@@ -6454,8 +6464,8 @@ class LeaseManager:
 
         preparation_retry = _CapturePreparationRetry(deadline, admit_preparation_retry)
 
-        def waited_ms() -> float:
-            return round((time.monotonic() - started) * 1000, 2)
+        def waited_ms() -> int:
+            return round((time.monotonic() - started) * 1000)
 
         def uncounted_busy() -> OpError:
             with mutation_lock.absorbing_busy():
@@ -6466,9 +6476,7 @@ class LeaseManager:
             mutation_lock.record_client_visible_busy()
             # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
             error.details.pop("wait_ms", None)
-            error.details.update(
-                cause=cause, waited_ms=round(waited_ms()), absorbed_attempts=absorbed
-            )
+            error.details.update(cause=cause, waited_ms=waited_ms(), absorbed_attempts=absorbed)
             error.remediation = remediation
             _log_mutation_event(
                 "contention_refused",
@@ -6498,6 +6506,7 @@ class LeaseManager:
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
+                attempt_started = time.monotonic()
                 try:
                     token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(preparation_retry)
                     try:
@@ -6520,7 +6529,13 @@ class LeaseManager:
                             error, "holder_overdue", _CAPTURE_HOLDER_OVERDUE_REMEDIATION
                         ) from None
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                    # The deadline leaves room for one guard timeout, not for a leaf
+                    # whose preparation is slow; never start an attempt the budget
+                    # cannot finish.
+                    attempt_seconds = time.monotonic() - attempt_started
+                    if remaining <= 0 or not request_budget.can_afford(
+                        request_budget.DELIVERY_RESERVE_SECONDS + attempt_seconds
+                    ):
                         raise refuse(
                             error,
                             "capture_wait_exhausted",

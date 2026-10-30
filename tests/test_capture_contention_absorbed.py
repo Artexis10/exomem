@@ -300,6 +300,9 @@ def test_a_guarded_record_update_waits_out_the_boundary(
             contention,
         )
     assert result
+    stored = record_formats.load_adapter(tmp_path, manifest).read()
+    (updated,) = [item for item in stored.records if item.identity.key == record.identity.key]
+    assert updated.values["provider"] == "Invented Garage Three"
 
 
 def test_a_record_append_waits_out_the_boundary(

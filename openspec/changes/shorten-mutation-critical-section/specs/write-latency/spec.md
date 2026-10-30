@@ -253,22 +253,29 @@ the delivery reserve and one guard acquire timeout still fit inside it).
 Waiting writes SHALL attempt in arrival order within one process, and a write
 arriving while others wait SHALL join behind them. Waiting parks a shared
 synchronous worker, so no more than half of the workers (at least one)
-MAY wait at once (the waiter cap; four at the default eight); a capture past
+MAY wait at once (the waiter cap; four at the default eight); a write past
 that cap is refused at once with `cause: capture_waiters_full`. The retry MUST run
 under the same idempotency identity, so the write commits exactly once, and
-MUST NOT re-run any attempt that observed a commit. A client MUST NOT receive
+MUST NOT re-run any attempt that observed a commit. A retry SHALL start only
+while the request budget still fits the delivery reserve plus an attempt as long
+as the last one. A write whose own preparation fetched caller-supplied temporary
+artifact handles before it met the busy boundary MUST NOT be re-run on the
+server, because a handle cannot be fetched twice; its busy reaches the caller,
+who retries with fresh handles. A client MUST NOT receive
 `MUTATION_BUSY` for a keyed write whose holder is still inside its allowance,
 whose wait has not run out, and that arrived within the waiter cap; absorption
 holds up to the cap and no further.
 
 A refusal remains only for a holder already past its allowance, a wait that
-ran out, or a capture past the waiter cap. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
+ran out, a write past the waiter cap, or a write that fetched caller-supplied
+handles. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
 `cause` (`holder_overdue`, `capture_wait_exhausted` or
 `capture_waiters_full`), the time waited, and a
 remediation that says the write did not commit and may be retried with the same
 idempotency key. The REST `Error` schema SHALL declare every field such a refusal
 carries. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the previous immediate
-refusal.
+refusal. The `capture` in the setting names and causes is historical; they apply
+to every keyed write.
 
 #### Scenario: Concurrent captures during a held boundary all commit once
 
@@ -285,9 +292,16 @@ refusal.
 - **THEN** the update waits, commits once after the holder releases
 - **AND** no `MUTATION_BUSY` reaches the caller
 
+#### Scenario: A write that fetched caller handles is not re-run
+
+- **WHEN** a keyed `preserve_artifacts` call meets a busy boundary after it
+  fetched its handles
+- **THEN** the caller receives `MUTATION_BUSY` with `committed: false`
+- **AND** each handle was fetched once, so a retry with fresh handles stores the files
+
 #### Scenario: An overdue holder is refused at once with a cause
 
-- **WHEN** a capture write finds a holder already past its allowance
+- **WHEN** a keyed write finds a holder already past its allowance
 - **THEN** it is refused without waiting further, with `cause: holder_overdue`
 - **AND** nothing was committed
 
@@ -297,20 +311,21 @@ refusal.
 - **THEN** the write is refused with `cause: capture_wait_exhausted`
 - **AND** nothing was committed
 
-#### Scenario: Waiting captures leave workers free for reads
+#### Scenario: Waiting writes leave workers free for reads
 
-- **WHEN** as many captures as the waiter cap allows are waiting on a held boundary
-- **THEN** a further capture is refused at once with `cause: capture_waiters_full`
+- **WHEN** as many writes as the waiter cap allows are waiting on a held boundary
+- **THEN** a further write is refused at once with `cause: capture_waiters_full`
 - **AND** a read served by the same worker pool completes without queueing
 
 #### Scenario: A wait never outlives the request budget
 
-- **WHEN** a capture waits on a busy boundary under a bound request budget
+- **WHEN** a keyed write waits on a busy boundary under a bound request budget
 - **THEN** it is refused, with its cause, before the delivery reserve begins
+- **AND** an attempt whose preparation is too slow to fit again is not started again
 
 #### Scenario: Only refusals a client saw are counted
 
-- **WHEN** a capture retries on the server and then commits
+- **WHEN** a keyed write retries on the server and then commits
 - **THEN** `exomem_mutation_busy_total` does not increase
 - **AND** the one refusal that does reach a client increases it once
 

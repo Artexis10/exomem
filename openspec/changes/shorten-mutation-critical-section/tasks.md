@@ -248,8 +248,12 @@ authority and can be rolled back independently.
       Evidence: PR #1901: `test_reference_preparation_survives_two_real_intervening_commits`, `test_three_reference_captures_survive_concurrent_preparation_invalidation` and `test_unproved_episode_references_return_a_bounded_retryable_failure_without_a_write` in `tests/test_episode_memory_command.py`.
 - [x] 10.6 Widen absorption from the capture commands to every keyed write:
       a guarded `record_memory` update meeting a held boundary waits and commits
-      once (`test_a_guarded_record_update_waits_out_the_boundary`). Declare the
-      refusal's `cause` and `absorbed_attempts` in the REST `Error` schema.
+      once (`test_a_guarded_record_update_waits_out_the_boundary`). Never re-run a
+      narrow write that fetched caller handles
+      (`test_a_busy_boundary_never_fetches_a_handle_twice_in_one_call`), and never
+      start an attempt the request budget cannot finish
+      (`test_a_slow_attempt_is_not_started_again_past_the_request_budget`).
+      Declare every field a busy refusal carries in the REST `Error` schema.
 
 ## 11. Graph receipt identity after authority release
 
