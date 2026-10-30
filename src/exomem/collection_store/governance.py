@@ -595,6 +595,9 @@ class ReleaseCache:
         self.contracts = OrderedDict()
         self.memberships = OrderedDict()
         self.decisions = OrderedDict()
+        #: (view path, sha256 of its bytes) proven equal to the render of the committed rows. A render is
+        #: a function of the store alone, so any store change drops every proof (see ``check`` and ``finish``).
+        self.render_proofs = OrderedDict()
         self.pending = None
         self.replacements = {}
         self.observed = self._stamp()
@@ -627,6 +630,7 @@ class ReleaseCache:
         self.contracts.clear()
         self.memberships.clear()
         self.decisions.clear()
+        self.render_proofs.clear()
         self.replacements.clear()
         self.observed = self._stamp()
 
@@ -735,6 +739,10 @@ class ReleaseCache:
 
     def finish(self, committed):
         changed = self.conn.total_changes != self.observed[0]
+        if changed or self.unmanaged:
+            # A managed commit keeps the incremental caches below, but a proof of one view's bytes
+            # holds only for the store that rendered it.
+            self.render_proofs.clear()
         if committed and not self.unmanaged and self.conn.total_changes == self.accounted:
             for cid, identities in self.pending.items():
                 state = self.replacements.get(cid) or self.states.get(cid)
@@ -1851,8 +1859,6 @@ class OperationAuthorization:
                     # A retired page must not disclose a raw-history boundary through an empty matching header.
                     return Decision(0)
             if content is not None:
-                from . import legacy_originals, views
-
                 cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
                 row = cursor.fetchone()
                 if row is None:
@@ -1866,19 +1872,14 @@ class OperationAuthorization:
                 ):
                     return Decision(0)
                 manifest = manifest_for(projection["collection_id"])
-                _version, rendered = views.render_view(
-                    self.conn, views.store_identity(self.conn), projection, manifest,
-                    root=self.root, cache=self.cache, operation=self,
-                )
-                if content != rendered.encode("utf-8"):
-                    # Migration preserves initial source bytes before asynchronous stamping.
-                    if not legacy_originals.current_view_matches(self.conn, projection, content):
-                        return Decision(0)
+                digest = hashlib.sha256(content)
+                if not self._bytes_are_current_render(projection, manifest, content, digest.digest()):
+                    return Decision(0)
                 parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
                 if parsed is None:
                     return Decision(0)
                 extra = set(membership.evaluate_snapshot(
-                    parsed, self.policy, content_hash=hashlib.sha256(content).hexdigest(),
+                    parsed, self.policy, content_hash=digest.hexdigest(),
                 )) - set(decision.scope_ids)
                 if extra:
                     decision = egress._meet_decisions((decision,
@@ -1889,6 +1890,37 @@ class OperationAuthorization:
         except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
                 TypeError, KeyError, sqlite3.Error):
             return Decision(0)
+
+    def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes) -> bool:
+        """Whether ``content`` is the current render of ``projection``, or a migrated original.
+
+        This proof is a function of the store and the bytes alone, never of the caller or the policy,
+        so a repeat over the same store keeps it. The verdict built on it is decided again each time.
+        """
+        from . import legacy_originals, views
+
+        cache, key = self.cache, (projection["path"], digest)
+        # A relationship label reads vault files through this operation; a history page is not proved
+        # to depend on the store alone. Neither is kept. Nor is any proof made mid-write or past an
+        # unseen store change.
+        presentation = manifest.item_presentation
+        keepable = (projection["kind"] != "history"
+                    and (presentation is None or not presentation.relationships)
+                    and cache.pending is None and not cache.unmanaged
+                    and self.conn.total_changes == cache.observed[0])
+        if keepable and key in cache.render_proofs:
+            cache.render_proofs.move_to_end(key)
+            return True
+        _version, rendered = views.render_view(
+            self.conn, views.store_identity(self.conn), projection, manifest,
+            root=self.root, cache=cache, operation=self,
+        )
+        if content == rendered.encode("utf-8"):
+            if keepable:
+                cache._remember(cache.render_proofs, key, True, 65536)
+            return True
+        # Migration preserves initial source bytes before asynchronous stamping.
+        return legacy_originals.current_view_matches(self.conn, projection, content)
 
     def allows_file(
         self, path: str, *, content_sha256: str | Callable[[], str] | None = None
