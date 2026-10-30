@@ -106,6 +106,24 @@ def _published_metadata_current(metadata, *, copied_raw=None, raw_marker=None):
     ) is None
 
 
+def published_evidence(metadata):
+    """The bookkeeping proving the installed replica carries this live head, epoch and intent, else None.
+
+    A re-admission that finds the same evidence under the boundary, with the replica bytes
+    it names, has nothing to publish. Any pending intent, divergence or foreign adoption
+    record is the full publication path's to settle.
+    """
+    if (metadata.get(_PENDING) is not None or metadata.get(authority.PENDING_CREATE) is not None
+            or metadata.get(schema.META_REPLICA_DIVERGENCE) is not None
+            or metadata.get(schema.META_ADOPTED_FOREIGN_REPLICA) is not None
+            or metadata.get(authority.MARKER_REQUIRED) != "1"
+            or metadata.get(_DIGEST) is None or metadata.get(_PUBLISHED) is None
+            or json.loads(metadata[_PUBLISHED]) != _head(metadata)
+            or not _published_metadata_current(metadata)):
+        return None
+    return (_json(_head(metadata)), metadata[_DIGEST], metadata.get(_EPOCH), metadata.get(_INTENT))
+
+
 def _read_copied_intent(filesystem, witness, *, digest, head, epoch, deadline=None, progress=None):
     """Read metadata from a private copy of the authenticated retained descriptor."""
     check = progress if progress is not None else lambda: None
