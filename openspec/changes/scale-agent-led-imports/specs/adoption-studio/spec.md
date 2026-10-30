@@ -68,6 +68,20 @@ When an `exomem import` finishes, the command SHALL write a stage record for the
 - **WHEN** adoption runs on the path of a local import that stays open
 - **THEN** no staged copy is consumed, and a rerun of the import copies only what was missing
 
+### Requirement: A staged import is not indexed
+
+The vault-wide scans that build search, recall and their catalogues SHALL skip the `_Imports/` folder at the vault root. A staged file SHALL reach the indexes only through the Source that adoption files for it. Adoption Studio SHALL still scan a stage that a run names.
+
+#### Scenario: A staged note is not found by vault-scope search
+
+- **WHEN** a note sits under `_Imports/<import_id>/` and a vault-scope search queries a term that only that note holds
+- **THEN** the search returns no hit for it
+
+#### Scenario: A large import does not hold the cell's readiness
+
+- **WHEN** a Cloud import lands tens of thousands of staged notes while the runtime is stopped, and the runtime starts again
+- **THEN** readiness does not wait on indexing the staged notes
+
 ## MODIFIED Requirements
 
 ### Requirement: Deterministic read-only scan and candidate inventory

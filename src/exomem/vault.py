@@ -237,6 +237,9 @@ _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 
 
+# The vault folder that holds staged imports, one `<import_id>` folder each.
+IMPORT_STAGE_DIRNAME = "_Imports"
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
@@ -266,6 +269,10 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         SHIPPED_SCHEMA_DIRNAME,
         "_Governance",
         "_Adoption",
+        # A staged import is transient input that adoption files into the Knowledge Base and
+        # then discards; indexing it doubles every filed note and, after a large import lands
+        # offline, makes readiness wait on a whole-catalogue rebuild over the stage.
+        IMPORT_STAGE_DIRNAME,
     }
 )
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)

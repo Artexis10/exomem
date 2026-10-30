@@ -227,7 +227,7 @@ def run_import(
                 receipt["manifest"] = saved["path"]
                 _prove_manifest(vault_root, receipt["manifest"])
             elif request.kind == "adopt":
-                destination = vault_root / "_Imports" / request.import_id
+                destination = vault_root / import_stage.STAGE_DIR / request.import_id
                 _ensure_private_directory(destination.parent)
                 if destination.exists():
                     # A crash after rename is recoverable only with identical staged bytes.
@@ -334,7 +334,7 @@ def _prove_restore_collections(staging: Path) -> None:
 def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) -> None:
     """Remove transport/adoption material. Committed RAW sources remain governed data."""
     _id(import_id)
-    if (vault_root / "_Imports").is_symlink() or (vault_root.parent / ".import-keys").is_symlink():
+    if (vault_root / import_stage.STAGE_DIR).is_symlink() or (vault_root.parent / ".import-keys").is_symlink():
         raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "symlink")
     if not keep_adoption:
         # First, so that a stop between the two steps leaves a stage with no manifest, which nothing consumes.
@@ -342,7 +342,7 @@ def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) ->
     for path in [
         vault_root.parent / ".import-keys" / import_id,
         vault_root.parent / f".import-{import_id}",
-    ] + ([] if keep_adoption else [vault_root / "_Imports" / import_id]):
+    ] + ([] if keep_adoption else [vault_root / import_stage.STAGE_DIR / import_id]):
         if path.is_symlink():
             path.unlink()
         elif path.exists():

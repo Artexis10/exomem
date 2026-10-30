@@ -179,3 +179,15 @@ def test_adoption_dir_is_in_the_corpus_exclusion_set() -> None:
     from exomem import find_corpus
 
     assert "_Adoption" in find_corpus.EXCLUDED_DIR_NAMES
+
+
+def test_a_staged_import_is_not_in_vault_scope_recall(vault: Path) -> None:
+    """A staged import is filed into the Knowledge Base and then discarded; indexing it doubles each note."""
+    staged = vault / "_Imports" / "6f1c2a9e-3b4d-4c5e-8f70-1a2b3c4d5e6f" / "notes"
+    staged.mkdir(parents=True)
+    (staged / "harbour.md").write_text("# Harbour survey\n\nThe kelpwater tide table.\n", encoding="utf-8")
+    (vault / "Old Notes").mkdir(exist_ok=True)
+    (vault / "Old Notes" / "lighthouse.md").write_text("# Lighthouse\n\nThe brinewick lamp log.\n", encoding="utf-8")
+
+    assert _recall(vault, "kelpwater", scope="vault") == []
+    assert _recall(vault, "brinewick", scope="vault") == ["Old Notes/lighthouse.md"]

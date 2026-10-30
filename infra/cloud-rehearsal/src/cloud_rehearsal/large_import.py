@@ -129,8 +129,23 @@ try:
     total, used = fs.f_blocks * fs.f_frsize, (fs.f_blocks - fs.f_bfree) * fs.f_frsize
 except OSError:
     pass
+ready = None
+try:
+    import urllib.error, urllib.request
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8765/health/ready', timeout=3) as reply:
+            body = json.loads(reply.read())
+    except urllib.error.HTTPError as refused:
+        body = json.loads(refused.read())
+    # What readiness waits on, so a slow start shows its cause in the samples.
+    ready = {key: body.get(key) for key in ('status', 'reasons')}
+    ready['retrieval'] = {key: (body.get('retrieval') or {}).get(key) for key in ('state',)}
+    ready['repair'] = {key: (body.get('repair') or (body.get('retrieval') or {}).get('repair') or {}).get(key)
+                       for key in ('phase', 'age_seconds')}
+except Exception:  # a stopped or starting server leaves the sample without readiness, never without memory
+    pass
 print(json.dumps({'memory_current': current, 'memory_anon': anon, 'memory_peak': peak, 'memory_limit': limit,
-                  'volume_total': total, 'volume_used': used}))
+                  'volume_total': total, 'volume_used': used, 'ready': ready}))
 """
 
 

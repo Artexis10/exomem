@@ -12,9 +12,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import private_state, state_migration, state_paths
+from . import private_state, state_migration, state_paths, vault
 
-STAGE_DIR = "_Imports"
+STAGE_DIR = vault.IMPORT_STAGE_DIRNAME
 CLOUD_RECEIPTS = "cloud-imports"
 LOCAL_RECORDS = "local-imports"
 # What a run records as the reason its stage is trusted; the two values are a closed protocol pair.
