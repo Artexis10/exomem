@@ -10658,7 +10658,8 @@ def op_adoption_studio(
     Args:
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
-        path: For `start`, scan subtree (default: vault root). For run-listing
+        path: For `start`, scan subtree (default: whole vault; ask which folder).
+            For run-listing
             `status`, count distinct filed originals under it (null with
             `complete=false` if incomplete). Omit for legacy listing.
         include_hidden: For `start`, include hidden files.

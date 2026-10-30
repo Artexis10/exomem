@@ -658,8 +658,9 @@ def _resolve_classification(
             )
         raise AdoptionRunError(
             "SOURCE_KIND_UNREGISTERED",
-            f"source_kind {kind.key!r} is not in the Source taxonomy; "
-            "register it in _Schema/source-taxonomy.yaml first",
+            f"source_kind {kind.key!r} is not in the Source taxonomy. Select again without source_kind or domain "
+            "to leave the files unclassified. Registering a new kind in _Schema/source-taxonomy.yaml changes the "
+            "person's vocabulary: do it only after they confirm",
         )
     if kind.key in source_taxonomy.UNCHOSEN_KINDS or kind.key == source_taxonomy.EPISODE_KIND:
         raise AdoptionRunError(
@@ -835,7 +836,10 @@ def _next_actions(run: dict) -> list[dict]:
         else:
             actions.append(
                 {"action": "apply", "status": "available",
-                 "description": "Apply stopped with work left; call apply again with the continuation."}
+                 "description": "Apply stopped with work left; call apply again with the continuation, yourself, "
+                                "not in a background worker. If you stop before remaining is 0, tell the person the "
+                                "applied and remaining counts from progress, that the import is unfinished, and that "
+                                "apply with the run_id, plan_id and continuation resumes it."}
             )
     elif phase in ("applied", "partial"):
         actions.append(

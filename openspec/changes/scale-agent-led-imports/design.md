@@ -75,7 +75,7 @@ An artifact is copied in a single streamed pass that hashes while it copies and 
 
 ### D6. The agent leads from tool text
 
-The `observe_transfer` description, its `import_handoff` routes and the `adoption_studio` next actions name the whole flow: import, wait for `done`, page through `start` while `next_after` is set, `select`, `plan`, `apply`, `finish`, review the residual, then discard. The skill scaffold gains a generic import reference. A client without a shell is routed to Home.
+The `observe_transfer` description, its `import_handoff` routes and the `adoption_studio` next actions name the whole flow: import, wait for `done`, page through `start` while `next_after` is set, `select`, `plan`, `apply`, `finish`, review the residual, then discard. The skill scaffold gains a generic import reference. A client without a shell is routed to Home. The default (compact) `import_memory` reply carries `apply_stop`, `next_after`, `next_actions` and `finish.residual`, so the stop, the next page and the residual need no `full` reply.
 
 ### D7. Proof runs where admission does not double the volume
 
