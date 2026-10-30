@@ -21,7 +21,8 @@ env:
   # The newest release one store schema back; move it to the next one with each schema bump.
   EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
   # The earlier release that full runs qualify as the rollback application on a migrated
-  # store; keep it a release that supports the current store schema.
+  # store. A store schema bump empties it, because no earlier release reads the new schema;
+  # the next release that ships that schema sets it again.
   EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.151.1"
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
@@ -540,7 +541,9 @@ jobs:
       # design §10, "Reversal"): on full runs the journey runs this release on the migrated copy.
       # It must admit the store, write both built-ins, restart and keep the original-file archives.
       - name: Install the pinned earlier application for the rollback qualification
-        if: steps.scope.outputs.docs_only != 'true' && needs.scope.outputs.full == 'true'
+        if: >-
+          steps.scope.outputs.docs_only != 'true' && needs.scope.outputs.full == 'true'
+          && env.EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION != ''
         timeout-minutes: 5
         run: |
           uv venv "$RUNNER_TEMP/compatible-application" --python 3.13
