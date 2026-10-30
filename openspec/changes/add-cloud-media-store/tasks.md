@@ -76,56 +76,68 @@
   - [ ] 5.3.2 Add Source sessions through the existing canonical writer and mutation replay protocol. Verify metadata refusal before bytes, lane isolation, a recovered acknowledgement without duplicate captures, and unknown outcomes with retained uploads. Reuse the existing staged file; keep semantic compilation agent-authored.
   - [ ] 5.3.3 Verify resource bounds before advertising larger Source uploads in each supported authority mode. Activated vocabulary writes currently materialize staged images and reject arbitrary binary changes; preserve that authority while preventing an oversized allocation just to discover a refusal.
 - [ ] 5.4 Add imports larger than the volume: windows that adoption files by rename (D12). Verify: an import larger than the volume lands without the volume passing its growth threshold and without the cell growing.
-  - Design: D12, with the amendments to D3, D8 and D10 (2026-10-30). Four choices are pending operator confirmation: the shape, the CLI as the only sender in slice 1, 1 GiB as the largest offloadable file, and test cells only until task 5.5. The M4 scope is pending too.
+  - Design: D12, with the amendments to D3, D8 and D10 (2026-10-30). Four choices are pending operator confirmation. They are the shape, the CLI as the only sender in slice 1, 1 GiB as the largest offloadable file, and test cells only until task 5.5. The M4 scope is pending too. Three operator asks are pending: the canary's hydration capacity, a retained store's keys and egress, and a B2 sandbox bucket with its key.
   - Prerequisites: `scale-agent-led-imports` merges first. It supplies the stage manifests, consume-on-filing, paging, collection identity and the space stop. Pull request 2216 lands before the rehearsal.
   - Slices: slice 1 is 5.4.1 to 5.4.12, proved on a local-storage cell. Slice 2 is Home windows in a Substrate change of their own, and a per-kind space factor if 5.4.12 shows a need (D10). Slice 3 is streaming hydration, pipelined uploads and, if holds hurt, option R. Task 5.4.13 closes slice 1.
   - [ ] 5.4.1 Amend D3, D8 and D10 of this change and add D12, with the specs and these tasks. Verify: `openspec validate --all --strict` passes.
     - Drafted on 2026-10-30 and revised the same day to file by rename. It closes when the operator confirms the four choices.
-  - [ ] 5.4.2 Add the one classification rule (text, offloadable artifact, resident artifact) and import it in the CLI and the adoption inventory. Compute the `age` ciphertext size against the object bound, and plaintext plus ciphertext against the hydration capacity. Verify these with tests:
+  - [ ] 5.4.2 Add the one classification rule (text, offloadable artifact, resident artifact) and import it in the CLI, the adoption inventory, offload and eviction. Compute the `age` ciphertext size against the object bound, and plaintext plus ciphertext against the hydration capacity. Verify these with tests:
     - the CLI's class for each member of a generated folder equals the inventory's;
     - a file of exactly the object bound is resident;
     - a hydration capacity below twice a file's size makes the file resident.
-  - [ ] 5.4.3 Apply M1 to M4. Verify these with tests:
-    - a filed PDF offloads without a restart;
+  - [ ] 5.4.3 Apply M1 to M4, eviction on demand, the claim order and the resident rule (D3). Verify these with tests:
+    - a filed PDF offloads without a restart, and a resident video gets no offload job;
+    - offload records a resident original as refused without encrypting it or writing a temporary file;
     - an offload is claimed before queued transcription;
     - a never-read original is evicted under pressure, and an owner-read one is not;
+    - a demand evicts below the everyday stop point until the budget covers it, and a lapsed demand does not;
+    - eviction skips an original whose hydration does not fit the hydration capacity;
     - a pending unclaimed job does not keep its original, and a claimed job keeps it across a timeout slice and a memory brake;
     - failed and blocked jobs do not keep their originals;
-    - a hydration transport failure and a full hydration capacity each return the job to the queue with no attempt consumed and its speech progress kept;
+    - at `max_hydrations` claimed but unfinished jobs, the worker resumes one before a fresh job, and below it a local original runs first;
+    - a hydration transport failure and hydration capacity in use each return the job with no attempt consumed, its speech progress kept and a retry time;
+    - an original whose hydration exceeds the whole capacity blocks its job with `MEDIA_HYDRATION_TOO_LARGE`;
     - eviction reads a bounded candidate set.
-  - [ ] 5.4.4 Make the import Job record each member's identity (device, inode, size, `mtime_ns`, `ctime_ns`) in the member manifest, after it sets the modification time. Verify: a Job test shows each entry's identity equals the stat of its staged file. The rehearsal shows the identity unchanged when the runtime pod mounts the volume.
+  - [ ] 5.4.4 Make the import Job record each member's identity in the member manifest, after it sets the modification time. The identity is inode, size, `mtime_ns` and `ctime_ns`, without the device number. Verify: a Job test shows each entry's identity equals the stat of its staged file. The rehearsal shows the identity unchanged when the runtime pod mounts the volume.
   - [ ] 5.4.5 Add the rename primitive to the Source writer and file artifact members by rename. Verify these with tests:
     - a matched member files with no byte read, and its offload job exists when the call returns;
     - a mismatched member re-hashes once and files, or goes to the residual as changed;
     - a mismatched member above the ceiling goes to the residual with no byte read;
     - a cross-device rename falls back to the streamed copy;
-    - a stop after the rename commits the Source page on replay, or renames the file back on a mismatch;
+    - a rename never replaces a file at the Knowledge Base path, and the member stays unfiled with the conflict reported;
+    - a stop after the rename commits the Source page on replay; on a mismatch, replay hashes in place and moves nothing into the stage;
     - a stop after the commit settles as already applied with no byte read;
-    - a failed batch renames the file back and never removes it;
+    - a failed batch renames the file back, recreates a removed staged folder and never removes the file;
+    - the batch writer never lists the renamed binary as a destination;
+    - `import_discard` settles a renamed but uncommitted member first, or refuses and names it;
     - the file watcher and media scans bind no renamed file before replay settles it.
-  - [ ] 5.4.6 Report the window budget, the resident room, the classification inputs, the largest offloadable file, the remaining allowance, the drain state and each window's residual in `adoption_studio status`. Verify: tests for the arithmetic, for unknown when an input cannot be read, and for no budget on a cell without the store.
+  - [ ] 5.4.6 Report both budgets, the classification inputs, the remaining allowance, the drain state and each window's residual with its paths in `adoption_studio status`. Accept the next window's bytes as the demand. Verify: tests for the arithmetic and for a recorded and renewed demand. Tests also show unknown when an input cannot be read, and no budget on a cell without the store.
   - [ ] 5.4.7 Add CLI windows. Verify these with tests against a synthetic API and MCP:
     - three times the budget becomes three or more windows, each within the budget and the published admission limit;
     - an unknown budget waits and reports;
+    - a window that the reachable budget covers waits and sends its bytes as the demand;
+    - "band too small" stops and reports the budget, the reachable budget and the member's bytes;
     - "allowance exhausted" and "media usage unknown" stop and report;
-    - a series whose resident bytes do not fit is refused before upload, with its files listed;
+    - a series whose resident bytes exceed the reachable budget is refused before upload, with its files listed;
+    - a source folder with `.exomem-series.json` at its top level is refused before upload;
+    - a resend of the residual sends the residual members as a new series, and skips a member that changed at the source;
     - a restart after window 2 resends nothing, and a window without a receipt is sent again;
     - a refused window is planned again smaller;
     - an older cell gets one import, or a refusal when the folder exceeds its known size;
-    - each window carries the series path list;
+    - each window carries the series file;
     - the CLI tells the person to keep the source until the residual is empty.
   - [ ] 5.4.8 Update the tool text, regenerate the surface and plugins, and tell an agent without a shell to give the person the CLI command. Verify: the tool-surface and scaffold-leak tests pass, and descriptions stay within the plugin description limit.
-  - [ ] 5.4.9 Take one owner census per offload batch through the existing `usage` parameter. First list every writer that can bind a version while the runtime serves. Verify: a test counts one census for a batch of 500 offloads, and a publication-time reference change is still refused.
-  - [ ] 5.4.10 In cellctl, render the growth threshold and an eviction target below it into the store policy, and refuse a policy whose target is at or above the threshold. Keep a retained store's hydration path while it has evicted originals. Verify: chart and manifest tests for both, and a drain test that keeps evicted originals readable when they exceed the volume.
-  - [ ] 5.4.11 Pass the series path list as `whole_scan`, take a recorded stage's collection root from its manifest, and never list the series path list as an item. Verify: a bare name that repeats in a later window stays ambiguous, and a fully filed stage keeps its collection root.
-  - [ ] 5.4.12 Extend the large-import rehearsal of `scale-agent-led-imports` (its task 5.1) with the media store on a local-storage cell of 20 GiB, in a B2 sandbox bucket. Import at least 50 GiB of mixed media and notes. Include files over 200 MiB, files just under the largest offloadable file and one file above the object bound. Record the store policy used. Verify:
+  - [ ] 5.4.9 Take one owner census per offload batch through the existing `usage` parameter, and reuse it across guard releases. First list every writer that can bind a version while the runtime serves. Verify: a test counts one census for a batch of 500 offloads and shows another write between two members. A publication-time reference change is still refused.
+  - [ ] 5.4.10 In cellctl, render the growth threshold into the store policy, so the cell reads the one value that cellctl uses. Verify: a manifest test shows the policy's threshold equals cellctl's growth threshold.
+  - [ ] 5.4.11 Pass the series file's path list as `whole_scan`. Take a recorded stage's collection root and default label from its series file or manifest. Never list the series file as an item. Verify: a bare name that repeats in a later window stays ambiguous. Two windows of one series get one root and label, and a fully filed stage keeps its root.
+  - [ ] 5.4.12 Extend the large-import rehearsal of `scale-agent-led-imports` (its task 5.1) with the media store on a local-storage cell of 20 GiB. Use the sandbox bucket on B2 that the operator supplies (pending). Import at least 50 GiB of mixed media and notes. Include files over 200 MiB, files just under the largest offloadable file and one file above the object bound. Run no owner reads during the series. Record the store policy used, with the hydration capacity that the operator sets (pending). Verify:
     - the logs show no ENOSPC, `INSUFFICIENT_SPACE` or `MEDIA_ALLOWANCE_EXCEEDED`;
     - the volume claim and `storage_gib` are 20 GiB before and after;
     - the sampler's peak, a lower bound, is at most the growth threshold of the volume;
     - every offloadable Source downloads to its manifest SHA-256, and the file above the object bound stays resident;
     - the residual is as expected;
     - the report records the window count, the holds per window, and the downtime of each prepare, import and discard hold;
-    - the report records the filing rate and the census time per offload batch;
+    - the report records the filing rate, the census time per offload batch, and the bytes and time of each eviction on demand;
     - the report records whether a note links to an attachment that an earlier window carried.
   - [ ] 5.4.13 Run the full corpus, get an independent review, merge, then roll out with the operator. Verify: the review names C4 and C6 verdicts, and each rollout step in D10 has an operator approval.
 - [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, with its network and admission rules (the Job and its policy do not exist before this task), and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.

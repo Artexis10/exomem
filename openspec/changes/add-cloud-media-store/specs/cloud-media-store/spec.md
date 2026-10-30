@@ -2,13 +2,19 @@
 
 ### Requirement: Bound originals are written through to the cell's media store
 
-On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type or size. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded.
+On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded. Offload SHALL apply the classification rule before it encrypts. An original that the rule calls resident SHALL get a recorded refusal, and offload SHALL write no temporary file for it.
 
 #### Scenario: A recording is captured on a selected cell
 
 - **WHEN** an owner captures a recording and its sidecar is committed
 - **THEN** one offload job encrypts and uploads the recording
 - **AND** the sidecar gains the stored-object reference only after the stored copy's size and digest are confirmed
+
+#### Scenario: A resident original is never encrypted
+
+- **WHEN** an offload job reaches a 1.5 GiB video, and the object bound is 1 GiB
+- **THEN** the worker records the video as resident without encrypting it
+- **AND** no temporary file for it appears on the volume, and the video stays local
 
 #### Scenario: The store is unreachable
 
@@ -47,13 +53,31 @@ The system SHALL decide an original's state through one function, from the prese
 
 ### Requirement: Eviction frees volume space only from confirmed, idle originals
 
-When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The cell SHALL check the target after each offload and each media job, and on a timer. The eviction target SHALL be lower than the online-growth trigger. An original SHALL be eligible only when it is cached and nothing keeps it on the volume. A media job that a worker has claimed SHALL keep its original until the job completes, fails or is blocked, also while a timeout slice, a memory brake or an engine wait returns it to the queue as pending. A pin, a hydration or a download SHALL keep its original. A pending media job that no worker has claimed, a failed job and a blocked job SHALL NOT keep an original. An eligible original SHALL also be unread by any owner, or last read by an owner at least the configured minimum idle age ago, as the cell's own record shows. Only an owner's playback, download or viewing SHALL count as a read; offload, extraction, hydration for processing and export packing SHALL NOT. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
+When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The cell SHALL check the target after each offload and each media job, and on a timer. The eviction target SHALL be lower than the online-growth trigger. While an import series records a demand, the cell SHALL also evict in the same order. It SHALL stop when the window budget covers the demand or no eligible original is left. A demand SHALL lapse 15 minutes after the sender last renewed it. An original SHALL be eligible only when it is cached, its hydration fits the hydration capacity, and nothing keeps it on the volume. A media job that a worker has claimed SHALL keep its original until the job completes, fails or is blocked. This SHALL hold also while a timeout slice, a memory brake or an engine wait returns the job to the queue as pending. A pin, a hydration or a download SHALL keep its original. A pending media job that no worker has claimed, a failed job and a blocked job SHALL NOT keep an original. An eligible original SHALL also be unread by any owner, or last read by an owner at least the configured minimum idle age ago, as the cell's own record shows. Only an owner's playback, download or viewing SHALL count as a read; offload, extraction, hydration for processing and export packing SHALL NOT. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
 
 #### Scenario: A media-heavy cell fills up
 
 - **WHEN** volume use passes the eviction target
 - **THEN** the largest eligible originals are removed from the volume until use is below the target minus the margin
 - **AND** small recently read originals stay on the volume
+
+#### Scenario: A series waits for room
+
+- **WHEN** a 20 GiB cell has an eviction target of 0.7 and a margin of 0.1
+- **AND** it has 11.5 GiB in use and a window budget of 0
+- **AND** an import series records a demand of 4 GiB
+- **THEN** eviction removes eligible originals, largest first, until the window budget covers 4 GiB
+- **AND** without the demand, eviction would not run, because use is below the target
+
+#### Scenario: A demand lapses
+
+- **WHEN** the sender stops renewing its demand, and 15 minutes pass
+- **THEN** eviction runs only above the everyday target again
+
+#### Scenario: An original that could not come back stays
+
+- **WHEN** a stored original's plaintext and ciphertext together exceed the hydration capacity, and volume use is above the target
+- **THEN** eviction skips the original
 
 #### Scenario: An original is still being processed
 
@@ -98,7 +122,7 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 ### Requirement: A media job defers when its original cannot be hydrated
 
-When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration that fails for a transport error or for lack of hydration capacity SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
+When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration can fail for a transport error, or because other hydrations hold the hydration capacity. Such a failure SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A worker SHALL NOT claim a returned job again before its retry time. The retry time SHALL start at 1 minute and double with each return, up to 15 minutes. An original whose hydration needs more than the whole hydration capacity SHALL block the job with `MEDIA_HYDRATION_TOO_LARGE`. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
 
 #### Scenario: The edge is down when a job is claimed
 
@@ -111,6 +135,31 @@ When a worker claims a media job whose original is evicted, it SHALL hydrate the
 - **WHEN** a worker claims a job for an evicted original while other hydrations hold the whole hydration capacity
 - **THEN** the job returns to the queue with its attempt count unchanged, and no failure is recorded
 
+#### Scenario: A returned job waits its retry time
+
+- **WHEN** a job returned to the queue 30 seconds ago for the first time, and a job whose original is on the volume waits
+- **THEN** the worker claims the job whose original is on the volume
+- **AND** it claims the returned job only after 1 minute has passed
+
+#### Scenario: An original larger than the hydration capacity
+
+- **WHEN** a worker claims a job for an evicted original whose plaintext and ciphertext together exceed the whole hydration capacity
+- **THEN** the job is blocked with `MEDIA_HYDRATION_TOO_LARGE`, and the worker does not claim it again
+
+### Requirement: The worker bounds the jobs that keep originals
+
+After offload jobs, the worker SHALL keep at most `max_hydrations` claimed but unfinished media jobs. At that cap, it SHALL resume one of them before it claims a fresh job. Below the cap, it SHALL claim a job whose original is on the volume before a job whose original must be hydrated. Within each group, it SHALL claim a fresh job before a resumed one.
+
+#### Scenario: Long recordings reach the cap
+
+- **WHEN** `max_hydrations` is 2, two transcription jobs have each run one timeout slice, and fresh jobs wait
+- **THEN** the worker resumes one of the two transcription jobs before it claims a fresh job
+
+#### Scenario: Local originals run first
+
+- **WHEN** the oldest fresh job's original is evicted, and a newer fresh job's original is on the volume
+- **THEN** the worker claims the newer job first
+
 ### Requirement: Offload work precedes extraction
 
 The media worker SHALL claim a pending offload job before any pending extraction job, so that a long extraction queue never delays the volume space that an offload frees.
@@ -120,15 +169,20 @@ The media worker SHALL claim a pending offload job before any pending extraction
 - **WHEN** a filed PDF's offload job enters the queue after fifty pending transcription jobs
 - **THEN** the worker claims the offload job before any of those transcription jobs
 
-### Requirement: Adoption queues an offload for every artifact that it files
+### Requirement: Adoption queues an offload for every offloadable artifact that it files
 
-When adoption files an artifact on a cell selected for the media store, it SHALL queue the artifact's offload job at filing, whatever the artifact's type.
+When adoption files an offloadable artifact on a cell selected for the media store, it SHALL queue the artifact's offload job at filing, whatever its type. The classification rule decides what is offloadable. A resident artifact SHALL get no offload job.
 
 #### Scenario: A filed PDF offloads without a restart
 
 - **WHEN** adoption files a PDF on a selected cell
 - **THEN** the PDF's offload job exists when the apply call returns
 - **AND** the worker stores the PDF without a restart or a discovery pass
+
+#### Scenario: A resident video gets no offload job
+
+- **WHEN** adoption files a 1.5 GiB video, and the object bound is 1 GiB
+- **THEN** the video has no offload job, and it stays on the volume
 
 ### Requirement: Hydration verifies an original before it reappears
 
@@ -298,7 +352,7 @@ The owner meter SHALL require complete canonical reference custody, including Tr
 It SHALL exclude registry-owned private state without reusing recall exclusions.
 A malformed potential companion or conflicting binding SHALL NOT prove that no referenced version exists.
 Offload SHALL check the allowance before encryption or provider upload, and SHALL recheck its proposed reference union before publication.
-A batch of offloads SHALL take one owner census and SHALL charge each version that it newly references to that census, instead of one census per member.
+A batch of offloads SHALL take one owner census, not one per member. It SHALL charge each version that it newly references to that census. The batch SHALL reuse its census across guard releases, and SHALL NOT hold the mutation boundary for the whole batch.
 A quota failure or unknown meter SHALL leave the original local with retryable demand.
 
 #### Scenario: A complete meter meets incomplete custody
@@ -336,6 +390,7 @@ A quota failure or unknown meter SHALL leave the original local with retryable d
 - **WHEN** the worker offloads a batch of 500 filed originals
 - **THEN** it reads the owner's references once for the batch
 - **AND** each member's admission and publication check use that census with the versions that the batch has already published
+- **AND** other writes run between two members
 
 #### Scenario: Offload meets a full allowance
 
@@ -412,9 +467,3 @@ The media store SHALL be off unless a cell is on the canary list or the fleet sw
 
 - **WHEN** the store is turned off for a cell that has evicted originals
 - **THEN** the cell hydrates every evicted original back, keeps its edge egress until none remain, and then loses that egress
-
-#### Scenario: Stored media exceed the volume
-
-- **WHEN** the store is turned off for a cell whose evicted originals do not fit its volume within its size cap
-- **THEN** the cell keeps its edge egress and its hydration path, and every evicted original stays readable
-- **AND** the cell reports the shortfall in bytes

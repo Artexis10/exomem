@@ -6,19 +6,26 @@ The Cloud CLI SHALL split a folder larger than the cell's window budget into win
 - 2 × its text bytes + its artifact bytes is at most the window budget that the cell reports;
 - when the cell publishes `import_limits`, used + `space_factor` × the window's bytes + `reserve_bytes` is at most the cell's current size, so admission grows no claim.
 
-Windows SHALL carry offloadable artifacts first, resident artifacts next and text last, each in path order across the series. The CLI SHALL wait and report when the budget is unknown. It SHALL also wait when the next window does not fit, while the cell still has unfiled windows, pending offloads or evictable bytes. It SHALL stop and report, without waiting, when the cell reports media usage unknown or the allowance exhausted. It SHALL also stop when the next window does not fit and the cell has nothing left to file, offload or evict. That stop SHALL list the window's files.
+Windows SHALL carry offloadable artifacts first, resident artifacts next and text last, each in path order across the series. The CLI SHALL size each window within the reachable budget that the cell reports. While the budget does not cover the next window, each status call SHALL carry that window's bytes as the demand. The CLI SHALL wait and report in these cases:
+- the budget is unknown;
+- the reachable budget covers the next window, and the budget does not cover it yet.
+
+It SHALL stop and report, without waiting, in these cases:
+- the cell reports media usage unknown or the allowance exhausted;
+- the reachable budget cannot hold even the next member. This stop SHALL say "band too small" and give the budget, the reachable budget and that member's bytes.
 
 #### Scenario: A folder of three times the budget lands without growth
 
 - **WHEN** the CLI imports a folder of recordings and notes that holds three times the window budget, and the agent files each window
+- **AND** no owner reads, downloads or hydrations run during the series
 - **THEN** the CLI creates three or more windows, one at a time
 - **AND** the cell's volume use stays at or below its growth threshold
 - **AND** the cell's storage size does not change
 
 #### Scenario: The volume has not drained
 
-- **WHEN** the next window does not fit the budget that the cell reports, and the cell still has an unfiled window
-- **THEN** the CLI creates no import, waits, and reports the shortfall
+- **WHEN** the next window does not fit the budget that the cell reports, and the reachable budget covers it
+- **THEN** the CLI creates no import, sends the window's bytes as the demand, waits, and reports the shortfall
 - **AND** it creates the window once the reported budget covers it
 
 #### Scenario: The budget is unknown
@@ -48,10 +55,10 @@ Windows SHALL carry offloadable artifacts first, resident artifacts next and tex
 - **WHEN** the cell reports media usage unknown with the path of the note that makes it unknown
 - **THEN** the CLI stops and reports that path, and creates no further window
 
-#### Scenario: Nothing is left to drain
+#### Scenario: The band is too small
 
-- **WHEN** the next window does not fit, and the cell has no unfiled window, no pending offload and no evictable bytes
-- **THEN** the CLI stops and lists the files of that window
+- **WHEN** the cell reports a reachable budget of 0.5 GiB, and the next member is a 0.8 GiB recording
+- **THEN** the CLI stops with "band too small" and reports the budget, the reachable budget and the recording's bytes
 
 ### Requirement: An older cell gets one import
 
@@ -70,12 +77,13 @@ The CLI SHALL treat a cell that reports no window budget as an older cell, or as
 ### Requirement: The CLI refuses a series that cannot land, before any upload
 
 Before the first upload, the CLI SHALL refuse a series in each of these cases and list the files concerned:
-- 2 × its text bytes + its resident artifact bytes exceed the resident room that the cell reports;
+- 2 × its text bytes + its resident artifact bytes exceed the reachable budget that the cell reports;
 - its offloadable bytes exceed the remaining media allowance that the cell reports.
 
 #### Scenario: Resident files do not fit
 
-- **WHEN** the cell reports a resident room of 8.75 GiB, and the series holds 3 GiB of text and 3 GiB of artifacts above the largest offloadable file
+- **WHEN** the cell reports a reachable budget of 8.75 GiB
+- **AND** the series holds 3 GiB of text and 3 GiB of artifacts above the largest offloadable file
 - **THEN** the CLI refuses the series before any upload
 - **AND** it lists the resident files with their sizes and gives both figures
 
@@ -128,19 +136,30 @@ One module SHALL hold the rule that classifies a member as text, an offloadable 
 
 The Adoption Studio status SHALL report these figures. Each figure that the cell cannot read SHALL be unknown with a reason, never zero.
 - The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity, `max_hydrations` × the largest offloadable file, and one offload temporary file of up to the object bound.
-- The resident room: the window budget with every evictable cached original counted as free.
+- The reachable budget: the window budget once the agent files every landed window, pending offloads finish and eviction frees every eligible original. It SHALL leave out an original that an owner read within the minimum idle age.
 - The inputs of the classification rule: the object bound, the hydration capacity and the inline text limit, and the largest offloadable file that they allow.
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
-- For each landed window, the count and bytes of its residual.
+- For each landed window, the count and bytes of its residual, and its member paths page by page.
 
-A cell without the media store SHALL report no window budget.
+A status call MAY carry the next window's bytes. The cell SHALL then record them as the series' demand for eviction, or renew the demand. A cell without the media store SHALL report no window budget.
 
 #### Scenario: The budget is computed from its inputs
 
 - **WHEN** the volume is 20 GiB, the growth threshold is 80%, use is 7 GiB, the reserve is 0.25 GiB and the hydration capacity is 2.25 GiB
 - **AND** the placed-copy allowance is 1 GiB, the offload temporary allowance is 1 GiB, and landed windows hold 0.5 GiB of unfiled text
 - **THEN** the status reports a window budget of 4 GiB
+
+#### Scenario: The reachable budget counts what eviction can free
+
+- **WHEN** the window budget is 1 GiB, 6 GiB of eligible originals are cached, and landed windows hold 2 GiB of unfiled offloadable members
+- **AND** an owner read another 1 GiB of originals within the minimum idle age
+- **THEN** the status reports a reachable budget of 9 GiB
+
+#### Scenario: A status call records a demand
+
+- **WHEN** a status call carries 4 GiB as the next window's bytes, and the window budget is 1 GiB
+- **THEN** the cell records a demand of 4 GiB, and eviction runs until the budget covers it
 
 #### Scenario: An input cannot be read
 
@@ -154,21 +173,40 @@ A cell without the media store SHALL report no window budget.
 
 ### Requirement: The import receipt records each member's identity
 
-For an `adopt` import, the import Job SHALL record each member's identity in the member manifest, beside its path, size and SHA-256. The identity SHALL be the staged file's device, inode, size, `mtime_ns` and `ctime_ns`, read after the Job sets the file's modification time.
+For an `adopt` import, the import Job SHALL record each member's identity in the member manifest, beside its path, size and SHA-256. The identity SHALL be the staged file's inode, size, `mtime_ns` and `ctime_ns`, read after the Job sets the file's modification time. It SHALL NOT include the device number, because each pod can see the volume under a different device number.
 
 #### Scenario: The receipt carries the identity
 
-- **WHEN** an `adopt` import finishes and the runtime starts again on the same volume
+- **WHEN** an `adopt` import finishes and the runtime starts again on the same volume, under a different device number
 - **THEN** each manifest entry's identity equals the stat of its staged file
 
-### Requirement: Each window carries the series path list
+### Requirement: Each window carries the series file
 
-The CLI SHALL record the full path list of a series and SHALL put it in each window as one reserved hidden file at the stage root. The import Job SHALL stage that file like any member.
+The CLI SHALL record the full path list of a series and its label, the source folder's name. It SHALL put both in each window as one file at the stage root, named `.exomem-series.json`. The import Job SHALL stage that file like any member. The CLI SHALL refuse, before any upload, a source folder that holds a file of that name at its top level.
 
 #### Scenario: A later window carries the whole list
 
 - **WHEN** the CLI sends window 4 of a series of 9 windows
-- **THEN** the stage of window 4 holds the reserved file, and it lists the paths of all 9 windows
+- **THEN** the stage of window 4 holds the series file, and it lists the paths of all 9 windows and the series label
+
+#### Scenario: The source folder holds the reserved name
+
+- **WHEN** the source folder holds `.exomem-series.json` at its top level, and the person includes hidden files
+- **THEN** the CLI refuses the folder before any upload and names the file
+
+### Requirement: The CLI resends the residual as a new series
+
+When the person asks to resend a series' residual, the CLI SHALL send the residual members as a new series with new import IDs. It SHALL take their paths from the residual that the cell lists for each window, before the window is discarded. It SHALL refuse a member whose source file differs in size or modification time from the series record.
+
+#### Scenario: A restore sent large members to the residual
+
+- **WHEN** two 600 MiB members of window 3 went to the residual after a backup restore, and the person asks to resend the residual
+- **THEN** the CLI sends the two members as a new series, and adoption files them by rename
+
+#### Scenario: A residual member changed at the source
+
+- **WHEN** a residual member's source file has a newer modification time than the series record
+- **THEN** the CLI does not send that member and reports it
 
 ### Requirement: The CLI tells the person to keep the source
 

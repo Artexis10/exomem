@@ -2,11 +2,11 @@
 
 ### Requirement: Adoption files a recorded artifact member by rename
 
-Adoption SHALL file an artifact member of a recorded stage through a Source-writer primitive that renames the staged file into place. This applies when the stage and the Knowledge Base share one filesystem. Before the rename, the primitive SHALL compare the staged file's identity with the identity in the stage manifest:
+Adoption SHALL file an artifact member of a recorded stage through a Source-writer primitive that renames the staged file into place. This applies when the stage and the Knowledge Base share one filesystem. Before the rename, the primitive SHALL compare the staged file's inode, size, `mtime_ns` and `ctime_ns` with the identity in the stage manifest:
 - On a match, the manifest SHA-256 SHALL be the Source's `binary_sha256`, and the primitive SHALL read no byte of the file.
 - On a mismatch, or for a manifest entry without an identity, the primitive SHALL hash the file once between two stat checks. It SHALL rename the file only when the digest equals the manifest SHA-256 and the two stats agree. Otherwise the member SHALL stay in the residual as changed.
 
-A rename that fails with a cross-device error SHALL fall back to the streamed copy. The adoption ceiling SHALL apply to that copy and to the hash of a mismatched member, and SHALL NOT apply to a rename after an identity match. After the rename, adoption SHALL queue the artifact's offload job.
+The rename SHALL NOT replace an existing file. When a file already exists at the Knowledge Base path, the member SHALL stay unfiled, and adoption SHALL report the conflict. The batch writer SHALL commit the Source page, and the renamed binary SHALL NOT be one of its destinations. A rename that fails with a cross-device error SHALL fall back to the streamed copy. The adoption ceiling SHALL apply to that copy and to the hash of a mismatched member. It SHALL NOT apply to a rename after an identity match. After the rename, adoption SHALL queue the artifact's offload job when the classification rule calls the artifact offloadable.
 
 #### Scenario: A large video files without a byte read
 
@@ -17,7 +17,12 @@ A rename that fails with a cross-device error SHALL fall back to the streamed co
 #### Scenario: A file above the offloadable limit files and stays
 
 - **WHEN** adoption applies a 1.5 GiB staged video whose identity matches, and the object bound is 1 GiB
-- **THEN** the video files by rename and stays on the volume as a resident original
+- **THEN** the video files by rename, gets no offload job, and stays on the volume as a resident original
+
+#### Scenario: The Knowledge Base path is taken
+
+- **WHEN** a file already exists at a member's Knowledge Base path when adoption renames the member
+- **THEN** the existing file keeps its bytes, the member stays in the stage, and adoption reports the conflict
 
 #### Scenario: A restore changed the identity
 
@@ -41,16 +46,22 @@ A rename that fails with a cross-device error SHALL fall back to the streamed co
 
 ### Requirement: A rename survives a stop
 
-The rename primitive SHALL rename before it commits the Source page, and replay SHALL finish or reverse each state without loss:
-- **Renamed, Source page not committed.** Replay SHALL compare the binary's device, inode, size and `mtime_ns` with the manifest identity. On a match, it SHALL commit the Source page with the manifest SHA-256. Otherwise it SHALL rename the file back to its staged path.
-- **Source page committed.** Replay SHALL settle the member as already applied when the Source's `binary_sha256` equals the manifest SHA-256, without reading bytes. It SHALL queue the offload job if none exists.
+The rename primitive SHALL rename before it commits the Source page, and replay SHALL finish each state without loss:
+- **Renamed, Source page not committed.** Replay SHALL compare the binary's inode, size and `mtime_ns` with the manifest identity. On a match, it SHALL commit the Source page with the manifest SHA-256. On a mismatch, it SHALL hash the file where it is, within the adoption ceiling. It SHALL commit the Source page when the digest equals the manifest SHA-256. Otherwise it SHALL leave the file unbound at its Knowledge Base path and report it as changed. Replay SHALL NOT move a file back into a stage.
+- **Source page committed.** Replay SHALL settle the member as already applied when the Source's `binary_sha256` equals the manifest SHA-256, without reading bytes. It SHALL queue the offload job if none exists and the member is offloadable.
 
-A rollback SHALL reverse a rename by renaming the file back to its staged path, and SHALL NOT remove a renamed file.
+A rollback of a failed batch SHALL rename each renamed binary back to its staged path, without replacing an existing file. It SHALL recreate a staged parent folder that is gone. When the staged path is taken, the binary SHALL stay unbound at its Knowledge Base path, and the run SHALL report it. Neither replay nor rollback SHALL remove a renamed binary.
 
 #### Scenario: A stop after the rename
 
 - **WHEN** the process stops after a member's rename and before its Source page commits, and the file is unchanged
 - **THEN** the next `apply` commits the Source page with the manifest SHA-256 and reports the item as applied
+
+#### Scenario: A file changed after the rename
+
+- **WHEN** the process stops after a member's rename, and the binary's size no longer matches the manifest identity
+- **THEN** the next `apply` hashes the binary where it is, finds a different digest, and leaves it unbound at its Knowledge Base path
+- **AND** it reports the member as changed and moves nothing into the stage
 
 #### Scenario: A stop after the commit
 
@@ -62,27 +73,52 @@ A rollback SHALL reverse a rename by renaming the file back to its staged path, 
 - **WHEN** a later write in the same batch fails after a member's rename
 - **THEN** the renamed file returns to its staged path with its bytes intact, and the item stays unfiled
 
+#### Scenario: A rollback after the staged folder went
+
+- **WHEN** a batch fails after a member's rename, and `finish` has removed the member's empty staged folder
+- **THEN** the rollback recreates the folder and renames the file back into it
+
+### Requirement: A discard settles renamed members first
+
+Before `import_discard` asks for a window's discard, it SHALL settle each member of that window that is renamed but not committed, by the replay rule. When replay leaves a member's file unbound, the discard SHALL refuse and name the member and the file's Knowledge Base path. Once that file is moved or deleted, the discard SHALL proceed.
+
+#### Scenario: A discard after a stop
+
+- **WHEN** the person discards a window, and one member is renamed but its Source page is not committed
+- **THEN** the discard commits that member's Source page first, and then discards the window
+
+#### Scenario: A member that cannot settle
+
+- **WHEN** a renamed but uncommitted member is above the adoption ceiling, and its identity no longer matches
+- **THEN** the discard refuses, names the member and its Knowledge Base path, and keeps the window's manifest
+- **AND** after the person deletes that file, the discard proceeds
+
 ### Requirement: Links resolve against the whole series
 
-When a recorded stage holds a series path list, adoption SHALL pass that list as `whole_scan`. A bare link name then resolves against every file of the series. Adoption SHALL never list or file the series path list itself.
+When a recorded stage holds a series file, adoption SHALL pass its path list as `whole_scan`. A bare link name then resolves against every file of the series. Adoption SHALL never list or file the series file itself.
 
 #### Scenario: A name repeats in a later window
 
 - **WHEN** a note in window 6 links a bare name that window 6 holds, and window 7, not yet landed, holds another file with the same name
 - **THEN** the link stays unresolved as ambiguous, and it does not resolve to the file in window 6
 
-### Requirement: The collection root of a recorded stage comes from its manifest
+### Requirement: The collection root of a recorded stage comes from its record
 
-Adoption SHALL take the collection root of a recorded stage from its manifest, not from a walk of the stage.
+Adoption SHALL take the collection root of a recorded stage from its record, not from a walk of the stage. For a stage with a series file, it SHALL apply the collection-root rule to the series path list. It SHALL take the series label as the default label. For any other recorded stage, it SHALL apply the rule to the manifest's member paths. The series file SHALL NOT count as a member for this rule.
 
 #### Scenario: A stage whose artifacts are all filed
 
 - **WHEN** `start` runs again on a recorded stage whose artifacts are all filed and whose empty folders are removed
 - **THEN** the run keeps the collection root and collection paths of the first run
 
+#### Scenario: Two windows of one series
+
+- **WHEN** window 1 holds only files under `Recordings/`, and window 2 holds files under `Recordings/` and `Notes/`
+- **THEN** both windows get the same collection root and the series label, and each file's collection path is its path in the source folder
+
 ### Requirement: The residual tells the person to keep the source
 
-`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. While a residual is not empty, the tool text SHALL tell the person to keep the source folder.
+`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. While a residual is not empty, the tool text SHALL tell the person to keep the source folder.
 
 #### Scenario: A window keeps a residual
 
