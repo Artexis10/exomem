@@ -378,6 +378,9 @@ def binding_facts(vault: Path, *, surfaces: list[str]) -> dict:
             "contract": resolved.get("contract"),
             "owner_promotion_classes": envelope.promotion_classes(owner=True),
         }
+    from exomem import install_hook
+
+    hook_sources = install_hook._HOOK_DIR_SRC  # noqa: SLF001 - the installer's own source directory
     role = "organisation-replay-binding"
     try:
         # An installed distribution names its revision in its own record; git run
@@ -389,6 +392,12 @@ def binding_facts(vault: Path, *, surfaces: list[str]) -> dict:
         "interpreter": {"path": sys.executable, "version": sys.version},
         "loaded_source_path": str(Path(exomem.__file__).resolve()),
         "package_identity": identity,
+        # The hook files this package ships; the bind holds the wired hooks to them.
+        "hook_sources": {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(hook_sources.iterdir())
+            if path.is_file()
+        },
         "product_version": exomem.__version__,
         "scaffold": dict((skill or {}).get("metadata") or {}),
         "authority_mode": VocabularyAuthority(vault).runtime_status().mode,

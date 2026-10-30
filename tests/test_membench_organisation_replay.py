@@ -420,6 +420,18 @@ def test_a_candidate_bound_at_the_base_revision_is_refused(tmp_path):
         bind(config)
 
 
+def test_a_candidate_that_changes_a_shipped_hook_still_pairs_with_the_baseline():
+    def binding(hook_digest):
+        return {
+            "base_revision": "a" * 40,
+            "profile": "neutral-lexical",
+            "client": {"model": "m", "version": "1.0.0", "standin": False, "launcher": []},
+            "shapes": {"hooked": {"hook_scripts_sha256": hook_digest}},
+        }
+
+    assert runner.arm_parity(binding("1" * 64)) == runner.arm_parity(binding("2" * 64))
+
+
 def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkeypatch):
     # Failure caught: a quota pause recorded as a struck situation, or a rerun that
     # rebuilds the seed under a finished capture session and aborts on its inputs.

@@ -18,7 +18,7 @@ from pathlib import Path
 from epistemic.journeys.f27_replay import AgentEnvelope, Arm, build_turn_argv, refuse_unsafe_out_dir
 
 from membench.utility.switch_eval import protocol
-from membench.utility.switch_eval.arms import ArmSpec, sha256_text
+from membench.utility.switch_eval.arms import ArmSpec, canonical_json, sha256_text
 from membench.utility.switch_eval.session import (
     ABORT,
     ACTOR_FAILURE,
@@ -188,8 +188,8 @@ def session_files(
     return paths, shipped_hooks(slot, spec, paths["settings.json"])
 
 
-def hook_scripts_digest(slot: Slot) -> str:
-    """Digest of the hook code the shipped install deployed into the slot, by file name.
+def deployed_hooks(slot: Slot) -> dict[str, str]:
+    """``name -> sha256`` of each hook code file the install deployed into the slot.
 
     The hooks import their sibling helpers, so every deployed code file counts,
     not only the scripts the settings name. A hook's own state files beside
@@ -197,12 +197,15 @@ def hook_scripts_digest(slot: Slot) -> str:
     """
 
     hook_dir = slot.hook_home / "hooks"
-    digest = hashlib.sha256()
-    for path in sorted(hook_dir.iterdir()):
-        if path.is_file() and path.suffix in HOOK_CODE_SUFFIXES:
-            text = path.read_bytes().replace(str(slot.root).encode(), _SLOT.encode())
-            digest.update(path.name.encode() + b"\0" + text + b"\0")
-    return digest.hexdigest()
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(hook_dir.iterdir())
+        if path.is_file() and path.suffix in HOOK_CODE_SUFFIXES
+    }
+
+
+def hook_scripts_digest(slot: Slot) -> str:
+    return sha256_text(canonical_json(deployed_hooks(slot)))
 
 
 def files_digests(paths: Mapping[str, Path], slot: Slot) -> dict[str, str | None]:
@@ -377,6 +380,17 @@ def bind(config: RunConfig) -> dict:
             f"refused: the arm's interpreter loads the package at {loaded}, not at the "
             f"bound revision {config.revision}"
         )
+    # PR B changes a shipped hook, so the arms' hooks differ by design; each arm's
+    # wired hooks must instead be the files its own package ships.
+    deployed = deployed_hooks(slot)
+    foreign = sorted(
+        name for name, sha in deployed.items() if facts["hook_sources"].get(name) != sha
+    )
+    if not deployed or foreign:
+        raise SystemExit(
+            f"refused: the wired hooks {foreign or 'none'} are not the hook files the arm's "
+            "package ships"
+        )
     record = {
         "binding_ref": f"{config.arm}-{config.revision[:12]}",
         "arm": config.arm,
@@ -403,6 +417,8 @@ def bind(config: RunConfig) -> dict:
             "loaded_source_path": facts["loaded_source_path"],
             **facts["package_identity"],
         },
+        # Each shape's hook_scripts_sha256 is the digest of the wired subset of these.
+        "shipped_hook_files": facts["hook_sources"],
         "contract_version": bootstrap.get("contract_version"),
         "scaffold": facts["scaffold"],
         "engagement": {
@@ -428,6 +444,25 @@ def bind(config: RunConfig) -> dict:
         json.dumps(record, indent=2, sort_keys=True), encoding="utf-8"
     )
     return record
+
+
+def arm_parity(binding: Mapping) -> dict:
+    """What must be equal across the arms, or the comparison measures it too.
+
+    Hook code is not here: the candidate may change a shipped hook, and the bind
+    ties each arm's wired hooks to its own package instead.
+    """
+
+    client = binding["client"]
+    return {
+        "base_revision": binding["base_revision"],
+        "model": client["model"],
+        "client_version": client["version"],
+        "standin": client["standin"],
+        # A stand-in's launcher names its own arm's interpreter and checkout.
+        "launcher": None if client["standin"] else client["launcher"],
+        "profile": binding["profile"],
+    }
 
 
 # --------------------------------------------------------------------------

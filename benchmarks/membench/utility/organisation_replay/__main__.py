@@ -91,29 +91,11 @@ def cmd_bind(args) -> int:
     return 0
 
 
-def arm_parity(binding: dict) -> dict:
-    """What must be equal across the arms, or the comparison measures it too."""
-
-    client = binding["client"]
-    return {
-        "base_revision": binding["base_revision"],
-        "model": client["model"],
-        "client_version": client["version"],
-        "standin": client["standin"],
-        # A stand-in's launcher names its own arm's interpreter and checkout.
-        "launcher": None if client["standin"] else client["launcher"],
-        "profile": binding["profile"],
-        "hook_scripts_sha256": {
-            shape: facts.get("hook_scripts_sha256") for shape, facts in binding["shapes"].items()
-        },
-    }
-
-
 def cmd_run(args) -> int:
     from membench.utility.switch_eval.__main__ import EXIT_PAUSED, EXIT_REFUSED
     from membench.utility.switch_eval.session import RunAborted, RunPaused
 
-    from .runner import run_situation
+    from .runner import arm_parity, run_situation
     from .situation import load_situation
 
     out = Path(args.out)
