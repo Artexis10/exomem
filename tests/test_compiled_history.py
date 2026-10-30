@@ -138,19 +138,34 @@ def test_unusable_history_matches_absence_without_claiming_retention(tmp_path: P
     assert "Second wording." in result["body"]
 
 
-def test_a_revision_names_the_exomem_release_that_wrote_it(tmp_path: Path, owner) -> None:
-    # A reader tracing a bad interpretation needs the writer release, which the
-    # entry did not record before.
+def test_a_revision_names_the_release_that_planned_it_even_if_committed_on_another(
+    tmp_path: Path, owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A reader tracing a bad interpretation needs the release behind it. The release
+    # rides in the transition token: a retry after an upgrade must re-plan the same
+    # history bytes, or the pending transition can never complete.
     import exomem
 
     _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
-    _correct(tmp_path, "Second wording.", "The first correction.")
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    request = dict(
+        path=PAGE, category="rule", content="Second wording.", kind="claim",
+        unit_ref=unit.unit_ref, expected_fingerprint=unit.fingerprint,
+        expected_hash=_page_hash(tmp_path / PAGE), reason="The first correction.",
+    )
+    validated = commands.op_observe_memory(tmp_path, operation="validate", **request)["semantic"]
+    planned_release = exomem.__version__
+    monkeypatch.setattr(exomem, "__version__", "9999.0.0")
+
+    commands.op_observe_memory(
+        tmp_path, operation="update", transition_token=validated["transition_token"],
+        relation_review_hash=validated["relation_review_hash"], **request,
+    )
 
     history = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)["revision_history"]
-
     revision, = history["revisions"]
     assert "First wording." in revision["prior"]["source"]
-    assert revision["exomem_version"] == exomem.__version__
+    assert revision["exomem_version"] == planned_release
 
 
 def test_admitted_history_does_not_claim_complete_coverage(tmp_path: Path, owner) -> None:

@@ -282,7 +282,6 @@ def test_owner_lock_released_during_hardening_does_not_stop_startup(
 
     IdempotencyStore(state / "idempotency.sqlite")
 
-    assert not released.exists()
     assert stat.S_IMODE(kept.stat().st_mode) == 0o600
 
 

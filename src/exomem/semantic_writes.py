@@ -1426,6 +1426,11 @@ def _existing_transition_token(
     # validated ones instead of drifting whenever the clock ticks between calls.
     if stamp is not None:
         payload["stamp"] = stamp
+    # The release that planned the transition rides in the token, so an exact
+    # retry after an upgrade re-plans the same history bytes.
+    from . import __version__
+
+    payload["exomem_version"] = __version__
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -1549,13 +1554,19 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     }
     # `stamp` is optional so a token minted before this field existed still
     # decodes; a token that omits it simply cannot pin the writer's instant.
-    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at"})):
+    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at", "exomem_version"})):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
     if value["version"] != 1 or any(
         type(value[key]) is not str
         for key in ("transition_id", "operation", "path", "before_hash", "after_hash")
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    if "exomem_version" in value and (
+        type(value["exomem_version"]) is not str or not value["exomem_version"]
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"

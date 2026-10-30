@@ -4,7 +4,8 @@
 
 Each compiled-history entry that the semantic writer retains for a changed
 interpretation SHALL record `exomem_version`, the release of the Exomem server
-that wrote the entry. A history read SHALL return that field with the revision.
+that planned the transition, carried in the transition token so that an exact
+retry re-plans identical history bytes. A history read SHALL return that field with the revision.
 Entries retained before this field existed SHALL keep their stored bytes and
 SHALL remain admissible without it; the system SHALL NOT backfill them. The
 system SHALL NOT record a model identity, because the server cannot know it.
@@ -13,7 +14,7 @@ system SHALL NOT record a model identity, because the server cannot know it.
 
 - **WHEN** a governed writer changes an interpretation and retains the prior
   interpretation in compiled history
-- **THEN** the retained entry records the Exomem release that wrote it
+- **THEN** the retained entry records the Exomem release that planned the change
 - **AND** a history read of that page returns the release with the revision
 
 #### Scenario: An entry from before the field still reads

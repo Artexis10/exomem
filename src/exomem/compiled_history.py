@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    __version__,
     context_refs,
     memory_refs,
     origin_bindings,
@@ -146,13 +145,13 @@ def plan_entry(
         "affected_units": affected,
         "reason": reason,
         "actor": {"audience": who.audience_id, "surface": who.surface},
-        # The release that wrote this entry, so a later reader can tie an
-        # interpretation change to the writer version. Entries written before
-        # this field existed simply lack it.
-        "exomem_version": __version__,
         "prior": {"source": preflight.exact_before_source},
         "binding": metadata.payload,
     }
+    # The release that planned the transition, taken from the token so an exact
+    # retry re-plans identical bytes; a token minted before this field lacks it.
+    if "exomem_version" in token:
+        entry["exomem_version"] = token["exomem_version"]
     guard = vault.PathGuard.capture(root, path.relative_to(root).as_posix(), leaf_policy="absent")
     return vault.PlannedWrite(
         path,
