@@ -4,7 +4,7 @@
 
 Local health surfaces SHALL distinguish process/transport liveness from retrieval admission. Retrieval SHALL be reported ready only when both required recall projections are live and both maintained catalogue checkpoints are proven exactly equal to those projections. A previously ready bit SHALL be revoked when that equality no longer holds. A process whose transport responds but whose projection/catalogue is warming or unavailable MUST NOT be reported as fully ready.
 
-Once a managed process has itself proved that equality since its warm began, a catalogue that later trails a live projection SHALL be reported as retrieval state `lagging`, and the serving status SHALL stay ready, while per-request recall can still serve the published catalogue. That holds only when the warm's required stages are done, event indexes are enabled, and, for both scopes, a live projection and a published catalogue checkpoint exist, come from one process instance, and keep the access-policy and semantic-catalogue identity of the vault. `lagging` SHALL report the lagging scopes and the seconds this process has seen the published catalogue checkpoints unchanged. It SHALL NOT report `admitted=true` and SHALL NOT add a reason code. A process that has not proved that equality since its managed warm began, whose live or published projection is lost, or whose identity changed SHALL NOT report `lagging`.
+Once a managed process has itself proved that equality since its warm began, a catalogue that later trails a live projection SHALL be reported as retrieval state `lagging`, and the serving status SHALL stay ready, while per-request recall can still serve the published catalogue. That holds only when the warm has finished, because recall refuses with a warming outcome until then; event indexes are enabled; and, for both scopes, a live projection and a published catalogue checkpoint exist and keep the access-policy and semantic-catalogue identity of the vault. `lagging` SHALL report the lagging scopes and the seconds this process has seen the published catalogue checkpoints unchanged. It SHALL NOT report `admitted=true` and SHALL NOT add a reason code. A process that has not proved that equality since its managed warm began, whose warm is still running, whose live or published projection is lost, or whose identity changed SHALL NOT report `lagging`.
 
 The readiness surface MAY answer from a ready proof for at most 30 seconds. It SHALL NOT reuse a not-ready or failed proof, a proof that reports `lagging`, or a standby's proof. A reused proof SHALL be void once the process records a retrieval admission change or promotes a standby. Nothing else voids it, so the other fields of a reused answer, such as the coordination role, the session-store state and the observability block, may be up to 30 seconds old. The answer SHALL report the proof's age, counted from when its measurement began.
 
@@ -36,9 +36,15 @@ The readiness surface MAY answer from a ready proof for at most 30 seconds. It S
 
 #### Scenario: A lost projection revokes readiness
 
-- **WHEN** after admission a live projection is lost or invalidated, a scope has no published catalogue checkpoint, or the access-policy identity, the semantic-catalogue identity or the process instance changes
+- **WHEN** after admission a live projection is lost or invalidated, a scope has no published catalogue checkpoint, or the access-policy identity or the semantic-catalogue identity changes
 - **THEN** health reports retrieval as warming or unavailable with `admitted=false` and status not ready, at once when this process recorded the change and within 30 seconds otherwise
 - **AND** background repair must prove the new equality before readiness returns
+
+#### Scenario: A running warm withholds the served lag
+
+- **WHEN** a proven process begins a new warm and a live projection is ahead of the maintained catalogue
+- **THEN** health reports retrieval as warming with `admitted=false` and status not ready until the whole warm, including its optional preloads, has finished
+- **AND** recall refuses with its warming outcome over the same period
 
 #### Scenario: A fresh process waits for a strict proof
 

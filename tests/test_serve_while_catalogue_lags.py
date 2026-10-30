@@ -41,6 +41,12 @@ class _Runtime:
         self.page.write_text(f"# Probe\n\nedit number {self.edits}\n", encoding="utf-8")
         freshness.on_files_changed(self.vault, changed=[self.page])
 
+    def reseed_projection(self) -> None:
+        """The live projection comes back from the vault as it is now."""
+        entry = (str(self.page), freshness.stat_signature(self.page))
+        for scope in freshness.SCOPES:
+            freshness.seed(self.vault, scope, [entry])
+
     def probe(self, *, times: int = 1, gap: float = 0.0) -> list[httpx.Response]:
         async def scenario() -> list[httpx.Response]:
             app = FastMCP("serve-while-lagging")
@@ -102,7 +108,7 @@ def test_a_proven_process_stays_ready_while_the_catalogue_trails_its_projection(
     assert isinstance(retrieval["catalogue_unchanged_seconds"], float)
 
 
-def test_the_lag_age_counts_a_stuck_catalogue_and_restarts_when_it_publishes_again(
+def test_the_lag_age_counts_a_stuck_catalogue_and_restarts_only_when_it_publishes_again(
     runtime: _Runtime,
 ) -> None:
     """A busy catalogue must not read as a stuck one, nor a stuck one as busy."""
@@ -110,6 +116,14 @@ def test_the_lag_age_counts_a_stuck_catalogue_and_restarts_when_it_publishes_aga
     first, second = runtime.probe(times=2, gap=0.05)
     stuck = second.json()["retrieval"]["catalogue_unchanged_seconds"]
     assert stuck > first.json()["retrieval"]["catalogue_unchanged_seconds"]
+
+    # One probe that is not lagging says nothing about the published pair.
+    freshness.invalidate(runtime.vault)
+    assert runtime.probe()[0].status_code == 503
+    runtime.reseed_projection()
+    [resumed] = runtime.probe()
+    assert resumed.json()["retrieval"]["state"] == "lagging"
+    assert resumed.json()["retrieval"]["catalogue_unchanged_seconds"] > stuck
 
     lexstore.ensure_fresh(runtime.vault)  # the catalogue publishes a newer pair
     runtime.advance_projection()
@@ -136,22 +150,6 @@ def test_a_lost_projection_is_not_ready_even_for_a_proven_process(
     assert answer.json()["retrieval"]["state"] == "unavailable"
 
 
-def test_an_identity_change_is_not_ready_even_for_a_proven_process(runtime: _Runtime) -> None:
-    """A registry reset mints a new instance; the old catalogue is not its lag."""
-    runtime.advance_projection()
-    instance = freshness.instance_id()
-    freshness.clear()
-    assert freshness.instance_id() != instance
-    entry = (str(runtime.page), freshness.stat_signature(runtime.page))
-    for scope in freshness.SCOPES:
-        freshness.seed(runtime.vault, scope, [entry])
-
-    [answer] = runtime.probe()
-
-    assert answer.status_code == 503, answer.json()
-    assert answer.json()["retrieval"]["state"] == "unavailable"
-
-
 def test_a_new_warm_waits_for_a_strict_proof_however_servable_the_lag(
     runtime: _Runtime,
 ) -> None:
@@ -161,33 +159,36 @@ def test_a_new_warm_waits_for_a_strict_proof_however_servable_the_lag(
 
     readiness.begin_warm()
     readiness.finish_required_warm()  # the warm's optional preloads still run
-
     [warming] = runtime.probe()
     assert warming.status_code == 503, warming.json()
     assert warming.json()["retrieval"]["state"] == "warming"
 
+    readiness.finish_warm()  # the warm ends without a strict proof: the catalogue still lags
+    [unproven] = runtime.probe()
+    assert unproven.status_code == 503, unproven.json()
+    assert unproven.json()["retrieval"]["state"] == "unavailable"
+
     lexstore.ensure_fresh(runtime.vault)
     assert warmup.warm_retrieval_catalog(runtime.vault)
-    readiness.finish_warm()
     [proven] = runtime.probe()
     assert proven.status_code == 200 and proven.json()["retrieval"]["state"] == "ready"
 
 
-def test_the_lag_is_served_once_the_required_warm_is_done_not_after_optional_preloads(
-    runtime: _Runtime,
-) -> None:
-    """Catches a proven process held `warming` by a model preload nothing depends on."""
+def test_the_lag_is_served_only_once_the_whole_warm_has_finished(runtime: _Runtime) -> None:
+    """Catches health saying ready while `find` refuses with the warm still running."""
     readiness.begin_warm()  # a promoted worker re-warms; its optional preloads outlast the rest
     assert warmup.warm_retrieval_catalog(runtime.vault)
+    readiness.finish_required_warm()
     runtime.advance_projection()
 
-    [before] = runtime.probe()
-    readiness.finish_required_warm()
-    [after] = runtime.probe()
+    [during_preloads] = runtime.probe()
+    readiness.finish_warm()
+    [after_warm] = runtime.probe()
 
-    assert before.status_code == 503 and before.json()["retrieval"]["state"] == "warming"
-    assert after.status_code == 200 and after.json()["retrieval"]["state"] == "lagging"
-    assert readiness.is_warming()
+    assert during_preloads.status_code == 503
+    assert during_preloads.json()["retrieval"]["state"] == "warming"
+    assert after_warm.status_code == 200
+    assert after_warm.json()["retrieval"]["state"] == "lagging"
 
 
 def test_an_unmanaged_proof_does_not_make_a_later_lag_ready(runtime: _Runtime) -> None:

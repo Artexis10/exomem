@@ -14,6 +14,10 @@ from typing import Any
 
 RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
+#: The `retrieval.state` of a proven process whose catalogue trails a live
+#: projection that recall still serves. It exists only in this payload, never in
+#: `readiness.retrieval_admission`, whose states `find` routes on.
+RETRIEVAL_STATE_LAGGING = "lagging"
 
 log = logging.getLogger(__name__)
 
@@ -454,14 +458,15 @@ def build_runtime_readiness(
     retrieval_serving = True
     if retrieval is not None:
         state = str(retrieval.get("state") or "unverified")
-        if state not in {"ready", "lagging", "warming", "unavailable", "unverified"}:
+        known = {"ready", RETRIEVAL_STATE_LAGGING, "warming", "unavailable", "unverified"}
+        if state not in known:
             state = "unverified"
         # `admitted` keeps meaning strict equality; a lag recall can still
         # serve leaves it false while the process stays routable.
         retrieval_admitted = bool(retrieval.get("admitted")) and state == "ready"
-        retrieval_serving = retrieval_admitted or state == "lagging"
+        retrieval_serving = retrieval_admitted or state == RETRIEVAL_STATE_LAGGING
         retrieval_payload = {"state": state, "admitted": retrieval_admitted}
-        if state == "lagging":
+        if state == RETRIEVAL_STATE_LAGGING:
             retrieval_payload.update(_public_catalogue_lag(retrieval))
         repair = _public_lexical_repair(retrieval.get("repair"))
         if repair is not None:
@@ -523,21 +528,17 @@ def build_runtime_readiness(
 
 # The published catalogue checkpoint pair this process first saw while it was
 # lagging, and when. A catalogue that is merely busy publishes a new pair each
-# time and restarts the clock; only a stuck one keeps ageing.
+# time and restarts the clock; only a stuck one keeps ageing. Only a changed
+# pair restarts it: a probe that is not lagging says nothing about the pair, and
+# a strictly ready answer already implies a newer one.
 _LAG_LOCK = threading.Lock()
 _lag_first_seen: tuple[object, float] | None = None
 
 
-def _catalogue_unchanged_seconds(published: object | None) -> float | None:
-    """Seconds this process has seen `published` unchanged while lagging.
-
-    `None` ends the observation: the process is no longer lagging.
-    """
+def _catalogue_unchanged_seconds(published: object) -> float:
+    """Seconds this process has seen the `published` checkpoint pair unchanged."""
     global _lag_first_seen
     with _LAG_LOCK:
-        if published is None:
-            _lag_first_seen = None
-            return None
         now = time.monotonic()
         if _lag_first_seen is None or _lag_first_seen[0] != published:
             _lag_first_seen = (published, now)
@@ -551,20 +552,19 @@ def _served_catalogue_lag(
 
     Strict admission is the only thing that reports `ready`. This reports a
     lag only for a managed process that proved the catalogue exactly since its
-    warm began, with that warm's required stages done (so `warming` during the
-    optional preloads counts like `unavailable`), and only while recall can
-    still serve the published catalogue: both live projections present, both
-    catalogues published by this process instance, identity unchanged.
-    Anything else keeps the strict answer, so a fresh process, a lost
-    projection or an identity change stays not ready.
+    warm began, and only while recall serves the published catalogue: `find`
+    does that in the strict state `unavailable`, which begins when the whole warm
+    has finished, and refuses with `warming` until then. Health follows that
+    state, and requires both live projections present with a published
+    catalogue for each, under an unchanged identity. Anything else keeps the
+    strict answer, so a fresh process or a lost projection stays not ready.
     """
     from . import freshness, lexstore, readiness
 
     if (
         vault_root is None
-        or retrieval.get("admitted")
+        or retrieval.get("state") != "unavailable"
         or not readiness.retrieval_proven()
-        or not readiness.required_warm_finished()
         or not freshness.event_indexes_enabled()
     ):
         return None
@@ -788,10 +788,8 @@ def runtime_readiness(
         coordination = _unmeasured_coordination("status_error")
     retrieval = readiness.retrieval_admission(configured_vault)
     lag = _served_catalogue_lag(configured_vault, retrieval)
-    if lag is None:
-        _catalogue_unchanged_seconds(None)
-    else:
-        retrieval = {**retrieval, "state": "lagging", **lag}
+    if lag is not None:
+        retrieval = {**retrieval, "state": RETRIEVAL_STATE_LAGGING, **lag}
     if configured_vault is not None:
         try:
             from . import lexstore

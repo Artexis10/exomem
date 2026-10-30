@@ -21,15 +21,20 @@ catalogue's own published checkpoint per scope.
   `runtime_retrieval_catalog_admission` moves into a helper that schedules no
   repair, so the probe does not run the strict proof a second time. The request
   path keeps its call shape. The probe adds one rule, `require_live_projection`:
-  both scopes need a live projection from the published checkpoint's process
-  instance. A lost projection or an identity change is not a lag.
-- **Warming after the required warm counts as unavailable.** The required warm
-  being done is a condition of `lagging`, so optional model preloads do not hold
-  a proven process out of service.
+  both scopes need a live projection. A lost projection is not a lag. A
+  published catalogue from another process instance is served by recall, so
+  health follows recall and reports it as a lag, and its age shows a catalogue
+  that cannot catch up.
+- **Health follows what recall serves.** `find` serves a published catalogue
+  only in the strict state `unavailable`, which begins when the whole warm has
+  finished. While the optional preloads run, `retrieval_admission` returns
+  `warming` and recall refuses. `lagging` therefore needs the strict state
+  `unavailable`, and health never says ready while recall refuses.
 - **Age measures a stuck catalogue.** `catalogue_unchanged_seconds` counts from
   when this process first saw the current published checkpoint pair while
-  lagging, on a monotonic clock, kept as process state. A new published pair, or
-  leaving `lagging`, restarts it.
+  lagging, on a monotonic clock, kept as process state. Only a changed pair
+  restarts it. A probe that is not lagging does not, and a strictly ready answer
+  already implies a newer pair.
 - **No cache for `lagging`.** Losing a live projection moves no generation the
   ready-proof cache watches, so each probe proves again while the catalogue
   lags.

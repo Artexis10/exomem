@@ -1741,9 +1741,8 @@ def _published_catalog_admission(
     differs from the published one is reported in ``lagging_scopes``.
 
     ``require_live_projection`` additionally refuses a scope with no live
-    projection, or one published by another process instance. The request path
-    wants neither refusal; health does, because a lost projection or an
-    identity change is not a lag that recall can ride out.
+    projection. The request path serves from the published projection then;
+    health does not report that as a lag, because the projection is lost.
     """
     from . import freshness as freshness_module
     from . import recall_policy
@@ -1762,9 +1761,7 @@ def _published_catalog_admission(
             # current policy hides. Refuse until republication.
             return None
         live = freshness_module.live_recall_checkpoint(root, scope)
-        if require_live_projection and (
-            live is None or live.instance_id != published.instance_id
-        ):
+        if require_live_projection and live is None:
             return None
         if live is not None and live == published:
             checkpoints[scope] = live
@@ -1779,9 +1776,8 @@ def served_catalog_lag(vault_root: Path) -> RecallProjectionAdmission | None:
 
     Called after the strict proof has already failed, so it takes only the
     published-projection half and schedules no repair. It answers None unless
-    both scopes still have a live projection from this process instance and a
-    published catalog under an unchanged identity, and at least one scope
-    trails its live projection.
+    both scopes still have a live projection and a published catalog under an
+    unchanged identity, and at least one scope trails its live projection.
     """
     if not maintained_content_index_enabled():
         # No maintained catalog is served, so nothing trails a projection.

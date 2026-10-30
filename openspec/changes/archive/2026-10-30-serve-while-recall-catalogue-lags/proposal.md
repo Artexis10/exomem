@@ -8,7 +8,7 @@ Kubernetes then removes the only pod from its Service, and the gateway refuses
 the agent's next write with `CELL_NOT_READY`. In one rehearsal the pod log shows
 949 readiness 503s and no write 503s.
 
-Per-request recall already serves this lag after the required warm. Only the
+Per-request recall already serves this lag once the warm has finished. Only the
 health answer is stricter, so a cell that is serving correctly reports itself
 unroutable.
 
@@ -19,8 +19,9 @@ unroutable.
   catalogue trails a live projection that per-request recall can still serve.
   The answer names the lagging scopes and the seconds this process has seen the
   published catalogue unchanged.
-- A fresh process, a lost live or published projection, a changed access-policy
-  or catalogue identity, and rollback mode keep today's 503.
+- A fresh process, a warm still running, a lost live or published projection, a
+  changed access-policy or catalogue identity, and rollback mode keep today's
+  503.
 - Strict equality still sets `retrieval.state: "ready"` and `admitted: true`.
   `lagging` never sets `admitted`, adds no reason code, and does not change
   takeover eligibility.
@@ -32,7 +33,8 @@ unroutable.
 
 - `install-readiness`: "Runtime Health Distinguishes Transport And Recall
   Admission" gains the `lagging` state. The scenario "Stale catalogue proof
-  revokes readiness" becomes three scenarios.
+  revokes readiness" keeps its name with an amended body, and four scenarios
+  are added.
 - `recall-read-path`: strict health readiness stays strict. The serving
   `status` may follow a servable lag after a strict proof.
 - `runtime-readiness-contract`: a served catalogue lag does not affect takeover
