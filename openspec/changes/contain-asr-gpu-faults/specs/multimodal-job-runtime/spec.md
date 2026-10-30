@@ -57,8 +57,13 @@ When the operator explicitly requests CUDA and the GPU works but another process
 - **THEN** the job is deferred as for a busy GPU
 - **AND** it is not failed or blocked
 
+#### Scenario: Automatic mode moves to the CPU when the GPU fills up
+- **WHEN** automatic mode chose the GPU and the model load then fails with a CUDA out-of-memory error
+- **THEN** the job runs on the CPU
+- **AND** an explicit CUDA request still defers instead
+
 #### Scenario: A busy GPU does not hold back other media
-- **WHEN** a speech job waits for a busy GPU and an image job is queued, before or during the wait
+- **WHEN** a speech job waits for a busy GPU and an image job is queued, before or during the wait, by any path that queues work
 - **THEN** the image job is processed without waiting for the interval to end
 - **AND** the speech job stays pending
 
@@ -76,6 +81,11 @@ When the operator explicitly requests CUDA and the GPU works but another process
 - **WHEN** speech jobs wait for a busy GPU
 - **THEN** status reports their number, the free and needed memory, and since when they wait
 - **AND** doctor reports the same as a warning
+- **AND** a Cloud cell's tool status leaves these facts to doctor, as it does for memory reasons
+
+#### Scenario: The record of a wait ends with the waiting work
+- **WHEN** the speech jobs that waited for the GPU are gone and a later speech job waits
+- **THEN** status reports the start of the later wait, not the earlier one
 
 ### Requirement: A CUDA fault never takes down the serving worker
 Exomem SHALL NOT let a CUDA library fault end the process that serves requests. The service manager SHALL start every worker it owns with no CUDA device visible and SHALL keep the deployment's device list for the disposable media process alone. Before the first media process of a worker lifetime, the media supervisor SHALL initialize CUDA once in a throwaway process that has the media process's environment, with a finite timeout. When that process dies by a signal, times out or fails, the media process SHALL start with no CUDA device. An explicit CUDA request SHALL then block the job with the failure named, an automatic request SHALL use the CPU, and status and doctor SHALL show the reason. A media process that dies by a signal the supervisor did not send SHALL be restarted after a delay that doubles to a ceiling.
@@ -86,17 +96,42 @@ Exomem SHALL NOT let a CUDA library fault end the process that serves requests. 
 - **AND** an explicit CUDA speech job is blocked with the signal and the failed stage in its error
 - **AND** status and doctor show the same reason
 
+#### Scenario: The preflight hangs
+- **WHEN** the preflight process, or a helper that it started, runs past the timeout
+- **THEN** the supervisor kills its whole process group and waits a bounded time
+- **AND** the preflight counts as failed with the timeout and the stage named
+
 #### Scenario: The GPU is healthy
 - **WHEN** the preflight process initializes CUDA and exits cleanly
 - **THEN** the media process receives the deployment's CUDA device list
 - **AND** the serving worker still sees no CUDA device
+- **AND** status and doctor report the preflight as passed
 
-#### Scenario: A model asks for CUDA inside the serving worker
-- **WHEN** the deployment asks a torch model in the serving worker to use CUDA
-- **THEN** the model runs on the CPU
-- **AND** the worker does not initialize CUDA
+#### Scenario: Nothing can be tested
+- **WHEN** no CUDA device is visible to the media process, or the host has no NVIDIA driver
+- **THEN** no preflight runs
+- **AND** status and doctor report the GPU as not tested, never as passed
+
+#### Scenario: The preflight sees what the media process sees
+- **WHEN** a library reaches the media process only through its search path variables
+- **THEN** the preflight process imports that library as well
+
+#### Scenario: A foreground serve process
+- **WHEN** an operator runs the server without the service manager, in the foreground or over a standard-input pipe
+- **THEN** that process hides its own CUDA devices before any model loads
+- **AND** the media process it starts receives the deployment's device list
+
+#### Scenario: A model asks for CUDA in a process with no visible device
+- **WHEN** a torch model is asked to use CUDA in the serving worker, or in a media process denied the GPU
+- **THEN** the model runs on the CPU and the process logs that once
+- **AND** doctor tells the operator that torch models run on the CPU in the serving worker
+
+#### Scenario: A restart clears the earlier verdict
+- **WHEN** the service restarts after a failed preflight
+- **THEN** status reports no verdict until the new preflight finishes
 
 #### Scenario: A media process keeps dying by a signal
 - **WHEN** successive media processes die by a signal that the supervisor did not send
 - **THEN** each restart waits twice as long as the one before, up to a ceiling
 - **AND** the supervisor does not start a process every few seconds
+- **AND** status and doctor show the number of deaths in a row and the job at the head of the queue
