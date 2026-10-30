@@ -14,7 +14,14 @@ from typing import Any
 
 import yaml
 
-from . import memory_refs, relation_registry, semantic_language_registry, semantic_units, vault
+from . import (
+    memory_refs,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+    state_paths,
+    vault,
+)
 from .vocabulary import instances
 
 # Matching source bytes must not reuse an older parser's interpretation.
@@ -255,7 +262,10 @@ def build_parent_index_state(
     root = Path(vault_root)
     candidate = Path(path)
     if candidate.is_absolute():
-        rel_path = candidate.resolve().relative_to(root.resolve()).as_posix()
+        # The vault root is configuration, so a scope may reuse it; the candidate resolves live.
+        rel_path = candidate.resolve().relative_to(
+            state_paths.resolved_vault_path(root, expanduser=False)
+        ).as_posix()
         source_path = candidate
     else:
         rel_path = PurePosixPath(str(path).replace("\\", "/")).as_posix().lstrip("/")

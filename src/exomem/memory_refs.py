@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import unquote
 
-from . import call_spans, reserved_paths
+from . import call_spans, reserved_paths, state_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
@@ -1475,7 +1475,10 @@ def _refs_for_paths_from_scan(
 
 def _relative_markdown(vault_root: Path, path: Path) -> str | None:
     try:
-        rel = path.resolve().relative_to(Path(vault_root).resolve()).as_posix()
+        # The vault root is configuration, so a scope may reuse it; the path resolves live.
+        rel = path.resolve().relative_to(
+            state_paths.resolved_vault_path(vault_root, expanduser=False)
+        ).as_posix()
     except (OSError, ValueError):
         return None
     prefix = f"{kb_dirname()}/"

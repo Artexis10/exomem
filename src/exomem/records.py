@@ -19,7 +19,7 @@ from typing import Any, NotRequired
 
 from typing_extensions import TypedDict
 
-from . import record_formats, record_governance, vault, writer_lease
+from . import record_formats, record_governance, state_paths, vault, writer_lease
 from . import structured_collections as collections
 from .collection_profiles import profile_for
 
@@ -280,7 +280,11 @@ def append_record(
                 "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
             )
     warnings: list[str] = []
-    with writer_lease.active_manager().mutation_guard(root, operation="record_append"):
+    # Opened with the boundary held, so the ceiling is read after any wait; no task starts inside.
+    with (
+        writer_lease.active_manager().mutation_guard(root, operation="record_append"),
+        state_paths.resolution_scope(),
+    ):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
         if resumed is None:
@@ -1245,7 +1249,11 @@ def bulk_upsert_records(
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("bulk_upsert")
     batch_id = uuid.uuid4().hex[:12]
     total = len(rows)
-    with writer_lease.active_manager().mutation_guard(root, operation="record_bulk_upsert"):
+    # Opened with the boundary held, so the ceiling is read after any wait; no task starts inside.
+    with (
+        writer_lease.active_manager().mutation_guard(root, operation="record_bulk_upsert"),
+        state_paths.resolution_scope(),
+    ):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
@@ -1777,7 +1785,11 @@ def update_record(
         )
     _refuse_excluded_authored_names(overrides)
     warnings: list[str] = []
-    with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
+    # Opened with the boundary held, so the ceiling is read after any wait; no task starts inside.
+    with (
+        writer_lease.active_manager().mutation_guard(root, operation="record_update"),
+        state_paths.resolution_scope(),
+    ):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
         if resumed is None:
