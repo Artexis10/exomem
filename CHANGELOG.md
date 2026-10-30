@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.151.1](https://github.com/Artexis10/exomem/compare/v0.151.0...v0.151.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **collections:** refuse an unchanged settlement failure without settling again ([#2211](https://github.com/Artexis10/exomem/issues/2211)) ([b1a34ce](https://github.com/Artexis10/exomem/commit/b1a34cef65de01f23b6d7ca6095105e22080491a))
+* **service:** answer a call whose worker died as retryable ([#2213](https://github.com/Artexis10/exomem/issues/2213)) ([bd1f797](https://github.com/Artexis10/exomem/commit/bd1f797a2ba20a80c20cd2fdc264fa4e4b2c251a))
+* **writes:** wait out ordinary boundary contention for every keyed write ([#2209](https://github.com/Artexis10/exomem/issues/2209)) ([f4101b2](https://github.com/Artexis10/exomem/commit/f4101b23e73ca8b9ced99c20e7242c9004de4b5c))
+
+
+### Performance
+
+* **ci:** seed both MCP latency arms at once ([#2215](https://github.com/Artexis10/exomem/issues/2215)) ([ff6cfa9](https://github.com/Artexis10/exomem/commit/ff6cfa958227ecb15df795bfa293c223e30cbe10))
+
 ## [0.151.0](https://github.com/Artexis10/exomem/compare/v0.150.0...v0.151.0) (2026-10-30)
 
 
