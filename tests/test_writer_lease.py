@@ -3091,6 +3091,65 @@ def test_different_identity_busy_is_precommit(
     assert first_calls == ["first"]
 
 
+def test_keyed_write_during_warm_waits_and_commits_once(tmp_path: Path) -> None:
+    """A restart's warm-up is seconds long; the client must not see it as a refusal."""
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("called"))
+    readiness.begin_warm()
+    for component in readiness.COMPONENTS:
+        if component != "semantic_corpus":
+            readiness.mark_ready(component)
+    finisher = threading.Timer(0.4, readiness.mark_ready, args=("semantic_corpus",))
+    finisher.start()
+    try:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="during-warm",
+            idempotency_principal_scope="alice",
+            mutation_request_id="warm-wait",
+        )
+    finally:
+        finisher.join()
+        readiness.reset()
+
+    assert calls == ["called"]
+
+
+def test_keyed_write_refuses_when_warm_outlasts_the_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("called"))
+    readiness.begin_warm()
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpError) as warming:
+            manager.invoke(
+                command,
+                (),
+                {},
+                idempotency_key="long-warm",
+                idempotency_principal_scope="alice",
+                mutation_request_id="warm-too-long",
+            )
+    finally:
+        readiness.reset()
+
+    assert time.monotonic() - started < 5.0
+    assert warming.value.code == "MUTATION_WARMING"
+    payload = error_dict(warming.value)
+    assert payload["status"] == "retryable"
+    assert payload["committed"] is False
+    assert payload["waited_ms"] >= 300
+    assert calls == []
+    assert active_mutation_snapshot()["state"] == "free"
+
+
 def test_mutation_during_semantic_warm_returns_without_holding_boundary(
     tmp_path: Path,
 ) -> None:

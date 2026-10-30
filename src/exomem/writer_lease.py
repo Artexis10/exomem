@@ -4406,6 +4406,48 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     return wait
 
 
+_WARMUP_POLL_SECONDS = 0.25
+
+
+def _wait_out_write_warmup(*, absorb: bool) -> tuple[str | None, float]:
+    """The write-gating component still warming after a bounded wait, and the seconds waited.
+
+    Warm-up ends by itself within seconds (5-20 s per restart on a personal vault,
+    2026-10-25..30), so a keyed write waits it out on the bounded wait and the
+    parked-worker cap that a busy boundary uses, instead of handing the client a
+    refusal it can only retry. An unkeyed write keeps the immediate refusal: a client
+    that gave up during the wait and resent it would run it twice.
+    """
+    from . import readiness
+
+    def still_warming() -> str | None:
+        # Readiness components, a closed set that readiness.COMPONENTS fixes.
+        return next(
+            (c for c in ("graph_handoff", "semantic_corpus") if readiness.should_defer(c)),
+            None,
+        )
+
+    warming = still_warming()
+    if warming is None or not absorb or not _writes_absorb_contention():
+        return warming, 0.0
+    if not _take_capture_waiter_slot():
+        return warming, 0.0
+    started = time.monotonic()
+    deadline = started + _capture_wait_seconds()
+    try:
+        while warming is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Polled, not one long wait: a warm that finishes without marking
+            # this component also ends the gate (should_defer turns false).
+            readiness.wait(warming, min(remaining, _WARMUP_POLL_SECONDS))
+            warming = still_warming()
+    finally:
+        _release_capture_waiter_slot()
+    return warming, time.monotonic() - started
+
+
 @dataclass(frozen=True)
 class _CapturePreparationRetry:
     """The invocation's existing allowance and admission for precommit retries."""
@@ -5361,21 +5403,21 @@ class LeaseManager:
             command=command.name,
             receipt=receipt or "none",
         )
-        from . import readiness
-
         # The graph handoff joins this gate for the reason the corpus is on it:
         # a write admitted before its delta origin exists does not merely run
         # slower, it registers a whole-vault rebuild for a lineage it could
         # have adopted in the first seconds of the warm. Both refusals are the
         # same retryable shape, and reads are untouched either way.
-        warming = next(
-            (
-                component
-                for component in ("graph_handoff", "semantic_corpus")
-                if readiness.should_defer(component)
-            ),
-            None,
-        )
+        warming, warm_waited = _wait_out_write_warmup(absorb=key is not None)
+        if warm_waited > 0:
+            _log_mutation_event(
+                "warmup_waited",
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt or "none",
+                waited_ms=int(warm_waited * 1000),
+                outcome="refused" if warming is not None else "admitted",
+            )
         if warming is not None:
             details: dict[str, Any] = {
                 "status": "retryable",
@@ -5383,6 +5425,7 @@ class LeaseManager:
                 "retry_after_ms": 750,
                 "request_id": request_id,
                 "receipt_id": receipt,
+                "waited_ms": int(warm_waited * 1000),
             }
             if effective_public_idempotency_key is not None:
                 details["idempotency_key"] = effective_public_idempotency_key
