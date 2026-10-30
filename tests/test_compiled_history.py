@@ -153,9 +153,9 @@ def test_a_revision_names_the_release_that_planned_it_even_if_committed_on_anoth
         unit_ref=unit.unit_ref, expected_fingerprint=unit.fingerprint,
         expected_hash=_page_hash(tmp_path / PAGE), reason="The first correction.",
     )
-    monkeypatch.setattr(exomem, "__version__", "9999.0.0")
-    validated = commands.op_observe_memory(tmp_path, operation="validate", **request)["semantic"]
-    monkeypatch.undo()
+    with monkeypatch.context() as planning:
+        planning.setattr(exomem, "__version__", "9999.0.0")
+        validated = commands.op_observe_memory(tmp_path, operation="validate", **request)["semantic"]
 
     commands.op_observe_memory(
         tmp_path, operation="update", transition_token=validated["transition_token"],
