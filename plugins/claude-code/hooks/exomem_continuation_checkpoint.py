@@ -43,6 +43,10 @@ def local_credentials():
 # Shared filenames for the retrieve hook's per-client, per-session map state.
 ACTIVATION_MAP_GENERATION_SUFFIX = ".map-generation"
 ACTIVATION_MAP_OVERHEAD_SUFFIX = ".map-overhead"
+# The retrieve hook keeps the last vocabulary delta it showed and a marker that the live context holds it.
+# A lifecycle event drops only the marker, so the next prompt shows that delta once more.
+ACTIVATION_VOCABULARY_DELTA_SUFFIX = ".vocabulary-delta"
+ACTIVATION_VOCABULARY_SHOWN_SUFFIX = ".vocabulary-shown"
 
 SCHEMA_VERSION = 1
 EVENT_CONTRACT_VERSION = 1
@@ -465,6 +469,7 @@ def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
         token,
         token.with_suffix(ACTIVATION_MAP_GENERATION_SUFFIX),
         token.with_suffix(ACTIVATION_MAP_OVERHEAD_SUFFIX),
+        token.with_suffix(ACTIVATION_VOCABULARY_SHOWN_SUFFIX),
     ):
         try:
             unlink_nudge_file(path)
