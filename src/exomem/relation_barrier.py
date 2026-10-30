@@ -32,13 +32,18 @@ REMEDIATION = (
 
 @dataclass(frozen=True)
 class Choice:
-    """The caller's answer to the barrier: one reason for the call, or one per target page."""
+    """The caller's answer to the barrier: one reason for the call, or one per edge."""
 
     reason: str | None = None
-    by_target: tuple[tuple[str, str], ...] = ()
+    #: (relation as written, target page, reason) from the create-entity `relations` items.
+    by_edge: tuple[tuple[str, str, str], ...] = ()
 
-    def reason_for(self, target_path: str) -> str | None:
-        return dict(self.by_target).get(target_path.removesuffix(".md")) or self.reason
+    def reason_for(self, relation: str, target_path: str) -> str | None:
+        target = target_path.removesuffix(".md")
+        for kind, page, reason in self.by_edge:
+            if kind == relation and page == target:
+                return reason
+        return self.reason
 
 
 @dataclass(frozen=True)
@@ -146,7 +151,7 @@ def evaluate(
         )
         if not options:
             continue
-        reason = choice.reason_for(fact.logical_target_path) if choice is not None else None
+        reason = choice.reason_for(fact.raw_relation, fact.logical_target_path) if choice is not None else None
         if reason is None:
             refused.append((fact, options))
         else:

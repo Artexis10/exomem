@@ -28,11 +28,11 @@ relations:
   member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
   kin_of: {description: Is a relative of, family: kinship, direction: symmetric, origins: [semantic_relation], endpoints: {subject: [entity:person], object: [entity:person]}}
   affiliated_with: {description: Is affiliated with without being a member or owner, family: affiliation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person], object: [entity:organization]}}
-  owns: {description: Owns, family: ownership, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:*], object: [entity:*]}}
+  owns: {description: Owns, family: ownership, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:*]}}
   part_of: {description: Is a part of, family: composition, direction: directed, inverse: contains, origins: [semantic_relation]}
   contains: {description: Contains as a part, family: composition, direction: directed, inverse: part_of, origins: [semantic_relation]}
   extends: {description: Extends or specializes, family: specialization, direction: directed, origins: [semantic_relation]}
-  located_at: {description: Is physically located at, family: location, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:*], object: [entity:*]}}
+  located_at: {description: Is physically located at, family: location, direction: directed, origins: [semantic_relation]}
   operates: {description: Operates or runs day to day, family: operation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:*]}}
   supplies: {description: Supplies goods or services to, family: supply, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:*]}}
   produces: {description: Produces or makes, family: production, direction: directed, origins: [semantic_relation]}

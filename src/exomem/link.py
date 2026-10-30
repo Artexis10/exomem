@@ -511,7 +511,7 @@ def _normalize_relations(
     *,
     vault_root: Path,
     resolver: WikilinkResolver,
-) -> tuple[list[tuple[str, str]], list[str], tuple[tuple[str, str], ...]]:
+) -> tuple[list[tuple[str, str]], list[str], tuple[tuple[str, str, str], ...]]:
     """Validate typed `{kind, target[, reason]}` edges and canonicalize each target as
     `_normalize_connections` does.
 
@@ -519,7 +519,7 @@ def _normalize_relations(
     parses back to the same kind, so no value can add or reshape a line. Whether
     the kind is registered and in scope stays the creation preflight's decision.
     Identical pairs collapse; different kinds for one target stay distinct. The third
-    value holds each item's `reason` by target page: the answer to a generic edge.
+    value holds each item's `reason` with its kind and target page: the answer to that edge.
     """
     if relations is None:
         return [], [], ()
@@ -529,7 +529,7 @@ def _normalize_relations(
         )
     pairs: list[tuple[str, str]] = []
     warnings: list[str] = []
-    reasons: list[tuple[str, str]] = []
+    reasons: list[tuple[str, str, str]] = []
     for index, item in enumerate(relations):
         if (
             not isinstance(item, dict)
@@ -562,7 +562,7 @@ def _normalize_relations(
                 reason = relation_review.review_reason(item["reason"], f"relations[{index}].reason")
             except relation_review.RelationReviewError as error:
                 raise LinkError("INVALID_LINK", ["relations"], error.reason) from error
-            reasons.append((targets[0].removesuffix(".md"), reason))
+            reasons.append((pair[0], targets[0].removesuffix(".md"), reason))
     return pairs, warnings, tuple(reasons)
 
 

@@ -319,6 +319,49 @@ def test_create_entity_commits_a_generic_item_that_carries_a_reason_and_logs_it(
     assert (edge["reason"], edge["reason_recorded"]) == (REASON, True)
 
 
+def test_a_reason_on_a_specific_item_does_not_answer_a_generic_item_to_the_same_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call = _served(tmp_path, monkeypatch)
+    works = _target(_entity(call, "organization", "Quay Works"))
+    specific = {"kind": "member_of", "target": works, "reason": REASON}
+    generic = {"kind": "relates_to", "target": works}
+
+    refused = _entity(call, "person", "Cy Dock", relations=[specific, generic])
+    committed = _entity(call, "person", "Cy Dock", relations=[specific, {**generic, "reason": REASON}])
+
+    assert refused["error"]["code"] == CODE
+    assert committed["state"] == "committed", committed
+
+
+def test_a_person_is_offered_the_relations_that_fit_a_person_or_an_organization_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call = _served(tmp_path, monkeypatch)
+    works = _target(_entity(call, "organization", "Quay Works"))
+    ben = _target(_entity(call, "person", "Ben Quay"))
+
+    def offered(target: str) -> list[str]:
+        refused = _entity(call, "person", "Cy Dock", relations=[{"kind": "relates_to", "target": target}])
+        return [option["key"] for option in refused["error"]["options"]]
+
+    assert offered(works) == ["member_of", "affiliated_with", "owns", "operates"]
+    assert offered(ben) == ["kin_of", "owns", "operates", "supplies"]
+
+
+def test_a_generic_edge_between_two_concepts_commits_without_a_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call = _served(tmp_path, monkeypatch)
+    ledger = _target(_entity(call, "concept", "Tidal Ledger"))
+
+    committed = _entity(
+        call, "concept", "Tide Table", relations=[{"kind": "relates_to", "target": ledger}]
+    )
+
+    assert committed["state"] == "committed", committed
+
+
 def test_a_plain_connection_between_two_people_is_refused_and_kin_of_is_offered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

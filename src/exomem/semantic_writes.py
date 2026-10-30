@@ -4423,7 +4423,7 @@ def preflight_creation(
     registrations: tuple[DraftRegistration, ...] = (),
     relation_disposition: str | None = None,
     relation_review_reason: str | None = None,
-    generic_reasons: tuple[tuple[str, str], ...] = (),
+    generic_reasons: tuple[tuple[str, str, str], ...] = (),
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     vocabulary_binding: Any | None = None,
@@ -4467,7 +4467,7 @@ def _preflight_creation(
     registrations: tuple[DraftRegistration, ...],
     relation_disposition: str | None,
     relation_review_reason: str | None,
-    generic_reasons: tuple[tuple[str, str], ...],
+    generic_reasons: tuple[tuple[str, str, str], ...],
     predecessor_path: str | None,
     predecessor_content_hash: str | None,
     vocabulary_binding: Any | None,
@@ -4485,7 +4485,7 @@ def _preflight_creation(
         )
     choice = _generic_choice(relation_disposition, relation_review_reason)
     if generic_reasons:
-        choice = replace(choice or relation_barrier.Choice(), by_target=generic_reasons)
+        choice = replace(choice or relation_barrier.Choice(), by_edge=generic_reasons)
     # `generic` answers the barrier only; the relation review below never sees it.
     review_disposition = None if relation_disposition == relation_barrier.GENERIC else relation_disposition
     token = DraftToken.decode(draft_token)

@@ -21,7 +21,7 @@ _CLUB = {
     "parent": "organization",
     "attributes": {"folder": "Clubs"},
 }
-_OWNS_ENDPOINTS = {"subject": ["entity:*"], "object": ["entity:*"]}
+_OWNS_ENDPOINTS = {"subject": ["entity:person", "entity:organization"], "object": ["entity:*"]}
 
 
 def _served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -174,7 +174,10 @@ def test_an_extension_that_declares_nothing_shows_the_endpoints_it_inherits(
 
     _save_extension(call, "vault.keeps", _extension("owns"))
     inherited = relation_registry.load_registry(vault).endpoints_of("vault.keeps")
-    assert (inherited.subject, inherited.object) == (("entity:*",), ("entity:*",))
+    assert (inherited.subject, inherited.object) == (
+        ("entity:person", "entity:organization"),
+        ("entity:*",),
+    )
 
 
 def _capture_and_note(call, title: str, relation_row: str | None = None) -> dict:
