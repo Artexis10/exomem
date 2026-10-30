@@ -153,9 +153,9 @@ def test_a_revision_names_the_release_that_planned_it_even_if_committed_on_anoth
         unit_ref=unit.unit_ref, expected_fingerprint=unit.fingerprint,
         expected_hash=_page_hash(tmp_path / PAGE), reason="The first correction.",
     )
-    validated = commands.op_observe_memory(tmp_path, operation="validate", **request)["semantic"]
-    planned_release = exomem.__version__
     monkeypatch.setattr(exomem, "__version__", "9999.0.0")
+    validated = commands.op_observe_memory(tmp_path, operation="validate", **request)["semantic"]
+    monkeypatch.undo()
 
     commands.op_observe_memory(
         tmp_path, operation="update", transition_token=validated["transition_token"],
@@ -165,7 +165,7 @@ def test_a_revision_names_the_release_that_planned_it_even_if_committed_on_anoth
     history = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)["revision_history"]
     revision, = history["revisions"]
     assert "First wording." in revision["prior"]["source"]
-    assert revision["exomem_version"] == planned_release
+    assert revision["exomem_version"] == "9999.0.0"
 
 
 def test_admitted_history_does_not_claim_complete_coverage(tmp_path: Path, owner) -> None:
