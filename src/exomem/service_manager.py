@@ -250,17 +250,17 @@ DEFAULT_STANDBY_WARM_SECONDS = 300.0
 COLD_START_ENV = "EXOMEM_COLD_START_SECONDS"
 DEFAULT_COLD_START_SECONDS = 300.0
 COLD_START_FLOOR_SECONDS = 120.0
-#: A worker that exits on its own is restarted in place at most this many
-#: times in any window of this length. One more exit inside the window stops
-#: the supervisor instead, so the unit's cgroup cleanup and Restart= take over,
-#: as they did for every crash before in-place restarts. The window outlasts
-#: the cold start several times over; the crashes that motivated this came
-#: about six minutes apart, two to a window.
+#: A serving worker that exits on its own is restarted in place at most this
+#: many times in any window of this length. One more exit inside the window
+#: stops the supervisor instead, so the unit's cgroup cleanup and Restart= take
+#: over, as they did for every crash before in-place restarts. Each restart
+#: counted here reached readiness, so a window holds at most a few warm cycles;
+#: the crashes that motivated this came about six minutes apart, two to a window.
 RESTART_LIMIT = 3
 RESTART_WINDOW_SECONDS = 600.0
-#: The upgrade's stop allowance: how long the exited worker's descendants get
-#: to show they have exited before the unit is left to clean them.
-RESTART_STOP_SECONDS = 10.0
+#: How long a stopped worker's tree gets to show that every process exited,
+#: in a handoff and after a crash alike.
+STOP_ALLOWANCE_SECONDS = 10.0
 
 
 def standby_warm_budget() -> float:
@@ -488,46 +488,52 @@ class Supervisor:
         """Replace a worker that exited on its own while both listeners stay up.
 
         Ingress holds new calls under its admission budget meanwhile, as it does
-        during a handoff. Returns None once a replacement serves, or why the
-        supervisor has to stop instead: the restart budget is spent, or the
-        exited worker's descendants were not proven gone. Stopping hands the
-        unit's cgroup to systemd, whose cleanup does not depend on that proof.
+        during a handoff. Returns None once a replacement serves, or when a
+        transition that held the lock already dealt with the exit. Otherwise it
+        returns why the supervisor has to stop instead: the restart budget is
+        spent, the exited worker's descendants were not proven gone, or the
+        replacement did not report ready. Stopping hands the unit's cgroup to
+        systemd, whose cleanup and restart do not depend on this process.
         """
         async with self.lock:
+            # The exit was seen before the lock. A transition holding it may
+            # have replaced the worker or failed into recovery meanwhile, and
+            # neither outcome is this restart's to overwrite.
+            if self.phase != "ready" or self.runtime.pid:
+                return None
+            self.last_exit_code = getattr(self.runtime, "returncode", None)
+            restarts = self._recent_restarts()
+            if len(restarts) >= self.restart_limit:
+                self.phase = "unavailable"
+                return (
+                    f"the worker exited {len(restarts) + 1} times in "
+                    f"{self.restart_window:g} seconds"
+                )
+            restarts.append(self.clock())
             self.phase = "restarting"
             self.ingress.pause()
+            log.warning(
+                "managed worker exited with status %s; restarting it in place (%d of %d)",
+                self.last_exit_code,
+                len(restarts),
+                self.restart_limit,
+            )
             target = self.records.active() or self.initial_target
-            while True:
-                self.last_exit_code = getattr(self.runtime, "returncode", None)
-                restarts = self._recent_restarts()
-                if len(restarts) >= self.restart_limit:
-                    self.phase = "unavailable"
-                    return (
-                        f"the worker exited {len(restarts) + 1} times in "
-                        f"{self.restart_window:g} seconds"
-                    )
-                restarts.append(self.clock())
-                log.warning(
-                    "managed worker exited with status %s; restarting it in place (%d of %d)",
-                    self.last_exit_code,
-                    len(restarts),
-                    self.restart_limit,
-                )
-                try:
-                    # The same proof a handoff runs before its replacement
-                    # starts: every descendant of the old worker has exited.
-                    await self.runtime.stop(timeout=RESTART_STOP_SECONDS)
-                except Exception:  # noqa: BLE001 - an unproven exit is the unit's to clean
-                    self.phase = "unavailable"
-                    return "the exited worker's descendants were not proven stopped"
-                try:
-                    client = await self.runtime.start(target, timeout=self._replacement_budget())
-                except Exception:  # noqa: BLE001 - a failed restart spends the budget
-                    log.warning("restarted managed worker did not report ready")
-                    continue
-                self.ingress.resume(client)
-                self.phase = "ready"
-                return None
+            try:
+                # The same proof a handoff runs before its replacement starts:
+                # every descendant of the old worker has exited.
+                await self.runtime.stop(timeout=STOP_ALLOWANCE_SECONDS)
+            except Exception:  # noqa: BLE001 - an unproven exit is the unit's to clean
+                self.phase = "unavailable"
+                return "the exited worker's descendants were not proven stopped"
+            try:
+                client = await self.runtime.start(target, timeout=self._replacement_budget())
+            except Exception:  # noqa: BLE001 - one attempt; a full unit restart is the next
+                self.phase = "unavailable"
+                return "the restarted worker did not report ready"
+            self.ingress.resume(client)
+            self.phase = "ready"
+            return None
 
     def _environment_notes(self, handoff: dict[str, Any]) -> dict[str, Any]:
         """Carry an unreadable environment file into every handoff record.
@@ -727,7 +733,7 @@ class Supervisor:
                     # Resume always repeats the stop proof, including a timed-out
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
-                    await self.runtime.stop(timeout=deadline.remaining(10))
+                    await self.runtime.stop(timeout=deadline.remaining(STOP_ALLOWANCE_SECONDS))
                     stopped_at = time.monotonic()
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
@@ -2097,7 +2103,12 @@ async def serve(
                     await discard(timeout=5)
                 except Exception:  # noqa: BLE001 - shutdown still has to stop the worker
                     pass
-            await supervisor.runtime.stop(timeout=5)
+            try:
+                await supervisor.runtime.stop(timeout=5)
+            except Exception:  # noqa: BLE001 - the unit's cgroup cleanup takes what is left
+                # A restart that gave up already names the reason worth reporting.
+                if stopped_because is None:
+                    raise
         if stopped_because is not None:
             # A failed exit status, so the journal and a Restart=on-failure unit see it.
             raise RuntimeError(stopped_because)

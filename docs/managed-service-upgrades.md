@@ -673,22 +673,32 @@ supervisor replaces the worker in place:
    `ready`.
 
 A call that the dead worker was answering gets the retryable error described
-in the managed-service spec. A call that arrives during the restart is held
-and served by the replacement when the replacement is ready inside the queue
-budget. Otherwise the call is answered as not dispatched.
+in the managed-service spec. A call that arrives during the restart is held for
+up to the 45-second queue budget. If the replacement reports ready inside that
+budget, the replacement serves the call. Otherwise the call is answered as not
+dispatched and can be retried. A production worker takes about 40 to 80 seconds
+to warm, so a call that arrives early in the restart usually gets the
+not-dispatched answer.
 
-The supervisor restarts a worker in place at most 3 times in any 10 minutes.
-A replacement that fails to report ready counts against that limit. The
-supervisor stops with a failed exit status in two cases:
+The supervisor makes one attempt for each exit, and restarts a serving worker
+in place at most 3 times in any 10 minutes. The supervisor stops with a failed
+exit status in these cases:
 
-- A further exit inside the window.
+- A fourth exit falls inside the window.
 - A descendant of the exited worker is still alive after 10 seconds.
+- The replacement exits before it reports ready, or does not report ready
+  inside the cold-start window.
+- The restart fails with an unexpected error.
 
 systemd then cleans the unit's cgroup and applies `Restart=`, as it did for
-every crash before this change. `--status` reports the restarts inside the
-window, the limit, the window and the last exit status under
+every crash before in-place restarts. `--status` reports the restarts inside
+the window, the limit, the window and the last exit status under
 `worker_restarts`. The journal records each restart with the worker's exit
 status. A negative status is the signal that killed the worker.
+
+The supervisor runs from the launcher venv, so a worker handoff does not
+change this behaviour. It takes effect after the offline maintenance that
+changes the stable supervisor, described above, which restarts the unit once.
 
 ## Admission budgets
 

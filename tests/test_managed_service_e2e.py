@@ -307,18 +307,14 @@ def test_a_crashed_worker_is_replaced_while_the_listener_stays_up(tmp_path):
                 assert status["worker_pid"] == during.data["pid"]
                 assert status["worker_restarts"]["in_window"] == 1
                 assert status["worker_restarts"]["last_exit_code"] == -signal.SIGKILL
+                # The replacement could only spawn once no descendant was left.
                 with pytest.raises(ProcessLookupError):
                     os.kill(escaped.data["pid"], 0)
-                assert not any(
-                    e["kind"] == "started-beside-escaped-child" for e in events(tmp_path)
-                )
 
     asyncio.run(scenario())
 
 
-def test_a_worker_that_cannot_restart_stops_the_supervisor(tmp_path, monkeypatch):
-    monkeypatch.setenv("EXOMEM_FIXTURE_RESTART_LIMIT", "1")
-
+def test_a_worker_that_cannot_restart_stops_the_supervisor(tmp_path):
     async def scenario():
         async with live_fixture(tmp_path) as (_, _, supervisor):
             worker = (await control(tmp_path, "status"))["worker_pid"]

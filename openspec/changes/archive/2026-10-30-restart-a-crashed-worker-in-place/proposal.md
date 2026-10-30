@@ -1,12 +1,13 @@
 ## Why
 
-When the managed worker crashes, the supervisor stops on purpose so that systemd cleans the unit's cgroup and restarts it. The public listener is closed from the crash until the next worker reports ready, which took 46 to 50 seconds per crash in the 30 October 2026 incident. Clients behind the tunnel saw 502 errors and broken calls instead of a bounded answer.
+When the managed worker crashes, the supervisor stops on purpose so that systemd cleans the unit's cgroup and restarts it. The public listener is closed from the crash until the next worker reports ready. In the 30 October 2026 incident, that took 47 to 85 seconds for each of five crashes. Clients behind the tunnel saw 502 errors and broken calls instead of a bounded answer.
 
 ## What Changes
 
 - A worker that exits outside a transition is replaced in place. The public listener, the local listener and the control socket stay open. Ingress holds calls under the existing admission budgets until the replacement reports ready.
 - Before the replacement starts, the supervisor proves that the exited worker and all its descendants have exited, with the same proof that a handoff runs. If that proof fails, the supervisor stops and leaves the cleanup to systemd.
-- The supervisor restarts a worker in place at most 3 times in any 10 minutes. One more exit inside the window stops the supervisor with a failed exit status, so the unit's cgroup cleanup and `Restart=` apply as before.
+- The supervisor makes one in-place attempt for each exit, and restarts a serving worker in place at most 3 times in any 10 minutes. The supervisor stops with a failed exit status when one more exit falls inside the window, or when the replacement does not report ready. The unit's cgroup cleanup and `Restart=` then apply as before.
+- A restart that waited for the transition lock does nothing when the transition already replaced the worker or failed into recovery.
 - Status reports a `restarting` phase and a `worker_restarts` block: the restarts inside the window, the limit, the window and the last exit status.
 
 ## Impact

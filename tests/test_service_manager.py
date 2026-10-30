@@ -235,13 +235,13 @@ def test_supervisor_start_with_receipt_does_not_launch_a_worker(tmp_path):
 
 
 class _ExitedRuntime(_Runtime):
-    """A worker that exited on its own; its next `failures` replacements exit before readiness."""
+    """A serving worker that exited on its own."""
 
-    def __init__(self, failures=0):
+    def __init__(self, replacement_fails=False):
         super().__init__()
         self.pid = 0
         self.returncode = -11
-        self.failures = failures
+        self.replacement_fails = replacement_fails
 
     async def stop(self, timeout):
         self.events.append("stop")
@@ -249,8 +249,7 @@ class _ExitedRuntime(_Runtime):
 
     async def start(self, target, timeout):
         self.events.append("start")
-        if self.failures:
-            self.failures -= 1
+        if self.replacement_fails:
             self.returncode = 2
             raise RuntimeError("candidate worker exited before readiness")
         self.pid = 200
@@ -289,22 +288,41 @@ def test_crashes_minutes_apart_are_each_restarted_in_place(tmp_path):
     asyncio.run(scenario())
 
 
-def test_a_worker_that_keeps_exiting_spends_the_restart_budget(tmp_path):
+def test_a_fourth_crash_inside_the_window_stops_the_supervisor(tmp_path):
     async def scenario():
-        runtime = _ExitedRuntime(failures=10)
-        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        now = [0.0]
+        runtime = _ExitedRuntime()
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: now[0])
+        for _ in range(3):
+            runtime.pid, runtime.returncode = 0, -11
+            assert await manager.restart_worker() is None
+            now[0] += 60.0
+        runtime.pid, runtime.returncode = 0, -11
         assert await manager.restart_worker() is not None
-        # Every replacement started only after the previous tree's exit was proven.
         assert runtime.events == ["stop", "start"] * 3
-        assert ingress.events == ["pause"]
+        assert ingress.events == ["pause", ("resume", "new-upstream")] * 3
         status = manager.status()
         assert status["phase"] == "unavailable"
         assert status["worker_restarts"] == {
             "in_window": 3,
             "limit": 3,
             "window_seconds": 600.0,
-            "last_exit_code": 2,
+            "last_exit_code": -11,
         }
+
+    asyncio.run(scenario())
+
+
+def test_a_replacement_that_never_reports_ready_stops_the_supervisor(tmp_path):
+    # A worker that cannot start, or hangs past the cold-start window, gets a
+    # full unit restart rather than a loop that never spends the budget.
+    async def scenario():
+        runtime = _ExitedRuntime(replacement_fails=True)
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        assert await manager.restart_worker() is not None
+        assert runtime.events == ["stop", "start"]
+        assert ingress.events == ["pause"]
+        assert manager.phase == "unavailable"
 
     asyncio.run(scenario())
 
@@ -324,6 +342,29 @@ def test_a_descendant_that_outlives_the_stop_allowance_blocks_the_restart(tmp_pa
         assert runtime.events == ["stop"]
         assert ingress.events == ["pause"]
         assert manager.phase == "unavailable"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("phase", "worker_pid"),
+    [("ready", 200), ("recovery-required", 0)],
+    ids=["transition-replaced-the-worker", "transition-failed-into-recovery"],
+)
+def test_a_restart_queued_behind_a_transition_keeps_its_outcome(tmp_path, phase, worker_pid):
+    # The monitor saw the exit while an upgrade held the lock; the upgrade
+    # then either served a new worker or recorded a failed transition.
+    async def scenario():
+        runtime = _ExitedRuntime()
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        async with manager.lock:
+            restart = asyncio.create_task(manager.restart_worker())
+            await asyncio.sleep(0)
+            manager.phase, runtime.pid = phase, worker_pid
+        assert await restart is None
+        assert runtime.events == []
+        assert ingress.events == []
+        assert manager.phase == phase
 
     asyncio.run(scenario())
 

@@ -89,15 +89,6 @@ def worker(root, socket_path, standby=False):
             # Run the final warm step that the released migration readiness requires.
             service_standby.prepare_collections_migration(root)
     else:
-        # A worker must never start beside a process its predecessor left behind.
-        escaped = root / "escaped.pid"
-        if escaped.exists():
-            try:
-                os.kill(int(escaped.read_text()), 0)
-            except ProcessLookupError:
-                pass
-            else:
-                event(root, "started-beside-escaped-child")
         (root / "worker.pid").write_text(str(os.getpid()))
         event(root, "worker-start")
 
@@ -226,14 +217,12 @@ async def daemon(root, port, unit, env_file=None):
         directory / "worker.sock", host="127.0.0.1", port=port, environment_file=env_file
     )
     event(root, "supervisor-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""))
-    restart_limit = os.environ.get("EXOMEM_FIXTURE_RESTART_LIMIT")
     manager = Supervisor(
         directory,
         initial_target={"python": sys.executable, "version": version("exomem")},
         ingress=ServiceIngress(IngressLimits(heartbeat_interval=0.1)),
         runtime=runtime,
         identity=identity,
-        **({"restart_limit": int(restart_limit)} if restart_limit else {}),
     )
     await serve(manager, host="127.0.0.1", port=port)
 

@@ -4,7 +4,7 @@
 
 When the serving worker exits outside a managed transition, the supervisor SHALL keep the public listener, the local listener and the control channel open, and SHALL start a replacement worker for the active release. Before the replacement starts, the supervisor SHALL prove that the exited worker and every descendant it left have exited. Until the replacement reports ready, the supervisor SHALL admit calls under the same bounds as a handoff.
 
-The supervisor SHALL restart a worker in place at most a fixed number of times within a fixed window, and a replacement that does not report ready SHALL count as a restart. A further exit inside the window, or a descendant that is still alive when the stop allowance ends, SHALL stop the supervisor with a failed exit status, so that the service manager cleans the unit and applies its restart policy.
+The supervisor SHALL restart a serving worker in place at most a fixed number of times within a fixed window, and SHALL make one attempt per exit. The supervisor SHALL stop with a failed exit status in these cases, so that the service manager cleans the unit and applies its restart policy: a further exit inside the window, a descendant that is still alive when the stop allowance ends, and a replacement that does not report ready inside the cold-start window. A restart that waited for a transition SHALL NOT act when that transition already replaced the worker or left the supervisor in recovery.
 
 The supervisor's status SHALL report a distinct phase while the replacement starts. It SHALL also report the restarts inside the window, the limit, the window and the last exit status.
 
@@ -28,5 +28,14 @@ The supervisor's status SHALL report a distinct phase while the replacement star
 - **THEN** each exited worker is replaced in place
 
 #### Scenario: The worker keeps exiting
-- **WHEN** the worker and its replacements exit more times inside the window than the restart limit allows
+- **WHEN** serving workers exit more times inside the window than the restart limit allows
 - **THEN** the supervisor stops with a failed exit status, and the service manager's restart policy applies
+
+#### Scenario: The replacement does not report ready
+- **WHEN** the replacement exits before it reports ready, or does not report ready inside the cold-start window
+- **THEN** the supervisor stops with a failed exit status instead of trying again
+
+#### Scenario: A transition handled the exit first
+- **WHEN** the worker exits while an upgrade holds the transition lock, and the upgrade then serves a new worker or records a failed transition
+- **THEN** the restart does not stop, start or resume anything
+- **AND** a failed transition stays in recovery with public ingress unavailable
