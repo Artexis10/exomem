@@ -1480,15 +1480,15 @@ def test_a_recall_row_splits_its_catalogue_waits(
 def test_a_span_with_every_field_slot_used_keeps_both_cpu_readings(
     ledger_dir: Path,
 ) -> None:
-    """The working-set lanes fill all four field slots; CPU must not be clipped."""
+    """The working-set carry rungs fill all five field slots; CPU must not be clipped."""
     from exomem import call_spans
 
     async def leaf(_context):
-        with call_spans.span("derived.full", {"a": 1, "b": 2, "c": 3, "d": 4}):
+        with call_spans.span("derived.full", {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}):
             pass
         return {"ok": True}
 
     _drive("remember", {"content": "x"}, leaf)
     spans = {span["name"]: span for span in _rows(ledger_dir)[-1]["spans"]}
     fields = spans["derived.full"]["fields"]
-    assert set(fields) == {"a", "b", "c", "d", "thread_cpu_us", "process_cpu_us"}
+    assert set(fields) == {"a", "b", "c", "d", "e", "thread_cpu_us", "process_cpu_us"}

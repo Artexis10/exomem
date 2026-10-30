@@ -508,13 +508,13 @@ def test_an_admitted_ranking_after_a_write_equals_the_ranking_of_a_fresh_process
     held = _seed_ranked(vault)
     hidden = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
 
-    def ranked() -> tuple[list[tuple[str, float]], int]:
+    def ranked() -> tuple[list[tuple[str, float]], int, int]:
         context = lexstore.RequestQueryContext(
             vault, lambda path: path != hidden, lifecycle_statuses.Basis(vault)
         )
-        with call_spans.meter(call_spans.STATS_REBUILT) as measured:
+        with call_spans.meter(call_spans.STATS_REBUILT, call_spans.PAGES_TOKENIZED) as measured:
             result = _ranked(vault, 1000, query_context=context)
-        return result, int(measured[call_spans.STATS_REBUILT])
+        return result, int(measured[call_spans.STATS_REBUILT]), int(measured[call_spans.PAGES_TOKENIZED])
 
     assert ranked()[1] == 1
     _research_page(vault, "ranked-added", "plimsett zorvane arrives late")
@@ -525,8 +525,9 @@ def test_an_admitted_ranking_after_a_write_equals_the_ranking_of_a_fresh_process
     page_terms = lexstore._page_terms
     monkeypatch.setattr(lexstore, "_page_terms", lambda text: tokenized.append(text) or page_terms(text))
 
-    warm, rebuilt = ranked()
-    assert rebuilt == 1 and len(tokenized) == 2
+    warm, rebuilt, counted = ranked()
+    # The ledger field says how many pages the rebuild tokenized: an incremental rebuild is not a full one.
+    assert rebuilt == 1 and len(tokenized) == 2 == counted
     lexstore.clear_stores()
     assert ranked()[0] == warm
 
