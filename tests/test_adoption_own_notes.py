@@ -343,13 +343,13 @@ def test_a_call_stops_between_notes_when_the_next_would_not_fit_and_the_continua
     monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
     monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "30")
     request_budget.reset_resolution_cache()
-    real_create = adopt.create_draft_note
+    real_create = adopt.create_draft_notes
 
-    def slow_note(*args, **kwargs):
-        clock["now"] += 20.0  # one note costs two thirds of a call
-        return real_create(*args, **kwargs)
+    def slow_notes(root, notes, **kwargs):
+        clock["now"] += 20.0 * len(notes)  # one note costs two thirds of a call
+        return real_create(root, notes, **kwargs)
 
-    monkeypatch.setattr(adopt, "create_draft_note", slow_note)
+    monkeypatch.setattr(adopt, "create_draft_notes", slow_notes)
     files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(3)}
     vault = _vault(tmp_path, files)
     run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])

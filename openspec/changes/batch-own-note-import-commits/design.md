@@ -11,11 +11,12 @@ Commit the whole chunk through the same structural path in one `batch_atomic_wri
 - Before the guard, each note's contract verdict is judged against the corpus that its preflight read plus every candidate of the chunk. The judgment runs only while every validity stamp is current.
 - Inside one `mutation_guard`, the batch re-checks each note's Source closure and validity stamp, then writes. On a stale stamp it rebuilds the corpus once and judges every candidate again, as a single creation judges itself again.
 - Navigation is planned once for all notes: one Recent-activity bullet and one log entry per note, in one write each.
+- `adoption_run` runs the identity check for every note of a chunk first. A call then times its first note alone. After that, a batch holds as many notes as fit in the time left at the dearest per-note cost the call has seen: a batch's time over its size. Without that first timing, one unmeasured batch could spend the time that the call keeps for its custody work.
 - The vocabulary gate receives a tuple of sealed manifests, one per primary page.
 
 The batch refuses a creation that needs the full relation review, that has a predecessor, or that binds a vocabulary entry. Those commit alone.
 
-The batch raises only while nothing of it is on disk: a refusal, or a write error after the write rolled back. Only then does the adoption caller fall back to the per-note path, and it logs the refusal code once. After the write the batch never falls back, because each note would find its page taken. Each note is reported as created, and a step that fails after the write fails only the note it ran for, as in the per-note path. A failure that belongs to the whole batch, such as the catalog publication or a write that kept workspace state, is every note's outcome.
+The batch raises only while nothing of it is on disk: a refusal, or a write error after the write rolled back. Only then does the adoption caller fall back to the per-note path, and it logs the refusal code once. After the write the batch never falls back, because each note would find its page taken. Each note is reported as created, and a step that fails after the write fails only the note it ran for, as in the per-note path. A failure that belongs to the whole batch, such as the catalog publication, a write that kept workspace state or a write that failed after its commit point, is every note's outcome. The write failing after its commit point is recognised by the batch's pages holding the bytes that it planned, so a page that another writer took still falls back. The caller's identity check then records each written note as already applied.
 
 ## Not chosen
 

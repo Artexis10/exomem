@@ -6,6 +6,7 @@
 - [x] 1.4 Keep each creation's outcome once the batch is written, and never commit it again (`test_a_failure_after_the_batch_is_written_fails_only_its_own_note`).
 - [x] 1.5 Judge the batch before the guard, and judge it again against one fresh corpus on a stale stamp (`test_a_commit_between_validation_and_the_batch_judges_the_batch_again`).
 - [x] 1.6 Refuse a note that replaces a predecessor (`test_a_note_that_replaces_a_predecessor_is_refused_from_the_batch`).
+- [x] 1.7 Report a write that fails after its commit point as every creation's outcome (`test_a_write_that_fails_after_its_commit_point_creates_no_note_again`).
 
 ## 2. Vocabulary gate
 
@@ -17,5 +18,5 @@
 
 - [x] 3.1 Add `adopt.create_draft_notes` with one outcome per note and a per-note fallback.
 - [x] 3.2 Give a note whose target another writer took `TARGET_OCCUPIED` and commit the others (`test_a_target_taken_by_another_writer_refuses_that_note_and_commits_the_others`).
-- [ ] 3.3 Call `adopt.create_draft_notes` from `adoption_run` (a later change; that file belongs to another change).
+- [x] 3.3 Call `adopt.create_draft_notes` from `adoption_run`, timing the first note of a call alone (`test_apply_times_one_note_then_commits_the_rest_of_the_chunk_in_one_batch`).
 - [x] 3.4 Fall back only when the batch raised before it wrote, and log the refusal code once per refused batch.

@@ -9,7 +9,15 @@ import pytest
 from test_adoption_collection import TODAY, _import, _vault
 from test_adoption_own_notes import JOURNAL_RULE, _notes
 
-from exomem import adopt, adoption_run, note, semantic_writes, vault, vocabulary_auxiliaries
+from exomem import (
+    adopt,
+    adoption_run,
+    note,
+    request_budget,
+    semantic_writes,
+    vault,
+    vocabulary_auxiliaries,
+)
 from exomem.governance import artifact_census
 
 COLLECTION = "Coll"
@@ -27,7 +35,7 @@ def _chunk(tmp_path: Path, count: int = 3) -> tuple[Path, list[adopt.DraftNote],
     run_id, planned = _import(root, path="Coll", include=[JOURNAL_RULE])
     held_back = pytest.MonkeyPatch()
     try:
-        held_back.setattr(adopt, "create_draft_note", _refuse_every_note)
+        held_back.setattr(adopt, "create_draft_notes", _hold_back_every_note)
         applied = adoption_run.apply(
             root, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY
         )
@@ -49,6 +57,10 @@ def _refuse_every_note(*_args: object, **_kwargs: object) -> None:
     raise RuntimeError("held back by the test")
 
 
+def _hold_back_every_note(_root: Path, notes: list[adopt.DraftNote], **_kwargs: object) -> list:
+    return [adopt.DraftNoteOutcome(error=RuntimeError("held back by the test")) for _ in notes]
+
+
 def _recent_activity(root: Path) -> list[str]:
     text = (root / KB / "index.md").read_text(encoding="utf-8")
     return [line for line in text.split("## Recent activity")[1].splitlines() if line.startswith("- ")]
@@ -57,6 +69,45 @@ def _recent_activity(root: Path) -> list[str]:
 def _log_entries(root: Path) -> list[str]:
     text = (root / KB / "log.md").read_text(encoding="utf-8")
     return [line for line in text.splitlines() if line.startswith("## [")]
+
+
+def test_apply_times_one_note_then_commits_the_rest_of_the_chunk_in_one_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "600")  # room for every note in one call
+    request_budget.reset_resolution_cache()
+    files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(4)}
+    root = _vault(tmp_path, files)
+    run_id, planned = _import(root, path="Coll", include=[JOURNAL_RULE])
+    batches: list[int] = []
+    real_commit = note.commit_prepared_notes
+
+    def counted_commit(vault_root, prepared):
+        batches.append(len(prepared))
+        return real_commit(vault_root, prepared)
+
+    monkeypatch.setattr(note, "commit_prepared_notes", counted_commit)
+    # A refused batch falls back to creating each note alone, which would fail every note here.
+    monkeypatch.setattr(adopt, "create_draft_note", _refuse_every_note)
+
+    applied = adoption_run.apply(root, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+
+    assert applied["phase"] == "applied"
+    assert batches == [1, 3]
+    assert len(_notes(root)) == 4
+    assert sum(" note | Notes/Insights/" in line for line in _log_entries(root)) == 4
+
+    rerun_id, replanned = _import(root, path="Coll", include=[JOURNAL_RULE])
+    again = adoption_run.apply(
+        root, run_id=rerun_id, plan_id=replanned["plan"]["plan_id"], today=TODAY
+    )
+
+    assert again["phase"] == "applied"
+    assert {outcome["note"]["status"] for outcome in again["outcomes"].values()} == {
+        "already-applied"
+    }
+    assert len(_notes(root)) == 4
+    assert batches == [1, 3]
 
 
 def test_a_chunk_of_notes_commits_with_one_bullet_and_one_log_entry_per_note(
