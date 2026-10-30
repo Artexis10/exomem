@@ -27,7 +27,7 @@ Ordinary recall SHALL continue over its admitted retrieval projection and servab
 
 ### Requirement: Published catalogue admission survives strict readiness demotion
 
-After managed warm-up, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Catalogue selection SHALL retain one transaction that binds both scope checkpoints, schema, semantic identity, and policy identity. Every catalogue read SHALL use that view, suppress every pending identity, and add only proven pending content. Exact and stale projections SHALL load their paths from that view without walking canonical files. Request admission SHALL NOT promote strict health readiness or escape into another request, vault, thread, or scope.
+After managed warm-up, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Catalogue selection SHALL retain one transaction that binds both scope checkpoints, schema, semantic identity, and policy identity. Every catalogue read SHALL use that view, suppress every pending identity, and add only proven pending content. Exact and stale projections SHALL load their paths from that view without walking canonical files. Request admission SHALL NOT promote strict health readiness or escape into another request, vault, thread, or scope. Strict health retrieval readiness (`ready`, `admitted=true`) SHALL stay strict; only the serving status MAY follow a servable lag, after this process has made a strict proof, as `install-readiness` defines.
 
 Selection SHALL materialize the evidence needed after the transaction closes. Query encoding, model loading, and reranking SHALL NOT retain the transaction. Canonical hydration SHALL match selected content hashes or exact request-owned pending evidence. A mismatch SHALL omit affected evidence and disclose incomplete coverage. Catalogue admission SHALL NOT weaken existing generation checks for independent indexes or claim a snapshot across separate stores. Partial results SHALL NOT enter shared result caches. Current disclosure authority and terminal byte checks SHALL remain mandatory.
 
@@ -77,6 +77,12 @@ Selection SHALL materialize the evidence needed after the transaction closes. Qu
 - **WHEN** ordinary KB recall is admitted but the vault catalogue used by an explicitly requested widening is lagging
 - **THEN** widening declines without a scan and preserves the KB results
 - **AND** an earlier cached widening cannot bypass that decline
+
+#### Scenario: A served lag does not promote strict readiness
+
+- **WHEN** a proven process serves recall from a published catalogue that trails a live projection and health reports retrieval as `lagging`
+- **THEN** health reports `admitted=false` for that retrieval state
+- **AND** the request still discloses the projection lag it serves
 
 ## ADDED Requirements
 
