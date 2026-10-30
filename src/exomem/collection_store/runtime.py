@@ -1141,7 +1141,14 @@ class StoreServer:
         self._views_owed = False  # a publication pass that a wake or a yielding tick left unstarted
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._edit_handle = None
-        self._history_policy = None  # the handle and release inputs whose history pages the drain has queued
+        # The store, instance, release inputs and head whose history pages the drain has queued.
+        self._history_policy = None
+        # A views tick after an idle release looks for edited view files without the lease: where its
+        # sweep continues (None between sweeps), when the next sweep is due, and each changed view
+        # (path to stat) it already handed to a leased pass, so one that stays changed wakes it once.
+        self._sweep_after = None
+        self._sweep_due = 0.0
+        self._sweep_seen = {}
         # False waits for exact-path lookup; True retains an unhandled hint for the census.
         self._view_changes = {}
         self._view_census_needed = False
@@ -1582,7 +1589,9 @@ class StoreServer:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM collections WHERE derived=1 LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
-            if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
+            # An idle release retires the handle without changing the store, so it needs no new reconcile.
+            if self._derived_handle is not None \
+                    and (self._derived_handle is self.runtime._handle or self._idle_released()) \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
             if rebuild is not None:
@@ -1659,6 +1668,10 @@ class StoreServer:
         The tick reads under one view of path placement and governance policy, opened per tick
         and never kept across two. Its store writes decide live (``_write``).
 
+        After this process released the lease on idle, a tick takes the lease again only for work
+        it proved without it (``_view_work_needs_lease``); the store thread's own ticks must not
+        undo the release. Otherwise it does nothing. A request or a watcher hint takes it as before.
+
         A tick that starts after a quiet gap (``_tick_may_start``) works as above, but returns
         before its first publication path when a request waits. The pass then stays owed and the
         tick keeps its age, so the starvation bound still counts from when it fell due. A starved
@@ -1677,12 +1690,14 @@ class StoreServer:
 
         # A starved tick runs one bounded turn whatever else is going on; any other yields at its next seam.
         starved = self._starved("views", time.monotonic())
-        self._views_owed = False  # this tick runs the owed pass, unless it yields before publishing
+        owed, self._views_owed = self._views_owed, False  # this tick runs the owed pass, unless it yields
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
         views = capability.collection_views_enabled(self.root)
         self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
+        if self._idle_released() and not self._view_work_needs_lease(views, owed):
+            return IMPORT_IDLE_SECONDS
         if views and (self._edit_back is None or self._edit_handle is not self.runtime._handle):
             self._edit_back = edit_back.EditBack()
         with self._condition:
@@ -1743,11 +1758,14 @@ class StoreServer:
             from . import history
 
             # Every file-held input of a history release, not the policy alone: no census render repairs the rest.
-            history_policy = (self.runtime._handle, history.release_inputs(self.root))
-            if history_policy != self._history_policy:
+            inputs = history.release_inputs(self.root)
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
+                queued = self._history_queued(reader, inputs)
+            if not queued:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                     inputs = self._write(writer.invalidate_history_pages)
-                    self._history_policy = (self.runtime._handle, inputs)
+                    self._history_policy = (*self._store_ids(writer.connection), inputs,
+                                            *chain.recorded_head(writer.connection))
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
@@ -1773,6 +1791,88 @@ class StoreServer:
         if self._views_after is None:
             self._views_passes += 1
         return min(wait, 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS)
+
+    def _idle_released(self):
+        """Whether this process released the lease on idle and has not taken it again.
+
+        A lost lease or a standby store is not this: its ticks run as before."""
+        return self.manager._store_released and self.manager._fencing_token is None
+
+    @staticmethod
+    def _store_ids(conn):
+        ids = dict(conn.execute("SELECT key,value FROM store_meta WHERE key IN (?,?)",
+                                (schema.META_STORE_ID, schema.META_INSTANCE_ID)))
+        return ids.get(schema.META_STORE_ID), ids.get(schema.META_INSTANCE_ID)
+
+    def _history_queued(self, reader, inputs):
+        """Whether the drain already queued the history pages of this store, instance and release inputs.
+
+        The writer handle is not part of the answer: taking the lease again opens a new one over the
+        same store, whose pages are as current as before. A store that moved on from the head the
+        drain saw is the same store; one that forked or went back, another instance, or other
+        release inputs call for every page again."""
+        from . import chain
+
+        if self._history_policy is None:
+            return False
+        store_id, instance_id, queued_inputs, *head = self._history_policy
+        if queued_inputs != inputs or self._store_ids(reader) != (store_id, instance_id):
+            return False
+        # nosemgrep: ep-word-membership -- chain.head_relation returns these closed relation tokens.
+        return chain.head_relation(reader, *head) in ("same", "ancestor")
+
+    def _view_work_needs_lease(self, views, owed):
+        """Whether a views tick after an idle release has work that needs the lease, proven without it.
+
+        Watcher hints, a publication pass left owed, a first pass never run, release inputs the
+        queued history pages predate, and an edited view file all prove work. Nothing else does:
+        the release drained the views, and only a leased writer commits new ones."""
+        from . import history
+
+        with self._condition:
+            hinted = self._view_census_needed or any(not checked for checked in self._view_changes.values())
+        if hinted or owed or self._views_after is not None or self._history_policy is None \
+                or (views and self._edit_back is None):
+            return True
+        try:
+            if history.release_inputs(self.root) != self._history_policy[2]:
+                return True
+        except Exception:  # noqa: BLE001 - inputs that cannot be read go to the leased tick, which reports them
+            return True
+        return views and self._view_file_changed()
+
+    def _view_file_changed(self):
+        """Whether a view file differs from the store's record, by a sweep that takes no lease.
+
+        It stands in for the leased full pass of edit-back and repeats at the same cadence, so an
+        owner's edit is absorbed with the watcher off. It yields to any waiting request between pages and
+        continues from where it stopped. A change found wakes the tick once: a view the leased pass left
+        changed does not wake it again until its file changes."""
+        from . import edit_back
+
+        started = time.monotonic()
+        if self._sweep_after is None:
+            if started < self._sweep_due:
+                return False
+            self._sweep_after = ""
+        found = False
+        try:
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
+                while self._sweep_after is not None:
+                    changed, self._sweep_after = edit_back.changed_views(reader, self.root, after=self._sweep_after)
+                    fresh = {path: stat for path, stat in changed.items()
+                             if path not in self._sweep_seen or self._sweep_seen[path] != stat}
+                    if fresh:
+                        self._sweep_seen.update(fresh)
+                        self._sweep_after, found = None, True
+                    elif self._sweep_after is not None and (
+                            self._aside() or self._stopping() or time.monotonic() - started >= VIEW_SLICE_SECONDS):
+                        return False
+        except Exception:  # noqa: BLE001 - a store that cannot be read now proves no work; the next sweep retries
+            logger.warning("view files could not be compared with the idle store; retrying later", exc_info=True)
+            self._sweep_after = None
+        self._sweep_due = started + edit_back.FULL_PASS_SECONDS
+        return found
 
     def _close(self):
         with self._condition:
