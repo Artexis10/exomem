@@ -37,8 +37,6 @@ from exomem import move_file as move_file_module
 from exomem import vault as vault_module
 
 _WAIT_SECONDS = 20.0
-#: A whole-vault graph rebuild takes seconds on a busy host. The item timeout is the outer bound.
-_REBUILD_SETTLE_SECONDS = 45.0
 
 
 class _Observed:
@@ -104,13 +102,20 @@ def watched(vault: Path, monkeypatch: pytest.MonkeyPatch):
     # A graph rebuild that the seeding started reconciles the freshness registry
     # from its own walk and holds the inbound index while it reads. Begin the
     # test only once it has landed, so no write below meets that walk.
-    assert graph_sync.drain_active_rebuilds(_REBUILD_SETTLE_SECONDS), (
+    assert graph_sync.drain_active_rebuilds(_WAIT_SECONDS), (
         "the seeding's graph rebuild did not settle"
     )
     try:
         yield vault, observed
     finally:
         watcher.stop()
+        # stop() waits two seconds for a thread. The control edit's dispatch can run
+        # longer on a busy host, and it resolves the state root when it finishes. After
+        # a worker's last test that is the real platform root, which trips the guard of
+        # the other workers' tests.
+        for thread in (watcher._thread, watcher._reconcile_thread):
+            if thread is not None:
+                thread.join(_WAIT_SECONDS)
         file_watcher.clear_self_write_registry()
 
 
