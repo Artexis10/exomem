@@ -121,6 +121,8 @@ class _Live:
     reason: str | None = None
     thread: threading.Thread | None = None
     chunks: int = 0
+    #: Checkpoints the leaf has passed; a dispatch that passed none has written nothing.
+    checkpoints: int = 0
     committed_paths: list[str] = field(default_factory=list)
 
 
@@ -761,6 +763,7 @@ def _dispatch(live: _Live, command: Any, injected: tuple[Any, ...], kwargs: dict
     deadline = time.monotonic() + BUSY_BUDGET_SECONDS
     while True:
         raise_if_stopped()
+        passed = live.checkpoints
         try:
             return writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
         except OpError as error:
@@ -768,6 +771,8 @@ def _dispatch(live: _Live, command: Any, injected: tuple[Any, ...], kwargs: dict
                 kwargs.get("mode") not in WHOLE_RUN_MODES
                 or error.code != "MUTATION_BUSY"
                 or error.details.get("committed") is not False
+                # A leaf that reached a checkpoint may have purged derived rows; a retry would misreport it.
+                or live.checkpoints != passed
                 or time.monotonic() >= deadline
             ):
                 raise
@@ -865,6 +870,7 @@ def checkpoint(phase: str, done: int | None = None, total: int | None = None) ->
     live = _JOB.get()
     if live is None:
         return
+    live.checkpoints += 1
     raise_if_stopped()
     with _write(live.vault_root) as conn:
         row = conn.execute("SELECT cancel_requested FROM jobs WHERE run_id = ?", (live.run_id,)).fetchone()

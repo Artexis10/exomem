@@ -13,7 +13,7 @@
 ## 3. Maintenance leaves
 
 - [x] 3.1 `fix`: compute the plan identity, guard sidecar repair writes, commit in guarded chunks with `skipped_changed`, commit the index refresh last, and call checkpoints.
-- [x] 3.2 `backfill-ids`: compute the plan identity, commit in guarded chunks, record minted IDs, and rebuild references in one short hold.
+- [x] 3.2 `backfill-ids`: compute the plan identity, commit in guarded chunks, and record minted IDs; each batch's write fan-out refreshes the references of the pages it wrote.
 - [x] 3.3 `reconcile`: move the census of removed and quarantined state before the first write, list CLIP and frame orphans, compute the plan identity, and call checkpoints between phases.
 
 ## 4. Admission and tool surface

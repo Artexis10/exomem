@@ -111,7 +111,8 @@ async def _until(client, run_id: str, done) -> dict:
     deadline = time.monotonic() + _DEADLINE_SECONDS
     while True:
         status = await _status(client, run_id)
-        if done(status):
+        # A read can meet brief store contention under the short mutation timeout some tests set.
+        if (status.get("error") or {}).get("code") != "MUTATION_BUSY" and done(status):
             return status
         assert time.monotonic() < deadline, f"job still at {status.get('state')}/{status.get('phase')}"
         await asyncio.sleep(0.05)
@@ -792,7 +793,9 @@ def test_a_page_body_edit_after_the_reconcile_preview_does_not_stale_the_plan(se
 
 
 def test_a_reconcile_job_waits_for_a_busy_boundary_instead_of_failing(server, vault, monkeypatch) -> None:
-    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.2")
+    # Short enough for several of the manager's waits inside the hold below; long enough for the job
+    # store's brief reserved-identity contention, which shares this timeout.
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
     writer_lease.reset_managers_for_tests()
     _seed_reconcile(vault)
 
@@ -801,7 +804,7 @@ def test_a_reconcile_job_waits_for_a_busy_boundary_instead_of_failing(server, va
         with _boundary_held(vault):
             handle = await _reconcile_start(client, preview["plan_id"])
             # Several of the manager's own waits pass while the other writer holds the boundary.
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(3.0)
             waiting = await _status(client, handle["run_id"])
         return waiting, await _until_terminal(client, handle["run_id"])
 
