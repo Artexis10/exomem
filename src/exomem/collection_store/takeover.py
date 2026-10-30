@@ -96,6 +96,29 @@ class Pending:
 
 
 @dataclass
+class Refused:
+    """A settlement refusal for one lease token, raised again until its basis changes or it is due.
+
+    Unlike Pending it admits no reads: the original refusal stands. It keeps only the code and
+    reason, so a repeated refusal carries no earlier traceback.
+    """
+
+    token: int
+    code: str
+    reason: str
+    signature: tuple | None
+    marker: bytes | None
+    checked: float = field(default_factory=time.monotonic)
+
+    def due(self, root):
+        return (time.monotonic() - self.checked >= RECHECK_SECONDS
+                or replica_signature(root) != self.signature or authority.read_marker(root) != self.marker)
+
+    def error(self):
+        return connection.CollectionStoreError(self.code, self.reason)
+
+
+@dataclass
 class Staged:
     leaf: str
     digest: str

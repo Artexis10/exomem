@@ -1586,6 +1586,35 @@ def test_hint_storage_cannot_override_canonical_ownership(abc, field, value):
     assert abc.read_c() == ["Canonical"]
 
 
+def test_unchanged_settlement_refusal_is_not_resettled_on_every_request(abc, monkeypatch):
+    """Defect: a marker conflict escaped settlement unrecorded, so every request settled the same state again."""
+    settled = []
+    settle = admission._settle
+    monkeypatch.setattr(admission, "_settle", lambda *a, **kw: settled.append(1) or settle(*a, **kw))
+    good = authority.read_marker(abc.root)
+    marker = json.loads(good)
+    marker["collections"][0]["source_path"] = "Knowledge Base/Records/Other/Items"
+    authority.marker_path(abc.root).write_text(json.dumps(marker))
+    token = abc.manager._fencing_token
+    abc.manager._last_activity_monotonic -= abc.manager.config.idle_release_seconds + 1
+    assert abc.manager._maybe_idle_release(token)
+
+    for _ in range(3):
+        refused(lambda: abc.write_c(LATER, "Refused"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert len(settled) == 1
+
+    recheck = takeover.RECHECK_SECONDS
+    monkeypatch.setattr(takeover, "RECHECK_SECONDS", 0.0)
+    refused(lambda: abc.write_c(LATER, "Refused"), "COLLECTION_STORE_MARKER_CONFLICT")
+    assert len(settled) == 2
+
+    # A corrected marker is retried at once, without waiting for the recheck interval.
+    monkeypatch.setattr(takeover, "RECHECK_SECONDS", recheck)
+    authority.marker_path(abc.root).write_bytes(good)
+    assert abc.write_c(LATER, "Recovered")["outcome"] == "committed"
+    assert abc.read_c() == ["Canonical", "Recovered"]
+
+
 def test_log_marker_ownership_preserves_structural_path_boundaries(abc):
     """A log namespace that either misses portable aliases or claims unrelated siblings and malformed fragments."""
     marker = json.loads(authority.read_marker(abc.root))
