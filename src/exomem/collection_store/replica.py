@@ -15,7 +15,7 @@ from contextlib import ExitStack, closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .. import held_fs, reserved_paths
+from .. import held_fs, reserved_paths, state_paths
 from ..cli_ops import OpError
 from ..kbdir import kb_dirname
 from . import authority, connection, legacy_originals, schema, snapshot, tokens
@@ -242,6 +242,8 @@ class _Publisher:
         self.steps.enter_context(reserved_paths._identity_coordination_scope(
             self.root, descriptor_ids=(_DESCRIPTOR,)
         ))
+        # Placement is resolved once per step, after the boundary is held, as a request does.
+        self.steps.enter_context(state_paths.resolution_scope())
 
     def forget(self, leaf, parent=None):
         witness = self.verifications.pop((id(parent or self.parent), leaf), None)
@@ -285,22 +287,19 @@ class _Publisher:
     def check(self, *, allow_diverged=False, effect=True):
         """Recheck authority, identity, epoch, intent and directories before going on.
 
-        A check that precedes no SQL or filesystem effect passes ``effect=False``: it may trust a
-        fresh local lease grant instead of asking the coordinator (A3). Every check before an
-        effect, and every store transaction, asks the coordinator, so no effect follows a lost lease.
+        Only the authority callback asks the coordinator (A3); the writer's guard repeats its
+        evaluation. A check after which this publisher changes nothing on disk but a flush before
+        its next check passes ``effect=False`` and may trust a fresh local lease grant. A store
+        transaction asks the coordinator as it begins, and its inner check asks again before the
+        commit, so no filesystem or SQL effect follows a lost lease.
         """
         from ..writer_lease import progress_check
 
+        with progress_check():
+            self.writer.require_write_authority(allow_diverged=allow_diverged)
         with nullcontext() if effect else progress_check():
-            self._check(allow_diverged=allow_diverged)
-
-    def _check(self, *, allow_diverged=False):
-        if allow_diverged:
-            self.writer.require_write_authority(allow_diverged=True)
-        else:
-            self.writer.require_write_authority()
-        if not self.authority_check():
-            raise _Retry("publication authority was lost")
+            if not self.authority_check():
+                raise _Retry("publication authority was lost")
         if self.writer.path != connection.store_path(self.root).resolve():
             raise _Retry("live store binding changed")
         if self.cancelled is not None and self.cancelled():
@@ -419,7 +418,8 @@ class _Publisher:
             raise _Diverged from error
 
     def bookkeeping(self, values):
-        self.check(effect=False)  # the transaction and the check inside it ask the coordinator
+        # The check inside the transaction asks the coordinator last before the commit.
+        self.check(effect=False)
         with self.writer.transaction() as conn:
             self.check()
             for key, value in values.items():
@@ -549,8 +549,14 @@ class _Publisher:
             self.forget(leaf, self.workspace)
         self.record(leaf, None, parent=self.workspace)
 
-    def flush(self):
-        # Flushing makes earlier effects durable; it changes no name or byte.
+    def flush(self, *, after_name_change=False):
+        """Make earlier effects in both directories durable; it changes no name or byte.
+
+        ``after_name_change``: since their last flush, only a held rename or directory unlink
+        changed them, so a filesystem whose name changes flush their parents has nothing left.
+        """
+        if after_name_change and self.filesystem.name_changes_flush_parents:
+            return
         self.check(effect=False)
         self.filesystem.flush_directory(self.parent).require()
         if self.workspace is not None:
@@ -631,7 +637,7 @@ class _Publisher:
         self.workspace.close()
         self.workspace = None
         self.record(pending["workspace_leaf"], None)
-        self.flush()
+        self.flush(after_name_change=True)
 
     def flush_installed(self, expected):
         leaf = connection.STORE_FILENAME
@@ -734,10 +740,10 @@ class _Publisher:
                                 leaf=aside_leaf,
                                 parent=self.workspace,
                             )
-                    self.flush()
+                    self.flush(after_name_change=True)
                 self.rename(stage, target_leaf)
                 self.record(pending["stage_leaf"], None, parent=self.workspace)
-                self.flush()
+                self.flush(after_name_change=True)
         # Windows deletion completes only after every reader and snapshot owner closes.
         if finish_staging is not None:
             finish_staging()
@@ -885,7 +891,7 @@ class _Publisher:
 
         It copies at a published head too when the intent or lease epoch changed since that copy.
         """
-        self.check(effect=False)
+        self.check()
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
@@ -911,7 +917,7 @@ class _Publisher:
 
         Returns the recorded intent, or the outcome when nothing needs copying.
         """
-        self.check(effect=False)
+        self.check()
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
@@ -926,7 +932,7 @@ class _Publisher:
         copied head must still be in this store's chain, and the installed replica must
         still be the one this store last published (check-then-swap, A4).
         """
-        self.check(effect=False)
+        self.check()
         if self.pending_raw is None or json.loads(self.pending_raw) != pending:
             raise _Retry("publication intent changed")
         with self.bound():
@@ -1017,7 +1023,7 @@ class _Publisher:
         return self.resolve(pending, finish_staging=finish_staging, artifact=artifact)
 
     def _staging_cancelled(self):
-        self.check(effect=False)
+        self.check()
         return False
 
 
@@ -1125,6 +1131,7 @@ def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, 
                 steps.enter_context(reserved_paths._identity_coordination_scope(
                     root, descriptor_ids=(_DESCRIPTOR,)
                 ))
+                steps.enter_context(state_paths.resolution_scope())
                 pending = _outcome(None, publisher.prepare, metadata=lambda: publisher.metadata)
                 publisher.writer = publisher.authority_check = None
                 if isinstance(pending, PublicationResult):
@@ -1206,7 +1213,8 @@ def _run(root, writer, authority_check, deadline, cancelled, *, stage_new, force
     publisher = _publisher(root, writer, authority_check, deadline, cancelled)
 
     def attempt():
-        with _alone(publisher.root, deadline):
+        # The caller holds the boundary, so placement is resolved once for the whole run.
+        with _alone(publisher.root, deadline), state_paths.resolution_scope():
             return publisher.run(stage_new, force=force)
 
     return _outcome(writer, attempt)

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import uuid
 from contextlib import closing, contextmanager
@@ -947,6 +948,96 @@ def test_a_lease_lost_during_the_copy_abandons_the_swap_and_keeps_the_previous_r
     assert (outcomes[0].status, outcomes[0].reason) == ("retry_pending", "COLLECTION_STORE_LEASE_REQUIRED")
     assert replica.replica_path(abc.root).read_bytes() == previous
     assert abc.meta()[schema.META_PUBLISHED_REPLICA_HEAD] == published
+
+
+@pytest.mark.timeout(180)  # one publication per trusted check site, each after a loss and a reacquisition
+@pytest.mark.parametrize("orderly", [False, True], ids=["coalesced", "release-flush"])
+def test_a_lease_lost_at_any_trusted_check_lands_no_later_name_change_or_transaction(
+        abc, monkeypatch, tmp_path, orderly):
+    """Defect: a publication check that trusts the fresh local grant (A3) lets a rename, unlink,
+    directory create or removal, or store transaction land after the coordinator revoked or
+    expired the lease. The loss strikes at each trusted check site of one publication in turn."""
+    from exomem import writer_lease
+
+    publishing = threading.get_ident()
+    target, lost, seen, landed = [None], [False], [], []
+
+    def lose(mode):
+        if mode == "revoked":
+            abc.manager.client.release_holder("host-a", abc.manager._fencing_token)
+        else:  # the coordinator's own record, as the passing of the lease lifetime leaves it
+            with closing(sqlite3.connect(tmp_path / "coordinator.sqlite")) as db, db:
+                db.execute("UPDATE leases SET expires_at = ?", (time.time() - 1,))
+        lost[0] = True
+
+    validate = writer_lease.LeaseManager.validate_fencing_token
+
+    def trusted(manager, token):
+        if writer_lease._PROGRESS_CHECK.get() and threading.get_ident() == publishing and not lost[0]:
+            # The call of `check` is the site; its first trusted validation leaves the widest window.
+            caller = [frame for frame in traceback.extract_stack() if frame.filename.endswith("replica.py")][-2]
+            site = (caller.name, caller.lineno)
+            seen.append(site)
+            if target[0] is not None and site == target[0][0]:
+                lose(target[0][1])
+        return validate(manager, token)
+
+    monkeypatch.setattr(writer_lease.LeaseManager, "validate_fencing_token", trusted)
+
+    def record(effect, done):
+        if lost[0] and done and threading.get_ident() == publishing:
+            landed.append(effect)
+
+    with held_fs.acquire(abc.root).require() as probe:
+        filesystem = type(probe)
+    def changes(name, original):
+        def changed(self, *args, **kwargs):
+            result = original(self, *args, **kwargs)
+            record(name, result.ok)
+            return result
+        return changed
+
+    for name in ("rename", "unlink", "unlink_directory"):
+        monkeypatch.setattr(filesystem, name, changes(name, getattr(filesystem, name)))
+    parent = filesystem.parent
+
+    def created(self, relative, *, create=False, **kwargs):
+        result = parent(self, relative, create=create, **kwargs)
+        record("directory create", create and result.ok)
+        return result
+
+    monkeypatch.setattr(filesystem, "parent", created)
+    transaction = connection.WriterConnection.transaction
+
+    @contextmanager
+    def committed(self, **kwargs):
+        with transaction(self, **kwargs) as conn:
+            yield conn
+        record("store transaction", True)
+
+    monkeypatch.setattr(connection.WriterConnection, "transaction", committed)
+
+    def publish():
+        token, deadline = abc.manager._fencing_token, time.monotonic() + 30
+        try:
+            if orderly:
+                abc.manager._release_collection_store(token, deadline=deadline, release=False)
+            else:
+                abc.manager._publish_collection_store(token, deadline=deadline)
+        except (CollectionStoreError, OpError):
+            pass  # a lost lease ends the publication; what matters is which effects landed first
+
+    assert abc.write_c(str(uuid.uuid4()), "Published without a loss")["outcome"] == "committed"
+    publish()
+    sites = list(dict.fromkeys(seen))
+    assert len(sites) > 10, sites
+    for number, site in enumerate(sites):
+        assert abc.write_c(str(uuid.uuid4()), f"Row {number}")["outcome"] == "committed"
+        target[0], lost[0], landed[:] = (site, ("revoked", "expired")[number % 2]), False, []
+        publish()
+        assert lost[0], f"the publication no longer reaches {site}"
+        assert landed == [], (target[0], landed)
+        target[0], lost[0] = None, False
 
 
 def test_export_refuses_a_lagging_replica_once_this_host_lost_the_lease(abc, tmp_path):

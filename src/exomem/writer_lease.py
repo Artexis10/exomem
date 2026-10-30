@@ -195,17 +195,18 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
-# True only inside ``progress_check``: a check that precedes no SQL or filesystem effect.
+# True only inside ``progress_check``: a check that need not ask the coordinator itself.
 _PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
 
 
 @contextmanager
 def progress_check() -> Iterator[None]:
-    """Run an authority check that precedes no SQL or filesystem effect.
+    """Run an authority check that need not ask the coordinator itself.
 
     Inside it, ``LeaseManager.validate_fencing_token`` trusts a fresh local grant instead of
-    reading coordinator status. Every check before an effect, and every store transaction,
-    runs outside it and asks the coordinator, so no effect lands after a lost lease.
+    reading coordinator status. It suits a check that precedes no store transaction or vault name
+    change, or one that repeats a check asking the coordinator before the same effect. Every such
+    effect still follows a check outside it, so none lands after a lost lease.
     """
     reset = _PROGRESS_CHECK.set(True)
     try:
@@ -4512,7 +4513,8 @@ class LeaseManager:
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
-        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock.
+        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock;
+        # None after a renewal fails, until the next grant.
         self._granted_monotonic: float | None = None
         self._capture_queue = _FairCaptureQueue()
         self._lock = threading.RLock()
@@ -4821,11 +4823,15 @@ class LeaseManager:
         self._expires_at = expires_at
         self._granted_monotonic = time.monotonic()
 
+    def _note_renewal_failed(self) -> None:
+        """With the lock held: a renewal that failed leaves no fresh grant until the next one arrives."""
+        self._granted_monotonic = None
+
     def _grant_fresh(self) -> bool:
         """With the lock held: whether the held grant will outlast the next renewal.
 
         Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen it.
-        A failed renewal leaves the grant to age past this bound; a refused one clears the token.
+        A failed renewal ends it until the next grant; a refused one clears the token.
         """
         return (
             self._expires_at is not None
@@ -6796,11 +6802,16 @@ class LeaseManager:
                         and time.monotonic() - self._last_renew_monotonic
                         < self._renew_interval_seconds()):
                     return
-            head = self._collection_store.report_head(token)
-            record = self.client.renew(
-                token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
-                collection_store_head=head,
-            )
+            try:
+                head = self._collection_store.report_head(token)
+                record = self.client.renew(
+                    token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
+                    collection_store_head=head,
+                )
+            except Exception:
+                with self._lock:
+                    self._note_renewal_failed()
+                raise
             with self._lock:
                 if self._fencing_token != token:
                     self._raise_fenced(token)
@@ -7130,6 +7141,8 @@ class LeaseManager:
                         self._log_lease_event("lease_renew_rejected")
             except OpError as error:
                 # Mutations still revalidate synchronously and fail closed.
+                with self._lock:
+                    self._note_renewal_failed()
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("renew", "error")
                 continue
