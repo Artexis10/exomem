@@ -7,15 +7,18 @@ items lowers what is visible but never what is outstanding.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
 
-from exomem import commands, set_frontmatter_field
+from exomem import commands, freshness, set_frontmatter_field
 from exomem import delete_file as delete_file_module
 from exomem import due_state as due_state_module
+from exomem import find as find_module
 from exomem import note as note_module
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+from exomem.vault import WikilinkResolver
 
 pytestmark = pytest.mark.usefixtures("obligations_only")
 
@@ -60,6 +63,24 @@ def _compile(vault: Path, title: str, *, status: str, source: str) -> str:
         relation_review_hash=validation.draft_hash,
         relation_review_reason="No relation exists in this fixture.",
     ).path
+
+
+def _write_live_note(vault: Path, source: str) -> str:
+    """A live note and the Source's citation edge to it, with no projection delta run."""
+    rel = "Knowledge Base/Notes/Insights/compiled-claim.md"
+    (vault / rel).write_text(
+        "---\ntype: insight\ntitle: Compiled claim\nstatus: active\n"
+        f'sources:\n  - "[[{source.removesuffix(".md")}]]"\n---\n\n# Compiled claim\n',
+        encoding="utf-8",
+    )
+    cited = vault / source
+    cited.write_text(
+        cited.read_text(encoding="utf-8").replace(
+            "ingested_into: []", f'ingested_into:\n  - "[[{rel.removesuffix(".md")}]]"'
+        ),
+        encoding="utf-8",
+    )
+    return rel
 
 
 def _block(vault: Path) -> dict:
@@ -249,3 +270,64 @@ def test_a_surface_without_review_gets_the_counts_but_no_route_to_a_missing_tool
 
     assert summary["visible_outstanding"] == {"unprocessed_source": [3, 3]}
     assert "next" not in summary
+
+
+@pytest.fixture
+def resolver_builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The id of the thread that ran each full vault walk of a `WikilinkResolver`."""
+    builders: list[int] = []
+    original = WikilinkResolver._build
+
+    def recording(self: WikilinkResolver) -> None:
+        builders.append(threading.get_ident())
+        original(self)
+
+    monkeypatch.setattr(WikilinkResolver, "_build", recording)
+    return builders
+
+
+def _join_deferred_delta() -> None:
+    for worker in threading.enumerate():
+        if worker.name == "exomem-due-state-delta":
+            worker.join(timeout=60)
+
+
+def test_a_write_delta_never_builds_the_vault_resolver_from_disk_on_the_calling_thread(
+    imported: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    resolver_builds: list[int],
+) -> None:
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
+    vault, sources = imported
+    note = _write_live_note(vault, sources[0])
+    # Neither cheap route can answer: no resolver is cached, and an out-of-band
+    # event fences the vault, so the corpus context declines too.
+    find_module.clear_cache()
+    epoch = freshness.mark_external_pending(vault)
+    try:
+        due_state_module.apply_write_delta(vault, note)
+        _join_deferred_delta()
+    finally:
+        freshness.clear_external_pending(vault, through=epoch)
+
+    assert threading.get_ident() not in resolver_builds
+    assert resolver_builds, "the deferred delta never walked the vault"
+    assert _outstanding_sources(vault) == 2
+
+
+def test_a_write_delta_with_a_warm_resolver_applies_inline(
+    imported: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    resolver_builds: list[int],
+) -> None:
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
+    vault, sources = imported
+    note = _write_live_note(vault, sources[0])
+    find_module.shared_resolver(vault)
+    resolver_builds.clear()
+
+    updated = due_state_module.apply_write_delta(vault, note)
+
+    assert updated is not None
+    assert _outstanding_sources(vault) == 2
+    assert resolver_builds == []

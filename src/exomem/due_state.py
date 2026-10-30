@@ -238,6 +238,12 @@ _UNPERSISTED_CAP = 8
 #: of one worker, so the registry cannot grow with the number of vaults served.
 _WARMING: set[str] = set()
 
+#: Write batches whose delta needed a wikilink resolver that only a walk of the vault
+#: could build, by vault. The key's presence means one worker is queued or running for
+#: that vault and drains the list, so a burst of writes shares one thread. Guarded by
+#: `_LOCK`; a key lives only as long as its worker.
+_DEFERRED_DELTAS: dict[str, list[PageWrite]] = {}
+
 #: The fallback session key for stdio and CLI, where the transport supplies no
 #: session identity. One key per process lifetime, which is exactly the scope of
 #: a stdio conversation.
@@ -1700,12 +1706,87 @@ def refresh_after_writes(vault_root: Path, writes: Iterable[PageWrite]) -> None:
         log.debug("due-state delta failed for %d written page(s)", len(writes), exc_info=True)
 
 
+class _ResolverUnavailable(Exception):
+    """The delta needs the vault resolver and only a walk of the vault can supply it."""
+
+
+def _defer_delta(
+    vault_root: Path, writes: list[PageWrite], *, today: dt.date | None
+) -> dict[str, Any] | None:
+    """Run a delta that needs a disk-built resolver off the calling thread.
+
+    The delta re-reads each page's current state and merges into the stored
+    projection under `_LOCK`, so running it later is safe: it records what the
+    pages are then, not what they were when the write committed.
+
+    Returns None, so the caller serves no advisory for this write. The sole
+    exception is the test seam, which runs the delta inline and returns its result.
+    """
+    if _sync_due_state_warm():
+        # As in `_schedule_reconcile`: the suite's disposable vaults cannot outlive a
+        # daemon worker, so it keeps deterministic carrier assertions by running inline.
+        return apply_write_deltas(vault_root, writes, today=today, allow_disk=True)
+    vault_root = Path(vault_root)
+    key = str(vault_root)
+    with _LOCK:
+        queued = key in _DEFERRED_DELTAS
+        _DEFERRED_DELTAS.setdefault(key, []).extend(writes)
+    if queued:
+        # The worker already queued or running for this vault takes these writes too.
+        return None
+
+    def _next_batch() -> list[PageWrite] | None:
+        with _LOCK:
+            batch = _DEFERRED_DELTAS.get(key)
+            if not batch:
+                # Emptied and removed in one step, so a write arriving now starts a worker.
+                _DEFERRED_DELTAS.pop(key, None)
+                return None
+            _DEFERRED_DELTAS[key] = []
+            return batch
+
+    def _run() -> None:
+        try:
+            from .foreground_activity import background_scope
+            from .governance.principal import library_scope
+
+            # An owner-local worker: a request's principal does not cross into this thread.
+            # It takes no mutation boundary: the delta merges under `_LOCK` alone.
+            with background_scope(vault_root), library_scope():
+                while (batch := _next_batch()) is not None:
+                    try:
+                        apply_write_deltas(vault_root, batch, allow_disk=True)
+                    except Exception:  # noqa: BLE001
+                        # Advisory, like `refresh_after_writes`: the next reconcile
+                        # repairs a batch that did not land.
+                        log.warning(
+                            "deferred due-state delta failed for %s", vault_root, exc_info=True
+                        )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "deferred due-state delta worker failed for %s", vault_root, exc_info=True
+            )
+            with _LOCK:
+                _DEFERRED_DELTAS.pop(key, None)
+
+    try:
+        threading.Thread(target=_run, name="exomem-due-state-delta", daemon=True).start()
+    except RuntimeError:
+        with _LOCK:
+            _DEFERRED_DELTAS.pop(key, None)
+        log.warning(
+            "could not start the deferred due-state delta for %s", vault_root, exc_info=True
+        )
+    return None
+
+
 @_owner_local
 def apply_write_deltas(
     vault_root: Path,
     writes: Iterable[PageWrite],
     *,
     today: dt.date | None = None,
+    allow_disk: bool = False,
 ) -> dict[str, Any] | None:
     """Recompute the entries of a batch of written pages with one load and one save.
 
@@ -1713,6 +1794,12 @@ def apply_write_deltas(
     reason: a missing projection is recovered by a read surface. One batch shares one
     wikilink snapshot, one review-ref lookup and one save of the projection, so a
     bulk import pays for the projection once per batch rather than once per page.
+
+    The calling thread never walks the vault to build that snapshot: a walk costs
+    seconds on a large vault, and this runs inside the write's mutation boundary. When
+    the snapshot is not available from the warm cache or the corpus context, the batch
+    is handed to a background worker (`_defer_delta`) and this returns None; that worker
+    passes `allow_disk=True`.
     """
     from . import audit as audit_module
     from . import find as find_module
@@ -1742,21 +1829,27 @@ def apply_write_deltas(
     def resolver() -> Any:
         # One snapshot for the whole delta, built on first use. Building it walks the
         # vault, so the two steps below share it instead of each paying for one.
-        return find_module.writer_resolver_snapshot(vault_root)
+        snapshot = find_module.writer_resolver_snapshot(vault_root, allow_disk=allow_disk)
+        if snapshot is None:
+            raise _ResolverUnavailable
+        return snapshot
 
     type_basis = note_types.Basis(vault_root)
-    source_paths = sorted(
-        set().union(
-            *(
-                _cited_source_paths(
-                    vault_root, write, page_of[write.path], type_basis=type_basis, resolver=resolver
+    try:
+        source_paths = sorted(
+            set().union(
+                *(
+                    _cited_source_paths(
+                        vault_root, write, page_of[write.path], type_basis=type_basis,
+                        resolver=resolver,
+                    )
+                    for write in writes
                 )
-                for write in writes
             )
         )
-    )
-
-    findings: list[Any] = _source_findings(vault_root, source_paths, resolver=resolver)
+        findings: list[Any] = _source_findings(vault_root, source_paths, resolver=resolver)
+    except _ResolverUnavailable:
+        return _defer_delta(vault_root, writes, today=today)
     if pages:
         findings.extend(
             audit_module._check_prediction_window(vault_root, pages, today=_FAR_FUTURE)
