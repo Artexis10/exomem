@@ -423,9 +423,6 @@ _DECLARED_FALLBACK_DISPOSITIONS = {
     # Not a race: a cold process-local resolver cache. The delta is proven
     # complete when it fires, so the queue owns the repair.
     "resolver_snapshot_unavailable": "defer",
-    # Not a race either: the whole-vault topology proof the pass would run under
-    # the hold is what the drain does proportionally.
-    "topology_change_left_to_the_drain": "defer",
     # Unknown scope: the sidecar or the delta cannot be trusted to bound it.
     "checkpoint_scope_is_not_paths": "rebuild",
     "graph_snapshot_unavailable": "rebuild",
@@ -1368,73 +1365,6 @@ def test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue(
     assert whole_vault_passes == []
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
-    _assert_matches_a_fresh_rebuild(vault)
-
-
-def test_a_create_defers_its_topology_proof_to_the_drain_for_a_caller_that_may_stop_at_queued(
-    vault: Path, whole_vault_passes: list[str]
-) -> None:
-    """A created page must not run the whole-vault topology proof under the hold.
-
-    The proof read every page's bytes and the whole membership under the
-    mutation boundary (70 s on a synthetic 15,000-page vault). The drain does
-    the same widening from the dependency index, sized by what moved.
-    """
-    _publish_with_a_resident_resolver(
-        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
-    )
-    whole_vault_passes.clear()
-    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
-
-    with graph_sync.standalone_join_waived():
-        report = index_sync.upsert_after_write(
-            vault, [vault / CREATED], created_paths=[vault / CREATED]
-        )
-
-    graph = next(item for item in report.components if item.component == "epistemic_graph")
-    assert (graph.outcome, graph.code) == ("deferred", "graph_repair_queued")
-
-    index_sync.drain_graph_work(vault)
-
-    assert whole_vault_passes == []
-    assert deferred_index.list_graph_paths(vault) == []
-    assert EpistemicGraphIndex(vault).available()
-    _assert_matches_a_fresh_rebuild(vault)
-
-
-def test_a_create_over_a_stale_stored_topology_leaves_the_graph_a_rebuild_would_build(
-    vault: Path,
-) -> None:
-    """The stored topology fingerprint is how a stale graph is found and healed.
-
-    A drain that left a retitle behind its fingerprint cannot own the next
-    topology change, so deferring a create to it would acknowledge rows that
-    still link the old title. The create keeps the fail-closed rebuild.
-    """
-    _publish_with_a_resident_resolver(
-        vault,
-        {
-            OLD_LINKER: _titled("Linker Old", "Cites [[Fresh Target]]."),
-            NEW_LINKER: _titled("Mentioner", "Mentions [[Linker Old]]."),
-        },
-    )
-    (vault / CREATED).write_text(_titled("Fresh Target", "A new page."), encoding="utf-8")
-    (vault / OLD_LINKER).write_text(
-        _titled("Linker New", "Cites [[Fresh Target]]."), encoding="utf-8"
-    )
-    freshness.rebaseline(vault)
-    index = EpistemicGraphIndex(vault)
-    index.drain_paths([vault / CREATED])
-    index.drain_paths([vault / OLD_LINKER])
-
-    _commit_before_its_fanout(vault, {CREATE_LINKER: _titled("Another Page", "A second create.")})
-    with graph_sync.standalone_join_waived():
-        index_sync.upsert_after_write(
-            vault, [vault / CREATE_LINKER], created_paths=[vault / CREATE_LINKER]
-        )
-    index_sync.drain_graph_work(vault)
-    assert graph_sync.drain_active_rebuilds(timeout=60.0)
-
     _assert_matches_a_fresh_rebuild(vault)
 
 

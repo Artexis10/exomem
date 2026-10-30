@@ -202,12 +202,6 @@ def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCovera
 #: governed writes of a replacement worker into 164.8 s and 46.7 s whole-vault
 #: passes.
 #:
-#: `topology_change_left_to_the_drain` is not a race either. A created, removed
-#: or retitled page sends the pass into a whole-vault topology proof, which held
-#: the mutation boundary for 70 s on a synthetic 15,000-page vault. A caller
-#: that may stop at queued defers at once, queuing the delta, and the drain
-#: widens to the affected sources with the hold sized by what changed.
-#:
 #: `"rebuild"` means the scope is *unknown*, not merely unproven: the sidecar
 #: could not be read, or the delta that says what changed is itself incomplete,
 #: so an external edit could be missing from any bounded set we could enqueue.
@@ -231,7 +225,6 @@ _FALLBACK_DISPOSITIONS = {
     "incremental_marker_refused": "defer",
     "unreachable": "defer",
     "resolver_snapshot_unavailable": "defer",
-    "topology_change_left_to_the_drain": "defer",
     "checkpoint_scope_is_not_paths": "rebuild",
     "graph_snapshot_unavailable": "rebuild",
     "recall_checkpoint_absent_or_registry_not_live": "rebuild",
@@ -6677,28 +6670,6 @@ class EpistemicGraphIndex:
             for path in set(delta.changed | delta.deleted)
             if (rel := _vault_rel(self.vault_root, Path(path))) is not None
         }
-        if (
-            topology_changed
-            and graph_checkpoint is not None
-            and _caller_can_carry_pending(self.vault_root, self._mutation_coordinator)
-        ):
-            # The proof below is O(vault) under this hold, and the drain does
-            # the same widening from the dependency index at a cost sized by
-            # what moved. Queue the delta, as the cold-resolver bail-out does:
-            # a stored entry that moved is somewhere in it. A caller that must
-            # converge keeps the proof, since its deferral is a whole-vault pass.
-            #
-            # Not past a stale stored fingerprint. A drain cannot own one, so it
-            # would widen unowned and acknowledge rows that the fingerprint
-            # exists to refuse. The same in-memory check as the proof's, without
-            # reading the corpus.
-            if _resolver_topology_fingerprint(
-                self._resolver_before(resolver, stored_entries)
-            ) != graph_values.get(_RESOLVER_TOPOLOGY_KEY):
-                self._mark_unavailable()
-                return fallback("stored_topology_fingerprint_mismatch")
-            deferred_scope.update(delta_rels)
-            return fallback("topology_change_left_to_the_drain")
         indexed_sources: dict[str, str] = {}
         linked_sources: set[str] = set()
         resolver_fingerprint: str | None = None
