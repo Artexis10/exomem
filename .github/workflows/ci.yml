@@ -20,10 +20,6 @@ env:
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
   # The newest release one store schema back; move it to the next one with each schema bump.
   EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
-  # The earlier release that full runs qualify as the rollback application on a migrated
-  # store. A store schema bump empties it, because no earlier release reads the new schema;
-  # the next release that ships that schema sets it again.
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.151.1"
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
@@ -537,18 +533,6 @@ jobs:
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
-      # Release evidence pins the rollback application (move-structured-collections-to-sqlite
-      # design §10, "Reversal"): on full runs the journey runs this release on the migrated copy.
-      # It must admit the store, write both built-ins, restart and keep the original-file archives.
-      - name: Install the pinned earlier application for the rollback qualification
-        if: >-
-          steps.scope.outputs.docs_only != 'true' && needs.scope.outputs.full == 'true'
-          && env.EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION != ''
-        timeout-minutes: 5
-        run: |
-          uv venv "$RUNNER_TEMP/compatible-application" --python 3.13
-          uv pip install --python "$RUNNER_TEMP/compatible-application/bin/python" "exomem==$EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION"
-          echo "EXOMEM_TEST_COMPATIBLE_PYTHON=$RUNNER_TEMP/compatible-application/bin/python" >> "$GITHUB_ENV"
       # The one run also drives the S1 summary-collection journey
       # (scripts/e2e_s1_summary_journey.py): installed release capability checks,
       # preserved-source import with a mid-job restart, daily queries

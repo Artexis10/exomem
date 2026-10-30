@@ -3091,7 +3091,7 @@ def main() -> int:
         "--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
     )
     parser.add_argument(
-        "--compatible-python", default=os.environ.get("EXOMEM_TEST_COMPATIBLE_PYTHON", ""),
+        "--compatible-python", default="",
         help="the earlier wheel installation for SQLite rollback qualification",
     )
     parser.add_argument("--http-server", default="")
