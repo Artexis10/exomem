@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 import os
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
@@ -45,6 +46,8 @@ from .vault import (
     unique_path,
     yaml_scalar,
 )
+
+log = logging.getLogger(__name__)
 
 DEFAULT_MODE = "scan-only"
 SUPPORTED_MODES = ("scan-only", "save-manifest", "copy-as-sources", "compile-selected")
@@ -599,7 +602,7 @@ class DraftNote:
 
 @dataclass(frozen=True)
 class DraftNoteOutcome:
-    """What became of one `DraftNote`: the note leaf's result, or the error that refused it."""
+    """What became of one `DraftNote`: the note leaf's result, or the error that failed it."""
 
     created: Any | None = None
     error: Exception | None = None
@@ -617,10 +620,10 @@ def create_draft_notes(
     Each note is validated and bound to its own draft token one at a time, as
     `create_draft_note` does. The notes that pass commit as one canonical batch, with one
     index and one log update, which is the per-note guarantees at a fraction of the cost.
-    When the batch refuses, each of its notes is created alone, so every note gets the
-    outcome `create_draft_note` gives it. A refused note holds only its own outcome. A note
-    that an earlier failed batch already wrote reports `TARGET_OCCUPIED` when created alone;
-    the caller's identity check records it as applied.
+    When the batch refuses before it writes, each of its notes is created alone, so every
+    note gets the outcome `create_draft_note` gives it. Once the batch is on disk it is never
+    created again: every note is created, and a step that fails after the write fails only
+    the note it ran for, as it would when that note is created alone.
     """
     from . import note as note_module
 
@@ -643,8 +646,13 @@ def create_draft_notes(
             settled[index] = DraftNoteOutcome(error=error)
     if prepared:
         try:
-            created = note_module.commit_prepared_notes(root, list(prepared.values()))
-        except Exception:  # noqa: BLE001 - the batch refused; each note then commits alone
+            committed = note_module.commit_prepared_notes(root, list(prepared.values()))
+        except Exception as refusal:  # noqa: BLE001 - it raises only while nothing of the batch is on disk
+            log.info(
+                "own-note batch refused code=%s notes=%d; creating each note alone",
+                getattr(refusal, "code", None) or type(refusal).__name__,
+                len(prepared),
+            )
             for index in prepared:
                 item = notes[index]
                 try:
@@ -655,8 +663,12 @@ def create_draft_notes(
                 except Exception as error:  # noqa: BLE001 - a refused note is its own outcome
                     settled[index] = DraftNoteOutcome(error=error)
         else:
-            for index, result in zip(prepared, created, strict=True):
-                settled[index] = DraftNoteOutcome(created=result)
+            for index, result in zip(prepared, committed, strict=True):
+                settled[index] = (
+                    DraftNoteOutcome(error=result)
+                    if isinstance(result, Exception)
+                    else DraftNoteOutcome(created=result)
+                )
     return [settled[index] for index in range(len(notes))]
 
 

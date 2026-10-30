@@ -2194,12 +2194,7 @@ def note(
             resolver=resolver,
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
-        raise NoteError(
-            error.code,
-            [],
-            error.reason,
-            dict(getattr(error, "details", None) or {}),
-        ) from error
+        raise _note_error(error) from error
     preflight = dataclass_replace(
         preflight,
         placement=_placement_block(root, destination, home_set, note_type=note_type, topics=topics or ()),
@@ -2344,12 +2339,7 @@ def note(
                 operation="create",
             )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
-        raise NoteError(
-            error.code,
-            [],
-            error.reason,
-            dict(getattr(error, "details", None) or {}),
-        ) from error
+        raise _note_error(error) from error
     return _finish_note(
         root,
         finish,
@@ -2456,20 +2446,31 @@ def _finish_note(
     )
 
 
-def commit_prepared_notes(root: Path, prepared: Sequence[_PreparedNote]) -> list[NoteResult]:
+def commit_prepared_notes(
+    root: Path, prepared: Sequence[_PreparedNote]
+) -> list[NoteResult | Exception]:
     """Commit notes that `note(..., _return_prepared=True, _defer_navigation=True)` returned.
 
     The notes commit as one canonical batch with one navigation update: one Recent-activity
-    bullet and one log entry per note, in one write each. A refusal raises `NoteError`
-    before any write, and the caller may commit each note alone instead.
+    bullet and one log entry per note, in one write each. A note that replaces a predecessor
+    is refused, because its successor bookkeeping is the single commit's.
+
+    A raise means that nothing of the batch is on disk: `NoteError` for a refusal, or the
+    write's own error after it rolled back. The caller may then commit each note alone. Once
+    the batch is on disk each note gets its `NoteResult`, or the error that a step after the
+    write raised for that note, as `note` raises it for a note committed alone.
     """
     root = Path(root)
-    if not prepared or any(item.navigation is None or item.finish is None for item in prepared):
+    entries = [item.navigation for item in prepared if item.navigation is not None]
+    finishes = [item.finish for item in prepared if item.finish is not None]
+    if not prepared or len(entries) != len(prepared) or len(finishes) != len(prepared):
         raise ValueError("commit_prepared_notes needs notes prepared with deferred navigation")
+    if any(entry.predecessor_path is not None for entry in entries):
+        raise NoteError("INVALID_AUXILIARY_WRITE", [], "a note that replaces a predecessor commits alone")
     started = time.perf_counter()
-    navigation = _plan_navigation(root, [item.navigation for item in prepared])
+    navigation = _plan_navigation(root, entries)
     try:
-        commits = semantic_writes.commit_creations(
+        outcomes = semantic_writes.commit_creations(
             root,
             creations=[
                 semantic_writes.BatchCreation(item.preflight, item.auxiliary_writes)
@@ -2479,29 +2480,47 @@ def commit_prepared_notes(root: Path, prepared: Sequence[_PreparedNote]) -> list
             operation="create",
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
-        raise NoteError(
-            error.code,
-            [],
-            error.reason,
-            dict(getattr(error, "details", None) or {}),
-        ) from error
+        raise _note_error(error) from error
     commit_ms = (time.perf_counter() - started) * 1000.0 / len(prepared)
-    results = []
-    for index, (item, committed) in enumerate(zip(prepared, commits, strict=True)):
+    results: list[NoteResult | Exception] = []
+    for index, (item, finish, outcome) in enumerate(zip(prepared, finishes, outcomes, strict=True)):
+        if isinstance(outcome, (semantic_writes.SemanticWriteError, relation_review.RelationReviewError)):
+            results.append(_note_error(outcome))
+            continue
+        if isinstance(outcome, Exception):
+            results.append(outcome)
+            continue
         warnings = [*item.warnings, *navigation.warnings]
         if navigation.rotation_note is not None and index == len(prepared) - 1:
             warnings.append(navigation.rotation_note)
-        results.append(
-            _finish_note(
-                root,
-                item.finish,
-                preflight=item.preflight,
-                identity=item.identity,
-                destination=item.destination,
-                warnings=warnings,
-                committed=committed,
-                commit_ms=commit_ms,
-                total_started=started,
+        try:
+            results.append(
+                _finish_note(
+                    root,
+                    finish,
+                    preflight=item.preflight,
+                    identity=item.identity,
+                    destination=item.destination,
+                    warnings=warnings,
+                    committed=outcome,
+                    commit_ms=commit_ms,
+                    total_started=started,
+                )
             )
-        )
+        except Exception as error:  # noqa: BLE001 - after the write a failure is this note's own outcome
+            results.append(error)
     return results
+
+
+def _note_error(
+    error: semantic_writes.SemanticWriteError | relation_review.RelationReviewError,
+) -> NoteError:
+    """The `NoteError` that a semantic-writer error becomes, caused by it."""
+    converted = NoteError(
+        error.code,
+        [],
+        error.reason,
+        dict(getattr(error, "details", None) or {}),
+    )
+    converted.__cause__ = error
+    return converted

@@ -4307,6 +4307,35 @@ def _structural_result(
     )
 
 
+def _structural_candidate(
+    root: Path,
+    destination: str,
+    source: str,
+    *,
+    before: semantic_contract.SemanticCorpusContext,
+    status_basis: lifecycle_statuses.Basis,
+) -> tuple[semantic_contract.SemanticPageState, str]:
+    """Build one new page's state from its placed source, with its origin normalized against `before`."""
+    candidate = semantic_contract.build_page_state(
+        root,
+        destination,
+        source,
+        status_basis=status_basis,
+    )
+    normalized_source = _normalize_origin_source(
+        source, state=candidate, corpus=before
+    )
+    if normalized_source != source:
+        source = normalized_source
+        candidate = semantic_contract.build_page_state(
+            root,
+            destination,
+            source,
+            status_basis=status_basis,
+        )
+    return candidate, source
+
+
 def _evaluate_structural(
     root: Path,
     *,
@@ -4338,23 +4367,9 @@ def _evaluate_structural(
     before, before_census = semantic_contract.build_corpus_context_with_census(
         root, status_basis=status_basis
     )
-    candidate = semantic_contract.build_page_state(
-        root,
-        destination,
-        source,
-        status_basis=status_basis,
+    candidate, source = _structural_candidate(
+        root, destination, source, before=before, status_basis=status_basis
     )
-    normalized_source = _normalize_origin_source(
-        source, state=candidate, corpus=before
-    )
-    if normalized_source != source:
-        source = normalized_source
-        candidate = semantic_contract.build_page_state(
-            root,
-            destination,
-            source,
-            status_basis=status_basis,
-        )
     return (
         _structural_result(
             contracts,
@@ -4761,18 +4776,25 @@ def commit_creations(
     shared_writes: Sequence[vault.PlannedWrite] = (),
     operation: str,
     status_basis: lifecycle_statuses.Basis | None = None,
-) -> tuple[CreationCommit, ...]:
-    """Commit structural creations as one canonical batch, one result per creation.
+) -> tuple[CreationCommit | Exception, ...]:
+    """Commit structural creations as one canonical batch, one outcome per creation.
 
     Each creation keeps its own draft token, source closure, back-references and contract
     verdict. The verdicts are judged against the corpus that holds every creation, so two
     creations that conflict refuse the batch. `shared_writes` are the auxiliaries that all
     creations share, such as the index and the log, planned once for the whole batch.
 
-    Only structural creations commit together. A creation that needs a relation review,
-    binds a vocabulary decision or retained origin inputs, or replaces a predecessor
-    commits alone. Every refusal raises before the first write, so the caller may commit
-    each creation alone instead.
+    Only structural creations commit together. A creation that needs a relation review or
+    binds a vocabulary decision or retained origin inputs commits alone, and so does one that
+    replaces a predecessor, which this batch takes no input for.
+
+    A raise means that nothing of the batch is on disk: a `SemanticWriteError` refusal, or the
+    write's own error after it rolled back. The caller may then commit each creation alone.
+    Once the batch is on disk nothing raises, because committing a creation again would find
+    its page taken. Each creation then gets its `CreationCommit`, or the exception that a step
+    after the write raised for it. A failure that belongs to the whole batch, such as its
+    catalog publication or a write that kept workspace state, is every creation's outcome, as
+    it would be for each creation committed alone.
     """
     root = Path(vault_root)
     if not creations:
@@ -4805,28 +4827,48 @@ def commit_creations(
                 "STALE_SEMANTIC_WRITE", "creations of one batch plan the same file"
             )
         claimed.add(path)
+    # Judged outside the guard, which then only checks that the preflights' stamps hold.
+    judged = (
+        _judge_preflights(root, planned, operation=operation)
+        if len(planned) > 1 and _stamps_current(root, planned)
+        else None
+    )
     with call_spans.span("commit.embedding_prewarm"):
         _prewarm_embeddings()
     from .writer_lease import active_manager, active_mutation_request_id
 
-    with active_manager().mutation_guard(
-        root,
-        request_id=active_mutation_request_id(),
-        operation=f"semantic_creation_{operation}_commit",
-        holder_kind="command",
-    ):
-        _enforce_closures(root, planned)
-        committed = _commit_structural(
+    committed: tuple[CreationCommit, ...] | None = None
+    failure: Exception | None = None
+    try:
+        with active_manager().mutation_guard(
             root,
-            planned,
-            shared_writes=tuple(shared_writes),
-            operation=operation,
-            status_basis=status_basis,
-        )
-    return tuple(
-        _creation_post_commit(root, item.preflight, commit)
-        for item, commit in zip(planned, committed, strict=True)
-    )
+            request_id=active_mutation_request_id(),
+            operation=f"semantic_creation_{operation}_commit",
+            holder_kind="command",
+        ):
+            _enforce_closures(root, planned)
+            committed, failure = _commit_structural(
+                root,
+                planned,
+                shared_writes=tuple(shared_writes),
+                operation=operation,
+                status_basis=status_basis,
+                judged=judged,
+            )
+    except Exception as error:
+        if committed is None:
+            raise
+        failure = error  # the guard failed to close after the batch was written
+    if failure is not None:
+        return tuple(failure for _ in planned)
+    assert committed is not None
+    outcomes: list[CreationCommit | Exception] = []
+    for item, commit in zip(planned, committed, strict=True):
+        try:
+            outcomes.append(_creation_post_commit(root, item.preflight, commit))
+        except Exception as error:  # noqa: BLE001 - a step after the write fails its own creation only
+            outcomes.append(error)
+    return tuple(outcomes)
 
 
 def _refuse_blocked_creation(preflight: CreationPreflight) -> None:
@@ -4899,43 +4941,101 @@ def _enforce_closures(root: Path, planned: Sequence[_PlannedCreation]) -> None:
             ) from error
 
 
+#: Each creation's verdict, the corpus before the batch, and each creation's page state.
+_Verdicts = tuple[
+    list[semantic_contract.SemanticContractResult],
+    semantic_contract.SemanticCorpusContext | None,
+    dict[str, semantic_contract.SemanticPageState],
+]
+
+
+def _stamps_current(root: Path, planned: Sequence[_PlannedCreation]) -> bool:
+    """Whether every preflight's validity stamp still holds: O(sidecars), no corpus walk."""
+    from .writer_lease import read_commit_generation
+
+    generation = read_commit_generation(root)
+    return all(
+        semantic_contract.validity_stamp_current(
+            root, item.preflight.census_token, commit_generation=generation
+        )
+        for item in planned
+    )
+
+
+def _judge_batch(
+    root: Path,
+    before: semantic_contract.SemanticCorpusContext,
+    states: Mapping[str, semantic_contract.SemanticPageState],
+    *,
+    operation: str,
+) -> list[semantic_contract.SemanticContractResult]:
+    """Judge each new page against `before` together with every page of the batch.
+
+    A verdict that blocks refuses the batch, so two creations that conflict commit alone.
+    """
+    combined = _corpus_with_recovery_states(root, before, list(states.values()), registry=before.registry)
+    contracts = memory_schema.load_saved_contracts(root)
+    results = [
+        _structural_result(
+            contracts, state, operation=operation, before_corpus=before, after_corpus=combined
+        )
+        for state in states.values()
+    ]
+    for result in results:
+        if result.should_block:
+            raise SemanticWriteError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                _blocking_reason(result),
+                result.blocking_findings,
+            )
+    return results
+
+
+def _judge_preflights(
+    root: Path, planned: Sequence[_PlannedCreation], *, operation: str
+) -> _Verdicts | None:
+    """Judge a batch from the corpus and the page states that its preflights read.
+
+    The stamps that the guard checks cover that corpus. `None` when the first preflight
+    kept no corpus; the guard then judges the batch against a fresh one.
+    """
+    before = planned[0].preflight.corpus
+    if before is None:
+        return None
+    states = {item.preflight.destination: item.preflight.semantic_state for item in planned}
+    return _judge_batch(root, before, states, operation=operation), before, states
+
+
 def _structural_verdicts(
     root: Path,
     planned: Sequence[_PlannedCreation],
     *,
     operation: str,
     status_basis: lifecycle_statuses.Basis,
-) -> tuple[
-    list[semantic_contract.SemanticContractResult],
-    semantic_contract.SemanticCorpusContext | None,
-    dict[str, semantic_contract.SemanticPageState],
-]:
-    """Admit the verdicts the preflights reached, or judge the creations again.
+    judged: _Verdicts | None,
+) -> _Verdicts:
+    """Admit the verdicts judged before the guard, or judge the creations again.
 
-    Returns each creation's verdict, the corpus before the batch, and the page state of
-    each creation. A preflight verdict is admitted only while its validity stamp is current.
+    One creation's judged verdict is its preflight's. A judged verdict is admitted only
+    while every validity stamp is current. Otherwise, or for an uncensusable tree, the
+    creations are judged again against one fresh corpus, so a concurrently-changed config,
+    registry or page cannot admit a stale pre-boundary verdict.
     """
-    from .writer_lease import read_commit_generation
-
-    generation = read_commit_generation(root)
-    current = [
-        semantic_contract.validity_stamp_current(
-            root, item.preflight.census_token, commit_generation=generation
+    if judged is None and len(planned) == 1:
+        preflight = planned[0].preflight
+        judged = (
+            [preflight.contract_result],
+            preflight.corpus,
+            {preflight.destination: preflight.semantic_state},
         )
-        for item in planned
-    ]
+    if judged is not None and _stamps_current(root, planned):
+        for _ in planned:
+            relation_review._record_prevalidated_commit_outcome("reused")
+        return judged
+    for _ in planned:
+        relation_review._record_prevalidated_commit_outcome("revalidated")
     if len(planned) == 1:
         preflight = planned[0].preflight
-        if current[0]:
-            relation_review._record_prevalidated_commit_outcome("reused")
-            return (
-                [preflight.contract_result],
-                preflight.corpus,
-                {preflight.destination: preflight.semantic_state},
-            )
-        # On mismatch (or an uncensusable tree) re-run the structural evaluation, so a
-        # concurrently-changed config or registry cannot admit a stale pre-boundary verdict.
-        relation_review._record_prevalidated_commit_outcome("revalidated")
         result, state, _fresh_census, corpus, _source = _evaluate_structural(
             root,
             destination=preflight.destination,
@@ -4950,31 +5050,33 @@ def _structural_verdicts(
                 result.blocking_findings,
             )
         return [result], corpus, {preflight.destination: state}
-    corpora = [item.preflight.corpus for item in planned]
-    if not all(current) or any(corpus is None for corpus in corpora):
+    before, _fresh_census = semantic_contract.build_corpus_context_with_census(
+        root, status_basis=status_basis
+    )
+    states = {
+        item.preflight.destination: _structural_candidate(
+            root,
+            item.preflight.destination,
+            _place_origin_source(item.preflight.destination, item.preflight.source),
+            before=before,
+            status_basis=status_basis,
+        )[0]
+        for item in planned
+    }
+    return _judge_batch(root, before, states, operation=operation), before, states
+
+
+def _publish_creation_catalog(catalog_target: Any) -> None:
+    """Advance the governance catalog after a creation's canonical bytes committed."""
+    from .governance import catalog_publication
+
+    try:
+        catalog_publication.publish_markdown_batch(catalog_target)
+    except catalog_publication.CatalogPublicationError as error:
         raise SemanticWriteError(
-            "STALE_SEMANTIC_WRITE", "the vault changed after these drafts were validated"
-        )
-    for _ in planned:
-        relation_review._record_prevalidated_commit_outcome("reused")
-    base = corpora[0]
-    states = {item.preflight.destination: item.preflight.semantic_state for item in planned}
-    combined = _corpus_with_recovery_states(root, base, list(states.values()), registry=base.registry)
-    contracts = memory_schema.load_saved_contracts(root)
-    results = [
-        _structural_result(
-            contracts, state, operation=operation, before_corpus=base, after_corpus=combined
-        )
-        for state in states.values()
-    ]
-    for result in results:
-        if result.should_block:
-            raise SemanticWriteError(
-                "SEMANTIC_CONTRACT_BLOCKED",
-                _blocking_reason(result),
-                result.blocking_findings,
-            )
-    return results, base, states
+            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            str(error),
+        ) from error
 
 
 def _commit_structural(
@@ -4985,16 +5087,21 @@ def _commit_structural(
     operation: str,
     status_basis: lifecycle_statuses.Basis,
     vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
-) -> tuple[CreationCommit, ...]:
+    judged: _Verdicts | None = None,
+) -> tuple[tuple[CreationCommit, ...], Exception | None]:
     """Write structural creations in one canonical batch, under the caller's mutation guard.
 
     Structural and non-semantic creations honour the validity stamp inside the boundary
     (see `_structural_verdicts`). One creation and many share this implementation.
+
+    Every raise comes before the batch is on disk. A failure after the write is returned
+    beside the commits for the caller to report: a write that kept workspace state, which
+    leaves no commits, or the catalog publication.
     """
     from .governance import catalog_publication
 
     results, catalog_corpus, catalog_states = _structural_verdicts(
-        root, planned, operation=operation, status_basis=status_basis
+        root, planned, operation=operation, status_basis=status_basis, judged=judged
     )
     writes = [*shared_writes, *(write for item in planned for write in item.auxiliaries)]
     primary_writes = [
@@ -5031,6 +5138,11 @@ def _commit_structural(
     bound_origins = [
         item.preflight.origin_inputs for item in planned if item.preflight.origin_inputs is not None
     ]
+
+    def validate_bound_origins() -> None:
+        for bound in bound_origins:
+            _validate_origin_inputs(root, bound)
+
     token = semantic_index.set_parent_states(
         {
             destination: semantic_index.from_semantic_page_state(state)
@@ -5053,9 +5165,7 @@ def _commit_structural(
                 *(guard for item in planned for guard in item.closure_plan.required_guards),
             ),
             _vocabulary_auxiliaries=manifests[0] if len(manifests) == 1 else manifests,
-            _validate_prepared_bindings=(
-                lambda: [_validate_origin_inputs(root, bound) for bound in bound_origins]
-            ) if bound_origins else None,
+            _validate_prepared_bindings=validate_bound_origins if bound_origins else None,
         )
     except vault.PathGuardError as error:
         if error.code == "PATH_VARIANT_EXISTS":
@@ -5070,28 +5180,31 @@ def _commit_structural(
             "STALE_SEMANTIC_WRITE",
             "a concurrent write updated a shared auxiliary during commit; retry the operation",
         ) from error
+    except vault.BatchWriteError as error:
+        # The write kept workspace state and may have kept pages, so it is no refusal.
+        return (), error
     finally:
         semantic_index.reset_parent_states(token)
-    try:
-        catalog_publication.publish_markdown_batch(catalog_target)
-    except catalog_publication.CatalogPublicationError as error:
-        raise SemanticWriteError(
-            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
-            str(error),
-        ) from error
-    shared = {Path(os.path.abspath(write.path)) for write in shared_writes}
+    # A creation reports every written file but the other creations' own: its own files, the
+    # batch's shared writes and any file the write adds. One creation reports them all.
+    owned = [
+        {Path(os.path.abspath(write.path)) for write in (*item.auxiliaries, primary)}
+        for item, primary in zip(planned, primary_writes, strict=True)
+    ]
     commits = []
-    for item, result in zip(planned, results, strict=True):
-        # A creation reports the files it and the batch's shared writes replaced.
-        own = shared | {Path(os.path.abspath(write.path)) for write in item.auxiliaries}
-        own.add(Path(os.path.abspath(root / item.preflight.destination)))
+    for item, own, result in zip(planned, owned, results, strict=True):
+        others = set().union(*owned) - own
         paths = tuple(
             path.relative_to(root).as_posix()
             for path in written
-            if Path(os.path.abspath(path)) in own
+            if Path(os.path.abspath(path)) not in others
         )
         commits.append(CreationCommit(item.preflight.applicability, True, paths, result, None))
-    return tuple(commits)
+    try:
+        _publish_creation_catalog(catalog_target)
+    except Exception as error:  # noqa: BLE001 - after the write a failure is reported, not refused
+        return tuple(commits), error
+    return tuple(commits), None
 
 
 def _prepare_creation_catalog_publication(
@@ -5265,21 +5378,17 @@ def _commit_creation(
                         lambda: _validate_origin_inputs(root, preflight.origin_inputs)
                     ) if preflight.origin_inputs is not None else None,
                 )
-            try:
-                catalog_publication.publish_markdown_batch(catalog_target)
-            except catalog_publication.CatalogPublicationError as error:
-                raise SemanticWriteError(
-                    "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
-                    str(error),
-                ) from error
+            _publish_creation_catalog(catalog_target)
             return CreationCommit(
                 "full", True, committed.written_paths, committed.contract_result, committed
             )
-        (committed,) = _commit_structural(
+        commits, failure = _commit_structural(
             root,
             (planned,),
             operation=operation,
             status_basis=status_basis,
             vocabulary_guards=vocabulary_guards,
         )
-        return committed
+        if failure is not None:
+            raise failure
+        return commits[0]
