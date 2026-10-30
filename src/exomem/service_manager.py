@@ -431,8 +431,8 @@ class Supervisor:
         self.clock = clock
         #: When each in-place restart began, oldest first, inside the window.
         self._restarts: deque[float] = deque()
-        #: The exit status of the last worker that exited on its own; None
-        #: until one has, or when the last one was stopped for never being ready.
+        #: The exit status of the last serving worker that exited on its own;
+        #: None until one has.
         self.last_exit_code: int | None = None
 
     def _replacement_budget(self) -> float:
