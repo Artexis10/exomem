@@ -123,7 +123,7 @@ Adoption SHALL take the collection root of a recorded stage from its record, not
 
 ### Requirement: The residual tells the person to keep the source
 
-`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While any landed window has an unfiled member or any residual record remains, the tool text SHALL tell the person to keep the source folder. An unfiled member is a manifest member that no adoption run has filed, so a landed window with no run counts every member. `adoption_studio(action="acknowledge")` SHALL take an import ID and the paths to clear from that window's residual record. It SHALL refuse a call without paths. Its tool text SHALL say that acknowledging is the person's decision.
+`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While a landed window has an unfiled member, the tool text SHALL tell the person to keep the source folder. It SHALL also do so while a residual record lists a member. An unfiled member is a manifest member, other than the series file, that no adoption run has filed. A landed window with no run therefore counts every member except the series file. A residual record that lists no member SHALL NOT count. `adoption_studio(action="acknowledge")` SHALL take an import ID and the paths to clear from that window's residual record. It SHALL refuse a call without paths. Its tool text SHALL say that acknowledging is the person's decision.
 
 #### Scenario: A window keeps a residual
 
@@ -151,3 +151,9 @@ Adoption SHALL take the collection root of a recorded stage from its record, not
 
 - **WHEN** a window has landed, and no adoption run has started on its stage
 - **THEN** the status tells the person to keep the source folder, although no residual exists yet
+
+#### Scenario: A series is fully filed and discarded
+
+- **WHEN** adoption filed every member of every window of a series, and every window is discarded
+- **THEN** the status reports no unfiled member and no residual record that lists a member
+- **AND** the tool text no longer tells the person to keep the source folder

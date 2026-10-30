@@ -503,7 +503,7 @@ A failed listing or an unobserved edge generation MUST NOT count as done.
 
 ### Requirement: The media store is off by default and drains on disable
 
-The media store SHALL be off unless a cell is on the canary list or the fleet switch is on. A cell that is not selected SHALL have no media edge egress, no offload and no eviction. Turning the store off for a selected cell SHALL stop new offload and eviction at once. It SHALL keep hydration available until no original of that cell is evicted, and only then remove the cell's edge egress. If the volume cannot hold every evicted original within its size cap, the cell SHALL keep its edge egress and report the shortfall in bytes.
+The media store SHALL be off unless a cell is on the canary list or the fleet switch is on. A cell that was never selected SHALL have no media edge egress, no offload and no eviction. Turning the store off for a selected cell SHALL stop new offload at once. When the volume can hold every evicted original within its size cap, eviction SHALL also stop at once. The cell SHALL then hydrate every evicted original back. cellctl SHALL keep the cell's media key, edge credential, edge egress and active-set entry until a report from the cell shows no evicted original. Only then SHALL cellctl remove them. When no such report exists, or cellctl cannot read it, cellctl SHALL keep them. A cell whose evicted originals do not fit SHALL follow the requirement "A cell that cannot drain keeps its stored media readable".
 
 #### Scenario: Default installation
 
@@ -514,3 +514,19 @@ The media store SHALL be off unless a cell is on the canary list or the fleet sw
 
 - **WHEN** the store is turned off for a cell that has evicted originals
 - **THEN** the cell hydrates every evicted original back, keeps its edge egress until none remain, and then loses that egress
+
+#### Scenario: No report since the store was turned off
+
+- **WHEN** the store is turned off for a cell, and cellctl has read no report from the cell since then
+- **THEN** cellctl keeps the cell's media key, edge credential, edge egress and active-set entry
+
+### Requirement: A cell that cannot drain keeps its stored media readable
+
+This requirement covers a turned-off cell whose volume cannot hold every evicted original within its size cap. Such a cell SHALL keep its media key, its edge credential and its edge egress. Its reports show evicted originals, so cellctl keeps them. Owner reads and media jobs SHALL hydrate its evicted originals as before. Offload SHALL stay off. Eviction SHALL keep running, so that a hydrated copy leaves the volume again. The cell SHALL report the shortfall in bytes. When the shortfall reaches zero, for example after the volume grows or the owner deletes media, the cell SHALL drain. The drain follows the requirement "The media store is off by default and drains on disable".
+
+#### Scenario: Stored media exceed the volume
+
+- **WHEN** the store is turned off for a cell with a 20 GiB volume that holds 50 GiB of evicted originals
+- **THEN** the cell keeps its media key, edge credential and edge egress, and offloads no new original
+- **AND** an evicted recording that the owner plays hydrates as before
+- **AND** the cell reports the shortfall in bytes

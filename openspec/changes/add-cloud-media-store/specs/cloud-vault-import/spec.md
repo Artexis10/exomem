@@ -153,13 +153,13 @@ One module SHALL hold the rule that classifies a member as text, an offloadable 
 The Adoption Studio status SHALL report these figures. Each figure that the cell cannot read SHALL be unknown with a reason, never zero.
 - The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity, `max_hydrations` × the largest offloadable file, and one offload temporary file of up to the object bound.
 - The reachable budget: the window budget once the agent files every landed window, pending offloads finish and eviction frees every eligible original. It SHALL leave out an original that an owner read within the minimum idle age.
-- The job-pinned bytes: the offloadable originals that claimed, unfinished media jobs keep on the volume, other than those that the worker hydrated for them.
+- The job-pinned bytes: the offloadable originals that claimed, unfinished media jobs keep on the volume, the copies that the worker hydrated for them included.
 - The inputs of the classification rule: the object bound, the hydration capacity and the inline text limit, and the largest offloadable file that they allow.
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
-- For each landed window, the count and bytes of its unfiled members. An unfiled member is a manifest member that no adoption run has filed. A window with no run SHALL count every member.
+- For each landed window, the count and bytes of its unfiled members. An unfiled member is a manifest member, other than the series file, that no adoption run has filed. A window with no run SHALL count every member except the series file.
 - For each landed window, the count and bytes of its residual, and its member paths page by page.
-- For each discarded window with a residual record, the record's members as "discarded, not filed", with path, bytes and code, page by page.
+- For each discarded window whose residual record lists a member, the record's members as "discarded, not filed", with path, bytes and code, page by page.
 
 A status call MAY carry a series ID and the next window's bytes. The cell SHALL then record them as that series' demand for eviction, or renew it, and keep the other series' demands. It SHALL ignore a demand above the reachable budget. A cell without the media store SHALL report no window budget.
 
@@ -177,7 +177,7 @@ A status call MAY carry a series ID and the next window's bytes. The cell SHALL 
 
 #### Scenario: A landed window with no run
 
-- **WHEN** a window has landed with 40 members, and no adoption run has started on its stage
+- **WHEN** a window has landed with 40 members and the series file, and no adoption run has started on its stage
 - **THEN** the status reports 40 unfiled members for that window, with their bytes
 
 #### Scenario: A status call records a demand
@@ -207,7 +207,7 @@ For an `adopt` import, the import Job SHALL record each member's identity in the
 
 ### Requirement: A discard keeps a residual record
 
-When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The record SHALL stay until a resend or an acknowledgement clears its members.
+When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: `import_discard` with `walk_stage` set. That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A retried walk SHALL keep the record that an earlier walk wrote. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
 
 #### Scenario: A discard after a path conflict
 
@@ -223,7 +223,13 @@ When the discard Job discards a recorded stage, it SHALL keep a residual record 
 #### Scenario: The receipt cannot be read
 
 - **WHEN** the person discards a window whose stage exists, and its receipt cannot be read
-- **THEN** the discard refuses with `IMPORT_RECEIPT_UNREADABLE`, and the stage stays
+- **THEN** the discard refuses with `IMPORT_RECEIPT_UNREADABLE`, names the `walk_stage` exit, and the stage stays
+
+#### Scenario: A discard walks the stage
+
+- **WHEN** an agent discards that window again with `walk_stage` set
+- **THEN** a separate record lists each staged file except the series file, with the code `receipt_unreadable`
+- **AND** the unreadable receipt stays, the stage folder is gone, and the status lists those files as "discarded, not filed"
 
 ### Requirement: Each window carries the series file
 
@@ -263,7 +269,7 @@ When the person asks to resend a series' residual, the CLI SHALL send the residu
 
 ### Requirement: The CLI tells the person to keep the source
 
-When the last window lands, the CLI SHALL report that the upload is done and that filing continues. It SHALL tell the person to keep the source folder while the cell reports an unfiled member in any landed window or any residual record.
+When the last window lands, the CLI SHALL report that the upload is done and that filing continues. It SHALL tell the person to keep the source folder while the cell reports an unfiled member in a landed window. It SHALL also do so while a residual record lists a member. The series file is never an unfiled member, and a residual record that lists no member does not count.
 
 #### Scenario: The last window lands before filing ends
 
