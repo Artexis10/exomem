@@ -1984,11 +1984,12 @@ def _create_notes(
 
     The identity check runs first: an item whose note exists settles as found, and one
     whose note cannot be placed fails. The other items commit in batches through the
-    governed two-phase creation (`adopt.create_draft_notes`). A call times its first note
-    alone; after that a batch holds as many notes as fit in the time left at the dearest
-    per-note cost this call has seen. The items a batch leaves keep their `source-applied`
-    outcome and the continuation resumes at them. A call always makes at least one note,
-    so a budget below one note's cost still moves.
+    governed two-phase creation (`adopt.create_draft_notes`). A call makes one note at a
+    time until it has made and timed one; after that a batch holds as many notes as fit in
+    the time left at the dearest cost per made note this call has seen. A refused note does
+    not lower that cost, because a quick refusal would make the next batch look free. The
+    items a batch leaves keep their `source-applied` outcome and the continuation resumes at
+    them. A call always tries at least one note, so a budget below one note's cost still moves.
     """
     outcomes = run["outcomes"]
     owed = [
@@ -2003,13 +2004,16 @@ def _create_notes(
     while due:
         if not stats["notes_started"]:
             size = 1
+        elif not stats["notes_created"]:
+            # No note made yet, so nothing prices a batch: one note, paced on the dearest try.
+            size = 1 if pacer.note_fits(chunk, stats["note_try_ms_max"] / 1000) else 0
         else:
             size = len(due)
             while size and not pacer.note_fits(chunk, stats["note_ms_max"] * size / 1000):
                 size -= 1
-            if not size:
-                stats["notes_deferred"] += 1
-                break
+        if not size:
+            stats["notes_deferred"] += 1
+            break
         batch, due = due[:size], due[size:]
         started = time.monotonic()
         results = adopt_module.create_draft_notes(
@@ -2023,11 +2027,13 @@ def _create_notes(
             ],
             collection=label, date_iso=run["plan"]["date"],
         )
+        elapsed_ms = (time.monotonic() - started) * 1000
         stats["notes_started"] += size
-        # The dearest per-note cost seen so far, as a batch's time over its size.
-        stats["note_ms_max"] = max(
-            stats["note_ms_max"], int((time.monotonic() - started) * 1000 / size)
-        )
+        stats["note_try_ms_max"] = max(stats["note_try_ms_max"], int(elapsed_ms / size))
+        made = sum(result.created is not None for result in results)
+        if made:
+            # The dearest cost per made note: a batch's time, its refusals included, over the notes it made.
+            stats["note_ms_max"] = max(stats["note_ms_max"], int(elapsed_ms / made))
         for planned, result in zip(batch, results, strict=True):
             _settle_draft_note(
                 root, planned, result, outcomes[planned["original_path"]],

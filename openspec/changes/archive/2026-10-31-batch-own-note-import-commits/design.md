@@ -11,7 +11,7 @@ Commit the whole chunk through the same structural path in one `batch_atomic_wri
 - Before the guard, each note's contract verdict is judged against the corpus that its preflight read plus every candidate of the chunk. The judgment runs only while every validity stamp is current.
 - Inside one `mutation_guard`, the batch re-checks each note's Source closure and validity stamp, then writes. On a stale stamp it rebuilds the corpus once and judges every candidate again, as a single creation judges itself again.
 - Navigation is planned once for all notes: one Recent-activity bullet and one log entry per note, in one write each.
-- `adoption_run` runs the identity check for every note of a chunk first. A call then times its first note alone. After that, a batch holds as many notes as fit in the time left at the dearest per-note cost the call has seen: a batch's time over its size. Without that first timing, one unmeasured batch could spend the time that the call keeps for its custody work.
+- `adoption_run` runs the identity check for every note of a chunk first. A call then makes one note at a time until it has made and timed one. After that, a batch holds as many notes as fit in the time left at the dearest cost per made note that the call has seen: a batch's time over the notes it made. Without that timing, one unmeasured batch could spend the time that the call keeps for its custody work. A refused note does not count, because a quick refusal would make the next batch look free.
 - The vocabulary gate receives a tuple of sealed manifests, one per primary page.
 
 The batch refuses a creation that needs the full relation review, that has a predecessor, or that binds a vocabulary entry. Those commit alone.

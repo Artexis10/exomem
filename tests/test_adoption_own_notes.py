@@ -388,6 +388,52 @@ def test_a_call_stops_between_notes_when_the_next_would_not_fit_and_the_continua
     assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 3
 
 
+def test_a_quick_refusal_does_not_make_the_next_batch_of_notes_look_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "40")
+    request_budget.reset_resolution_cache()
+    files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(8)}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    refused = planned["plan"]["items"][0]["original_path"]  # the first note a call makes
+    real_validate = adopt._validate_draft
+    real_create = adopt.create_draft_notes
+
+    def refuse_the_first_note_at_once(root, planned_item, arguments):
+        if planned_item["original_path"] == refused:
+            raise adopt.AdoptError("PLAN_STALE", "refused by the test")
+        return real_validate(root, planned_item, arguments)
+
+    def eight_seconds_per_made_note(root, notes, **kwargs):
+        outcomes = real_create(root, notes, **kwargs)
+        clock["now"] += 8.0 * sum(outcome.created is not None for outcome in outcomes)
+        return outcomes
+
+    monkeypatch.setattr(adopt, "_validate_draft", refuse_the_first_note_at_once)
+    monkeypatch.setattr(adopt, "create_draft_notes", eight_seconds_per_made_note)
+
+    elapsed: list[float] = []
+    last: dict = {}
+    while not elapsed or last.get("continuation"):
+        began = clock["now"]
+        last = adoption_run.apply(
+            vault, run_id=run_id, plan_id=planned["plan"]["plan_id"],
+            continuation=last.get("continuation"), today=TODAY,
+        )
+        elapsed.append(clock["now"] - began)
+
+    assert max(elapsed) <= 40.0 - 2.0
+    assert last["outcomes"][refused]["note"]["code"] == "PLAN_STALE"
+    assert last["progress"] == {"applied": 7, "failed": 1, "remaining": 0, "total": 8}
+    assert len(_notes(vault)) == 7
+
+
 def test_own_note_adoption_uses_the_project_home_in_its_frozen_plan(tmp_path: Path) -> None:
     from test_vault_homes import _save
 
