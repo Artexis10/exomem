@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
@@ -66,9 +67,15 @@ _JOURNAL_SIZE_LIMIT = 64 << 20  # bytes: 64 MiB
 QUERY_REBUILDING = "QUERY_REBUILDING"
 REBUILD_MISMATCH = "DERIVED_REBUILD_MISMATCH"
 SOURCE_MISSING = "DERIVED_SOURCE_MISSING"
-#: Rows one rebuild step applies in one transaction, so requests are served between steps. A step
-#: also ends after the batch it is applying when its caller asks (``step``).
+#: Rows one rebuild step applies at most in one transaction, so requests are served between steps.
+#: A step also ends after the batch that spends ``STEP_SECONDS``, or when its caller asks (``step``).
 REBUILD_STEP_ROWS = 2000
+#: Seconds of row work one transaction of derived rows may spend holding the vault mutation
+#: boundary. Import and rebuild batches are sized from the collection's last batch, so a request
+#: waits about this long behind them whatever a row costs on this machine and collection.
+STEP_SECONDS = 0.15
+#: Rows a collection's first batch takes, before its pace is known.
+FIRST_BATCH_ROWS = 50
 #: This file's own layout; a file of another one is discarded, and its rows rebuild from the log.
 LAYOUT = 3
 
@@ -377,6 +384,7 @@ class Store:
         self._write_scope, self._owns_transaction = None, False
         self.conn = self._open()
         self.readers: dict[str, Any] = {}  # a rebuild's open member reader per collection
+        self._pace: dict[str, float] = {}  # seconds of row work per row in each collection's last batch
 
     def _open(self) -> sqlite3.Connection:
         for attempt in (0, 1):
@@ -588,6 +596,22 @@ class Store:
             self.conn.execute("INSERT OR REPLACE INTO derived_progress(collection_id,job_id,record_json) "
                               "VALUES (?,?,?)", (collection_id, job_id, _json(record)))
         return record
+
+    def batch_rows(self, collection_id: str, ceiling: int) -> int:
+        """Rows the collection's next batch takes, so its row work fits ``STEP_SECONDS`` at the last batch's pace.
+
+        Only row work sets the pace: a fixed cost per transaction would otherwise shrink every
+        later batch toward one row without shortening the hold.
+        """
+        pace = self._pace.get(collection_id)
+        if pace is None:
+            return min(FIRST_BATCH_ROWS, ceiling)
+        return ceiling if pace <= 0 else max(1, min(ceiling, int(STEP_SECONDS / pace)))
+
+    def paced(self, collection_id: str, rows: int, seconds: float) -> None:
+        """Record the row work of a batch of ``rows`` rows, which sizes the collection's next batch."""
+        if rows:
+            self._pace[collection_id] = seconds / rows
 
     def rejections(self, collection_id: str) -> list[tuple[int, int, str, str]]:
         return self.conn.execute("SELECT ordinal,byte_offset,code,at FROM derived_rejections "
@@ -1049,13 +1073,19 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str
     shas, taken, ended, stopped = binding["source"]["members"]["sha256"], 0, False, False
     try:
         with store.transaction():
-            while taken < REBUILD_STEP_ROWS and not ended and not (taken and aside()):
-                batch = importer._next_batch(reader, plan, reader.pending, order)
+            began = time.perf_counter()
+            while taken < REBUILD_STEP_ROWS and not ended and not (
+                    taken and (aside() or time.perf_counter() - began >= STEP_SECONDS)):
+                started = time.perf_counter()
+                batch = importer._next_batch(reader, plan, reader.pending, order,
+                                             limit=store.batch_rows(collection_id, importer.MAX_BATCH_ROWS))
                 if batch.stop is not None:
                     stopped = True  # a logged member never stopped its import
                     break
                 applied = importer._derived_apply(store.conn, goal, batch, manifest, binding["source"]["ref"], shas,
                                                   scope=store.write_scope)
+                # A replay reads its rows under the boundary too, so its pace counts the reading.
+                store.paced(collection_id, len(batch.rows) + len(batch.rejections), time.perf_counter() - started)
                 for _, key, payload in applied.entries:
                     importer._extend(tally, key, payload)
                 rows += sum(outcome["outcome"] == "inserted" for outcome in applied.outcomes)
