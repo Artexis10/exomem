@@ -3145,6 +3145,7 @@ def test_keyed_write_refuses_when_warm_outlasts_the_wait(
     payload = error_dict(warming.value)
     assert payload["status"] == "retryable"
     assert payload["committed"] is False
+    assert payload["cause"] == "warm_wait_exhausted"
     assert payload["waited_ms"] >= 300
     assert calls == []
     assert active_mutation_snapshot()["state"] == "free"
@@ -3170,6 +3171,9 @@ def test_mutation_during_semantic_warm_returns_without_holding_boundary(
     assert payload["committed"] is False
     assert payload["retry_after_ms"] == 750
     assert payload["request_id"] == "warm-request"
+    # Unkeyed: a resend after a client gave up during a wait would run it twice.
+    assert payload["cause"] == "unkeyed"
+    assert payload["waited_ms"] == 0
     assert calls == []
     assert active_mutation_snapshot()["state"] == "free"
 

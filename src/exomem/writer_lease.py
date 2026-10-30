@@ -4409,14 +4409,15 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
 _WARMUP_POLL_SECONDS = 0.25
 
 
-def _wait_out_write_warmup(*, absorb: bool) -> tuple[str | None, float]:
-    """The write-gating component still warming after a bounded wait, and the seconds waited.
+def _wait_out_write_warmup(*, absorb: bool, deadline: float) -> tuple[str | None, str | None]:
+    """The write-gating component still warming when the wait ends, and why it was not waited out.
 
     Warm-up ends by itself within seconds (5-20 s per restart on a personal vault,
-    2026-10-25..30), so a keyed write waits it out on the bounded wait and the
-    parked-worker cap that a busy boundary uses, instead of handing the client a
-    refusal it can only retry. An unkeyed write keeps the immediate refusal: a client
-    that gave up during the wait and resent it would run it twice.
+    2026-10-25..30), so a keyed write waits it out until `deadline`, the same
+    deadline its busy-boundary wait uses, and on the same parked-worker cap,
+    instead of handing the client a refusal it can only retry. An unkeyed write
+    keeps the immediate refusal: a client that gave up during the wait and resent
+    it would run it twice. The cause is None when nothing was warming.
     """
     from . import readiness
 
@@ -4428,12 +4429,16 @@ def _wait_out_write_warmup(*, absorb: bool) -> tuple[str | None, float]:
         )
 
     warming = still_warming()
-    if warming is None or not absorb or not _writes_absorb_contention():
-        return warming, 0.0
+    if warming is None:
+        return None, None
+    if not absorb:
+        return warming, "unkeyed"
+    if not _writes_absorb_contention():
+        return warming, "absorb_disabled"
+    if time.monotonic() >= deadline:
+        return warming, "warm_wait_exhausted"
     if not _take_capture_waiter_slot():
-        return warming, 0.0
-    started = time.monotonic()
-    deadline = started + _capture_wait_seconds()
+        return warming, "capture_waiters_full"
     try:
         while warming is not None:
             remaining = deadline - time.monotonic()
@@ -4445,7 +4450,7 @@ def _wait_out_write_warmup(*, absorb: bool) -> tuple[str | None, float]:
             warming = still_warming()
     finally:
         _release_capture_waiter_slot()
-    return warming, time.monotonic() - started
+    return warming, None if warming is None else "warm_wait_exhausted"
 
 
 @dataclass(frozen=True)
@@ -5408,15 +5413,20 @@ class LeaseManager:
         # slower, it registers a whole-vault rebuild for a lineage it could
         # have adopted in the first seconds of the warm. Both refusals are the
         # same retryable shape, and reads are untouched either way.
-        warming, warm_waited = _wait_out_write_warmup(absorb=key is not None)
-        if warm_waited > 0:
+        # One clock for every wait this write makes before it runs: warm-up here,
+        # then a busy boundary, so neither restarts the bound or under-reports it.
+        wait_started = time.monotonic()
+        wait_deadline = wait_started + _capture_wait_seconds(self._mutation_timeout_seconds)
+        warming, warm_cause = _wait_out_write_warmup(absorb=key is not None, deadline=wait_deadline)
+        warm_waited_ms = round((time.monotonic() - wait_started) * 1000)
+        if warm_waited_ms > 0:
             _log_mutation_event(
                 "warmup_waited",
                 request_id=request_id,
                 command=command.name,
                 receipt=receipt or "none",
-                waited_ms=int(warm_waited * 1000),
-                outcome="refused" if warming is not None else "admitted",
+                waited_ms=warm_waited_ms,
+                outcome="admitted" if warming is None else warm_cause,
             )
         if warming is not None:
             details: dict[str, Any] = {
@@ -5425,7 +5435,8 @@ class LeaseManager:
                 "retry_after_ms": 750,
                 "request_id": request_id,
                 "receipt_id": receipt,
-                "waited_ms": int(warm_waited * 1000),
+                "cause": warm_cause,
+                "waited_ms": warm_waited_ms,
             }
             if effective_public_idempotency_key is not None:
                 details["idempotency_key"] = effective_public_idempotency_key
@@ -6280,6 +6291,8 @@ class LeaseManager:
                 key=key,
                 commit_state=commit_state,
                 request_id=request_id,
+                wait_started=wait_started,
+                wait_deadline=wait_deadline,
                 # A narrow leaf meets the busy only after its own preparation. When
                 # that preparation fetched caller-supplied temporary handles, the
                 # server cannot fetch them again; only the caller can retry.
@@ -6453,6 +6466,8 @@ class LeaseManager:
         key: str | None,
         commit_state: Mapping[str, bool],
         request_id: str,
+        wait_started: float | None = None,
+        wait_deadline: float | None = None,
         rerun_safe: bool = True,
     ) -> Any:
         """Run one keyed write, waiting out an ordinary busy boundary.
@@ -6475,8 +6490,13 @@ class LeaseManager:
                 return run()
             finally:
                 _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
-        started = time.monotonic()
-        deadline = started + _capture_wait_seconds(self._mutation_timeout_seconds)
+        # The request's wait clock when `invoke` started it before a warm-up wait.
+        started = time.monotonic() if wait_started is None else wait_started
+        deadline = (
+            started + _capture_wait_seconds(self._mutation_timeout_seconds)
+            if wait_deadline is None
+            else wait_deadline
+        )
         queue = self._capture_queue
         ticket = None
         absorbed = 0
