@@ -499,6 +499,32 @@ def test_a_pooled_proof_does_not_release_a_read_after_a_namespace_change(service
     assert any(lent[last][1] is earlier for _, earlier in lent[:last]), "the release did not reuse a pooled reader"
 
 
+def test_a_read_releases_while_an_unrelated_holder_keeps_the_boundary(service, monkeypatch):
+    """A graph drain or views reconcile that changes no ownership must not refuse a whole read."""
+    root = service.root
+    _published(SimpleNamespace(meta=lambda: store_meta(root)))
+    manager = ownership._manager(root)
+    monkeypatch.setattr(manager, "_mutation_timeout_seconds", 0.2)
+    held, release = threading.Event(), threading.Event()
+
+    def drain():
+        with manager._mutation_coordinator_for(root).hold(
+                timeout_seconds=5, operation="test-graph-drain", holder_kind="graph"):
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=drain)
+    holder.start()
+    try:
+        assert held.wait(5)
+        with ownership.read_scope(root) as scope:
+            assert scope.proof().selected(root, CID) is not None
+            scope.finish()
+    finally:
+        release.set()
+        holder.join()
+
+
 def test_recovery_must_cover_later_collections_before_and_after_a_whole_read(service, tmp_path, monkeypatch):
     root = service.root
     _published(SimpleNamespace(meta=lambda: store_meta(root)))
