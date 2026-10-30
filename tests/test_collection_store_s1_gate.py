@@ -956,7 +956,8 @@ def test_a_lease_lost_at_any_trusted_check_lands_no_later_name_change_or_transac
         abc, monkeypatch, tmp_path, orderly):
     """Defect: a publication check that trusts the fresh local grant (A3) lets a rename, unlink,
     directory create or removal, or store transaction land after the coordinator revoked or
-    expired the lease. The loss strikes at each trusted check site of one publication in turn."""
+    expired the lease. The loss strikes at each trusted check site that a clean publication
+    reaches, in turn."""
     from exomem import writer_lease
 
     publishing = threading.get_ident()

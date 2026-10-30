@@ -1041,6 +1041,8 @@ def publish_replica(
     This is deliberately not wired to a public or service adapter. The caller
     supplies mode/adoption/fence authority, holds the mutation boundary and
     guarantees exclusive custody of the operation workspace for the entire call.
+    ``authority_check`` must validate the fencing token with the lease coordinator:
+    it is the only coordinator check before each name change and commit (A3).
     Every sync client must exclude that subtree from incoming and outgoing sync;
     a random name, permissions or the lease alone cannot establish custody.
     Disposable isolated callers supply their own custody. No replica is ever
@@ -1104,7 +1106,8 @@ def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, 
 
     ``step(patience, cancelled)`` is the caller's context manager for one brief
     boundary step: at an idle instant it holds the boundary, rechecks lease and
-    custody, and yields this vault's writer with its authority check. Copying,
+    custody, and yields this vault's writer with its authority check, which must
+    validate the fencing token with the lease coordinator (A3). Copying,
     byte verification and file fsync run outside canonical and identity exclusion.
     Each resumed step compares metadata, name topology and exact held versions
     before effects. A changed observation leaves the v2 intent for recovery.
