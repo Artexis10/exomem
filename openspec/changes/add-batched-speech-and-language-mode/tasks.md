@@ -28,3 +28,6 @@
   - Word accuracy has no listened reference, so it is unverified in both arms.
 - [x] 4.2 Regenerate the tool surface and record the new digest as pending in the connector contract.
 - [ ] 4.3 After the release is installed, refresh the ChatGPT plugin so that it sends `multilingual`, then process one recording in each language mode on the installed service and record the sidecar facts here.
+  Installed-service part done (30 Oct 2026, release 0.150.0, desktop GPU). The ChatGPT plugin refresh is still open.
+  - Single mode, a 21-minute Estonian lecture with `language: et`: `asr_language_mode: single`, `asr_decoding: batched`, `asr_language: et`, `asr_language_source: requested`.
+  - Multilingual mode, a 90-second clip with 12.5 s of speech: `asr_language_mode: multilingual`, `asr_decoding: batched`, `asr_language: en` from the engine, `asr_language_source: requested`, and `asr_language_probability` null.

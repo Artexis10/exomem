@@ -29,5 +29,10 @@
 
 ## 5. Release
 
-- [ ] 5.1 After the release is installed, reprocess one long non-English recording with a language hint on the real speech models. Compare the new transcript with the prior page, and record the result here.
+- [x] 5.1 After the release is installed, reprocess one long non-English recording with a language hint on the real speech models. Compare the new transcript with the prior page, and record the result here.
+  Result (30 Oct 2026, release 0.150.0, desktop GPU, large-v3). The recording is a 21-minute Estonian lecture, reprocessed with `language: et`.
+  - The sidecar recorded `asr_language: et`, `asr_language_source: requested`, `asr_language_mode: single`, `asr_decoding: batched`, `asr_policy: fw-policy-2`, and 1212 s of speech in 1284 s.
+  - The prior text was kept as a linked `.prior-1` page.
+  - The prior page had 236 timed lines, of which 34 were repeats, and 2907 words. The new page has 156 timed lines with no repeats and 2574 words. The same Estonian content sits in longer segments.
+  - Word accuracy has no listened reference, so it is unverified in both versions.
 - [ ] 5.2 Record the new tool-surface digest as pending in the connector contract, and ask the operator to refresh the ChatGPT plugin so that ChatGPT can send `reprocess`.
