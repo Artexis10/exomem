@@ -2666,12 +2666,20 @@ def finish(
                 verified_total=verified_total, today=run_date,
             )
         title = recall["query"]
+        # A question is ready only once the search finds the page it asks about.
+        ready = (
+            {
+                "first_question": f'What do my notes say about "{title}"?',
+                "route": capabilities.active_call_route("search_memory", {"query": title}),
+            }
+            if recall["ok"] is True
+            else {"indexing": _indexing(recall, coverage["recall"])}
+        )
         run["finish"] = {
             "at": _now_iso(),
             "recall_check": recall,
             "coverage": coverage,
-            "first_question": f'What do my notes say about "{title}"?',
-            "route": {"tool": "search_memory", "args": {"query": title}},
+            **ready,
             "handoff": _handoff(run),
             "verified_unchanged": verified_unchanged,
             "verified_total": verified_total,
@@ -2682,6 +2690,22 @@ def finish(
         run["phase"] = "done"
         store.save(run)
     return _present(root, run, coverage=coverage)
+
+
+def _indexing(recall: dict, sample: dict) -> dict:
+    """Why finish offers no first question: the recall check's state and the recall sample's counts.
+
+    The state is `pending` or `failed` when the search could not answer, and `missed` when it
+    answered without the page. `found` is None when no sampled search answered.
+    """
+    return {
+        "state": recall.get("status") or "missed",
+        "sampled": sample["sampled"],
+        "found": sample["found"],
+        "missed": len(sample["missed"]),
+        "pending": sample.get("pending", 0),
+        "failed": sample.get("failed", 0),
+    }
 
 
 def _write_run_manifest(

@@ -425,6 +425,9 @@ def test_recall_check_accepts_only_the_exact_target_page(
     wrong = adoption_run.finish(vault, run_id=run_id, today=TODAY)
     assert wrong["finish"]["recall_check"]["ok"] is False
     assert wrong["coverage"]["recall"] == {"sampled": 1, "found": 0, "missed": [target]}
+    # The search answered without the page, so a question about it is not ready.
+    assert "first_question" not in wrong["finish"]
+    assert wrong["finish"]["indexing"]["state"] == "missed"
 
 
 @pytest.mark.parametrize("read_state", ["pending", "failed"])
@@ -459,6 +462,32 @@ def test_finish_does_not_report_incomplete_recall_as_missing(
     assert "- Recall check: needs attention" not in manifest
     if read_state == "pending":
         assert recall["warming"]["components"] == ["pending_visibility"]
+
+
+def test_finish_offers_no_first_question_while_the_imported_pages_are_not_yet_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {
+        "Coll/alpha.md": "# Alpha\n\nAn alpha observation.\n",
+        "Coll/beta.md": "# Beta\n\nA beta observation.\n",
+    })
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    def index_still_catching_up(*_args, degraded_out=None, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+        if degraded_out is not None:
+            degraded_out.append("pending_visibility")
+        return []
+
+    monkeypatch.setattr(find, "find", index_still_catching_up)
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert finished["phase"] == "done"
+    assert "first_question" not in finished["finish"]
+    assert "route" not in finished["finish"]
+    assert finished["finish"]["indexing"] == {
+        "state": "pending", "sampled": 2, "found": None, "missed": 0, "pending": 2, "failed": 0,
+    }
 
 
 def test_finish_retains_confirmed_hits_when_other_recall_is_pending(
