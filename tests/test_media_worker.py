@@ -3281,14 +3281,29 @@ def test_a_host_with_no_cuda_device_to_initialize_records_the_gpu_as_not_tested(
     child_env = worker._guard_gpu({"CUDA_VISIBLE_DEVICES": ""})
 
     assert child_env["CUDA_VISIBLE_DEVICES"] == ""
-    recorded = media_jobs.status(vault)["gpu_preflight"]
+    status = media_jobs.status(vault)
+    recorded = status["gpu_preflight"]
     assert (recorded["result"], recorded["reason"]) == ("not tested", "no CUDA device visible")
+    assert status["serving_worker_cuda_hidden"] is False  # recorded with the first launch, not before
 
 
-def test_a_restarted_supervisor_drops_the_last_lifetimes_gpu_verdict_and_reports_whether_cuda_is_hidden(
+def test_an_idle_supervisor_start_records_no_gpu_fact(vault) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._stop_event.set()
+
+    worker._supervise()
+
+    status = media_jobs.status(vault)
+    assert (status["gpu_preflight"], status["serving_worker_cuda_hidden"], status["child_crashes"]) == (None, None, None)
+
+
+def test_a_restarted_supervisor_drops_the_last_lifetimes_gpu_verdict_and_corrects_whether_cuda_is_hidden(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    media_jobs.MediaJobStore(vault).record_gpu_preflight("failed", "died with SIGSEGV during torch CUDA initialization")
+    store = media_jobs.MediaJobStore(vault)
+    store.record_gpu_preflight(
+        "failed", "died with SIGSEGV during torch CUDA initialization", serving_worker_cuda_hidden=False
+    )
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setenv(cuda_containment.CHILD_DEVICES_ENV, '"0"')
     worker = media_worker.MediaWorker(vault, execution_mode="process")
@@ -4417,7 +4432,7 @@ def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
     _run_supervisor_for(worker, 2.0)
 
     boundary = [op for op in taken if op and op.startswith("reserved_identity")]
-    # Two reads as before, plus the one write at the start of a supervisor lifetime.
+    # Two reads as before, plus the one open at the start of a supervisor lifetime, which writes only what is stale.
     assert len(boundary) <= 6, (
         f"an idle supervisor took the mutation boundary {len(boundary)} times in "
         f"two seconds ({boundary}); this is the log flood"

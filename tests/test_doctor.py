@@ -500,16 +500,17 @@ def test_media_gpu_check_names_why_the_gpu_is_denied_busy_or_untested(vault: Pat
 
 
 @pytest.mark.parametrize(
-    ("preflight", "driver", "says_child_uses_gpu"),
+    ("preflight", "hidden", "driver", "says_child_uses_gpu"),
     [
-        ({"result": "passed", "reason": None}, True, True),
-        (None, True, True),  # no media child has started yet on a host with a driver
-        (None, False, False),  # a host with no NVIDIA driver has no GPU to reserve
-        ({"result": "not tested", "reason": "no NVIDIA driver found"}, False, False),
+        ({"result": "passed", "reason": None}, True, True, True),
+        ({"result": "passed", "reason": None}, None, True, False),  # a supervisor that has not recorded the fact yet
+        (None, True, True, True),  # no media child has started yet on a host with a driver
+        (None, True, False, False),  # a host with no NVIDIA driver has no GPU to reserve
+        ({"result": "not tested", "reason": "no NVIDIA driver found"}, True, False, False),
     ],
 )
 def test_media_gpu_check_says_the_media_child_uses_the_gpu_only_where_one_exists(
-    vault: Path, monkeypatch, preflight, driver: bool, says_child_uses_gpu: bool
+    vault: Path, monkeypatch, preflight, hidden, driver: bool, says_child_uses_gpu: bool
 ) -> None:
     from exomem import media_jobs, resource_status
 
@@ -517,7 +518,7 @@ def test_media_gpu_check_says_the_media_child_uses_the_gpu_only_where_one_exists
         "healthy": True,
         "counts": {"pending": 0, "blocked": 0, "failed": 0},
         "gpu_preflight": preflight,
-        "serving_worker_cuda_hidden": True,
+        "serving_worker_cuda_hidden": hidden,
     }
     monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
     monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "/usr/bin/nvidia-smi" if driver else None)

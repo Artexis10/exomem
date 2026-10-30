@@ -1968,30 +1968,37 @@ class MediaJobStore:
         """End the record of a GPU wait; a no-op that writes nothing when none is recorded."""
         self._clear_meta(GPU_WAIT_KEY)
 
-    def record_gpu_preflight(self, result: str, reason: str | None) -> None:
-        """Record the preflight verdict: "passed", "failed" or "not tested", and why."""
+    def record_gpu_preflight(self, result: str, reason: str | None, *, serving_worker_cuda_hidden: bool) -> None:
+        """Record the preflight verdict ("passed", "failed" or "not tested", and why) and how CUDA is split.
+
+        The first launch of a media child records both. A supervisor that never launches one records neither,
+        so an idle serving process leaves the media store as it found it.
+        """
         conn = self._connect()
         try:
             with conn:
                 self._set_meta_json(
                     conn, GPU_PREFLIGHT_KEY, {"result": result, "reason": reason, "checked_at": time.time()}
                 )
+                self._set_meta_json(conn, SERVING_CUDA_HIDDEN_KEY, {"hidden": serving_worker_cuda_hidden})
         finally:
             conn.close()
 
     def reset_runtime_status(self, *, serving_worker_cuda_hidden: bool) -> bool:
         """Start of a worker lifetime: drop the last lifetime's verdict, crash count and orphaned wait.
 
-        Records whether CUDA is hidden. Returns whether a GPU wait is still recorded for waiting jobs.
+        It changes only what is stale, so an idle supervisor writes nothing. A recorded `hidden` fact that
+        no longer matches this process is corrected. Returns whether a GPU wait is still recorded for waiting jobs.
         """
         conn = self._connect()
         try:
             with conn:
                 self._set_meta_json(conn, GPU_PREFLIGHT_KEY, None)
                 self._set_meta_json(conn, CHILD_CRASHES_KEY, None)
-                self._set_meta_json(conn, SERVING_CUDA_HIDDEN_KEY, {"hidden": serving_worker_cuda_hidden})
                 if not _pending_speech_count(conn):
                     self._set_meta_json(conn, GPU_WAIT_KEY, None)  # no waiting job is left to own the old wait
+                if _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY) is not None:
+                    self._set_meta_json(conn, SERVING_CUDA_HIDDEN_KEY, {"hidden": serving_worker_cuda_hidden})
                 return _read_meta_json(conn, GPU_WAIT_KEY) is not None
         finally:
             conn.close()
@@ -2028,13 +2035,18 @@ class MediaJobStore:
 
     @staticmethod
     def _set_meta_json(conn: sqlite3.Connection, key: str, value: dict[str, Any] | None) -> None:
+        """Write one fact, or delete it for `None`. An unchanged fact and an absent one write nothing."""
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         if value is None:
-            conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+            if row is not None:
+                conn.execute("DELETE FROM meta WHERE key = ?", (key,))
             return
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, json.dumps(value)),
-        )
+        text = json.dumps(value)
+        if row is None or row[0] != text:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, text),
+            )
 
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
         states = [RUNNING]

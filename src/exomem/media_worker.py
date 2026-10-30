@@ -1703,7 +1703,12 @@ class MediaWorker:
             if not verdict.ok:
                 log.error("media worker: GPU preflight failed (%s); media runs without the GPU", verdict.reason)
             self._gpu_preflight = verdict
-            self._record_status(MediaJobStore.record_gpu_preflight, verdict.result, verdict.reason)
+            self._record_status(
+                MediaJobStore.record_gpu_preflight,
+                verdict.result,
+                verdict.reason,
+                serving_worker_cuda_hidden=cuda_containment.hidden_from_worker(),
+            )
         if self._gpu_preflight.ok:
             return env
         failure = f"GPU preflight {self._gpu_preflight.reason}; media processing runs without the GPU until the service restarts"
