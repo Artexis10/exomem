@@ -3282,7 +3282,7 @@ def test_a_host_with_no_cuda_device_to_initialize_records_the_gpu_as_not_tested(
 
     assert child_env["CUDA_VISIBLE_DEVICES"] == ""
     recorded = media_jobs.status(vault)["gpu_preflight"]
-    assert (recorded["result"], recorded["reason"]) == ("not tested", "no CUDA device visible; nothing tested")
+    assert (recorded["result"], recorded["reason"]) == ("not tested", "no CUDA device visible")
 
 
 def test_a_restarted_supervisor_drops_the_last_lifetimes_gpu_verdict_and_reports_whether_cuda_is_hidden(
@@ -3300,7 +3300,9 @@ def test_a_restarted_supervisor_drops_the_last_lifetimes_gpu_verdict_and_reports
     assert (status["gpu_preflight"], status["serving_worker_cuda_hidden"]) == (None, True)
 
 
-def test_the_record_of_a_gpu_wait_ends_once_the_waiting_work_is_gone(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_restart_ends_the_record_of_a_gpu_wait_whose_waiting_work_is_gone(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     result = _preserve_media_stub(vault, filename="deleted-while-waiting.m4a")
     job = media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
     store = media_jobs.MediaJobStore(vault)
@@ -3311,6 +3313,44 @@ def test_the_record_of_a_gpu_wait_ends_once_the_waiting_work_is_gone(vault, monk
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker._wake, "wait", lambda _timeout: worker._stop_event.set() or False)
 
+    worker._supervise()
+    store.enqueue(job)  # a later recording
+
+    assert media_jobs.status(vault)["gpu_wait"] is None  # the old record would still report the first wait
+
+
+def test_an_idle_pass_ends_the_record_of_a_gpu_wait_whose_waiting_work_is_gone_without_a_restart(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="deleted-while-waiting.m4a")
+    job = media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(job)
+    store.note_gpu_wait("insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed")  # what a busy child records
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    now = [1000.0]
+
+    class _BusyChild:
+        pid = 2_147_483_645
+        returncode = media_worker._GPU_BUSY_EXIT_CODE
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: _BusyChild())
+
+    def poll(_timeout):
+        if worker._child is None:  # the busy child was handled and the supervisor waits to ask again
+            now[0] += 10
+            if now[0] == 1010.0:
+                store.discard(job)  # the recording is deleted while it waits
+            if now[0] >= 1100.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
     worker._supervise()
     store.enqueue(job)  # a later recording
 

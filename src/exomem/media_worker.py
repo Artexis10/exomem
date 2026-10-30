@@ -1699,14 +1699,9 @@ class MediaWorker:
         A host with no CUDA device to initialize gets the verdict "not tested", never "passed".
         """
         if self._gpu_preflight is None:
-            if cuda_containment.no_cuda_visible(env):
-                verdict = cuda_containment.Preflight.untested("no CUDA device visible")
-            elif resource_status.find_nvidia_smi() is None:
-                verdict = cuda_containment.Preflight.untested("no NVIDIA driver found")
-            else:
-                verdict = cuda_containment.preflight(env)
-                if not verdict.ok:
-                    log.error("media worker: GPU preflight failed (%s); media runs without the GPU", verdict.reason)
+            verdict = cuda_containment.check_gpu(env, driver_present=resource_status.find_nvidia_smi() is not None)
+            if not verdict.ok:
+                log.error("media worker: GPU preflight failed (%s); media runs without the GPU", verdict.reason)
             self._gpu_preflight = verdict
             self._record_status(MediaJobStore.record_gpu_preflight, verdict.result, verdict.reason)
         if self._gpu_preflight.ok:

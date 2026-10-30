@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import held_fs, media_brakes, reserved_paths
+from . import cloud_cell, held_fs, media_brakes, reserved_paths
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .vault import parse_frontmatter
@@ -2813,7 +2813,7 @@ MACHINE_STATUS_FIELDS = (
 def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str, Any]:
     """The `process_media status` view of `status`, without operator detail."""
     full = status(vault_root, path=path)
-    fields = TOOL_STATUS_FIELDS if media_brakes.enabled() else TOOL_STATUS_FIELDS + MACHINE_STATUS_FIELDS
+    fields = TOOL_STATUS_FIELDS if cloud_cell.cloud_mode_enabled() else TOOL_STATUS_FIELDS + MACHINE_STATUS_FIELDS
     result = {field: full[field] for field in fields}
     result["health_scope"] = "reconciliation"
     if vault_root is not None:

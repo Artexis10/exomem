@@ -66,7 +66,7 @@ class Preflight:
     @classmethod
     def untested(cls, why: str) -> Preflight:
         """Nothing initialized CUDA, so nothing can be said about the GPU: the child's environment stays as it is."""
-        return cls(True, f"{why}; nothing tested", tested=False)
+        return cls(True, why, tested=False)
 
     @property
     def result(self) -> str:
@@ -184,6 +184,20 @@ def preflight(env: Mapping[str, str], *, timeout: float = PREFLIGHT_TIMEOUT_SECO
         return Preflight(False, f"died with {signal_name(-process.returncode)} during {stage}")
     detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
     return Preflight(False, f"exited {process.returncode} during {stage}" + (f": {detail[-1][:200]}" if detail else ""))
+
+
+def check_gpu(env: Mapping[str, str], *, driver_present: bool, timeout: float = PREFLIGHT_TIMEOUT_SECONDS) -> Preflight:
+    """The verdict on a GPU, for the media supervisor and for doctor: one rule, so they never disagree.
+
+    Without a visible CUDA device or an NVIDIA driver there is nothing to initialize, and the verdict
+    says "not tested", never "passed". `driver_present` is the caller's lookup, because this module
+    imports nothing from the package.
+    """
+    if no_cuda_visible(env):
+        return Preflight.untested("no CUDA device visible")
+    if not driver_present:
+        return Preflight.untested("no NVIDIA driver found")
+    return preflight(env, timeout=timeout)
 
 
 def signal_name(number: int) -> str:

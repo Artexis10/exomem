@@ -184,7 +184,7 @@ def select_device(
         if value.lower().startswith("cuda") and cuda_containment.no_cuda_visible():
             # torch's device syntax, not a word list. No CUDA device is visible to this process (the serving
             # worker, or a media child denied the GPU), so a CUDA model would fail to load: say so once.
-            _warn_cuda_unavailable(env, value)
+            _warn_cuda_unavailable(env, value, cuda_containment.preflight_failure())
             return "cpu"
         return value  # verbatim: cpu / cuda / cuda:1 / ...
 
@@ -199,13 +199,13 @@ def select_device(
 
 
 @functools.cache
-def _warn_cuda_unavailable(env: str, value: str) -> None:
+def _warn_cuda_unavailable(env: str, value: str, denied: str | None) -> None:
     log.warning(
-        "%s=%s asks for CUDA, but %s is empty in this process: the GPU is reserved for the media child. "
-        "Using the CPU.",
+        "%s=%s asks for CUDA, but this process has no visible CUDA device (%s is empty). Using the CPU.%s",
         env,
         value,
         cuda_containment.DEVICES_ENV,
+        f" The media supervisor denied this process the GPU: {denied}." if denied else "",
     )
 
 

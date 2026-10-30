@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from . import __version__, install_info, process_memory
+from . import __version__, cuda_containment, install_info, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
 from .kbdir import kb_dirname, kb_prefix
@@ -1680,7 +1680,25 @@ def _check_embeddings_disabled() -> DoctorCheck:
     return _check("embeddings.enabled", "pass", "EXOMEM_DISABLE_EMBEDDINGS is not set.")
 
 
-def _check_torch_cuda() -> DoctorCheck:
+def _gpu_probe() -> cuda_containment.Preflight:
+    """Initialize CUDA in a throwaway process, as the media supervisor does.
+
+    A CUDA library can crash the process that loads it. Doctor must report that fault, so it never
+    initializes CUDA in its own process until this probe has passed.
+    """
+    from . import resource_status
+
+    return cuda_containment.check_gpu(
+        cuda_containment.give_devices_to_child(os.environ),
+        driver_present=resource_status.find_nvidia_smi() is not None,
+    )
+
+
+def _probe_text(probe: cuda_containment.Preflight) -> str:
+    return f"GPU probe {probe.result}" + (f": {probe.reason}" if probe.reason else "")
+
+
+def _check_torch_cuda(probe: cuda_containment.Preflight | None = None) -> DoctorCheck:
     if not _module_available("torch"):
         return _check(
             "torch.cuda",
@@ -1688,20 +1706,33 @@ def _check_torch_cuda() -> DoctorCheck:
             "torch is not installed, so GPU acceleration cannot be checked.",
             "Install embeddings with `uv sync --extra embeddings`.",
         )
+    probe = _gpu_probe() if probe is None else probe
+    if probe.tested and not probe.ok:
+        return _check(
+            "torch.cuda",
+            "warn",
+            f"CUDA is not safe to use on this host: {_probe_text(probe)}. Doctor skipped its in-process GPU probe.",
+            "Repair the NVIDIA driver and the CUDA libraries that torch loads; a stale user-space package "
+            "can shadow the driver's libraries. The serving worker hides its CUDA devices, so it keeps "
+            "running; the media child runs without the GPU until the service restarts.",
+            details={"gpu_probe": {"result": probe.result, "reason": probe.reason}},
+        )
+    verdict = f" {_probe_text(probe)}."
     try:
         import torch
 
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
             arches = ", ".join(torch.cuda.get_arch_list())
-            return _check("torch.cuda", "pass", f"CUDA visible to torch: {name} ({arches}).")
+            return _check("torch.cuda", "pass", f"CUDA visible to torch: {name} ({arches}).{verdict}")
         mps = getattr(torch.backends, "mps", None)
         if mps is not None and mps.is_available() and mps.is_built():
             return _check(
                 "torch.cuda",
                 "pass",
                 "Apple Silicon MPS (Metal) backend available — bge/CLIP embeddings will "
-                "use the GPU. Note: faster-whisper (ASR) has no Metal path and stays on CPU.",
+                "use the GPU. Note: faster-whisper (ASR) has no Metal path and stays on CPU."
+                f"{verdict}",
             )
         # An NVIDIA host running CPU torch is a regression, not a configuration.
         # `uv pip install` (unlike `uv sync`) ignores [tool.uv.sources], so any
@@ -1720,7 +1751,7 @@ def _check_torch_cuda() -> DoctorCheck:
                 "torch.cuda",
                 "fail",
                 f"An NVIDIA driver is present (nvidia-smi found) but torch "
-                f"{getattr(torch, '__version__', '?')} cannot use CUDA — {detail}.",
+                f"{getattr(torch, '__version__', '?')} cannot use CUDA — {detail}.{verdict}",
                 "Reinstall the CUDA build of the SAME version from the pinned index, e.g. "
                 "`uv pip install --python <venv> --default-index "
                 "https://download.pytorch.org/whl/cu132 torch==<version>+cu132` — or run "
@@ -1730,7 +1761,7 @@ def _check_torch_cuda() -> DoctorCheck:
         return _check(
             "torch.cuda",
             "warn",
-            "torch imports but no GPU (CUDA or MPS) is available; embeddings/media run on CPU.",
+            f"torch imports but no GPU (CUDA or MPS) is available; embeddings/media run on CPU.{verdict}",
             "This is supported. On NVIDIA hosts verify the uv torch source and driver; on "
             "Apple Silicon ensure a recent arm64 torch wheel (default PyPI ships MPS).",
         )
@@ -1743,7 +1774,7 @@ def _check_torch_cuda() -> DoctorCheck:
         )
 
 
-def _check_torch_device() -> DoctorCheck:
+def _check_torch_device(probe: cuda_containment.Preflight | None = None) -> DoctorCheck:
     """Report the device the torch models (bge/CLIP) will actually select — read-only,
     loads no model."""
     if not _module_available("torch"):
@@ -1752,6 +1783,15 @@ def _check_torch_device() -> DoctorCheck:
             "warn",
             "torch not installed; embeddings fall back to lexical/CPU.",
             "Install with `uv sync --extra embeddings`.",
+        )
+    probe = _gpu_probe() if probe is None else probe
+    if probe.tested and not probe.ok:
+        # Performance mode would ask torch whether CUDA works, and that call is the fault. The
+        # serving worker hides its CUDA devices, so its torch models run on the CPU either way.
+        return _check(
+            "torch.device",
+            "pass",
+            f"bge/CLIP embeddings will run on: cpu. {_probe_text(probe)}.",
         )
     try:
         from . import accel
@@ -1867,17 +1907,6 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             remediation,
             details=status,
         )
-    crashes = status.get("child_crashes")
-    if crashes:
-        head = f"; the job next in the queue is {crashes['head_job']}" if crashes.get("head_job") else ""
-        return _check(
-            "media.runtime",
-            "warn",
-            f"The media child died by {crashes['signal']} {crashes['count']} time(s) in a row{head}.",
-            "Read the service log for the crash. If one file triggers it, move or delete that file. "
-            "The supervisor starts the next child after a delay that doubles to 5 minutes.",
-            details=status,
-        )
     if memory_blocked or over_budget:
         # Operator-only: tenants see memory-blocked work as waiting.
         return _check(
@@ -1901,11 +1930,32 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
     )
 
 
+def _check_media_child(vault_root: Path | None) -> DoctorCheck | None:
+    """Media children that keep dying by a signal. A check of its own, so an old failed job cannot hide it."""
+    if vault_root is None:
+        return None
+    from . import media_jobs
+
+    status = media_jobs.status(vault_root, diagnostic_snapshot=True)
+    crashes = status.get("child_crashes")
+    if not crashes:
+        return None
+    head = f"; the job next in the queue is {crashes['head_job']}" if crashes.get("head_job") else ""
+    return _check(
+        "media.child",
+        "warn",
+        f"The media child died by {crashes['signal']} {crashes['count']} time(s) in a row{head}.",
+        "Read the service log for the crash. If one file triggers it, move or delete that file. "
+        "The supervisor starts the next child after a delay that doubles to 5 minutes.",
+        details=status,
+    )
+
+
 def _check_media_gpu(vault_root: Path | None) -> DoctorCheck | None:
     """What the media supervisor knows about the GPU: a denied GPU, a busy GPU, and how CUDA is split."""
     if vault_root is None:
         return None
-    from . import media_jobs
+    from . import media_jobs, resource_status
 
     status = media_jobs.status(vault_root, diagnostic_snapshot=True)
     preflight = status.get("gpu_preflight")
@@ -1932,8 +1982,11 @@ def _check_media_gpu(vault_root: Path | None) -> DoctorCheck | None:
     facts = []
     if preflight:
         facts.append(f"GPU preflight {preflight['result']}" + (f": {preflight['reason']}" if preflight.get("reason") else ""))
-    if status.get("serving_worker_cuda_hidden"):
-        facts.append("torch models run on the CPU in the serving worker: the GPU is reserved for the media child")
+    # The line is true only where the media child can use the GPU: a passed preflight, or no preflight
+    # yet on a host with an NVIDIA driver. A host without a driver has no GPU to reserve.
+    child_can_use_gpu = preflight["result"] == "passed" if preflight else resource_status.find_nvidia_smi() is not None
+    if status.get("serving_worker_cuda_hidden") and child_can_use_gpu:
+        facts.append("CUDA is hidden from the serving process; the media child uses the GPU")
     if not facts:
         return None
     return _check("media.gpu", "pass", "; ".join(facts) + ".", details=status)
@@ -3875,6 +3928,9 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     media_runtime = _check_media_runtime(vault_root)
     if media_runtime is not None:
         checks.append(media_runtime)
+    media_child = _check_media_child(vault_root)
+    if media_child is not None:
+        checks.append(media_child)
     media_gpu = _check_media_gpu(vault_root)
     if media_gpu is not None:
         checks.append(media_gpu)
@@ -3894,7 +3950,8 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         # have. Reporting "torch is not installed" on an ONNX image is noise
         # about an absent framework, not a finding about the configured one.
         if extra == "embeddings":
-            checks.extend([_check_torch_cuda(), _check_torch_device()])
+            probe = _gpu_probe()
+            checks.extend([_check_torch_cuda(probe), _check_torch_device(probe)])
         checks.extend([_check_models_cache(), _check_model_residency(), _check_sqlite_vec()])
         mps_headroom = _check_mps_headroom()
         if mps_headroom is not None:
