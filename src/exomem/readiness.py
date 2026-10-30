@@ -57,23 +57,34 @@ _warm_finished = False
 #: optional preload held the 0.96.0 promotion `not_ready` for 53 s.
 _required_finished = False
 _runtime_managed = False
+#: This process has proved its recall catalogue exactly (strict equality with
+#: the live projection) since its managed warm began. It is what lets health
+#: keep answering ready while the catalogue later lags a projection that
+#: per-request recall can still serve; a process that never proved it has no
+#: such standing. Only a managed process can hold it: a standby's `mark_ready`
+#: runs unmanaged, and a flag it left behind could satisfy the promotion wait
+#: before the promoted worker proves anything. Every transition that starts a
+#: new proof epoch clears it.
+_retrieval_proven = False
 _started_at: float | None = None
 _retrieval_generation = 0
 
 
 def manage_runtime() -> None:
     """Declare that this process serves requests through managed activation."""
-    global _retrieval_generation, _runtime_managed
+    global _retrieval_generation, _retrieval_proven, _runtime_managed
     with _lock:
         _runtime_managed = True
+        _retrieval_proven = False
         _retrieval_generation += 1
 
 
 def unmanage_runtime() -> None:
     """Return request admission to the walk-backed offline contract."""
-    global _retrieval_generation, _runtime_managed
+    global _retrieval_generation, _retrieval_proven, _runtime_managed
     with _lock:
         _runtime_managed = False
+        _retrieval_proven = False
         _retrieval_generation += 1
 
 
@@ -89,13 +100,21 @@ def retrieval_proof_generation() -> int:
         return _retrieval_generation
 
 
+def retrieval_proven() -> bool:
+    """Whether this managed process has proved its catalogue since its warm began."""
+    with _lock:
+        return _retrieval_proven
+
+
 def admit_retrieval_proof(generation: int) -> bool:
     """Publish one exact proof only if no newer invalidation raced it."""
-    global _retrieval_generation
+    global _retrieval_generation, _retrieval_proven
     with _lock:
         if generation != _retrieval_generation:
             return False
         _events["retrieval_catalog"].set()
+        if _runtime_managed:
+            _retrieval_proven = True
         _retrieval_generation += 1
         return True
 
@@ -103,7 +122,7 @@ def admit_retrieval_proof(generation: int) -> bool:
 def begin_warm() -> None:
     """Mark a warm in-flight. Resets per-component events and deferred items."""
     global _retrieval_generation, _warm_active, _warm_finished, _started_at
-    global _required_finished
+    global _required_finished, _retrieval_proven
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
@@ -111,6 +130,7 @@ def begin_warm() -> None:
         _warm_active = True
         _warm_finished = False
         _required_finished = False
+        _retrieval_proven = False
         _started_at = time.monotonic()
         _retrieval_generation += 1
 
@@ -148,11 +168,13 @@ def required_warm_finished() -> bool:
 
 def mark_ready(component: str) -> list:
     """Set `component`'s event; atomically drain and return its deferred items."""
-    global _retrieval_generation
+    global _retrieval_generation, _retrieval_proven
     _check(component)
     with _lock:
         _events[component].set()
         if component == "retrieval_catalog":
+            if _runtime_managed:
+                _retrieval_proven = True
             _retrieval_generation += 1
         drained = _deferred[component]
         _deferred[component] = []
@@ -216,7 +238,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     restore a late-published catalog whose one background promotion callback
     lost a race.  The check never walks or reprojects the corpus.
     """
-    global _retrieval_generation
+    global _retrieval_generation, _retrieval_proven
     with _lock:
         if _events["retrieval_catalog"].is_set():
             admission = {"state": "ready", "admitted": True}
@@ -253,6 +275,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             # admission.  Publish the exact proof only if no newer invalidation
             # raced it (the generation comparison above is the CAS).
             _events["retrieval_catalog"].set()
+            _retrieval_proven = True
             _retrieval_generation += 1
         elif not proof_current and admission["admitted"]:
             _events["retrieval_catalog"].clear()
@@ -392,7 +415,7 @@ def snapshot() -> dict:
 def reset() -> None:
     """Test hook: return to the never-warmed state (mirrors find.clear_cache)."""
     global _retrieval_generation, _runtime_managed, _warm_active, _warm_finished, _started_at
-    global _required_finished
+    global _required_finished, _retrieval_proven
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
@@ -401,6 +424,7 @@ def reset() -> None:
         _warm_finished = False
         _required_finished = False
         _runtime_managed = False
+        _retrieval_proven = False
         _started_at = None
         _retrieval_generation += 1
 

@@ -339,6 +339,25 @@ def test_delete_crash_replays_the_removal_owner(tmp_path: Path, mixed: bool) -> 
     assert not derived_receipts.snapshot_pending_visibility(tmp_path, limit=512).paths
 
 
+def test_catalogue_row_from_before_a_status_only_edit_does_not_prove_custody(
+    tmp_path: Path,
+) -> None:
+    # A status-only edit leaves title, updated and body unchanged, so a row
+    # built from the old bytes matches every text column; retiring custody on
+    # it would serve the old status to status-filtered recall.
+    rel = "Knowledge Base/Notes/status.md"
+    before = delta._write(
+        tmp_path, rel, delta._page(title="Status", body="statusneedle", updated="2026-01-01")
+    )
+    delta._prime(tmp_path)
+    after = delta._write(tmp_path, rel, before.replace("status: active", "status: superseded"))
+
+    assert lexstore.holds_content_identities(tmp_path, {rel: delta._digest(after)}) == {rel: False}
+
+    lexstore.get_store(tmp_path).upsert_paths([tmp_path / rel])
+    assert lexstore.holds_content_identities(tmp_path, {rel: delta._digest(after)}) == {rel: True}
+
+
 def test_failed_unproven_prefix_backs_off_and_later_commit_recovers(tmp_path: Path) -> None:
     before = delta._page(title="Before", body="old", updated="2026-01-01")
     after = delta._page(title="After", body="new", updated="2026-02-01")
