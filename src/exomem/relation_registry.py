@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from . import relation_endpoints
 from .kbdir import kb_dirname
 from .vocabulary import registry as vocabulary_registry
 
@@ -57,11 +58,15 @@ _DEFINITION_FIELDS = {
     "replaced_by",
     "presentation_role",
     "label",
+    "endpoints",
 }
 #: Fields a shipped core relation may carry. This closed set is the pack's own schema
 #: (field names, not vocabulary); a pack with another field is a build defect.
 _CORE_FIELDS = frozenset(
-    {"description", "family", "direction", "inverse", "origins", "presentation_role", "generic"}
+    {
+        "description", "family", "direction", "inverse", "origins", "presentation_role", "generic",
+        "endpoints",
+    }
 )
 
 
@@ -89,6 +94,9 @@ class RelationDefinition:
     # Marks the core pack's one relation for "related, with no specific meaning". An
     # extension never carries it, so a specific refinement is never taken for it.
     generic: bool = False
+    # The pages this relation joins, as declared. An extension without a declaration takes its
+    # parent's (see `RelationRegistry.endpoints_of`); a relation with neither is undeclared.
+    endpoints: relation_endpoints.Endpoints | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -110,6 +118,8 @@ class RelationDefinition:
                 out[key] = scalar_value
         if self.generic:
             out["generic"] = True
+        if self.endpoints is not None:
+            out["endpoints"] = self.endpoints.as_dict()
         for key, collection_value in (
             ("aliases", self.aliases),
             ("source_kinds", self.source_kinds),
@@ -169,6 +179,16 @@ class RelationRegistry:
 
     def definition(self, key: str) -> RelationDefinition | None:
         return self.core.get(key) or self.extensions.get(key)
+
+    def endpoints_of(self, key: str) -> relation_endpoints.Endpoints | None:
+        """The endpoints a relation declares, else its parent's; None when neither does."""
+        definition = self.definition(key)
+        if definition is None:
+            return None
+        if definition.endpoints is not None:
+            return definition.endpoints
+        parent = self.core.get(definition.parent or "")
+        return parent.endpoints if parent is not None else None
 
     def terminal_replacement(self, key: str) -> str | None:
         return self.terminal_replacements.get(key)
@@ -297,6 +317,11 @@ def core_registry() -> RelationRegistry:
                 f"shipped relations pack: {key!r} has unknown fields {unknown} "
                 "or a generic that is not a boolean"
             )
+        endpoints, problems = (
+            relation_endpoints.parse(value["endpoints"]) if "endpoints" in value else (None, [])
+        )
+        if problems:
+            raise RuntimeError(f"shipped relations pack: {key!r} endpoints: {problems}")
         definitions[key] = RelationDefinition(
             key=key,
             description=str(value["description"]),
@@ -306,6 +331,7 @@ def core_registry() -> RelationRegistry:
             origins=frozenset(value.get("origins") or ["semantic_relation"]),
             presentation_role=value.get("presentation_role"),
             generic=value.get("generic", False),
+            endpoints=endpoints,
             core=True,
         )
     generic = sorted(key for key, definition in definitions.items() if definition.generic)
@@ -461,7 +487,83 @@ def _unchanged_saved_extensions(vault_root: Path, proposal: dict[str, Any]) -> f
 def validate_proposal(
     proposal: dict[str, Any], vault_root: Path | None = None
 ) -> list[dict[str, str]]:
-    return _blocking(load_registry(vault_root, proposal=proposal))
+    registry = load_registry(vault_root, proposal=proposal)
+    findings = _blocking(registry)
+    if vault_root is not None:
+        findings.extend(
+            endpoint_findings(
+                vault_root,
+                registry,
+                _changed_endpoint_keys(registry, load_registry(vault_root)),
+            )
+        )
+    return findings
+
+
+def _changed_endpoint_keys(registry: RelationRegistry, saved: RelationRegistry) -> list[str]:
+    """Extensions whose declared endpoints are new or differ from the saved registry's."""
+    return [
+        key
+        for key, definition in registry.extensions.items()
+        if definition.endpoints is not None
+        and (key not in saved.extensions or saved.extensions[key].endpoints != definition.endpoints)
+    ]
+
+
+def endpoint_findings(
+    vault_root: Path, registry: RelationRegistry, keys: Iterable[str]
+) -> list[dict[str, str]]:
+    """What the entity-type registry says about the endpoints of the extensions `keys`.
+
+    An endpoint may name only a registered entity type, and an extension's endpoints stay
+    inside its parent's, where a type covers its descendants. Entity types are vault data
+    that moves, so this reads the vault and runs only for the entries a save touches.
+    """
+    from . import entity_types
+
+    try:
+        types = entity_types.load_entity_types(vault_root)
+    except vocabulary_registry.RegistryError:
+        # No entity-type registry to check against: the endpoints only describe, so an
+        # unreadable one must not refuse a relation save.
+        return []
+    findings: list[dict[str, str]] = []
+    for key in keys:
+        definition = registry.extensions.get(key)
+        if definition is None or definition.endpoints is None:
+            continue
+        span = f"extensions.{key}.endpoints"
+        parent = registry.core.get(definition.parent or "")
+        for side in relation_endpoints.SIDES:
+            for token in definition.endpoints.side(side):
+                namespace, name = relation_endpoints.split(token)
+                if (
+                    namespace == relation_endpoints.ENTITY
+                    and name != relation_endpoints.ANY
+                    and types.resolve(name) is None
+                ):
+                    findings.append(
+                        _finding(
+                            "unknown_endpoint_type",
+                            f"{span}.{side}",
+                            f"{name!r} is not a registered entity type",
+                            relation=key,
+                        )
+                    )
+                elif parent is not None and parent.endpoints is not None and not any(
+                    relation_endpoints.covers(wider, token, types)
+                    for wider in parent.endpoints.side(side)
+                ):
+                    findings.append(
+                        _finding(
+                            "endpoint_outside_parent",
+                            f"{span}.{side}",
+                            f"{token!r} is outside the {side} endpoints of {definition.parent!r} "
+                            f"({', '.join(parent.endpoints.side(side))})",
+                            relation=key,
+                        )
+                    )
+    return findings
 
 
 def require_current_hash(current_hash: str, expected_hash: str) -> None:
@@ -485,6 +587,7 @@ def propose_extension(
     target_kinds: Iterable[str] | None = None,
     projects: Iterable[str] | None = None,
     page_types: Iterable[str] | None = None,
+    endpoints: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a read-only, reviewed extension delta without inferring meaning."""
     label = normalize_relation(requested_label)
@@ -533,6 +636,8 @@ def propose_extension(
     ):
         if supplied is not None:
             value[field_name] = supplied if field_name == "inverse" else list(supplied)
+    if endpoints is not None:
+        value["endpoints"] = deepcopy(dict(endpoints))
     scope: dict[str, list[str]] = {}
     if projects is not None:
         scope["projects"] = list(projects)
@@ -590,6 +695,8 @@ def _definition_document(definition: RelationDefinition) -> dict[str, Any]:
         value["presentation_role"] = definition.presentation_role
     if definition.label is not None:
         value["label"] = definition.label
+    if definition.endpoints is not None:
+        value["endpoints"] = definition.endpoints.as_dict()
     scope: dict[str, list[str]] = {}
     if definition.projects:
         scope["projects"] = sorted(definition.projects)
@@ -664,6 +771,7 @@ def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> Non
         "source_kinds",
         "target_kinds",
         "scope",
+        "endpoints",
     }
     for field_name in immutable:
         if field_name in patch and patch[field_name] != old.get(field_name):
@@ -710,6 +818,7 @@ def _semantic_continuity_findings(
         "origins",
         "source_kinds",
         "target_kinds",
+        "endpoints",
         "projects",
         "page_types",
     )
@@ -789,6 +898,11 @@ def save_registry(
     registry = load_registry(vault_root, proposal=proposal)
     inspected = vocabulary_registry.load(SPEC, Path(vault_root))
     blocking = vocabulary_registry.new_findings(inspected.findings, registry.findings)
+    blocking.extend(
+        endpoint_findings(
+            Path(vault_root), registry, _changed_endpoint_keys(registry, inspected.typed)
+        )
+    )
     if blocking:
         raise ValueError(f"INVALID_RELATION_REGISTRY: {blocking!r}")
     proposed_keys = set(registry.extensions) | set(registry.aliases)
@@ -1035,6 +1149,21 @@ def _parse_extension_data(
                     )
                 )
                 label = None
+        endpoints = None
+        if value.get("endpoints") is not None:
+            endpoints, problems = relation_endpoints.parse(value["endpoints"])
+            for problem in problems:
+                findings.append(
+                    _finding(
+                        "invalid_endpoints",
+                        f"{span}.endpoints",
+                        problem,
+                        relation=key,
+                        # Endpoints only describe; a saved declaration this release cannot read
+                        # never turns the registry into a refusal for pages.
+                        severity="warning" if key in grandfathered else "error",
+                    )
+                )
         definition = RelationDefinition(
             key=key,
             description=description,
@@ -1089,6 +1218,7 @@ def _parse_extension_data(
             core=False,
             presentation_role=presentation_role,
             label=label,
+            endpoints=endpoints,
         )
         extensions[key] = definition
     canonical = set(core.core) | set(extensions)
@@ -1364,7 +1494,9 @@ def _replacement_closure(
 # --------------------------------------------------------------------------- #
 
 #: Generic attributes a relation entry carries, in overlay field order.
-_MEANING_ATTRIBUTES = ("family", "direction", "inverse", "origins", "source_kinds", "target_kinds")
+_MEANING_ATTRIBUTES = (
+    "family", "direction", "inverse", "origins", "source_kinds", "target_kinds", "endpoints",
+)
 _ATTRIBUTE_FIELDS = (*_MEANING_ATTRIBUTES, "presentation_role")
 
 
@@ -1398,6 +1530,8 @@ class _Adapter:
             for name in ("source_kinds", "target_kinds"):
                 if getattr(definition, name):
                     attributes[name] = sorted(getattr(definition, name))
+            if definition.endpoints is not None:
+                attributes["endpoints"] = definition.endpoints.as_dict()
             scope = {
                 name: sorted(getattr(definition, name))
                 for name in ("projects", "page_types")
@@ -1476,6 +1610,8 @@ class _Adapter:
         for name in _ATTRIBUTE_FIELDS:
             if name in attributes and attributes[name] not in (None, "", []):
                 value = attributes[name]
+                if isinstance(value, Mapping):
+                    value = deepcopy(dict(value))
                 row[name] = list(value) if isinstance(value, (list, tuple)) else value
         if "scope" in attributes:
             row["scope"] = dict(attributes["scope"])
@@ -1507,6 +1643,11 @@ class _Adapter:
         removed: Container[str] = (),
     ) -> list[dict[str, str]]:
         return _semantic_continuity_findings(before, after, removed)
+
+    def admission(
+        self, vault_root: Path, candidate: RelationRegistry, touched: Mapping[str, Any]
+    ) -> list[dict[str, str]]:
+        return endpoint_findings(vault_root, candidate, touched)
 
 
 def _usage(vault_root: Path, snapshot: vocabulary_registry.Snapshot) -> Any:

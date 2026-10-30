@@ -31,6 +31,7 @@ from . import (
     memory_schema,
     metrics,
     note_types,
+    relation_endpoints,
     relation_registry,
     semantic_authoring,
     semantic_language_registry,
@@ -5112,6 +5113,100 @@ def _registry_findings(
                 resolved_rule=("relations", relation, "registry"),
             )
         )
+    findings.extend(_endpoint_findings(page, corpus))
+    return findings
+
+
+def _entity_type_registry(vault_root: Path) -> Any:
+    from . import entity_types
+    from .vocabulary.registry import RegistryError
+
+    try:
+        return entity_types.load_entity_types(vault_root)
+    except RegistryError:
+        # Without the vault's entity types a vault-defined type reads as unregistered,
+        # which the endpoint check treats as undecided, never as a mismatch.
+        return entity_types.core_registry()
+
+
+def _endpoint_page_kind(
+    state: SemanticPageState | None, types: Any
+) -> relation_endpoints.PageKind | None:
+    """What a page is for endpoint matching; None when its note type cannot say."""
+    if state is None:
+        return None
+    note_type = _type_basis(state).resolve(normalized_compiled_type(state.page_type)).note_type
+    if note_type is None:
+        return None
+    return relation_endpoints.page_kind(note_type.role, state.frontmatter.get("entity_type"), types)
+
+
+def _sides_outside(
+    endpoints: relation_endpoints.Endpoints,
+    subject: SemanticPageState | None,
+    target: SemanticPageState | None,
+    types: Any,
+) -> list[str]:
+    """The sides of an edge whose page is definitely outside the declared families."""
+    outside: list[str] = []
+    for side, state in (("subject", subject), ("object", target)):
+        kind = _endpoint_page_kind(state, types)
+        if kind is not None and relation_endpoints.fits(endpoints.side(side), kind, types) is False:
+            outside.append(side)
+    return outside
+
+
+def _endpoint_findings(
+    page: SemanticPageState, corpus: SemanticCorpusContext
+) -> list[ContractFinding]:
+    """A non-blocking finding for each authored edge outside its relation's endpoints.
+
+    The edge stays written. A page this writer cannot resolve, or one whose type leaves the
+    question open, is not judged, so a withheld target reads like an absent one.
+    """
+    findings: list[ContractFinding] = []
+    types: Any = None
+    for fact in writer_authored_facts(page, corpus):
+        if (
+            fact.canonical_relation is None
+            or fact.target_status != "resolved"
+            or fact.resolved_target_path is None
+        ):
+            continue
+        registry = corpus.registry_for(fact.authored_path)
+        endpoints = registry.endpoints_of(fact.canonical_relation)
+        if endpoints is None:
+            continue
+        types = types or _entity_type_registry(corpus.vault_root)
+        target_path = fact.resolved_target_path.split("#", 1)[0]
+        other = page if target_path == page.path else corpus.pages.get(target_path)
+        # A reversed frontmatter field (`superseded_by`) authors the edge from its target.
+        subject, target = (
+            (page, other) if fact.logical_source_path == fact.authored_path else (other, page)
+        )
+        sides = _sides_outside(endpoints, subject, target, types)
+        definition = registry.definition(fact.canonical_relation)
+        # A symmetric relation reads the same either way round, so it fits in either orientation.
+        if sides and definition is not None and definition.direction == "symmetric":
+            if not _sides_outside(endpoints, target, subject, types):
+                sides = []
+        if not sides:
+            continue
+        findings.append(
+            ContractFinding(
+                code="endpoint_mismatch",
+                severity="warning",
+                path=page.path,
+                span=None,
+                detail=(
+                    f"relation {fact.canonical_relation!r}: the {' and '.join(sides)} page is "
+                    "outside the endpoints the relation declares"
+                ),
+                remediation=RELATION_QUALITY_ADVISORIES["endpoint_mismatch"]["remediation"],
+                governed_element_identity=("relations", fact.identity),
+                resolved_rule=("relations", fact.canonical_relation, "endpoints"),
+            )
+        )
     return findings
 
 
@@ -5339,6 +5434,18 @@ def _disposition_finding(
 
 # These closed contract finding codes share fixed presentation text with compact replies.
 RELATION_QUALITY_ADVISORIES = MappingProxyType({
+    "endpoint_mismatch": {
+        "detail": (
+            "an authored relation joins a page outside the endpoints its relation declares; "
+            "the edge is written"
+        ),
+        "remediation": (
+            "Optional. The edge is kept. Review the relation with "
+            "`schema_memory(operation='inspect', subject='relations')`; keep it, or use a "
+            "relation whose declared endpoints fit. Never rewrite an edge merely to clear "
+            "this warning."
+        ),
+    },
     "RELATION_TYPED_EDGE_ABSENT": {
         "detail": (
             "connected through wikilinks, cited provenance or generic associations only; "

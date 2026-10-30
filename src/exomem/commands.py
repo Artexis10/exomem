@@ -11665,6 +11665,7 @@ def op_schema_memory(
                 "target_kinds",
                 "projects",
                 "page_types",
+                "endpoints",
                 "query",
             }
             if set(proposal) - allowed_proposal_fields:
@@ -11716,6 +11717,13 @@ def op_schema_memory(
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: proposal text fields must be strings"
                 )
+            if proposal.get("endpoints") is not None and not isinstance(
+                proposal["endpoints"], dict
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal.endpoints must be an object with "
+                    "subject and object lists"
+                )
             if (
                 why is not None
                 or save
@@ -11756,10 +11764,20 @@ def op_schema_memory(
                 target_kinds=proposal.get("target_kinds"),
                 projects=proposal.get("projects"),
                 page_types=proposal.get("page_types"),
+                endpoints=proposal.get("endpoints"),
                 query=proposal.get("query"),
                 limit=limit,
                 observations=observations if observations is not None else (),
                 continuation=continuation,
+            )
+            # The entity types an endpoint names are vault data, so the vault checks them.
+            candidate = relation_registry_module.load_registry(
+                proposal={"schema_version": 1, "extensions": result["delta"]["upsert"]}
+            )
+            result["findings"].extend(
+                relation_registry_module.endpoint_findings(
+                    vault_root, candidate, candidate.extensions
+                )
             )
             return {
                 "subject": "relations",

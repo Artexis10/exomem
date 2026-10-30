@@ -262,6 +262,21 @@ class EntityTypeRegistry:
         wanted = self.family_of(family) or _normalized(family)
         return actual is not None and actual == wanted
 
+    def covers(self, ancestor: str, leaf: str) -> bool:
+        """Whether the type `ancestor` is the type `leaf` or one of its ancestors.
+
+        A type covers its descendants: a vault type is registered under its `parent`.
+        """
+        wanted = self.resolve(ancestor)
+        current = self.resolve(leaf)
+        seen: set[str] = set()
+        while wanted is not None and current is not None and current.id not in seen:
+            if current.id == wanted.id:
+                return True
+            seen.add(current.id)
+            current = self.resolve(current.parent) if current.parent else None
+        return False
+
     def resolve(self, value: str) -> EntityTypeDefinition | None:
         normalized = _normalized(value)
         direct = (
