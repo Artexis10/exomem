@@ -6175,6 +6175,8 @@ class LeaseManager:
                 return result
             return finish_fast_ack_and_graph(result)
 
+        wide_hold: dict[str, Any] = {}
+
         try:
             @contextmanager
             def operation_guard() -> Iterator[None]:
@@ -6196,8 +6198,14 @@ class LeaseManager:
                             session_open_admission=session_open_admission,
                         )
                     )
-                    with guard:
-                        yield
+                    try:
+                        with guard:
+                            yield
+                    finally:
+                        if not narrow_boundary:
+                            # Post-terminal housekeeping takes later, shorter holds that
+                            # would overwrite this one before the journal row is written.
+                            wide_hold["timing"] = last_mutation_timing()
                 finally:
                     _ACTIVE_FAST_ACK_SESSION.reset(token)
 
@@ -6304,6 +6312,7 @@ class LeaseManager:
                 duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
                 scope=implicit_idempotency_scope or idempotency_principal_scope,
                 targets=[str(mutation_subject)],
+                wide_hold=wide_hold,
             )
             raise
         _log_mutation_event(
@@ -6327,6 +6336,7 @@ class LeaseManager:
             duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
             scope=implicit_idempotency_scope or idempotency_principal_scope,
             targets=[str(mutation_subject)],
+            wide_hold=wide_hold,
         )
         # Reclassify and its revert relocate through `move_file`, so they rewrite
         # the same withheld linking pages a move does.
@@ -6371,12 +6381,17 @@ class LeaseManager:
         duration_ms: float,
         scope: str | None,
         targets: list[str],
+        wide_hold: Mapping[str, Any] | None = None,
     ) -> None:
         """Best-effort mutation-journal write. Never raises."""
         try:
             from .mutation_journal import record_mutation
 
-            timing = last_mutation_timing()
+            timing = (
+                wide_hold["timing"]
+                if wide_hold is not None and "timing" in wide_hold
+                else last_mutation_timing()
+            )
             lease_role = (
                 "standalone"
                 if not self.config.enabled
