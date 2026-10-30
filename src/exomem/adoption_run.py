@@ -2477,7 +2477,7 @@ def _recall_check(root: Path, run: dict) -> dict:
             if degraded:
                 result["warming"] = _recall_warming(degraded)
         else:
-            result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
+            result["next_action"] = capabilities.active_call_route("maintain_memory", {"mode": "reconcile"})
     return result
 
 
