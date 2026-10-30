@@ -256,6 +256,36 @@ def test_legacy_owner_lock_is_hardened_with_runtime_state(tmp_path: Path) -> Non
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_owner_lock_released_during_hardening_does_not_stop_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another writer process releases its owner lock between our directory listing
+    # and the lstat; a standalone CLI writer once crashed here before any write.
+    state = tmp_path / "racing-lock-state"
+    owners = state / "idempotency-owners"
+    owners.mkdir(parents=True, mode=0o700)
+    released = owners / "released-by-peer.lock"
+    released.write_bytes(b"")
+    released.chmod(0o644)
+    kept = owners / "kept.lock"
+    kept.write_bytes(b"")
+    kept.chmod(0o644)
+    real_lstat = Path.lstat
+
+    def lstat_after_peer_release(path: Path):  # noqa: ANN202
+        if path == released:
+            path.unlink(missing_ok=True)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat_after_peer_release)
+
+    IdempotencyStore(state / "idempotency.sqlite")
+
+    assert not released.exists()
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o600
+
+
 def _initialize_idempotency_client(database: Path, role: str, legacy: bool, channel) -> None:  # noqa: ANN001
     from exomem import mutation_lock
 
