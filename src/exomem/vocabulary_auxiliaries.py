@@ -132,10 +132,39 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> tuple[Any, ...]:
     return tuple(images)
 
 
+# Primary-bound roles are admitted through their one primary (`vault._validate_batch_write_access`).
+_PRIMARY_BOUND_ROLES = frozenset(  # nosemgrep: ep-word-set -- Two of the sealed manifest's own code-owned roles.
+    {"lifecycle-review", "compiled-history"}
+)
+
+
+def _validate_each(vault_root: Path, images: tuple[Any, ...], manifests: tuple[Any, ...]) -> dict[str, str]:
+    """Validate sealed bindings of independent primaries, each against the complete images.
+
+    A claim is exclusive to one primary: a path that two bindings claim, or that is another
+    binding's primary, is refused. The merged roles name every derived output once.
+    """
+    roles: dict[str, str] = {}
+    primaries: set[str] = set()
+    for manifest in manifests:
+        if not isinstance(manifest, DerivedAuxiliaryManifest) or manifest.primary_path in primaries:
+            raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+        primaries.add(manifest.primary_path)
+        claimed = validate(vault_root, images, manifest)
+        if _PRIMARY_BOUND_ROLES.intersection(claimed.values()) or roles.keys() & claimed.keys():
+            raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+        roles.update(claimed)
+    if primaries & roles.keys():
+        raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+    return roles
+
+
 def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str, str]:
-    """Validate one sealed binding against the complete planned or staged images."""
+    """Validate one sealed binding, or a tuple of them, against the complete planned or staged images."""
     if manifest is None:
         return {}
+    if isinstance(manifest, tuple):
+        return _validate_each(Path(vault_root).resolve(), tuple(images), manifest)
     root = Path(vault_root).resolve()
     if not isinstance(manifest, DerivedAuxiliaryManifest) or manifest._seal is not _SEAL or manifest.root != root:
         raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
