@@ -1435,10 +1435,14 @@ class StoreServer:
                     # does: a caller that gets MUTATION_ACKNOWLEDGEMENT_PENDING returns while this
                     # still runs. Governance policy stays pinned through the release, which a read's
                     # snapshot allows. Path resolution and the connector ceiling are pinned for the
-                    # body only: the terminal egress filter re-reads them live. The MCP second pass
-                    # runs outside both scopes, so it stays live too. A write opens neither: it can
-                    # wait for the mutation boundary and must then decide on the policy and ceiling
-                    # it finds, not on the ones it read before the wait.
+                    # body only: the terminal egress filter re-reads them, but inside the dispatcher
+                    # its cross-check replays the body's verdict for a page it asks about with an
+                    # equal shape (`published_admission.RequestDecisions`), so a ceiling or placement
+                    # change within that one command is first seen by the MCP second pass. That pass
+                    # runs outside both scopes and shares no answer with the dispatcher, so it
+                    # decides live. A write opens neither: it can wait for the mutation boundary and
+                    # must then decide on the policy and ceiling it finds, not on the ones it read
+                    # before the wait.
                     scope.enter_context(state_paths.resolution_scope())
                     scope.enter_context(policy.request_policy_snapshot())
                 scope.enter_context(preview_store(self.root, self.runtime))

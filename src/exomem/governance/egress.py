@@ -58,10 +58,22 @@ from .. import (
     state_paths,
     vault,
 )
-from ..collection_store.preview import Batch, bound_writer, canonical_read, projection_decision
+from ..collection_store.preview import (
+    Batch,
+    bound_writer,
+    canonical_read,
+    note_checked_hash,
+    projection_decision,
+)
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
-from ..published_admission import Admission, AdmittedPredicate, admission_of, announce
+from ..published_admission import (
+    Admission,
+    AdmittedPredicate,
+    admission_of,
+    announce,
+    request_decisions,
+)
 from . import (
     artifact_census,
     authorization_custody,
@@ -2214,6 +2226,7 @@ def _decide_path(
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
+        note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
     canonical = projection_decision(
@@ -8730,6 +8743,38 @@ def filter_withheld_entries(
             return kept
         return node
 
+    def _pages_named(node, directory=None, location=()):
+        """The candidates the walk below asks about, found the way it finds them.
+
+        A page this misses is decided on a request of its own, and one it adds is decided for nothing:
+        a drift between the two costs requests and never a verdict.
+        """
+        if isinstance(node, Mapping):
+            here = _directory_of(node)
+            here = directory if here is None else here
+            for key, value in node.items():
+                child_location = (*location, key)
+                if _path_like(key) is not None:
+                    yield from _candidate_paths({"path": key}, here, ())
+                if _is_identifier_key(key) or isinstance(value, Mapping):
+                    yield from _candidate_paths(value, here, child_location)
+                yield from _pages_named(value, here, child_location)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for index, entry in enumerate(node):
+                child_location = (*location, index)
+                yield from _candidate_paths(entry, directory, child_location)
+                yield from _pages_named(entry, directory, child_location)
+
+    from ..collection_store import ownership
+
+    if (request_decisions() is not None and operation is None and not fail_closed
+            and not ownership.file_only(vault_root)):
+        # The store decides the pages of one pass together; a vault with no store has none to announce.
+        root_candidates = _candidate_paths(payload, None, ()) if isinstance(payload, Mapping) else ()
+        announce(
+            resolved for candidate in (*root_candidates, *_pages_named(payload))
+            if (resolved := _resolve_vault_item(candidate)) is not None
+        )
     filtered = _walk(payload)
     if (
         isinstance(payload, Mapping)

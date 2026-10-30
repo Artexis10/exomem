@@ -7,7 +7,6 @@ Nothing else, and no environment flag, changes file-mode routing.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -214,44 +213,52 @@ class Batch:
     #: It is read once for the command, so every page is decided against the same set.
     pinned: Mapping[str, Callable[[Path], Any]] = field(default_factory=dict)
     #: The keyword that holds the content hash a call expects its page to have, which the read
-    #: answers None for when the page differs. The batch decides each page against its own hash;
-    #: a call whose expected hash differs from that one is decided again on its own.
+    #: answers None for when the page differs. The read reports the hash it checked through
+    #: `note_checked_hash`; a call that expects another hash than that one is decided on its own.
     expects_hash: str | None = None
     #: A call that no other page may share: it records an effect, or carries a value of one page.
     alone: Callable[[Mapping[str, Any]], bool] | None = None
 
 
+#: The content hash each page of the store request being served was checked against, or None outside one.
+_CHECKED_HASHES: ContextVar[dict[str, str] | None] = ContextVar("store_checked_hashes", default=None)
+
+
+def note_checked_hash(path, digest):
+    """Report the hash of the bytes a read decided a page on, where it compares them to an expected hash.
+
+    A batched answer is decided for the page as it is now and carries no expected hash. A caller that
+    expects other bytes than these is decided on its own, and the batch never reads a page twice.
+    """
+    if (checked := _CHECKED_HASHES.get()) is not None:
+        checked[path] = digest
+
+
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
 
-    def __init__(self, read, vault_root, calls, hash_keyword=None):
-        self.read, self.vault_root, self.calls, self.hash_keyword = read, vault_root, calls, hash_keyword
+    def __init__(self, read, vault_root, calls):
+        self.read, self.vault_root, self.calls = read, vault_root, calls
         #: The pages this request decides, for the observability span (`StoreServer.call`).
         self.pages = len(calls)
 
     def __call__(self):
         from ..cli_ops import OpError
 
-        answers = {}
-        for path, (args, kwargs) in self.calls.items():
-            live = _content_hash(self.vault_root, path) if self.hash_keyword is not None else None
-            if live is not None:
-                kwargs = {**kwargs, self.hash_keyword: live}
-            try:
-                answers[path] = ("value", self.read(self.vault_root, *args, **kwargs), live)
-            except (CollectionStoreError, OpError) as error:
-                answers[path] = ("refused", error, live)
-            except Exception as error:  # noqa: BLE001 - raised again at that page's own turn
-                answers[path] = ("raised", error, live)
+        answers, checked = {}, {}
+        token = _CHECKED_HASHES.set(checked)
+        try:
+            for path, (args, kwargs) in self.calls.items():
+                try:
+                    kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
+                except (CollectionStoreError, OpError) as error:
+                    kind, payload = "refused", error
+                except Exception as error:  # noqa: BLE001 - raised again at that page's own turn
+                    kind, payload = "raised", error
+                answers[path] = (kind, payload, checked.get(path))
+        finally:
+            _CHECKED_HASHES.reset(token)
         return answers
-
-
-def _content_hash(vault_root, path):
-    """The sha256 of the page's current bytes, or None where they cannot be read."""
-    try:
-        return hashlib.sha256((Path(vault_root) / path).read_bytes()).hexdigest()
-    except OSError:
-        return None
 
 
 def _request(server, decisions, work):
@@ -268,7 +275,7 @@ def _request(server, decisions, work):
 
 def _replay(answer):
     """What that page's own call would have returned or raised."""
-    kind, payload, _live = answer
+    kind, payload, _checked = answer
     if kind != "value":
         raise payload
     return payload
@@ -316,10 +323,12 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
                 continue  # that page asks for itself and is refused there
             if routed is server:
                 calls[other] = ((other,), shared)
-        answers.update(_request(server, decisions, _Decide(read, vault_root, calls, batch.expects_hash)))
+        answers.update(_request(server, decisions, _Decide(read, vault_root, calls)))
     answer = answers[path]
-    # A caller that expected other bytes than the page has now is decided as it asked.
-    return alone() if expected is not None and expected != answer[2] else _replay(answer)
+    # A caller that expected other bytes than the page was decided on is decided as it asked. A read that
+    # reached its verdict without comparing bytes gave a verdict no expected hash can change.
+    checked = answer[2]
+    return alone() if expected is not None and checked is not None and expected != checked else _replay(answer)
 
 
 def canonical_read(function=None, *, projection=False, unavailable=None,
