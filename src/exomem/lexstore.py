@@ -6327,14 +6327,14 @@ class LexicalStore:
         """Would each walk yield this file? Single-file replay of the walks'
         directory skip rules, so hook-written rows match a rebuild's."""
         from . import find as find_module
-        from .vault import VAULT_SCAN_SKIP_DIRS
+        from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
 
         try:
             rel_parts = path.resolve().relative_to(self.vault_root.resolve()).parts
         except ValueError:
             return False, False
         dirs = rel_parts[:-1]
-        in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs)
+        in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage("/".join(dirs))
         in_kb = (
             len(rel_parts) > 1
             and rel_parts[0] == kb_dirname()

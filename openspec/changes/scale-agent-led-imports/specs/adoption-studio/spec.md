@@ -70,12 +70,17 @@ When an `exomem import` finishes, the command SHALL write a stage record for the
 
 ### Requirement: A staged import is not indexed
 
-The vault-wide scans that build search, recall and their catalogues SHALL skip the `_Imports/` folder at the vault root. A staged file SHALL reach the indexes only through the Source that adoption files for it. Adoption Studio SHALL still scan a stage that a run names.
+The vault-wide scans that build search, recall and their catalogues SHALL skip each stage, `_Imports/<import_id>/` at the vault root. A staged file SHALL reach the indexes only through the Source that adoption files for it. A folder named `_Imports` elsewhere, or a named folder under the root `_Imports/`, SHALL stay indexed. Adoption Studio SHALL still scan a stage that a run names.
 
 #### Scenario: A staged note is not found by vault-scope search
 
 - **WHEN** a note sits under `_Imports/<import_id>/` and a vault-scope search queries a term that only that note holds
 - **THEN** the search returns no hit for it
+
+#### Scenario: A person's own `_Imports` folder stays searchable
+
+- **WHEN** a note sits in a folder named `_Imports` below another folder, or in a named folder under the root `_Imports/`
+- **THEN** a vault-scope search finds it
 
 #### Scenario: A large import does not hold the cell's readiness
 

@@ -21,7 +21,7 @@
 - [x] 3.2 On a paged collection, resolve links by path or by a bare name unique across the whole scan, leave alias-only matches unresolved, and refuse to plan a page while an earlier page has unapplied items. Verify: tests show an ambiguous name left unresolved, a unique one resolved, and the refusal naming the earlier run.
 - [x] 3.3 Add `adoption_ceiling()` for staged files on every runtime, leaving `fetch_budget()` alone. Copy each artifact in one streamed pass that hashes while it copies and rolls back on a mismatch. Size the default to one call's time budget, and leave a larger file in the residual with a code. Verify: a Cloud-mode test applies a staged artifact over 100 MiB with memory bounded by the chunk size, and a mismatch rolls back.
 - [x] 3.4 Check free space plus a reserve that covers derived state before each chunk, and stop with a resumable `INSUFFICIENT_SPACE`. Verify: a test with a constrained free-space reading stops before the chunk and resumes.
-- [x] 3.5 Skip the `_Imports/` stage in the vault-wide scans, with the stage folder name kept in one place. Verify: a test shows a staged note absent from vault-scope search while a note in another folder outside the Knowledge Base is found.
+- [x] 3.5 Skip each `_Imports/<import_id>/` stage at the vault root in the vault-wide scans, with the stage folder name kept in one place. Verify: a test shows a staged note absent from vault-scope search, while notes in a nested `_Imports` folder, a Knowledge Base `_Imports` folder and a named folder under the root `_Imports/` are found.
 
 ## 4. Agent guidance
 
