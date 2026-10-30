@@ -8739,7 +8739,7 @@ class EpistemicGraphIndex:
                 {
                     "from": source,
                     "to": target,
-                    "relation_type": "relates_to",
+                    "relation_type": generic,
                     "method": "shared_open_question",
                     "evidence": {
                         "shared_questions": len(matches),
@@ -8793,7 +8793,7 @@ class EpistemicGraphIndex:
                 {
                     "from": source,
                     "to": target,
-                    "relation_type": "relates_to",
+                    "relation_type": generic,
                     "method": "shared_resolution_target",
                     "evidence": {
                         "shared_targets": len(matches),
@@ -8839,7 +8839,7 @@ class EpistemicGraphIndex:
                 {
                     "from": str(source),
                     "to": target_rel,
-                    "relation_type": "relates_to",
+                    "relation_type": generic,
                     "method": "shared_sources",
                     "evidence": {
                         "shared_source": _page_rel(
@@ -8930,6 +8930,7 @@ class EpistemicGraphIndex:
             "frontmatter_sources",
             "shared_sources",
         )
+        fit = relation_queue.RelationFit(self.vault_root, basis=type_basis)
         for source in selected:
             if len(groups) >= page_cap:
                 break
@@ -8992,6 +8993,9 @@ class EpistemicGraphIndex:
                 if effective != "open":
                     filtered["decided"] += 1
                     continue
+                # Where a specific relation fits both pages, the item carries them and offers no
+                # bullet: the agent picks the relation, and accept refuses without one.
+                options = fit.options(candidate, registry=selected_registries[source])
                 item = {
                     "review_id": review_id,
                     "ref": relation_queue.relation_review_ref(review_id),
@@ -9001,12 +9005,14 @@ class EpistemicGraphIndex:
                     "relation_type": relation_type,
                     "method": candidate["method"],
                     "evidence": candidate.get("evidence") or {},
-                    "bullet": relation_queue._bullet(candidate),
+                    "bullet": None if options else relation_queue._bullet(candidate),
                     "target_ref": from_ref,
                     "state": "open",
                     "signal_version": signal_version,
                     "source_path": source,
                 }
+                if options:
+                    item["options"] = options
                 if candidate.get("internal_evidence"):
                     item["internal_evidence"] = candidate["internal_evidence"]
                 visible.append(item)
@@ -9926,8 +9932,17 @@ def suggest_relations(
         )
     if include_model_suggestions:
         warnings.append("model-backed graph relation suggestions unavailable")
+    from . import relation_queue
+
+    # A generic proposal between pages that a specific relation fits carries those relations,
+    # so the agent chooses one instead of taking the generic as the answer.
+    fit = relation_queue.RelationFit(vault_root)
+    shown = []
+    for candidate in _dedupe_candidates(candidates)[: max(0, limit)]:
+        options = fit.options(candidate)
+        shown.append({**candidate, "options": options} if options else candidate)
     return {
-        "candidates": _dedupe_candidates(candidates)[: max(0, limit)],
+        "candidates": shown,
         "warnings": warnings,
         "model_suggestions_available": False,
         "mutated": False,
@@ -13338,7 +13353,7 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
             {
                 "from": rel_path,
                 "to": other_key.removeprefix("file:"),
-                "relation_type": "relates_to",
+                "relation_type": relation_registry.generic_relation_key(),
                 "method": "shared_sources",
                 "evidence": {"shared_source": shared_key.removeprefix("file:")},
             }
@@ -13598,7 +13613,7 @@ def _shared_open_question_candidates(
         {
             "from": rel_path,
             "to": target,
-            "relation_type": "relates_to",
+            "relation_type": relation_registry.generic_relation_key(),
             "method": "shared_open_question",
             "evidence": {
                 "shared_questions": len(matches),
@@ -13660,7 +13675,7 @@ def _shared_resolution_target_candidates(
         {
             "from": rel_path,
             "to": target,
-            "relation_type": "relates_to",
+            "relation_type": relation_registry.generic_relation_key(),
             "method": "shared_resolution_target",
             "evidence": {
                 "shared_targets": len(matches),
@@ -14018,7 +14033,7 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
             {
                 "from": self_path,
                 "to": target_path,
-                "relation_type": "relates_to",
+                "relation_type": relation_registry.generic_relation_key(),
                 "method": "embedding_proximity",
                 "evidence": {"cosine": round(float(score), 4)},
             }
