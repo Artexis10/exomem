@@ -22,6 +22,7 @@ Originals must still stay byte-identical as evidence. The owner must be able to 
 - **Export without the key in an egress pod.** A packing step that reaches only the edge decrypts evicted originals. A separate step without the key uploads the archive.
 - **Downloads and playback.** An owner opens an original through a link that works only in a browser signed in to Exomem. Local agents use `exomem cloud download` over OAuth. No tool result carries a bearer link.
 - **Storage quota.** The included media allowance is a configured value in the one limits source; the first value is 100 GB. Admission checks it before any byte arrives. The 20 GiB volume cap stays and stops being the media limit.
+- **Imports larger than the volume (amended 2026-10-30, task 5.4).** A sender splits the folder into windows that the cell's window budget sizes. The runtime stores each landed window's large members in the media store, and adoption files them by reference. Eviction counts owner reads only and runs during the import. Design D12 records the options.
 - **Default off, soft fail.** The store, the edge and eviction are off by default. A cell is enabled from a canary list or by a fleet switch. With the store unreachable, a cell keeps every original on its volume, queues offload work and evicts nothing.
 
 No server-side model is added. Extraction keeps running inside the cell, before any eviction, under `add-cloud-multimodal-processing`.
@@ -37,6 +38,8 @@ No server-side model is added. Extraction keeps running inside the cell, before 
 - `automatic-media-processing`: an evicted original keeps its sidecar, transcript and derived rows, and re-processing hydrates it first.
 - `hosted-vault-portability`: deletion fan-out treats eviction as a state, not a deletion, and export writes evicted originals byte-identical.
 - `cloud-operator-access`: privacy copy discloses the media store and who holds the media key.
+- `cloud-vault-import`: an import larger than the volume arrives in windows, and the cell reports its window budget.
+- `adoption-studio`: the inventory lists stored members, the ceiling applies to copies only, and the residual reports store bytes.
 - `cloud-cell`: not canonical yet. The runtime egress rule gains the media edge peer through dated in-place amendments in `adopt-exomem-cloud-plain-cells` and `move-cloud-cells-to-local-storage`. This change carries no delta for it.
 
 ## Impact

@@ -25,7 +25,7 @@
   - a corrupt object fails with `MEDIA_ORIGINAL_UNVERIFIED` and leaves the path empty;
   - reconciliation over a hydrated file with a new inode and change time rewrites no sidecar;
   - eviction and hydration fire no fan-out;
-  - eviction skips pending and unconfirmed originals;
+  - eviction skips pending and unconfirmed originals (2026-10-30: M4 in 5.4.3 narrows "pending" to running jobs);
   - a vault restore that brings back a reference to a destroyed version re-offloads the original and never evicts it on that reference.
 - [ ] 3.6 Report evicted originals as stored in processing status, and hydrate before an explicit re-process. Verify: processing tests for both.
 - [ ] 3.7 Close the recorded pre-canary repairs: terminal verification refusals and targeted retry, current-bound recovery, indexed protections and scoped pins, local staging errors, catalog admission before hydration, bounded partial overview, and exact-path job and index status. Verify: retained-ledger migration, repaired-input recovery, live capacity exclusion, refused and successful moves, and restricted local and evicted-original status through the real dispatcher. Record query plans against a populated temporary ledger. These repairs follow the disabled foundation as one rollout-dependent batch.
@@ -76,6 +76,52 @@
   - [ ] 5.3.2 Add Source sessions through the existing canonical writer and mutation replay protocol. Verify metadata refusal before bytes, lane isolation, a recovered acknowledgement without duplicate captures, and unknown outcomes with retained uploads. Reuse the existing staged file; keep semantic compilation agent-authored.
   - [ ] 5.3.3 Verify resource bounds before advertising larger Source uploads in each supported authority mode. Activated vocabulary writes currently materialize staged images and reject arbitrary binary changes; preserve that authority while preventing an oversized allocation just to discover a refusal.
 - [ ] 5.4 Add streaming import and split S2 admission into volume and store checks, amending S2's contract in its owning change. Verify: an import larger than the volume cap lands without the volume passing its cap.
+  - Design: D12, with the amendments to D3, D8 and D10 (2026-10-30). The shape, the Home sender in slice 1, eviction for every original, the store check on the whole allowance and the hold cost are pending operator confirmation.
+  - Prerequisite: `scale-agent-led-imports` merges first. It supplies the stage manifests, consume-on-filing, paging, collection identity and the space stop.
+  - Slices: slice 1 is 5.4.1 to 5.4.8, 5.4.7a and 5.4.12, proved on a local-storage cell. Slice 2 is 5.4.9 and 5.4.10. Task 5.4.11 lands before version destruction is enabled. Slice 3 is pipelined uploads and, if holds hurt, option R. Task 5.4.13 closes all slices.
+  - [ ] 5.4.1 Amend D3, D8 and D10 of this change, the Substrate change `admit-cloud-imports-against-published-limits` and `publish-cloud-import-limits` as dated amendments. Verify: `openspec validate --all --strict` passes in both repositories.
+    - Done in this change on 2026-10-30: D3, D8, D10, D12, the specs and these tasks. Still open: the Substrate change and `publish-cloud-import-limits`.
+  - [ ] 5.4.2 Add the shared store-bound predicate and import it in the CLI, stage offload and the inventory. Verify: a test shows that the CLI's declared store bytes for a generated folder equal the bytes that stage offload stores.
+  - [ ] 5.4.3 Apply M1 to M4. Verify these with tests:
+    - a filed PDF offloads without a restart;
+    - an offload is claimed before queued transcription;
+    - a never-read original is evicted under pressure, and an owner-read one is not;
+    - extraction of an evicted original leaves it evictable;
+    - eviction reads a bounded candidate set.
+  - [ ] 5.4.4 Add stage references, stage offload and the stage state function. Verify these with tests:
+    - removal happens only after a confirmed reference;
+    - text, over-bound and changed members stay;
+    - a crash before the reference write retries without loss;
+    - discard releases references at the next start;
+    - a duplicate uploads nothing.
+  - [ ] 5.4.5 File by reference. Verify these with tests:
+    - a 2 GiB stored member files with no volume bytes written;
+    - a stop between the sidecar and the release settles as already applied;
+    - the hydrated original matches the manifest SHA-256;
+    - the residual names stored members.
+  - [ ] 5.4.6 Report the window budget and the per-stage drain in `adoption_studio status`. Verify: tests for the arithmetic, and for unknown when an input cannot be read.
+  - [ ] 5.4.7 Add CLI windows, the series checkpoint, the budget wait and the fallbacks. Verify these with tests against a synthetic API and MCP:
+    - three times the budget becomes three or more windows;
+    - a restart after window 2 resends nothing;
+    - a refused window is planned again smaller;
+    - an older cell gets one import.
+  - [ ] 5.4.7a Add the Home sender in Substrate: the browser uploader windows a selected folder from the same window budget and store-bound rule that the cell reports, through the owner channel. The filing flow stays in MCP tools. Verify: browser tests against a synthetic cell show the same partition as the CLI for one generated folder, a restart that resends no landed window, and one import for an older cell.
+  - [ ] 5.4.8 Update the tool text and regenerate the surface and plugins. Verify: the tool-surface and scaffold-leak tests pass, and descriptions stay within the plugin description limit.
+  - [ ] 5.4.9 Make cellctl publish `media_limits` (control-plane review). Verify: tests for selected, unselected and retained-only cells, and no write when nothing changed.
+  - [ ] 5.4.10 Add the Substrate S2 split in the Substrate change `admit-cloud-imports-against-published-limits`. Verify these with PostgreSQL integration tests:
+    - windowed admission without growth;
+    - the whole-allowance refusal;
+    - the old formula for older senders and cells.
+  - [ ] 5.4.11 Make the backup-retention manifests list captured stage references, before version destruction is enabled. Verify: a version named only by a stage reference survives collection.
+  - [ ] 5.4.12 Extend the large-import rehearsal of `scale-agent-led-imports` (its task 5.1) with the media store on a fixed volume V, in a B2 sandbox bucket. Import at least 2.5 times V, with files over 200 MiB and one file above V/4. Verify:
+    - the logs show no ENOSPC, `INSUFFICIENT_SPACE` or `STORAGE_ALLOWANCE_EXCEEDED`;
+    - the volume claim and `storage_gib` equal V before and after;
+    - the sampler's peak, a lower bound, is at most V less the reserve;
+    - every eligible Source downloads to the manifest SHA-256;
+    - the residual is as expected;
+    - the report records the window count and the hold downtime per window;
+    - the report records whether a note links to an attachment that an earlier window stored.
+  - [ ] 5.4.13 Run the full corpus, get an independent review, merge, then roll out with the operator. Verify: the review names C4 and C6 verdicts, and the rollout steps in D10 each have an operator approval.
 - [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, with its network and admission rules (the Job and its policy do not exist before this task), and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.
 
 ## 6. Rollout (D11)
