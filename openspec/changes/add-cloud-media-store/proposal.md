@@ -38,7 +38,7 @@ No server-side model is added. Extraction keeps running inside the cell, before 
 - `automatic-media-processing`: an evicted original keeps its sidecar, transcript and derived rows, and re-processing hydrates it first.
 - `hosted-vault-portability`: deletion fan-out treats eviction as a state, not a deletion, and export writes evicted originals byte-identical.
 - `cloud-operator-access`: privacy copy discloses the media store and who holds the media key.
-- `cloud-vault-import`: an import larger than the volume arrives in windows, the import receipt records each member's identity, and the cell reports its window budget.
+- `cloud-vault-import`: an import larger than the volume arrives in windows, the import receipt records each member's identity, and the cell reports its window budget. A discard keeps a record of the members that adoption did not file.
 - `adoption-studio`: adoption files an artifact member by rename, links resolve against the whole series, and the residual tells the person to keep the source.
 - `cloud-cell`: not canonical yet. The runtime egress rule gains the media edge peer through dated in-place amendments in `adopt-exomem-cloud-plain-cells` and `move-cloud-cells-to-local-storage`. This change carries no delta for it.
 

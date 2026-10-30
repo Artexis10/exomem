@@ -53,21 +53,45 @@ The system SHALL decide an original's state through one function, from the prese
 
 ### Requirement: Eviction frees volume space only from confirmed, idle originals
 
-When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The cell SHALL check the target after each offload and each media job, and on a timer. The eviction target SHALL be lower than the online-growth trigger. While an import series records a demand, the cell SHALL also evict in the same order. It SHALL stop when the window budget covers the demand or no eligible original is left. A demand SHALL lapse 15 minutes after the sender last renewed it. An original SHALL be eligible only when it is cached, its hydration fits the hydration capacity, and nothing keeps it on the volume. A media job that a worker has claimed SHALL keep its original until the job completes, fails or is blocked. This SHALL hold also while a timeout slice, a memory brake or an engine wait returns the job to the queue as pending. A pin, a hydration or a download SHALL keep its original. A pending media job that no worker has claimed, a failed job and a blocked job SHALL NOT keep an original. An eligible original SHALL also be unread by any owner, or last read by an owner at least the configured minimum idle age ago, as the cell's own record shows. Only an owner's playback, download or viewing SHALL count as a read; offload, extraction, hydration for processing and export packing SHALL NOT. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
+When volume use passes the configured eviction target, the cell SHALL evict cached originals until use falls below the target minus the configured margin. It SHALL evict the originals that no owner has read first, largest first. It SHALL then evict the others, largest first and longest idle on ties. The cell SHALL check the target after each offload and each media job, and on a timer. The eviction target SHALL be lower than the online-growth trigger. The cell SHALL keep one demand for each import series and serve the largest live demand. It SHALL also evict in the same order while two conditions hold: the window budget is below that demand, and the window budget plus the bytes of the eligible originals covers it. It SHALL stop when the window budget covers the demand or no eligible original is left. It SHALL ignore a demand above the reachable budget. A demand SHALL lapse 15 minutes after its series last renewed it. An original SHALL be eligible only when it is cached, its hydration fits the hydration capacity, and nothing keeps it on the volume. A media job that a worker has claimed SHALL keep its original until the job completes, fails or is blocked. This SHALL hold also while a timeout slice or a memory stop returns the job to the queue as pending. A pin, a hydration or a download SHALL keep its original. A pending media job that no worker has claimed, a failed job and a blocked job SHALL NOT keep an original. An eligible original SHALL also be unread by any owner, or last read by an owner at least the configured minimum idle age ago, as the cell's own record shows. Only an owner's playback, download or viewing SHALL count as a read; offload, extraction, hydration for processing and export packing SHALL NOT. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
 
 #### Scenario: A media-heavy cell fills up
 
 - **WHEN** volume use passes the eviction target
-- **THEN** the largest eligible originals are removed from the volume until use is below the target minus the margin
+- **THEN** eligible originals are removed from the volume, unread ones first and largest first, until use is below the target minus the margin
 - **AND** small recently read originals stay on the volume
+
+#### Scenario: Unread originals leave first
+
+- **WHEN** volume use is above the target, and no owner has read a 300 MiB recording
+- **AND** an owner last played a 600 MiB video a month ago
+- **THEN** eviction removes the recording before the video
 
 #### Scenario: A series waits for room
 
 - **WHEN** a 20 GiB cell has an eviction target of 0.7 and a margin of 0.1
-- **AND** it has 11.5 GiB in use and a window budget of 0
+- **AND** it has 11.5 GiB in use, a window budget of 0 and 6 GiB of eligible originals
 - **AND** an import series records a demand of 4 GiB
-- **THEN** eviction removes eligible originals, largest first, until the window budget covers 4 GiB
+- **THEN** eviction removes eligible originals until the window budget covers 4 GiB
 - **AND** without the demand, eviction would not run, because use is below the target
+
+#### Scenario: A demand that eviction cannot meet yet
+
+- **WHEN** a series records a demand of 4 GiB, the window budget is 1 GiB, and 2 GiB of originals are eligible
+- **THEN** eviction does not run for the demand
+- **AND** it runs once filing and offload make enough originals eligible to cover the demand
+
+#### Scenario: Two series wait
+
+- **WHEN** one series records a demand of 3 GiB, and a second series records a demand of 5 GiB
+- **AND** 8 GiB of originals are eligible
+- **THEN** eviction runs until the window budget covers 5 GiB
+- **AND** the first series' demand stays recorded when the second series renews its own
+
+#### Scenario: A demand above the reachable budget
+
+- **WHEN** a status call records a demand of 40 GiB, and the reachable budget is 9 GiB
+- **THEN** the cell ignores the demand, and eviction does not run for it
 
 #### Scenario: A demand lapses
 
@@ -122,7 +146,7 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 ### Requirement: A media job defers when its original cannot be hydrated
 
-When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration can fail for a transport error, or because other hydrations hold the hydration capacity. Such a failure SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A worker SHALL NOT claim a returned job again before its retry time. The retry time SHALL start at 1 minute and double with each return, up to 15 minutes. An original whose hydration needs more than the whole hydration capacity SHALL block the job with `MEDIA_HYDRATION_TOO_LARGE`. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
+When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration can fail for a transport error, or because other hydrations hold the hydration capacity. Such a failure SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A worker SHALL NOT claim a returned job again before its retry time. The retry time SHALL start at 1 minute and double with each return, up to 15 minutes. An original whose hydration needs more than the whole hydration capacity SHALL block the job with `MEDIA_HYDRATION_TOO_LARGE`. The download routes SHALL refuse such an original with `MEDIA_HYDRATION_TOO_LARGE`, not with a refusal that tells the client to retry. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
 
 #### Scenario: The edge is down when a job is claimed
 
@@ -146,14 +170,31 @@ When a worker claims a media job whose original is evicted, it SHALL hydrate the
 - **WHEN** a worker claims a job for an evicted original whose plaintext and ciphertext together exceed the whole hydration capacity
 - **THEN** the job is blocked with `MEDIA_HYDRATION_TOO_LARGE`, and the worker does not claim it again
 
-### Requirement: The worker bounds the jobs that keep originals
+#### Scenario: A download of an original larger than the hydration capacity
 
-After offload jobs, the worker SHALL keep at most `max_hydrations` claimed but unfinished media jobs. At that cap, it SHALL resume one of them before it claims a fresh job. Below the cap, it SHALL claim a job whose original is on the volume before a job whose original must be hydrated. Within each group, it SHALL claim a fresh job before a resumed one.
+- **WHEN** an owner downloads an evicted original whose plaintext and ciphertext together exceed the whole hydration capacity
+- **THEN** the route refuses it with `MEDIA_HYDRATION_TOO_LARGE` and no retry hint
 
-#### Scenario: Long recordings reach the cap
+### Requirement: The worker bounds the jobs that keep hydrated originals
 
-- **WHEN** `max_hydrations` is 2, two transcription jobs have each run one timeout slice, and fresh jobs wait
-- **THEN** the worker resumes one of the two transcription jobs before it claims a fresh job
+After offload jobs, the worker SHALL count the claimed but unfinished media jobs for which it hydrated the original. While that count is at `max_hydrations`, it SHALL claim no job whose original must be hydrated. It SHALL claim a job whose original is on the volume before a job whose original must be hydrated. Within each group, it SHALL claim a fresh job before a resumed one. A job whose original was on the volume when the worker claimed it SHALL NOT count.
+
+#### Scenario: Hydrated jobs reach the cap
+
+- **WHEN** `max_hydrations` is 2, and two transcription jobs whose recordings the worker hydrated have each run one timeout slice
+- **AND** a fresh job whose original is evicted waits
+- **THEN** the worker does not claim the fresh job until one of the two transcription jobs ends
+
+#### Scenario: Long recordings on the volume do not fill the cap
+
+- **WHEN** `max_hydrations` is 2, and two long transcription jobs whose recordings stayed on the volume are claimed but unfinished
+- **THEN** the count is 0, and the worker may still claim a job whose original must be hydrated
+
+#### Scenario: A refused job does not block local work
+
+- **WHEN** the count is at `max_hydrations`, and the memory brakes refuse a resumed transcription job
+- **AND** a fresh capture's job waits with its original on the volume
+- **THEN** the worker claims the capture's job
 
 #### Scenario: Local originals run first
 

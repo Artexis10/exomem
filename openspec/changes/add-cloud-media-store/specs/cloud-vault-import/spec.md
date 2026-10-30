@@ -2,11 +2,11 @@
 
 ### Requirement: An import larger than the cell's volume arrives in windows
 
-The Cloud CLI SHALL split a folder larger than the cell's window budget into windows. Each window SHALL be an ordinary `adopt` import with its own import ID and recipient. The CLI SHALL create a window only when it fits:
+The Cloud CLI SHALL split a folder larger than the cell's window budget into windows. Each window SHALL be an ordinary `adopt` import with its own import ID and recipient. The CLI SHALL read the budget again right before it creates each window. It SHALL create the window only when that reading shows that the window fits:
 - 2 × its text bytes + its artifact bytes is at most the window budget that the cell reports;
 - when the cell publishes `import_limits`, used + `space_factor` × the window's bytes + `reserve_bytes` is at most the cell's current size, so admission grows no claim.
 
-Windows SHALL carry offloadable artifacts first, resident artifacts next and text last, each in path order across the series. The CLI SHALL size each window within the reachable budget that the cell reports. While the budget does not cover the next window, each status call SHALL carry that window's bytes as the demand. The CLI SHALL wait and report in these cases:
+Windows SHALL carry offloadable artifacts first, resident artifacts next and text last, each in path order across the series. The CLI SHALL size each window within the reachable budget that the cell reports. While the budget does not cover the next window, each status call SHALL carry the series ID and that window's bytes as the demand. The CLI SHALL renew the demand at least every 5 minutes while it waits. The CLI SHALL wait and report in these cases:
 - the budget is unknown;
 - the reachable budget covers the next window, and the budget does not cover it yet.
 
@@ -27,6 +27,11 @@ It SHALL stop and report, without waiting, in these cases:
 - **WHEN** the next window does not fit the budget that the cell reports, and the reachable budget covers it
 - **THEN** the CLI creates no import, sends the window's bytes as the demand, waits, and reports the shortfall
 - **AND** it creates the window once the reported budget covers it
+
+#### Scenario: Another series used the room
+
+- **WHEN** a budget reading covers the next window, and another series' window lands before the CLI creates it
+- **THEN** the CLI reads the budget again right before the create, finds that the window no longer fits, and waits
 
 #### Scenario: The budget is unknown
 
@@ -141,8 +146,9 @@ The Adoption Studio status SHALL report these figures. Each figure that the cell
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
 - For each landed window, the count and bytes of its residual, and its member paths page by page.
+- For each discarded window with a residual record, the record's members as "discarded, not filed", with path, bytes and code, page by page.
 
-A status call MAY carry the next window's bytes. The cell SHALL then record them as the series' demand for eviction, or renew the demand. A cell without the media store SHALL report no window budget.
+A status call MAY carry a series ID and the next window's bytes. The cell SHALL then record them as that series' demand for eviction, or renew it, and keep the other series' demands. It SHALL ignore a demand above the reachable budget. A cell without the media store SHALL report no window budget.
 
 #### Scenario: The budget is computed from its inputs
 
@@ -158,8 +164,9 @@ A status call MAY carry the next window's bytes. The cell SHALL then record them
 
 #### Scenario: A status call records a demand
 
-- **WHEN** a status call carries 4 GiB as the next window's bytes, and the window budget is 1 GiB
-- **THEN** the cell records a demand of 4 GiB, and eviction runs until the budget covers it
+- **WHEN** a status call carries a series ID and 4 GiB as the next window's bytes
+- **AND** the window budget is 1 GiB, and 6 GiB of originals are eligible
+- **THEN** the cell records a demand of 4 GiB for that series, and eviction runs until the budget covers it
 
 #### Scenario: An input cannot be read
 
@@ -180,6 +187,21 @@ For an `adopt` import, the import Job SHALL record each member's identity in the
 - **WHEN** an `adopt` import finishes and the runtime starts again on the same volume, under a different device number
 - **THEN** each manifest entry's identity equals the stat of its staged file
 
+### Requirement: A discard keeps a residual record
+
+When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. The record SHALL stay until a resend or an acknowledgement clears its members.
+
+#### Scenario: A discard after a path conflict
+
+- **WHEN** the person discards a window in which two members stayed unfiled after a path conflict
+- **THEN** the receipt keeps a residual record of both members, with their paths, bytes and the conflict code
+- **AND** the stage folder is gone
+
+#### Scenario: A discard stops and runs again
+
+- **WHEN** a discard stops after it rewrote the receipt and before it removed the stage, and the person discards the window again
+- **THEN** the receipt still holds the residual record from the first attempt
+
 ### Requirement: Each window carries the series file
 
 The CLI SHALL record the full path list of a series and its label, the source folder's name. It SHALL put both in each window as one file at the stage root, named `.exomem-series.json`. The import Job SHALL stage that file like any member. The CLI SHALL refuse, before any upload, a source folder that holds a file of that name at its top level.
@@ -196,12 +218,20 @@ The CLI SHALL record the full path list of a series and its label, the source fo
 
 ### Requirement: The CLI resends the residual as a new series
 
-When the person asks to resend a series' residual, the CLI SHALL send the residual members as a new series with new import IDs. It SHALL take their paths from the residual that the cell lists for each window, before the window is discarded. It SHALL refuse a member whose source file differs in size or modification time from the series record.
+When the person asks to resend a series' residual, the CLI SHALL send the residual members as a new series with new import IDs. It SHALL take their paths from the residual records of the series' discarded windows. It SHALL resend no member of a window that is not discarded yet. Each resend window SHALL carry the first series' file unchanged. The CLI SHALL refuse a member whose source file differs in size or modification time from the series record. After a resend window lands, the CLI SHALL clear its members from the old residual records.
 
 #### Scenario: A restore sent large members to the residual
 
-- **WHEN** two 600 MiB members of window 3 went to the residual after a backup restore, and the person asks to resend the residual
-- **THEN** the CLI sends the two members as a new series, and adoption files them by rename
+- **WHEN** two 600 MiB members of window 3 went to the residual after a backup restore, and window 3 is discarded
+- **AND** the person asks to resend the residual
+- **THEN** the CLI reads the two members from window 3's residual record and sends them as a new series
+- **AND** adoption files them by rename under the first series' collection root and label
+- **AND** status stops listing them as "discarded, not filed" once the resend window lands
+
+#### Scenario: A window not yet discarded
+
+- **WHEN** the person asks to resend the residual, and window 5 still has a residual and is not discarded
+- **THEN** the CLI sends no member of window 5, and reports that the window must be filed or discarded first
 
 #### Scenario: A residual member changed at the source
 
@@ -210,7 +240,7 @@ When the person asks to resend a series' residual, the CLI SHALL send the residu
 
 ### Requirement: The CLI tells the person to keep the source
 
-When the last window lands, the CLI SHALL report that the upload is done and that filing continues. It SHALL tell the person to keep the source folder until the cell reports an empty residual for every window.
+When the last window lands, the CLI SHALL report that the upload is done and that filing continues. It SHALL tell the person to keep the source folder until the cell reports no residual and no residual record for any window.
 
 #### Scenario: The last window lands before filing ends
 

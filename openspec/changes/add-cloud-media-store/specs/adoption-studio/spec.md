@@ -116,12 +116,28 @@ Adoption SHALL take the collection root of a recorded stage from its record, not
 - **WHEN** window 1 holds only files under `Recordings/`, and window 2 holds files under `Recordings/` and `Notes/`
 - **THEN** both windows get the same collection root and the series label, and each file's collection path is its path in the source folder
 
+#### Scenario: A resend keeps the first series' root
+
+- **WHEN** a resend window holds only residual members under `Recordings/`, and it carries the first series' file
+- **THEN** it gets the first series' collection root and label, and each member's collection path is its path in the source folder
+
 ### Requirement: The residual tells the person to keep the source
 
-`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. While a residual is not empty, the tool text SHALL tell the person to keep the source folder.
+`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While a residual or a residual record is not empty, the tool text SHALL tell the person to keep the source folder. `adoption_studio(action="acknowledge")` with an import ID SHALL clear that window's residual record, or only the paths that it names.
 
 #### Scenario: A window keeps a residual
 
 - **WHEN** `finish` runs on a window with two changed members and one member above the ceiling
 - **THEN** it reports the three members with their codes and bytes
 - **AND** it tells the person to keep the source folder until the residual is empty
+
+#### Scenario: Every window is discarded, and a member was never filed
+
+- **WHEN** every window of a series is discarded, and one window's residual record lists a recording
+- **THEN** the status lists the recording as "discarded, not filed"
+- **AND** the tool text tells the person to keep the source folder
+
+#### Scenario: The person does not want a member
+
+- **WHEN** the person acknowledges one path of a window's residual record
+- **THEN** the status no longer lists that path, and it still lists the record's other members
