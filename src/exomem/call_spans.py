@@ -65,8 +65,8 @@ NAME_MAX_CHARS = 64
 #: no single call may grow it without limit. Values are summed across a span's
 #: calls, exactly as `ms` and `count` are, so an aggregated span still reports
 #: one honest total.
-MAX_FIELDS_PER_SPAN = 4
-# CPU is fixed metadata, separate from the four caller measurements.
+MAX_FIELDS_PER_SPAN = 5
+# CPU is fixed metadata, separate from the five caller measurements.
 THREAD_CPU_US = "thread_cpu_us"
 #: CPU of every thread in the process over the span. Wall far above both clocks
 #: is a wait on a lock, I/O, SQLite or another process; process CPU far above
@@ -369,12 +369,14 @@ HYDRATION_MS = "hydration_ms"
 MOVE_PREFLIGHT_MS = "move_preflight_ms"
 MOVE_PREFLIGHTS = "move_preflights"
 #: A carry rung's work: the request's admitted pages, the rows its per-stem
-#: counts scanned, the candidate rows its corroboration test examined, and
-#: whether admitted ranking statistics were rebuilt rather than reused.
+#: counts scanned, the candidate rows its corroboration test examined, whether
+#: admitted ranking statistics were rebuilt rather than reused, and how many
+#: pages that rebuild tokenized (a small count is an incremental rebuild).
 ADMITTED_PAGES = "admitted"
 STEM_ROWS = "stem_rows"
 CANDIDATES = "candidates"
 STATS_REBUILT = "stats_rebuilt"
+PAGES_TOKENIZED = "pages_tokenized"
 
 #: The meter open on this thread of control, innermost first: the counts a
 #: span collects from code several calls below it. A ContextVar rather than a

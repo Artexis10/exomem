@@ -19,10 +19,12 @@ import json
 from pathlib import Path
 
 import pytest
-from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, call
+from test_activate_context_maps import _activate
+from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, OWNER, call
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
+from test_context_catalogue import _built
 from test_governance_egress import (
     EXTERNAL,
     SCOPE_ID,
@@ -481,9 +483,9 @@ def test_a_checkpoint_the_catalogue_has_moved_past_abstains_instead_of_answering
 # --------------------------------------------------------------------------
 
 
-def _carried_pages(root: Path) -> tuple[str, set[str]]:
-    """The readiness and the pages the external audience's rarity counts over."""
-    with request_scope(_external()), state_paths.resolution_scope():
+def _carried_pages(root: Path, who: RequestPrincipal | None = None) -> tuple[str, set[str]]:
+    """The readiness and the pages the caller's rarity counts over (the external audience by default)."""
+    with request_scope(who or _external()), state_paths.resolution_scope():
         keep = egress.release_walk_filter(root)
         result = lexstore.carry_term_statistics(
             root, ["work"], visible=keep, status_basis=lifecycle_statuses.Basis(root),
@@ -543,10 +545,10 @@ def store_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     return requests
 
 
-def _per_page_verdicts(root: Path, pages: list[str]) -> dict[str, bool]:
+def _per_page_verdicts(root: Path, pages: list[str], who: RequestPrincipal | None = None) -> dict[str, bool]:
     """What the caller's release filter says for each page asked on its own, outside any publication."""
     egress.clear_decision_memo()
-    with request_scope(_external()), state_paths.resolution_scope():
+    with request_scope(who or _external()), state_paths.resolution_scope():
         keep = egress.release_walk_filter(root)
         return {page: keep(page) for page in pages}
 
@@ -622,3 +624,58 @@ def test_a_batched_answer_is_never_given_to_another_caller(service) -> None:  # 
             assert egress.release_walk_filter(root)(pages[0])
         with request_scope(stranger), state_paths.resolution_scope():
             assert not egress.release_walk_filter(root)(pages[1])
+
+
+# --------------------------------------------------------------------------
+# The owner under no file policy: nothing names its verdicts, the store still owns pages
+# --------------------------------------------------------------------------
+
+
+def test_a_page_the_store_refuses_stays_withheld_from_the_owner_while_the_others_are_answered(
+    service, store_requests: list[dict], monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    from exomem.cli_ops import OpError
+
+    root = service.root
+    pages = _enrol_store_collections(root, 2)
+    lexstore.ensure_fresh(root)
+    refused = pages[1]
+    real = egress.projection_decision
+
+    def refusing(vault_root, rel_path, *args, **kwargs):
+        if rel_path == refused:
+            raise OpError("COLLECTION_STORE_UNAVAILABLE", "the store cannot place this page")
+        return real(vault_root, rel_path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "projection_decision", refusing)
+    expected = _per_page_verdicts(root, pages, OWNER)
+    assert expected == {pages[0]: True, refused: False, pages[2]: True}
+
+    store_requests.clear()
+    egress.clear_decision_memo()
+    state, admitted = _carried_pages(root, OWNER)
+
+    assert state == "available"
+    assert {page: page in admitted for page in pages} == expected
+    assert len(store_requests) == 1
+
+
+def test_the_owners_turn_slice_decides_its_store_owned_pages_in_one_store_request(
+    service, store_requests: list[dict]  # noqa: F811
+) -> None:
+    """With no file policy the owner has no cached verdicts, so each store-owned page was its own queue entry."""
+    root = service.root
+    _enrol_store_collections(root, 4)
+    _write(root / SHARED, _shared_page())
+    seed_ordinary_notes(root)
+    _built(root).close()
+    lexstore.ensure_fresh(root)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    _reset_caches()
+    store_requests.clear()
+
+    packet = _activate(root, turn=TURN)
+
+    assert [item["ref"] for item in packet["turn_slice"]["items"]] == [SHARED]
+    assert store_requests == [{"read_only": True, "wake_maintenance": False}]
