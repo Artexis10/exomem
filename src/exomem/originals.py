@@ -111,6 +111,52 @@ def binary_binding(fields: dict[str, object]) -> BinaryBinding | None:
     return BinaryBinding(path, digest, size)
 
 
+def reference_companion_fields(binary: BinaryBinding, reference: StoredObject) -> dict[str, object]:
+    """The existing descriptor fields needed by a reference-only Trash companion."""
+    return {"evidence_file": binary.path, "binary_sha256": binary.sha256,
+            "binary_size": binary.size, "stored_object": reference.fields()}
+
+
+def is_reference_only_companion(fields: dict[str, object], body: str) -> bool:
+    """Custom page content is never disposable retention metadata."""
+    binary = binary_binding(fields)
+    reference = stored_reference(fields.get("stored_object"))
+    return binary is not None and reference is not None and not body.strip() and fields == reference_companion_fields(binary, reference)
+
+
+def referenced_binding(
+    fields: dict[str, object], *, sidecar_path: str, store: StoreBinding,
+) -> tuple[BinaryBinding, StoredObject] | None:
+    """Read a canonical reference without requiring the original's physical presence.
+
+    A caller supplies the companion's authoritative path before any Trash relocation.
+    Missing or foreign references count as none; malformed selected-store custody raises.
+    """
+    from . import reserved_paths
+    from .governance.raw_protection import marked
+    from .kbdir import kb_dirname
+    from .preserve import _sidecar_paths
+
+    if "stored_object" not in fields:
+        return None
+    reference = stored_reference(fields["stored_object"])
+    if reference is None:
+        raise ValueError("stored reference is malformed")
+    if reference.store != store.store:
+        return None
+    binary = binary_binding(fields)
+    if binary is None or reserved_paths.classify_logical(binary.path).blocked:
+        raise ValueError("stored reference has no valid binary binding")
+    target = Path(binary.path)
+    candidates = _sidecar_paths(
+        target, protected=marked(binary.path),
+        source=target.is_relative_to(Path(kb_dirname()) / "Sources"),
+    )
+    if sidecar_path not in {candidate.as_posix() for candidate in candidates}:
+        raise ValueError("stored reference is not at its bound companion path")
+    return binary, reference
+
+
 def configuration(vault: Path) -> dict[str, object] | None:
     """Read explicit per-vault configuration, retaining identity while disabled.
 
@@ -189,7 +235,7 @@ def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object],
             if error.code != "MISSING":
                 raise
             continue
-        fields, _body, marker = parse_frontmatter(data.decode("utf-8"), strict=True)
+        fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
         if marker is not None and bound_path(fields) == relative:
             return companion, fields, data
     return None

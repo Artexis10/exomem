@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import logging
 import os
 import re
@@ -2129,6 +2130,8 @@ def _list_candidate_records(
     source_relative: str,
     *,
     identities: IdentityCatalogue | None,
+    require_complete: bool = False,
+    recursive: bool = True,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases."""
 
@@ -2136,11 +2139,26 @@ def _list_candidate_records(
 
     def walk(directory: held_fs.HeldDirectory, prefix: str) -> None:
         _require_current_generic_directory(filesystem, directory)
-        children = filesystem.children(directory)
+        def admit_name(name: str) -> bool:
+            relative = f"{prefix}/{name}" if prefix else name
+            child = relative if source_relative == "." else f"{source_relative.rstrip('/')}/{relative}"
+            classification = classify_logical(child)
+            if classification.disposition is PathDisposition.INVALID:
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            # Only registry-owned private paths are deliberate omissions from a complete census.
+            return classification.disposition is not PathDisposition.RESERVED
+
+        names = None
+        if require_complete:
+            names = {name for name in filesystem.iter_names(directory) if admit_name(name)}
+        children = filesystem.children(directory, name_filter=admit_name) if require_complete else filesystem.children(directory)
         if not children.ok:
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
-        for record in children.require():
+        observed = children.require()
+        if names is not None and names != {record.relative_path for record in observed}:
+            raise ReservedPathLeafError("UNSAFE_PATH")
+        for record in observed:
             relative = (
                 f"{prefix}/{record.relative_path}"
                 if prefix
@@ -2154,12 +2172,17 @@ def _list_candidate_records(
             )
             classification = classify_logical(child)
             descriptor_id = identities.descriptor_for(record.identity) if identities else None
+            if require_complete and (
+                classification.disposition is PathDisposition.INVALID
+                or (descriptor_id is None and record.identity.kind == "file" and record.identity.link_count != 1)
+            ):
+                raise ReservedPathLeafError("UNSAFE_PATH")
             blocked = (
                 classification.blocked
                 or descriptor_id is not None
                 or (record.identity.kind == "file" and record.identity.link_count != 1)
             )
-            if record.identity.kind != "directory" or blocked:
+            if not recursive or record.identity.kind != "directory" or blocked:
                 continue
             retained = filesystem.parent(child)
             if not retained.ok:
@@ -2170,6 +2193,8 @@ def _list_candidate_records(
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 _require_current_generic_directory(filesystem, child_directory)
                 walk(child_directory, relative)
+        if names is not None and names != {name for name in filesystem.iter_names(directory) if admit_name(name)}:
+            raise ReservedPathLeafError("IDENTITY_CHANGED")
         _require_current_generic_directory(filesystem, directory)
 
     walk(source_directory, "")
@@ -2183,23 +2208,44 @@ def list_generic_tree(
     recursive: bool = True,
     identities: IdentityCatalogue | None = None,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
+    require_complete: bool = False,
 ) -> tuple[GenericTreeEntry, ...]:
     """Enumerate an ordinary tree while structurally removing private state.
 
     `select` receives every releasable `(relative_path, kind)` in walk order and
     returns the relative paths to open, stat and read; None opens them all.
+    `require_complete` refuses ordinary omissions rather than reporting a partial census.
     """
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
-        return _list_generic_tree_held(
-            vault_root,
-            value,
-            recursive=recursive,
-            identities=current,
-            select=select,
+    with open_generic_tree(
+        vault_root, value, recursive=recursive, identities=identities,
+        select=select, require_complete=require_complete,
+    ) as entries:
+        return tuple(entries)
+
+
+@contextmanager
+def open_generic_tree(
+    vault_root: Path,
+    value: object,
+    *,
+    recursive: bool = True,
+    identities: IdentityCatalogue | None = None,
+    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
+    require_complete: bool = False,
+    markdown_header_limit: int | None = None,
+):
+    """Yield entries under one held walk; exhaust it before publishing a census."""
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
+        entries = _iter_generic_tree_held(
+            vault_root, value, recursive=recursive, identities=current,
+            select=select, require_complete=require_complete,
+            markdown_header_limit=markdown_header_limit,
         )
+        try:
+            yield entries
+        finally:
+            entries.close()
 
 
 def list_generic_names(
@@ -2219,14 +2265,16 @@ def list_generic_names(
     return tuple(names)
 
 
-def _list_generic_tree_held(
+def _iter_generic_tree_held(
     vault_root: Path,
     value: object,
     *,
     recursive: bool,
     identities: IdentityCatalogue,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
-) -> tuple[GenericTreeEntry, ...]:
+    require_complete: bool = False,
+    markdown_header_limit: int | None = None,
+) -> Iterator[GenericTreeEntry]:
 
     if value == ".":
         relative = "."
@@ -2241,7 +2289,6 @@ def _list_generic_tree_held(
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
-    visible: list[GenericTreeEntry] = []
     hidden_prefixes: list[str] = []
     with acquired.require() as filesystem:
         source_result = filesystem.parent(relative)
@@ -2251,12 +2298,14 @@ def _list_generic_tree_held(
         with source_result.require() as source_directory:
             _refuse_private_identity(source_directory.identity, identities)
             _require_current_generic_directory(filesystem, source_directory)
-            if recursive:
+            if recursive or require_complete:
                 records = _list_candidate_records(
                     filesystem,
                     source_directory,
                     relative,
                     identities=identities,
+                    require_complete=require_complete,
+                    recursive=recursive,
                 )
             else:
                 enumerated = filesystem.children(source_directory)
@@ -2293,6 +2342,7 @@ def _list_generic_tree_held(
             chosen = None if select is None else frozenset(
                 select([(record.relative_path, record.identity.kind) for record, _ in candidates])
             )
+            selected_versions: dict[str, held_fs.FileVersion] = {}
             for record, child in candidates:
                 if chosen is not None and record.relative_path not in chosen:
                     continue
@@ -2318,13 +2368,11 @@ def _list_generic_tree_held(
                             )
                         except OSError as error:
                             raise ReservedPathLeafError("IO_REFUSED") from error
-                    visible.append(
-                        GenericTreeEntry(
-                            record.relative_path,
-                            record.identity,
-                            None,
-                            mtime,
-                        )
+                    yield GenericTreeEntry(
+                        record.relative_path,
+                        record.identity,
+                        None,
+                        mtime,
                     )
                     continue
 
@@ -2350,11 +2398,46 @@ def _list_generic_tree_held(
                         descriptor = getattr(file, "descriptor", None)
                         if not isinstance(descriptor, int):
                             raise ReservedPathLeafError("IO_REFUSED")
+                        version = file.version()
+                        if require_complete:
+                            selected_versions[child] = version
+
+                        def require_current(*, version=version, leaf=leaf) -> None:
+                            if file.version() != version:
+                                raise ReservedPathLeafError("IDENTITY_CHANGED")
+                            _require_current_generic_directory(filesystem, parent)
+                            with filesystem.file(parent, leaf).require() as current:
+                                if current.version() != version:
+                                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+
                         try:
                             info = os.fstat(descriptor)
                         except OSError as error:
                             raise ReservedPathLeafError("IO_REFUSED") from error
                         markdown: bytes | None = None
+                        if leaf.casefold().endswith(".md") and markdown_header_limit is not None:
+                            from . import runtime_resources, vault
+
+                            with runtime_resources.parser_preparation(info.st_size) as preparation:
+                                preparation.reserve_source(0)
+                                preparation.reserve(preparation.reserved + io.DEFAULT_BUFFER_SIZE)
+                                with os.fdopen(os.dup(descriptor), "rb", buffering=io.DEFAULT_BUFFER_SIZE) as stream:
+                                    markdown = vault.read_frontmatter_header(
+                                        stream, markdown_header_limit, reserve=preparation.reserve_source,
+                                    )
+                                text = markdown.decode("utf-8")
+                                frontmatter = vault._FM_PATTERN.match(text)
+                                preparation.reserve_parser(
+                                    text, yaml_text=frontmatter.group(1) if frontmatter else None,
+                                )
+                                require_current()
+                                yield GenericTreeEntry(
+                                    record.relative_path, record.identity, info.st_size,
+                                    info.st_mtime, markdown,
+                                )
+                                require_current()
+                                del text, frontmatter, markdown
+                            continue
                         if leaf.casefold().endswith(".md"):
                             read_result = filesystem.read(file)
                             if not read_result.ok:
@@ -2364,18 +2447,32 @@ def _list_generic_tree_held(
                                     else "IO_REFUSED"
                                 )
                             markdown = read_result.require()
-                        visible.append(
-                            GenericTreeEntry(
-                                record.relative_path,
-                                record.identity,
-                                info.st_size,
-                                info.st_mtime,
-                                markdown,
-                            )
+                        require_current()
+                        yield GenericTreeEntry(
+                            record.relative_path,
+                            record.identity,
+                            info.st_size,
+                            info.st_mtime,
+                            markdown,
                         )
+                        require_current()
+            if require_complete:
+                current_records = _list_candidate_records(
+                    filesystem, source_directory, relative, identities=identities,
+                    require_complete=True, recursive=recursive,
+                )
+                if current_records != records:
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+                for child, version in selected_versions.items():
+                    parent_path, leaf = _leaf_spelling(child)
+                    with filesystem.parent(parent_path).require() as parent:
+                        _refuse_private_identity(parent.identity, identities)
                         _require_current_generic_directory(filesystem, parent)
+                        with filesystem.file(parent, leaf).require() as current_file:
+                            _refuse_private_identity(current_file.identity, identities)
+                            if current_file.version() != version:
+                                raise ReservedPathLeafError("IDENTITY_CHANGED")
             _require_current_generic_directory(filesystem, source_directory)
-    return tuple(visible)
 
 
 def _invalid(reason: str) -> PathClassification:

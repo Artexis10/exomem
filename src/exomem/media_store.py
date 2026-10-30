@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from . import held_fs, originals, reserved_paths
+from . import held_fs, media_allowance, originals, reserved_paths
 from .media_jobs import OFFLOAD_MEDIA_TYPE, STATUS_JOB_LIMIT, MediaJob, MediaJobStore, pid_alive
 from .originals import OriginalSnapshot, StoredObject, original_state
 
@@ -319,7 +319,7 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             continue
         try:
             raw = reserved_paths.read_generic_bytes(vault, sidecar.relative_to(vault).as_posix())
-            fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), strict=True)
+            fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), custody=True)
             relative = originals.bound_path(fields)
             if not isinstance(relative, str):
                 continue
@@ -369,7 +369,7 @@ def _processing_status_row(vault: Path, path: str | Path) -> dict[str, object]:
     try:
         raw = reserved_paths.read_generic_bytes(vault, snapshot.sidecar_path.relative_to(vault).as_posix())
         text = raw.data.decode("utf-8")
-        fields, _body, _marker = parse_frontmatter(text, strict=True)
+        fields, _body, _marker = parse_frontmatter(text, custody=True)
         processing = fields.get("processing_state")
         media_type = fields.get("media_type")
         if originals.bound_path(fields) != relative:
@@ -397,6 +397,10 @@ def processing_status(vault: Path, *, path: str | None = None) -> tuple[list[dic
 
 
 def enqueue_offload(vault: Path, path: Path) -> int:
+    return _enqueue_offload(vault, path)
+
+
+def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.ReferenceUsage | None = None) -> int:
     config = originals.configuration(vault)
     if config is None:
         return 0
@@ -404,7 +408,7 @@ def enqueue_offload(vault: Path, path: Path) -> int:
     if snapshot.state != "local" or snapshot.binary_sha256 is None or not snapshot.offloadable:
         return 0
     store = MediaJobStore(vault)
-    if _refused(store, snapshot, config):
+    if _refused(store, snapshot, config, usage=usage):
         return 0
     current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
@@ -419,15 +423,58 @@ def enqueue_offload(vault: Path, path: Path) -> int:
 
 
 def enqueue_offloads(vault: Path) -> int:
+    from .writer_lease import get_manager
+
     if originals.binding_for(vault) is None:
         return 0
-    return sum(enqueue_offload(vault, item.path) for item in bound_originals(vault))
+    with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
+        placeholders = ",".join("?" for _code in media_allowance.ALLOWANCE_REFUSAL_CODES)
+        rows, _coverage = _status_candidates(vault, "media_offload_refusals",
+            f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
+            media_allowance.ALLOWANCE_REFUSAL_CODES)
+        usage = media_allowance.reference_usage(vault) if rows else None
+        return sum(_enqueue_offload(vault, item.path, usage=usage) for item in bound_originals(vault))
 
 
 def _guard(vault: Path, operation: str):
     from .writer_lease import get_manager
 
     return get_manager().mutation_guard(vault, operation=operation, holder_kind="background")
+
+
+def _offload_admission(
+    vault: Path, snapshot: OriginalSnapshot, *, reference: StoredObject | None = None,
+    select_reuse: bool = True, usage: media_allowance.ReferenceUsage | None = None,
+) -> tuple[media_allowance.AllowanceDecision, OriginalSnapshot | None]:
+    """Select current live reuse and its quota projection under one read boundary."""
+    from .writer_lease import get_manager
+
+    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    binary = originals.BinaryBinding(snapshot.path.relative_to(vault).as_posix(),
+                                     snapshot.binary_sha256, snapshot.binary_size)
+    with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
+        config = originals.configuration(vault) or {}
+        # A caller can share one census only while its enclosing consistency guard holds.
+        if usage is None:
+            usage = media_allowance.reference_usage(vault)
+        reuse = None
+        if select_reuse and usage.versions is not None:
+            for key, path in usage.live_paths.items():
+                candidate_binary, candidate_reference = usage.versions[key]
+                if (candidate_binary.sha256 != binary.sha256 or candidate_binary.size != binary.size
+                        or candidate_reference.key_version != str(config.get("key_version"))):
+                    continue
+                try:
+                    candidate = original_state(vault, path)
+                    if (candidate.reference != candidate_reference or candidate.binary_sha256 != binary.sha256
+                            or candidate.binary_size != binary.size):
+                        raise ValueError("the live reuse binding changed")
+                except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                    usage = media_allowance.ReferenceUsage(None, usage.observed_at)
+                    break
+                reuse, reference = candidate, candidate_reference
+                break
+        return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
 
 
 def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
@@ -444,7 +491,7 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     text, guard = read_guarded_text(vault, snapshot.sidecar_path)
     if content_hash(text) != snapshot.sidecar_hash:
         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the sidecar binding changed")
-    fields, body, _marker = parse_frontmatter(text, strict=True)
+    fields, body, _marker = parse_frontmatter(text, custody=True)
     if reference is None:
         fields.pop("stored_object", None)
     else:
@@ -516,25 +563,43 @@ def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStor
         conn.close()
 
 
-def _refused(store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object]) -> bool:
+def _refused(
+    store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object], *,
+    usage: media_allowance.ReferenceUsage | None = None,
+) -> str | None:
     conn = store._connect(readonly=True)
     try:
         row = conn.execute("SELECT sha256, code, ciphertext_size FROM media_offload_refusals "
                            "WHERE binary_rel = ? AND sha256 = ?",
                            (store._relative(snapshot.path), snapshot.binary_sha256)).fetchone()
-        return row is not None and _refusal_applies(row, snapshot, config)
     finally:
         conn.close()
+    return _refusal_code(store.vault_root, row, snapshot, config, usage=usage) if row is not None else None
 
 
-def _refusal_applies(row, snapshot: OriginalSnapshot, config: dict[str, object]) -> bool:
+def _refusal_code(
+    vault: Path, row, snapshot: OriginalSnapshot, config: dict[str, object], *,
+    usage: media_allowance.ReferenceUsage | None = None,
+) -> str | None:
     if row["sha256"] != snapshot.binary_sha256:
-        return False
+        return None
     # These refusal codes are fixed by the media protocol, not inferred from error prose.
     if row["code"] == "MEDIA_OBJECT_TOO_LARGE":
         bound = config.get("max_object_bytes")
-        return bound is not None and row["ciphertext_size"] is not None and row["ciphertext_size"] > int(bound)
-    return True
+        return row["code"] if bound is not None and row["ciphertext_size"] is not None and row["ciphertext_size"] > int(bound) else None
+    if row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES:
+        if snapshot.reference is not None:
+            return None
+        decision, _reuse = _offload_admission(vault, snapshot, usage=usage)
+        return decision.code
+    return row["code"]
+
+
+def _require_allowance(ledger: MediaJobStore, snapshot: OriginalSnapshot, code: str | None) -> None:
+    if code is not None:
+        refusal = MediaStoreError(code, "the current media allowance does not admit this original")
+        _refuse(ledger, snapshot, refusal, None)
+        raise refusal
 
 
 def retry_offload(vault: Path, path: Path) -> int:
@@ -565,6 +630,8 @@ def _offload_input(vault: Path, path: Path, ledger: MediaJobStore):
 
 def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Originals that stay local because the store refused their exact bytes."""
+    from .writer_lease import get_manager
+
     query = "SELECT binary_rel, sha256, code, ciphertext_size FROM media_offload_refusals"
     parameters: tuple[object, ...] = ()
     if path is not None:
@@ -575,16 +642,20 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
         coverage = {**coverage, "coverage": "exact-path"}
     config = originals.configuration(vault) or {}
     result = []
-    for row in rows:
-        try:
-            snapshot = original_state(vault, row["binary_rel"])
-        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-            result.append(_unavailable_original(row["binary_rel"]))
-            continue
-        if not _refusal_applies(row, snapshot, config):
-            continue
-        result.append({"path": row["binary_rel"], "original_state": snapshot.state,
-                       "code": row["code"], "ciphertext_size": row["ciphertext_size"]})
+    with get_manager().consistency_guard(vault, operation="media_refusal_status", holder_kind="background"):
+        usage = (media_allowance.reference_usage(vault)
+                 if any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows) else None)
+        for row in rows:
+            try:
+                snapshot = original_state(vault, row["binary_rel"])
+            except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                result.append(_unavailable_original(row["binary_rel"]))
+                continue
+            code = _refusal_code(vault, row, snapshot, config, usage=usage)
+            if code is None:
+                continue
+            result.append({"path": row["binary_rel"], "original_state": snapshot.state,
+                           "code": code, "ciphertext_size": row["ciphertext_size"]})
     return result, coverage
 
 
@@ -607,7 +678,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
     None means that the original stays local: notes and datasets are never
-    offloaded, and a refusal stays parked until its input, policy or explicit retry changes it (D10).
+    offloaded. Quota refusals raise so that the worker retains retryable demand (D10).
     """
     vault = Path(vault).resolve()
     config = _settings(vault)
@@ -618,7 +689,10 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
     with _pin(vault, path), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
-        if _refused(ledger, snapshot, config):
+        refusal = _refused(ledger, snapshot, config)
+        if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
+            _require_allowance(ledger, snapshot, refusal)
+        if refusal is not None:
             return None
         if not snapshot.offloadable:
             return None
@@ -646,14 +720,13 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
             snapshot = original_state(vault, path)
         if snapshot.state != "local":
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original bytes are absent")
+        decision, reuse = _offload_admission(vault, snapshot)
+        _require_allowance(ledger, snapshot, decision.code)
         name_key = Path(str(config["name_key_path"])).read_bytes()
         if len(name_key) < 32:
             raise ValueError("the media name key requires at least 32 bytes")
         name = hmac.new(name_key, bytes.fromhex(snapshot.binary_sha256), hashlib.sha256).hexdigest()
         key_version = str(config["key_version"])
-        reuse = next((item for item in bound_originals(vault)
-                      if item.reference is not None and item.binary_sha256 == snapshot.binary_sha256
-                      and item.binary_size == snapshot.binary_size and item.reference.key_version == key_version), None)
         if reuse is not None and not _confirmed(backend, reuse.reference):
             reuse = None
         with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
@@ -667,6 +740,10 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                 # Reuse requires a live binding at the exact protection commit.
                 if reuse is not None and original_state(vault, reuse.path) != reuse:
                     reuse = None
+                decision, _candidate = _offload_admission(
+                    vault, snapshot, reference=reuse.reference if reuse is not None else None, select_reuse=False,
+                )
+                _require_allowance(ledger, snapshot, decision.code)
                 _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
             if reuse is not None:
                 reference = reuse.reference
@@ -693,6 +770,8 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+                decision, _candidate = _offload_admission(vault, snapshot, reference=reference, select_reuse=False)
+                _require_allowance(ledger, snapshot, decision.code)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
         return reference

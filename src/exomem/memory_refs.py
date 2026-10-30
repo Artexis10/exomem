@@ -1278,9 +1278,18 @@ def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str
         raise ReferenceError("INVALID_REFERENCE", f"invalid memory id: {exomem_id!r}")
     match = vault_module._FM_PATTERN.match(markdown)
     assert match is not None
-    insertion = match.end(1)
-    newline = "\r\n" if markdown.startswith("\r\n", insertion) else "\n"
-    rendered = markdown[:insertion] + f"{newline}{ID_FIELD}: {identity}" + markdown[insertion:]
+    line_break = vault_module.frontmatter_line_break(markdown, match)
+    if line_break:
+        insertion = match.end(1)
+        line = f"{line_break}{ID_FIELD}: {identity}"
+        rendered = markdown[:insertion] + line + markdown[insertion:]
+    else:
+        # An empty block has no line break before its closing fence,
+        # so the opening fence's line break ends the new line.
+        insertion = match.start(1)
+        opening_break = "\r\n" if markdown[:insertion].endswith("\r\n") else "\n"
+        line = f"{ID_FIELD}: {identity}{opening_break}"
+        rendered = markdown[:insertion] + line + markdown[insertion:]
     return rendered, identity
 
 

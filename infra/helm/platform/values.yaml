@@ -286,7 +286,7 @@ artifactBroker:
 # such as one canary; `allCells` serves every cell, including each cell created
 # later, and works beside the list. Raise a cell's number in `credentialEpochs`
 # to replace its credential and revoke the old one. `storePolicy` holds the
-# eviction and hydration settings cells read beside their keys. Create the
+# allowance, eviction and hydration settings cells read beside their keys. Create the
 # signing key and the edge's Secrets first (docs/runbooks/cloud-media-edge.md).
 mediaEdge:
   enabled: false
@@ -295,7 +295,8 @@ mediaEdge:
   allCells: false
   credentialEpochs: {}
   maxObjectBytes: 1073741824
-  storePolicy: {}
+  storePolicy:
+    allowance_bytes: 100000000000
   bucket: ""
   b2SecretName: exomem-media-edge-b2
   signingKeySecretName: exomem-media-edge-signing-key

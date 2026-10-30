@@ -32,6 +32,7 @@ from . import (
     semantic_index,
     semantic_writes,
     source_taxonomy,
+    trash_metadata,
     working_set_heat,
 )
 from .cli_ops import OpError
@@ -567,7 +568,9 @@ def _move_file_local(
     # the semantic write machinery below is written for — and the bytes are
     # renamed alongside it inside the same transaction.
     paired_binary: tuple[str, str] | None = None
-    pair = _paired_artifact(vault_root, old_rel)
+    recovering_from_trash = trash_metadata.is_trash_path(old_rel) and not trash_metadata.is_trash_path(new_rel)
+    # Recovery owns retirement of a Trash reference companion; it is not a page relocation.
+    pair = None if recovering_from_trash else _paired_artifact(vault_root, old_rel)
     if pair is not None:
         page_rel, binary_rel = pair
         if old_rel == binary_rel:
@@ -709,19 +712,7 @@ def _move_file_local(
             ),
         )
 
-    old_parts = old_rel.split("/")
-    new_parts = new_rel.split("/")
-    moved_out_of_trash = (
-        len(old_parts) >= 2
-        and old_parts[0] == kb_dirname()
-        and old_parts[1] == "_trash"
-    )
-    moved_into_trash = (
-        len(new_parts) >= 2
-        and new_parts[0] == kb_dirname()
-        and new_parts[1] == "_trash"
-    )
-    if moved_out_of_trash and not moved_into_trash:
+    if recovering_from_trash:
         from . import recover_from_trash as recovery
 
         _admit_publication(

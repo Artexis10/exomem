@@ -29,9 +29,10 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types, originals, reserved_paths, semantic_contract
+from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
+from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import (
     VaultPathError,
     batch_atomic_write,
@@ -47,7 +48,6 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 
-TRASH_SUBPATH = "_trash"
 
 
 @dataclass
@@ -133,7 +133,7 @@ def _delete_file_local(
             ),
         )
 
-    stored_original = None
+    evicted_original = None
     try:
         abs_path, rel_path = resolve_under_vault(
             vault_root, path, must_exist=True, must_be_file=True, refuse_withheld=True
@@ -143,16 +143,16 @@ def _delete_file_local(
             raise DeleteFileError(code=e.code, reason=e.reason) from e
         try:
             abs_path, rel_path = resolve_under_vault(vault_root, path, must_be_file=True)
-            stored_original = originals.original_state(vault_root, abs_path)
+            evicted_original = originals.original_state(vault_root, abs_path)
         except (VaultPathError, reserved_paths.ReservedPathLeafError):
             raise DeleteFileError(code=e.code, reason=e.reason) from None
         from .governance import egress
 
         visible = egress.restricted_release_filter(vault_root)
-        if stored_original.state != "evicted" or (visible is not None and not visible(rel_path)):
+        if evicted_original.state != "evicted" or (visible is not None and not visible(rel_path)):
             raise DeleteFileError(code=e.code, reason=e.reason) from e
     try:
-        if stored_original is None:
+        if evicted_original is None:
             reserved_paths.inspect_generic_file(vault_root, rel_path)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
@@ -207,6 +207,12 @@ def _delete_file_local(
                 f"Pass `allow_curated=true` only if you really mean it."
             ),
         )
+
+    stored_original = None
+    if originals.binding_for(vault_root) is not None and not originals.is_note_path(rel_path):
+        candidate = originals.original_state(vault_root, rel_path)
+        if candidate.reference is not None:
+            stored_original = candidate
 
     # Supersession history check.
     fm: dict = {}
@@ -317,7 +323,7 @@ def _delete_file_local(
     date_dir = now.strftime("%Y-%m-%d")
     time_prefix = now.strftime("%H%M%S")
     sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
-    trash_filename = f"{time_prefix}-{sanitized}"
+    trash_filename = trash_metadata.preserve_floor(rel_path, f"{time_prefix}-{sanitized}")
     trash_dir = kb_root(vault_root) / TRASH_SUBPATH / date_dir
     trash_abs = trash_dir / trash_filename
 
@@ -343,9 +349,12 @@ def _delete_file_local(
             ) from None
         return True
 
+    def destination_taken(candidate: Path) -> bool:
+        return any(trash_destination_exists(slot) for slot in trash_metadata.destination_paths(candidate))
+
     # Collision: never overwrite an existing ordinary trash entry, and never
     # route around a private physical alias by selecting a different suffix.
-    if trash_destination_exists(trash_abs):
+    if destination_taken(trash_abs):
         i = 2
         while True:
             stem, dot, ext = trash_filename.rpartition(".")
@@ -354,42 +363,19 @@ def _delete_file_local(
             else:
                 alt = f"{trash_filename}-{i}"
             alt_abs = trash_dir / alt
-            if not trash_destination_exists(alt_abs):
+            if not destination_taken(alt_abs):
                 trash_abs = alt_abs
                 trash_filename = alt
                 break
             i += 1
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
-    meta_abs = trash_dir / f"{trash_filename}.meta.json"
+    meta_abs = trash_dir / f"{trash_filename}{METADATA_SUFFIX}"
     meta_rel = meta_abs.relative_to(vault_root).as_posix()
-    try:
-        meta_expected_identity = reserved_paths.inspect_generic_file(
-            vault_root,
-            meta_rel,
-        )
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "MISSING":
-            meta_expected_identity = None
-        elif error.code in {
-            "CAPABILITY_UNAVAILABLE",
-            "IDENTITY_CHANGED",
-            "RESERVED_PATH",
-            "UNSAFE_PATH",
-        }:
-            raise DeleteFileError(
-                "RESERVED_PATH",
-                "trash metadata destination is reserved for its owning subsystem",
-            ) from None
-        else:
-            raise DeleteFileError(
-                "DELETE_FAILED",
-                "trash metadata destination could not be acquired safely",
-            ) from None
 
     if validate_only or expected_hash is not None:
         try:
-            source_hash = (stored_original.binary_sha256 if stored_original is not None
+            source_hash = (evicted_original.binary_sha256 if evicted_original is not None
                            else hashlib.sha256(reserved_paths.read_generic_bytes(vault_root, rel_path).data).hexdigest())
         except reserved_paths.ReservedPathLeafError as error:
             raise DeleteFileError(
@@ -528,35 +514,72 @@ def _delete_file_local(
         except Exception:  # noqa: BLE001 — suppression is best-effort
             log.debug("self-delete suppression registration failed", exc_info=True)
 
-    try:
-        transition.rename()
-    except lifecycle.LifecycleError as e:
-        try:
-            transition.abort()
-        except graph_sync.GraphLifecycleRollbackError as rollback_error:
-            raise DeleteFileError(
-                code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
-                reason="the staged trash transition could not be restored",
-            ) from rollback_error
-        raise DeleteFileError(
-            code=e.code,
-            reason=e.reason,
-        ) from e
+    meta = {
+        "original_path": rel_path,
+        "trashed_at": now.isoformat(),
+        "deleted_by": "exomem",
+        "inbound_link_count_at_trash": len(inbound_all),
+        "inbound_ignored_at_trash": [m.as_dict() for m in inbound_ignored],
+        "inbound_remaining_at_trash": [m.as_dict() for m in inbound],
+        "force_orphan_used": bool(force_orphan and inbound),
+        "force_superseded_used": bool(force_superseded and fm.get("superseded_by")),
+        "allow_curated_used": bool(curated and allow_curated),
+        "frontmatter_snapshot": _make_json_safe(fm),
+    }
+    metadata_bytes = json.dumps(meta, indent=2, default=str).encode("utf-8")
+    binary_placement_required = stored_original is not None and any(
+        item.source_path == rel_path and item.content_hash == stored_original.binary_sha256
+        and item.size == stored_original.binary_size for item in lifecycle_operation.manifest
+    )
+    # A stored companion needs durable placement to resolve its historical binary path in Trash.
+    placement_required = binary_placement_required or "stored_object" in fm
+    placement_files: list[tuple[str, bytes]] = [(meta_rel, metadata_bytes)] if placement_required else []
+    if binary_placement_required:
+        assert stored_original is not None and stored_original.reference is not None
+        assert stored_original.binary_sha256 is not None and stored_original.binary_size is not None
+        from .vault import render_frontmatter_document, serialize_frontmatter
 
+        # Only the exact bytes pinned by this reference can retain that version in Trash.
+        binding = originals.BinaryBinding(trash_rel, stored_original.binary_sha256, stored_original.binary_size)
+        fields = originals.reference_companion_fields(binding, stored_original.reference)
+        companion = originals.sidecar_path(Path(trash_rel)).as_posix()
+        companion_bytes = render_frontmatter_document(serialize_frontmatter(fields), "").encode("utf-8")
+        placement_files.append((companion, companion_bytes))
     try:
-        transition.publish_checkpoint()
-    except Exception as error:  # noqa: BLE001 - reverse caught transition
-        try:
-            transition.abort()
-        except graph_sync.GraphLifecycleRollbackError as rollback_error:
-            raise DeleteFileError(
-                code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
-                reason="graph checkpoint failed and the trash transition could not be restored",
-            ) from rollback_error
-        raise DeleteFileError(
-            code="GRAPH_SYNC_CHECKPOINT_FAILED",
-            reason="graph checkpoint failed; the trash transition was restored",
-        ) from error
+        with trash_metadata.preserve_placement(vault_root, transition, placement_files):
+            try:
+                transition.rename()
+            except lifecycle.LifecycleError as e:
+                try:
+                    transition.abort()
+                except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                    raise DeleteFileError(
+                        code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
+                        reason="the staged trash transition could not be restored",
+                    ) from rollback_error
+                raise DeleteFileError(
+                    code=e.code,
+                    reason=e.reason,
+                ) from e
+
+            try:
+                transition.publish_checkpoint()
+            except Exception as error:  # noqa: BLE001 - reverse caught transition
+                try:
+                    transition.abort()
+                except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                    raise DeleteFileError(
+                        code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
+                        reason="graph checkpoint failed and the trash transition could not be restored",
+                    ) from rollback_error
+                raise DeleteFileError(
+                    code="GRAPH_SYNC_CHECKPOINT_FAILED",
+                    reason="graph checkpoint failed; the trash transition was restored",
+                ) from error
+    except graph_sync.GraphLifecycleRollbackError as error:
+        raise DeleteFileError("GRAPH_SYNC_DELETION_ROLLBACK_FAILED", "Trash placement could not be restored") from error
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from error
     from .writer_lease import mark_active_mutation_committed
 
     mark_active_mutation_committed()
@@ -624,28 +647,11 @@ def _delete_file_local(
             except Exception:  # noqa: BLE001 - preserve committed deletion for reconcile
                 warnings.append("trash succeeded but graph publication failed; run reconcile")
 
-    # Write metadata sidecar capturing what we know at trash time.
-    meta = {
-        "original_path": rel_path,
-        "trashed_at": now.isoformat(),
-        "deleted_by": "exomem",
-        "inbound_link_count_at_trash": len(inbound_all),
-        "inbound_ignored_at_trash": [m.as_dict() for m in inbound_ignored],
-        "inbound_remaining_at_trash": [m.as_dict() for m in inbound],
-        "force_orphan_used": bool(force_orphan and inbound),
-        "force_superseded_used": bool(force_superseded and fm.get("superseded_by")),
-        "allow_curated_used": bool(curated and allow_curated),
-        "frontmatter_snapshot": _make_json_safe(fm),
-    }
-    try:
-        reserved_paths.publish_generic_bytes(
-            vault_root,
-            meta_rel,
-            json.dumps(meta, indent=2, default=str).encode("utf-8"),
-            expected_identity=meta_expected_identity,
-        )
-    except (OSError, reserved_paths.ReservedPathLeafError) as e:
-        warnings.append(f"trashed file ok but meta sidecar write failed: {e}")
+    if not placement_required:
+        try:
+            reserved_paths.publish_generic_bytes(vault_root, meta_rel, metadata_bytes, expected_identity=None)
+        except (OSError, reserved_paths.ReservedPathLeafError) as error:
+            warnings.append(f"trashed file ok but meta sidecar write failed: {error}")
 
     if not lifecycle.finish_deletion(
         lifecycle_operation, index_report=index_feedback

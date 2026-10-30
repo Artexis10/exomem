@@ -77,6 +77,32 @@ def test_strict_frontmatter_rejects_duplicate_keys_without_weakening_legacy_pars
     assert "second" not in exc.value.reason
 
 
+def test_custody_frontmatter_distinguishes_incomplete_headers_from_plain_notes() -> None:
+    """An incomplete header must not let an inventory silently skip a possible binding."""
+    source = "\ufeff---\r\nevidence_file: incomplete\r\n"
+    assert vault.parse_frontmatter(source) == ({}, source, None)
+    with pytest.raises(vault.FrontmatterError) as error:
+        vault.parse_frontmatter(source, custody=True)
+    assert error.value.code == "INVALID_FRONTMATTER"
+    assert vault.parse_frontmatter("A plain note.\n", custody=True) == ({}, "A plain note.\n", None)
+    assert vault.parse_frontmatter("---\n# An empty header.\n---\nBody.\n", custody=True)[0] == {}
+
+
+def test_strict_frontmatter_reads_a_note_opening_with_a_thematic_break_as_plain() -> None:
+    """Strict readers across the vault keep their meaning.
+
+    An unclosed opener is prose, not a block.
+    """
+    source = "---\nA note that opens with a thematic break.\n"
+    assert vault.parse_frontmatter(source, strict=True) == ({}, source, None)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_empty_frontmatter_keeps_the_document_body(newline: str) -> None:
+    source = f"---{newline}---{newline}Body.{newline}"
+    assert vault.parse_frontmatter(source, strict=True) == ({}, f"Body.{newline}", "")
+
+
 def test_create_only_write_refuses_existing_leaf_and_preserves_legacy_overwrite(
     tmp_path: Path,
 ) -> None:

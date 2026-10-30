@@ -372,7 +372,12 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 # Markdown fences delimit YAML; the optional UTF-8 BOM stays outside the YAML block.
-_FM_PATTERN = re.compile(r"^\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)(.*)", re.DOTALL)
+_FM_OPEN = "(?:\ufeff)?---\\r?\\n"
+# An empty YAML block shares the opening fence's newline with the closing fence.
+_FM_CLOSE = r"(?:\r?\n|(?<=\n))---(?:\r?\n|\Z)"
+_FM_PATTERN = re.compile(r"^" + _FM_OPEN + r"(.*?)" + _FM_CLOSE + r"(.*)", re.DOTALL)
+_FM_OPEN_BYTES = re.compile((r"^" + _FM_OPEN).encode("utf-8"))
+_FM_CLOSE_BYTES = re.compile(_FM_CLOSE.encode("utf-8"))
 _LOCK_NAMESPACES = frozenset(
     {"activation-manifest", "semantic-creation", "lexical-catalog-publication"}
 )
@@ -6692,14 +6697,75 @@ def yaml_safe_load(text: str):
     return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
 
 
-def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any], str, str | None]:
+def read_frontmatter_header(
+    stream: BinaryIO, max_bytes: int, *, reserve: Callable[[int], None] | None = None,
+) -> bytes:
+    """Read only the fixed fenced envelope, without decoding a Markdown body."""
+    if max_bytes < 8:
+        raise ValueError("frontmatter limit must cover its opening fence")
+
+    def read(size: int, *, line: bool = False) -> bytes:
+        if reserve is not None:
+            reserve(min(max_bytes, len(header) + size))
+        return stream.readline(size) if line else stream.read(size)
+
+    # A failed opener is ordinary prose, including an arbitrarily long first line.
+    header = bytearray()
+    header.extend(read(3))
+    if header == b"\xef\xbb\xbf":
+        header.extend(read(3))
+    if not header.endswith(b"---"):
+        return b""
+    header.extend(read(1))
+    if header.endswith(b"\r"):
+        header.extend(read(1))
+    opening = _FM_OPEN_BYTES.fullmatch(header)
+    if opening is None:
+        return b""
+    start = len(header)
+    while True:
+        previous = len(header)
+        chunk = read(min(4096, max_bytes - previous + 1), line=True)
+        if len(header) + len(chunk) > max_bytes:
+            raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter exceeds its byte budget")
+        header.extend(chunk)
+        # A fence at the buffer boundary is final only after a newline or actual EOF.
+        closing = _FM_CLOSE_BYTES.search(header, max(start, previous - 7))
+        if closing is not None and (not chunk or header.endswith(b"\n")):
+            return bytes(header[:closing.end()])
+        if not chunk:
+            raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter block is not terminated")
+
+
+def frontmatter_line_break(text: str, match: re.Match[str]) -> str:
+    """The line break between a matched YAML block and its closing fence.
+
+    It is empty for an empty block, which shares the opening fence's line break.
+    """
+    end = match.end(1)
+    breaks = ("\r\n", "\n")
+    return next((line_break for line_break in breaks if text.startswith(line_break, end)), "")
+
+
+def parse_frontmatter(
+    text: str, *, strict: bool = False, custody: bool = False
+) -> tuple[dict[str, Any], str, str | None]:
     """Split a markdown file into (frontmatter_dict, body, frontmatter_text).
 
     Returns ({}, text, None) when no frontmatter block is present.
     `body` has no leading newline (mirrors find._parse_page).
+
+    `custody` is for a reader that accounts for stored originals. It implies `strict` and
+    also refuses an opening fence with no closing fence, which could hide governed fields.
+    Ordinary strict readers treat such a document as a
+    plain note, so one stray note never blocks a vault-wide write.
     """
+    strict = strict or custody
     m = _FM_PATTERN.match(text)
     if not m:
+        # These delimiters are the fixed frontmatter format, not a rule about prose meaning.
+        if custody and text.removeprefix("\ufeff").startswith(("---\n", "---\r\n")):
+            raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter block is not terminated")
         return {}, text, None
     fm_text = m.group(1)
     body = m.group(2)

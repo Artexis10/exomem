@@ -302,6 +302,46 @@ Each cell has a media allowance, separate from its volume size. It is a configur
 
   Vault storage is provisioned per cell and costs more per gigabyte; media storage is billed by the bytes stored. A meter that cannot be read shows as unknown, never as zero.
 
+#### Complete reference accounting
+
+The owner meter reads canonical sidecars, including Trash, under the existing consistency guard.
+It deduplicates the selected store's object versions and checks that duplicate plaintext sizes and digests agree.
+The cache ledger and provider listings cannot prove the owner's current reference total.
+A strict census extends the existing reserved-path boundary; it adds no inventory database or second exclusion list.
+Registry-owned private state stays excluded.
+Ordinary aliases, incomplete enumeration, invalid placement or malformed potential companions make usage unknown.
+Closing checks compare the complete namespace and the versions of selected headers and used placement files.
+These witnesses detect changes across the census; they do not create an atomic snapshot against external writers.
+The shared frontmatter reader gives custody readers a `custody` mode that distinguishes absent frontmatter from an unterminated block; strict reads already reject a non-mapping root, and an empty or null root holds no fields.
+Ordinary strict readers keep their meaning, so a plain note that opens with a thematic break never blocks a governed write.
+Unknown usage defers offload, while local bytes and core operations remain available.
+This prevents unmetered uploads; its cost is a retry after reference custody is repaired.
+
+Trashing a stored binary writes a canonical companion for its physical Trash path.
+Both that companion and the placement metadata become durable before the old live reference retires.
+The transition checks all destination names and reverses only files it created.
+Directory companions can retain historical pointers; one strict placement reader shares recovery's original-root and descendant-suffix mapping.
+Recovery either transfers a reference to a compatible live companion or restores local bytes before retiring its Trash companion and metadata.
+Both recovery entry points use the same rule.
+A failed cleanup keeps enough placement evidence for the retained reference.
+Older Trash bytes without a canonical reference remain local; no cache or provider listing invents their former version.
+
+The existing Cloud worker lock serializes offloads; no second queue or reservation database is added.
+The cell checks complete usage before encryption or provider upload, then recomputes the proposed reference union under the publication guard.
+A referenced version adds no bytes; a newly referenced version adds its original plaintext size.
+Reuse requires a current canonical companion outside Trash; historical placement alone does not prove that the live binding remains.
+If provider confirmation or the protection check invalidates reuse, admission assesses a new version before encryption.
+A publication refusal retains the plaintext and the durable protection record.
+
+The chart's media edge store policy supplies `allowance_bytes` through the existing cell configuration path.
+The runtime has no business default; a missing or invalid allowance makes admission unknown.
+A quota or unknown-meter refusal retains retryable worker demand and reassesses current custody and policy on a later scan.
+It does not enter the exact-input terminal refusal rule.
+Restricted status rows show the current refusal code without global usage figures.
+The first implementation scans directly; a cache requires measured cost and an explicit invalidation contract.
+
+Complete ingress admission and the operator's physical meter remain part of task 4.5.
+
 The 20 GiB volume cap is unchanged. It now bounds notes, sidecars, indexes, datasets and the cache, not media.
 
 S2 import admission is unchanged by this change. A later streaming-import slice splits it in two:
