@@ -597,8 +597,8 @@ class Store:
                               "VALUES (?,?,?)", (collection_id, job_id, _json(record)))
         return record
 
-    def batch_rows(self, collection_id: str, ceiling: int) -> int:
-        """Rows the collection's next batch takes, so its row work fits ``STEP_SECONDS`` at the last batch's pace.
+    def batch_rows(self, collection_id: str, ceiling: int, seconds: float = STEP_SECONDS) -> int:
+        """Rows the collection's next batch takes, so its row work fits ``seconds`` at the last batch's pace.
 
         Only row work sets the pace: a fixed cost per transaction would otherwise shrink every
         later batch toward one row without shortening the hold.
@@ -606,7 +606,7 @@ class Store:
         pace = self._pace.get(collection_id)
         if pace is None:
             return min(FIRST_BATCH_ROWS, ceiling)
-        return ceiling if pace <= 0 else max(1, min(ceiling, int(STEP_SECONDS / pace)))
+        return ceiling if pace <= 0 else max(1, min(ceiling, int(seconds / pace)))
 
     def paced(self, collection_id: str, rows: int, seconds: float) -> None:
         """Record the row work of a batch of ``rows`` rows, which sizes the collection's next batch."""
@@ -1077,8 +1077,9 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str
             while taken < REBUILD_STEP_ROWS and not ended and not (
                     taken and (aside() or time.perf_counter() - began >= STEP_SECONDS)):
                 started = time.perf_counter()
-                batch = importer._next_batch(reader, plan, reader.pending, order,
-                                             limit=store.batch_rows(collection_id, importer.MAX_BATCH_ROWS))
+                # A later batch of the step takes only what is left of its budget.
+                batch = importer._next_batch(reader, plan, reader.pending, order, limit=store.batch_rows(
+                    collection_id, importer.MAX_BATCH_ROWS, STEP_SECONDS - (started - began)))
                 if batch.stop is not None:
                     stopped = True  # a logged member never stopped its import
                     break

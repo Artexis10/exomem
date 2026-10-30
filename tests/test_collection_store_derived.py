@@ -235,7 +235,7 @@ def _restart_into_a_slow_rebuild(running, monkeypatch):
     """Import one member of six batches, drop its rows file and restart the service, which rebuilds them.
 
     Each replayed batch takes 0.3 s, as a batch does beside CPU-bound requests, and the service's mutation
-    timeout is one second: longer than one batch, shorter than the member's six. Returns the restarted
+    timeout is one second: longer than one batch, shorter than the member's batches together. Returns the restarted
     service, the rows the import left and the start of each replayed batch.
     """
     root = running.root
