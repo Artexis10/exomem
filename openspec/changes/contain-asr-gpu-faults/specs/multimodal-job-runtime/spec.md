@@ -137,6 +137,11 @@ Exomem SHALL NOT let a CUDA library fault end the process that serves requests. 
 - **WHEN** the service restarts after a failed preflight
 - **THEN** status reports no verdict until the new preflight finishes
 
+#### Scenario: An idle service leaves the media store as it found it
+- **WHEN** the service starts, no media job needs a child, and the store holds no stale GPU fact
+- **THEN** the service adds and changes no row in the media store
+- **AND** status reports the preflight verdict and the CUDA split as unknown until the first child launches
+
 #### Scenario: A media process keeps dying by a signal
 - **WHEN** successive media processes die by a signal that the supervisor did not send
 - **THEN** each restart waits twice as long as the one before, up to a ceiling
