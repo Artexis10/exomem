@@ -202,6 +202,12 @@ def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCovera
 #: governed writes of a replacement worker into 164.8 s and 46.7 s whole-vault
 #: passes.
 #:
+#: `topology_change_left_to_the_drain` is not a race either. A created, removed
+#: or retitled page sends the pass into a whole-vault topology proof, which held
+#: the mutation boundary for 70 s on a synthetic 15,000-page vault. A caller
+#: that may stop at queued defers at once, queuing the delta, and the drain
+#: widens to the affected sources with the hold sized by what changed.
+#:
 #: `"rebuild"` means the scope is *unknown*, not merely unproven: the sidecar
 #: could not be read, or the delta that says what changed is itself incomplete,
 #: so an external edit could be missing from any bounded set we could enqueue.
@@ -225,6 +231,7 @@ _FALLBACK_DISPOSITIONS = {
     "incremental_marker_refused": "defer",
     "unreachable": "defer",
     "resolver_snapshot_unavailable": "defer",
+    "topology_change_left_to_the_drain": "defer",
     "checkpoint_scope_is_not_paths": "rebuild",
     "graph_snapshot_unavailable": "rebuild",
     "recall_checkpoint_absent_or_registry_not_live": "rebuild",
@@ -3350,6 +3357,13 @@ class EpistemicGraphIndex:
         return True, title or None
 
     @staticmethod
+    def _live_resolver_entry(
+        resolver: vault_module.WikilinkResolver, rel: str
+    ) -> tuple[bool, str | None]:
+        """A page's entry in `resolver`, comparable with `_stored_resolver_entry`."""
+        return rel.removesuffix(".md") in resolver.full_paths, resolver.title_key_for_path(rel)
+
+    @staticmethod
     def _read_topology_carry(
         conn: sqlite3.Connection,
     ) -> dict[str, tuple[bool, str | None]] | None:
@@ -3433,11 +3447,7 @@ class EpistemicGraphIndex:
         differing = {
             rel
             for rel, entry in rows.items()
-            if entry
-            != (
-                rel.removesuffix(".md") in resolver.full_paths,
-                resolver.title_key_for_path(rel),
-            )
+            if entry != self._live_resolver_entry(resolver, rel)
         }
         kb = self.vault_root / kb_dirname()
         prefix = kb_prefix()
@@ -3504,10 +3514,9 @@ class EpistemicGraphIndex:
         """
         entries = {rel: self._stored_resolver_entry(conn, rel) for rel in residue}
         for rel, entry in (carry or {}).items():
-            if rel not in residue and self._stored_resolver_entry(conn, rel) != (
-                rel.removesuffix(".md") in resolver.full_paths,
-                resolver.title_key_for_path(rel),
-            ):
+            if rel not in residue and self._stored_resolver_entry(
+                conn, rel
+            ) != self._live_resolver_entry(resolver, rel):
                 return False
             entries[rel] = entry
         present = [(rel, title) for rel, (exists, title) in sorted(entries.items()) if exists]
@@ -5973,15 +5982,25 @@ class EpistemicGraphIndex:
             # guess, and a missed one publishes a stale edge as available.
             if not self._dependency_index_complete(conn):
                 return None
-            sources = self._dependency_sources_for_keys(
-                conn, _dependency_changed_keys(rels, resolver)
-            )
+            return self._fragment_sources(conn, rels, resolver)
         except sqlite3.Error:
             return None
         finally:
             if conn is not None:
                 conn.rollback()
                 conn.close()
+
+    @classmethod
+    def _fragment_sources(
+        cls, conn: sqlite3.Connection, rels: set[str], resolver: vault_module.WikilinkResolver
+    ) -> set[str]:
+        """Pages whose persisted raw targets name `rels` with a `#` fragment.
+
+        A fragment lands on a unit that the target's own bytes decide. These
+        pages re-derive whenever `rels` changed, even when no title or existence
+        moved.
+        """
+        sources = cls._dependency_sources_for_keys(conn, _dependency_changed_keys(rels, resolver))
         return {source for source, raw_target in sources if "#" in raw_target} - rels
 
     def _resolver_affected_sources(
@@ -6637,11 +6656,7 @@ class EpistemicGraphIndex:
             self._mark_unavailable()
             return fallback("resolver_snapshot_unavailable")
         topology_changed = any(
-            (
-                rel.removesuffix(".md") in resolver.full_paths,
-                resolver.title_key_for_path(rel),
-            )
-            != old_entry
+            self._live_resolver_entry(resolver, rel) != old_entry
             for rel, old_entry in stored_entries.items()
         )
         delta_rels = {
@@ -6649,6 +6664,18 @@ class EpistemicGraphIndex:
             for path in set(delta.changed | delta.deleted)
             if (rel := _vault_rel(self.vault_root, Path(path))) is not None
         }
+        if (
+            topology_changed
+            and graph_checkpoint is not None
+            and _caller_can_carry_pending(self.vault_root, self._mutation_coordinator)
+        ):
+            # The proof below is O(vault) under this hold, and the drain does
+            # the same widening from the dependency index at a cost sized by
+            # what moved. Queue the delta, as the cold-resolver bail-out does:
+            # a stored entry that moved is somewhere in it. A caller that must
+            # converge keeps the proof, since its deferral is a whole-vault pass.
+            deferred_scope.update(delta_rels)
+            return fallback("topology_change_left_to_the_drain")
         indexed_sources: dict[str, str] = {}
         linked_sources: set[str] = set()
         resolver_fingerprint: str | None = None
@@ -7021,8 +7048,24 @@ class EpistemicGraphIndex:
         rels: set[str],
         *,
         resolver: vault_module.WikilinkResolver,
+        owns_topology: bool = False,
     ) -> set[str] | None:
-        """Find topology dependants from complete persisted raw dependencies."""
+        """Find topology dependants from complete persisted raw dependencies.
+
+        A linker's rows read its target through three things only: how the
+        resolver resolves the name, whether the target exists (`_target_kind`),
+        and where a `#` fragment lands (`_relation_destination`). The
+        incremental refresh already widens on that model (`_refresh_paths_locked`
+        re-derives `_fragment_dependants` alone while no stored entry moved).
+
+        `owns_topology` is `_drain_owns_topology` for these `rels`: every
+        difference between the resolver and the stored topology is then a queued
+        page, so a queued page whose existence and title the stored row already
+        records moved no resolution or existence. Only the pages that moved
+        widen to every linker by key; the others widen to their fragment
+        dependants. Without it any difference may be outside `rels`, and every
+        queued page widens by key.
+        """
         opened_snapshot = not conn.in_transaction
         if opened_snapshot:
             conn.execute("BEGIN")
@@ -7032,14 +7075,14 @@ class EpistemicGraphIndex:
             return None
         appeared: set[str] = set()
         vanished: set[str] = set()
-        old_titles: set[str] = set()
+        old_titles: dict[str, str] = {}
         for rel in rels:
             row = conn.execute(
                 "SELECT title FROM graph_nodes WHERE path = ? AND kind = 'file'", (rel,)
             ).fetchone()
             indexed = row is not None
             if row is not None and row[0] is not None and str(row[0]).strip():
-                old_titles.add(str(row[0]).strip().casefold())
+                old_titles[rel] = str(row[0]).strip().casefold()
             exists = (self.vault_root / rel).exists()
             if exists and not indexed:
                 appeared.add(rel)
@@ -7054,6 +7097,14 @@ class EpistemicGraphIndex:
                     conn.rollback()
                 return None
 
+        moved = {
+            rel
+            for rel in rels
+            if not owns_topology
+            or rel in appeared
+            or rel in vanished
+            or self._stored_resolver_entry(conn, rel) != self._live_resolver_entry(resolver, rel)
+        }
         affected: set[str] = set()
         for rel in vanished:
             affected.update(
@@ -7063,11 +7114,14 @@ class EpistemicGraphIndex:
                     (_file_key(rel),),
                 )
             )
-        keys = _dependency_changed_keys(rels, resolver) | old_titles
+        keys = _dependency_changed_keys(moved, resolver) | {
+            title for rel, title in old_titles.items() if rel in moved
+        }
         affected.update(
             source_path
             for source_path, _raw_target in self._dependency_sources_for_keys(conn, keys)
         )
+        affected.update(self._fragment_sources(conn, rels - moved, resolver))
         if opened_snapshot:
             conn.rollback()
         return affected - rels
@@ -7187,17 +7241,23 @@ class EpistemicGraphIndex:
             }
             probe = self._connect()
             try:
-                affected = self._topology_affected_sources(
-                    probe, queued_rels, resolver=resolver
-                )
+                # One snapshot, so the ownership proof and the widening that
+                # relies on it read the same rows.
+                if not probe.in_transaction:
+                    probe.execute("BEGIN")
                 # Decided on the pre-pass rows, which still carry the stored
                 # titles; inside the publication hook the rows already hold the
                 # new ones, and reverting to them would prove nothing. Only the
                 # queued pages explain topology: widening follows their keys,
-                # so an affected page's own retitle was never widened.
+                # so an affected page's own retitle was never widened. Decided
+                # before the widening, which narrows to what moved only when
+                # these pages explain every change.
                 carry = self._read_topology_carry(probe)
-                owns_topology = affected is not None and self._drain_owns_topology(
+                owns_topology = self._drain_owns_topology(
                     probe, resolver, queued_rels, carry
+                )
+                affected = self._topology_affected_sources(
+                    probe, queued_rels, resolver=resolver, owns_topology=owns_topology
                 )
                 carry_after = (
                     None

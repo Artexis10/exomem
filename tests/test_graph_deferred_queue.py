@@ -423,6 +423,9 @@ _DECLARED_FALLBACK_DISPOSITIONS = {
     # Not a race: a cold process-local resolver cache. The delta is proven
     # complete when it fires, so the queue owns the repair.
     "resolver_snapshot_unavailable": "defer",
+    # Not a race either: the whole-vault topology proof the pass would run under
+    # the hold is what the drain does proportionally.
+    "topology_change_left_to_the_drain": "defer",
     # Unknown scope: the sidecar or the delta cannot be trusted to bound it.
     "checkpoint_scope_is_not_paths": "rebuild",
     "graph_snapshot_unavailable": "rebuild",
@@ -1368,6 +1371,46 @@ def test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue(
     _assert_matches_a_fresh_rebuild(vault)
 
 
+def test_a_create_defers_its_topology_proof_to_the_drain_for_a_caller_that_may_stop_at_queued(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+) -> None:
+    """A created page must not run the whole-vault topology proof under the hold.
+
+    The proof read every page's bytes and the whole membership under the
+    mutation boundary (70 s on a synthetic 15,000-page vault). The drain does
+    the same widening from the dependency index, sized by what moved.
+    """
+    _publish_with_a_resident_resolver(
+        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    whole_vault_passes.clear()
+    proofs: list[int] = []
+    real_membership = EpistemicGraphIndex._checkpoint_membership
+
+    def counted(self: Any, checkpoint: Any) -> Any:
+        proofs.append(1)
+        return real_membership(self, checkpoint)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_checkpoint_membership", counted)
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+
+    with graph_sync.standalone_join_waived():
+        report = index_sync.upsert_after_write(
+            vault, [vault / CREATED], created_paths=[vault / CREATED]
+        )
+
+    graph = next(item for item in report.components if item.component == "epistemic_graph")
+    assert (graph.outcome, graph.code) == ("deferred", "graph_repair_queued")
+    assert proofs == [], "the write ran the whole-vault topology proof under the hold"
+
+    index_sync.drain_graph_work(vault)
+
+    assert whole_vault_passes == []
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
 def _acknowledged_behind_withdrawn_reads(root: Path) -> None:
     """A create the drain acknowledged, after which reads were withdrawn."""
     _publish_with_a_resident_resolver(
@@ -1907,7 +1950,10 @@ def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
         monkeypatch,
         {
             PAGE_A: _page("A", "A is revised against [[queue-b]]."),
-            PAGE_B: _page("B", "B is revised and cites nothing."),
+            # Retitled, so that the drain of B widens to A. A's replay was
+            # withheld while B was queued, and only a batch that holds A
+            # covers the committed generation and acknowledges it.
+            PAGE_B: _page("B renamed", "B is revised and cites nothing."),
         },
     )
     real_drain = EpistemicGraphIndex.drain_paths
