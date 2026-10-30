@@ -1303,7 +1303,8 @@ def _pages_without_id(
     kb = Path(vault_root) / kb_dirname()
     if not kb.is_dir():
         return
-    # A backfill job plans over every page before it holds the boundary, so the walk yields to a foreground read.
+    # A backfill job plans over every page before it holds the boundary, so the walk yields
+    # to a foreground read.
     for path in foreground_priority.yielding_in_bulk(sorted(kb.rglob("*.md"))):
         rel = _relative_markdown(vault_root, path)
         if rel is None:
@@ -1407,7 +1408,9 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
         for rel, path, raw, _ in _pages_without_id(root, skipped)
     ]
     fresh = _backfill_plan_id((rel, digest) for rel, _, digest in pending)
-    maintenance_jobs.require_current_plan("backfill-ids", plan_id, fresh, "the pages that lack an exomem_id")
+    maintenance_jobs.require_current_plan(
+        "backfill-ids", plan_id, fresh, "the pages that lack an exomem_id"
+    )
     identity_issues = scan_issues(root)
     _refuse_duplicates(identity_issues)
     assigned: dict[str, str] = {}

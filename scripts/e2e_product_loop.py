@@ -555,11 +555,15 @@ async def _await_maintenance_job(client, run_id: str, timeout: float) -> Any:
     """Read the job until it leaves `running`, within the graph convergence window."""
     deadline = time.monotonic() + _GRAPH_CONVERGENCE_SECONDS
     while True:
-        job = await _call(client, "maintain_memory", {"mode": "maintenance-job", "run_id": run_id}, timeout)
+        job = await _call(
+            client, "maintain_memory", {"mode": "maintenance-job", "run_id": run_id}, timeout
+        )
         if not isinstance(job, dict) or job.get("state") != "running":
             return job
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"maintenance job {run_id} is still running after {_GRAPH_CONVERGENCE_SECONDS}s")
+            raise RuntimeError(
+                f"maintenance job {run_id} is still running after {_GRAPH_CONVERGENCE_SECONDS}s"
+            )
         await asyncio.sleep(_GRAPH_POLL_SECONDS)
 
 
