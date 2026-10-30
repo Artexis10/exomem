@@ -251,8 +251,9 @@ authority and can be rolled back independently.
       once (`test_a_guarded_record_update_waits_out_the_boundary`). Never re-run a
       narrow write that fetched caller handles
       (`test_a_busy_boundary_never_fetches_a_handle_twice_in_one_call`), and never
-      start an attempt the request budget cannot finish
-      (`test_a_slow_attempt_is_not_started_again_past_the_request_budget`).
+      start an attempt the request budget cannot finish, also after a wait in line
+      (`test_a_slow_attempt_is_not_started_again_past_the_request_budget`,
+      `test_a_wait_in_line_is_counted_before_a_slow_attempt_starts_again`).
       Declare every field a busy refusal carries in the REST `Error` schema.
 
 ## 11. Graph receipt identity after authority release

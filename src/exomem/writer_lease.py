@@ -6440,7 +6440,15 @@ class LeaseManager:
         # The last busy refusal this write absorbed: a wait that runs out in line
         # still names the holder that kept it waiting.
         last_busy: OpError | None = None
+        last_attempt_seconds = 0.0
         holds_slot = False
+
+        def fits_another_attempt() -> bool:
+            # The deadline leaves room for one guard timeout, not for a leaf whose
+            # preparation is slow; never start an attempt the budget cannot finish.
+            return request_budget.can_afford(
+                request_budget.DELIVERY_RESERVE_SECONDS + last_attempt_seconds
+            )
 
         def wait_turn() -> bool:
             # A head ticket can return immediately even after its deadline.
@@ -6506,6 +6514,11 @@ class LeaseManager:
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
+                if last_busy is not None and not fits_another_attempt():
+                    # Waiting in line can spend the budget the check below saw.
+                    raise refuse(
+                        last_busy, "capture_wait_exhausted", _CAPTURE_WAIT_EXHAUSTED_REMEDIATION
+                    )
                 attempt_started = time.monotonic()
                 try:
                     token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(preparation_retry)
@@ -6529,13 +6542,8 @@ class LeaseManager:
                             error, "holder_overdue", _CAPTURE_HOLDER_OVERDUE_REMEDIATION
                         ) from None
                     remaining = deadline - time.monotonic()
-                    # The deadline leaves room for one guard timeout, not for a leaf
-                    # whose preparation is slow; never start an attempt the budget
-                    # cannot finish.
-                    attempt_seconds = time.monotonic() - attempt_started
-                    if remaining <= 0 or not request_budget.can_afford(
-                        request_budget.DELIVERY_RESERVE_SECONDS + attempt_seconds
-                    ):
+                    last_attempt_seconds = time.monotonic() - attempt_started
+                    if remaining <= 0 or not fits_another_attempt():
                         raise refuse(
                             error,
                             "capture_wait_exhausted",

@@ -187,6 +187,8 @@ _OPENAPI_ERROR_SCHEMA = {
         # DERIVED from the single source of truth, never transcribed.
         "site": {"type": "string", "enum": list(_retrieval_warming_sites())},
         "waited_ms": {"type": "integer", "minimum": 0},
+        # One lock acquire's wait, on a MUTATION_BUSY the server did not wait out.
+        "wait_ms": {"type": "number", "minimum": 0},
         # Why a write's server-side wait on a busy mutation boundary ended in
         # MUTATION_BUSY, and how many busy attempts it absorbed before that.
         "cause": {"type": "string"},

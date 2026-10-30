@@ -258,7 +258,7 @@ that cap is refused at once with `cause: capture_waiters_full`. The retry MUST r
 under the same idempotency identity, so the write commits exactly once, and
 MUST NOT re-run any attempt that observed a commit. A retry SHALL start only
 while the request budget still fits the delivery reserve plus an attempt as long
-as the last one. A write whose own preparation fetched caller-supplied temporary
+as the last one, checked again after any wait in line. A write whose own preparation fetched caller-supplied temporary
 artifact handles before it met the busy boundary MUST NOT be re-run on the
 server, because a handle cannot be fetched twice; its busy reaches the caller,
 who retries with fresh handles. A client MUST NOT receive
@@ -266,9 +266,10 @@ who retries with fresh handles. A client MUST NOT receive
 whose wait has not run out, and that arrived within the waiter cap; absorption
 holds up to the cap and no further.
 
-A refusal remains only for a holder already past its allowance, a wait that
-ran out, a write past the waiter cap, or a write that fetched caller-supplied
-handles. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
+A write that fetched caller-supplied handles keeps the plain retryable
+`MUTATION_BUSY` with `committed: false`, as before absorption. Any other refusal
+remains only for a holder already past its allowance, a wait that ran out, or a
+write past the waiter cap. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
 `cause` (`holder_overdue`, `capture_wait_exhausted` or
 `capture_waiters_full`), the time waited, and a
 remediation that says the write did not commit and may be retried with the same

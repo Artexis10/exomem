@@ -129,6 +129,39 @@ def test_a_slow_attempt_is_not_started_again_past_the_request_budget(
     assert elapsed <= budget - 1.0, elapsed
 
 
+def test_a_wait_in_line_is_counted_before_a_slow_attempt_starts_again(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writers ahead in line can spend the budget a slow attempt needs."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "40")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path), mutation_timeout_seconds=0.2
+    )
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 1.0)
+
+    def behind_other_writers(_ticket, _deadline):
+        time.sleep(1.5)
+        return True
+
+    monkeypatch.setattr(manager._capture_queue, "wait_turn", behind_other_writers)
+    attempts: list[float] = []
+
+    def slow_preparation_then_busy():
+        attempts.append(time.monotonic())
+        time.sleep(1.0)
+        raise _busy()
+
+    budget = 4.0
+    started = time.monotonic()
+    with pytest.raises(OpError) as refused:
+        _run(manager, slow_preparation_then_busy, budget=budget)
+    elapsed = time.monotonic() - started
+
+    assert refused.value.details["cause"] == "capture_wait_exhausted"
+    assert len(attempts) == 1
+    assert elapsed <= budget - 1.0, elapsed
+
+
 def test_absorbed_retries_do_not_count_as_client_visible_busy(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
