@@ -4711,37 +4711,15 @@ def post_commit_batch_fanout(
     # Register the self-authored replacements so the live watcher drops
     # their echo instead of re-embedding the same files a second time.
     publication_intents = tuple(publication_intents)
-    corpus_published = False
-    try:
-        from . import file_watcher
+    from . import file_watcher
 
-        # The fan-out driver's own two steps, which sat between the mark and
-        # `index.upsert_after_write` with no span: registering this process's
-        # self-writes so the watcher does not re-observe them, and the graph
-        # epoch check below.
-        with call_spans.span(
-            "index.self_write_registration", {"paths": len(replaced)}
-        ):
-            registered_intents, corpus_published = file_watcher.register_self_write(
-                vault_root, replaced, return_publication_result=True
-            )
-        if corpus_published:
-            file_watcher.finalize_publication_intents(
-                publication_intents, succeeded=registered_intents
-            )
-        elif publication_intents:
-            file_watcher.abort_publication_intents(
-                publication_intents, force_paths=replaced
-            )
-    except Exception:  # noqa: BLE001 — suppression is best-effort
-        if publication_intents:
-            from . import file_watcher
-
-            file_watcher.abort_publication_intents(
-                publication_intents, force_paths=replaced
-            )
-        logging.getLogger(__name__).debug(
-            "self-write suppression registration failed", exc_info=True
+    # The fan-out driver's own two steps, which sat between the mark and
+    # `index.upsert_after_write` with no span: registering this process's
+    # self-writes so the watcher does not re-observe them, and the graph
+    # epoch check below.
+    with call_spans.span("index.self_write_registration", {"paths": len(replaced)}):
+        corpus_published = file_watcher.register_self_write_and_close(
+            vault_root, replaced, publication_intents
         )
     try:
         from . import index_sync
@@ -5265,11 +5243,9 @@ def _batch_atomic_write_locked(
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
     publication_intents: list[Any] = []
-    publication_intents_enabled = False
-    if vault_root is not None and (post_commit_fanout or publication_intents_out is not None):
-        from .writer_lease import active_derived_batch_custody
-
-        publication_intents_enabled = not active_derived_batch_custody(Path(vault_root))
+    publication_intents_enabled = vault_root is not None and (
+        post_commit_fanout or publication_intents_out is not None
+    )
     if vault_root is not None:
         from . import graph_sync
 
@@ -5958,7 +5934,7 @@ def _batch_atomic_write_locked(
     if vault_root is not None:
         # Before the write acknowledges, so the free-text census names every
         # file this batch installed, whatever its kind and whichever fan-out
-        # route follows. The fast-receipt route skips the watcher registration.
+        # route follows. The fast-receipt route registers the self-write too.
         from .governance import artifact_census
 
         artifact_census.note_created(vault_root, replaced)
@@ -5968,6 +5944,18 @@ def _batch_atomic_write_locked(
             raise RuntimeError("derived receipt has no canonical commit timestamp")
         from .writer_lease import complete_active_derived_batch
 
+        if publication_intents_enabled:
+            # Publish and close the echo proof before the reply, as the
+            # synchronous route does: the drain runs behind the reply, and until
+            # it does a reader would take the registry's pre-write state as
+            # current. No caller is left a fan-out to finish, so it sees no
+            # intent to abort.
+            from . import file_watcher
+
+            file_watcher.register_self_write_and_close(
+                vault_root, replaced, publication_intents
+            )
+            publication_intents.clear()
         complete_active_derived_batch(
             fast_receipt,
             canonical_commit_monotonic=canonical_commit_monotonic,
@@ -7591,6 +7579,14 @@ def find_inbound_wikilinks(
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
     return _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+
+
+def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them."""
+    data = _inbound_index(vault_root)
+    with _INBOUND_INDEX_LOCK:
+        snapshots = {target: _snapshot_inbound(data, target) for target in targets}
+    return {target: _select_inbound_wikilinks(snapshot, target, None) for target, snapshot in snapshots.items()}
 
 
 def cached_inbound_wikilinks(
