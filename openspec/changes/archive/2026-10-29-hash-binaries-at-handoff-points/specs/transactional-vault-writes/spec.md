@@ -101,10 +101,12 @@ includes deliberate substitution of an exact batch-controlled source-stage,
 workspace, or destination pathname component before the corresponding kernel
 namespace instruction, and mutation of a residue workspace or child after its
 last relevant check before the directory guard consumes the classification
-result. It also includes a same-size rewrite of a binary stage, an installed
-binary destination, or a private publication temporary that leaves the trusted
-change witness unchanged because it lands within one filesystem timestamp
-tick of the last witness. Portable filesystems expose neither a conditional identity
+result. It also includes a same-size rewrite of a binary stage or an installed
+binary destination within one filesystem timestamp tick of its last change
+witness, and a same-size rewrite of a private publication temporary, or of the
+destination it was just installed as, that is made after the verified copy and
+before the installed witness is read and leaves the size and modification time
+unchanged. Portable filesystems expose neither a conditional identity
 precondition for every pathname component nor a portable frozen directory-
 census primitive. This narrow exclusion does not weaken rollback for detected
 drift, ordinary concurrency detected by the applicable checks, cooperating

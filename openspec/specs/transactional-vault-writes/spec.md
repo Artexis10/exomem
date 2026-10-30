@@ -2,6 +2,7 @@
 
 ## Purpose
 Make multi-file vault writes behave transactionally: batch Markdown writes are all-or-nothing, and a move and its inbound wikilink rewrites roll back together. Graph-relevant writes keep fail-closed ordering unless a media caller explicitly requests deferred graph completion.
+
 ## Requirements
 
 ### Requirement: Multi-File Markdown Batches Roll Back
@@ -24,7 +25,10 @@ platform supports them, use descriptor-relative traversal where available,
 and reject symlink or reparse traversal. A pathname fallback SHALL revalidate
 the bound workspace and leaf identity immediately before use. Planned bytes
 SHALL be written and verified through the owned stage descriptor before any
-destination replacement.
+destination replacement. The bytes copied from a stage into a destination
+SHALL be hashed while they are copied, and the destination SHALL be installed
+only when that digest matches the planned digest. A mismatch SHALL leave no
+destination installed for that stage.
 
 Before the first destination replacement, the primitive SHALL capture every
 pre-existing destination in memory as exact bytes plus permission bits,
@@ -44,7 +48,13 @@ pathname as backup or rollback state. Pre-existing user files, including
 treated as rollback artifacts. Before every replacement, restore, or removal,
 the primitive SHALL revalidate target identity/content guards, workspace
 identity, stage identity/content, already installed finals, and applicable
-directory censuses. Detected or ambiguous drift SHALL fail closed and SHALL
+directory censuses. A binary stage and an installed binary destination MAY be
+revalidated by their exact file identity and a trusted platform change
+witness (size, modification time, and change time) instead of rereading their
+bytes; a platform or route without a trusted change witness SHALL keep the
+content check. Each binary's bytes SHALL be hashed when they are copied into
+the stage and when they are copied into the destination, and SHALL NOT be
+reread for each further replacement where a trusted change witness exists. Detected or ambiguous drift SHALL fail closed and SHALL
 NOT overwrite, move, or delete the changed path.
 
 Rollback SHALL attempt every still-safe destination after any individual
@@ -96,7 +106,12 @@ includes deliberate substitution of an exact batch-controlled source-stage,
 workspace, or destination pathname component before the corresponding kernel
 namespace instruction, and mutation of a residue workspace or child after its
 last relevant check before the directory guard consumes the classification
-result. Portable filesystems expose neither a conditional identity
+result. It also includes a same-size rewrite of a binary stage or an installed
+binary destination within one filesystem timestamp tick of its last change
+witness, and a same-size rewrite of a private publication temporary, or of the
+destination it was just installed as, that is made after the verified copy and
+before the installed witness is read and leaves the size and modification time
+unchanged. Portable filesystems expose neither a conditional identity
 precondition for every pathname component nor a portable frozen directory-
 census primitive. This narrow exclusion does not weaken rollback for detected
 drift, ordinary concurrency detected by the applicable checks, cooperating
@@ -165,6 +180,28 @@ primitive does not claim cross-file all-or-none power-loss atomicity.
 - **WHEN** a process running as the vault owner changes a relevant pathname component after its last verified check and before that observation is consumed, including final-instruction substitution or residue mutation after its final bounded census
 - **THEN** the primitive does not claim a portable conditional-identity or frozen-directory-census guarantee for that interval
 - **AND** detected-drift, applicable ordinary-concurrency, and cooperating-writer guarantees remain unchanged
+
+#### Scenario: Tampered stage is never published
+
+- **WHEN** a staged binary changes after its last witness check and before its bytes are copied into the destination
+- **THEN** the copy's digest does not match the planned digest and no destination is installed for that stage
+- **AND** every destination the batch already changed is rolled back, the changed stage is retained as private residue rather than deleted, and the operation reports a cleanup-incomplete outcome chained to the content failure rather than an incomplete rollback
+
+#### Scenario: Binary bytes are hashed at their two handoff points
+
+- **WHEN** a batch of any number of writes installs a binary on a platform with a trusted change witness
+- **THEN** the binary's bytes are hashed once while copied into the stage and once while copied into the destination
+- **AND** later revalidation of that stage and that installed destination compares identity and change witness without rereading the bytes
+
+#### Scenario: Untrusted change witness keeps content checks
+
+- **WHEN** the platform does not expose a trusted change witness for an installed binary destination
+- **THEN** that destination is revalidated by its exact content before each later replacement, restore, or removal
+
+#### Scenario: Rollback removal of a large binary streams its content check
+
+- **WHEN** rollback removes a binary destination that the failed batch installed
+- **THEN** it verifies the exact installed content through a bounded buffer and never holds the whole file in memory
 
 ### Requirement: Moves Roll Back Link Rewrites
 
