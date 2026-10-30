@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import cuda_containment, resource_status
@@ -241,6 +241,17 @@ def as_gpu_busy(error: BaseException) -> ASRGpuBusy | None:
     if not is_cuda_out_of_memory(error) or _requested_device()[0] != "cuda":
         return None
     return ASRGpuBusy(f"the GPU ran out of memory while loading the speech model: {error}")
+
+
+def cpu_selection_after_cuda_oom(selection: ASRSelection, error: BaseException) -> ASRSelection | None:
+    """The CPU selection for a job whose automatic CUDA choice ran out of memory while loading, else None.
+
+    Automatic mode chose CUDA from the free memory at the probe, and another process took it since.
+    The job can run on the CPU, so it does not wait. An explicit CUDA request waits instead (`as_gpu_busy`).
+    """
+    if selection.device != "cuda" or not is_cuda_out_of_memory(error) or _requested_device()[0] != "auto":
+        return None
+    return select_asr_runtime(probe=replace(selection.probe, cuda_available=False))
 
 
 def as_compute_runtime_error(error: BaseException) -> ASRComputeRuntimeError | None:

@@ -3244,7 +3244,8 @@ def test_a_crashing_gpu_preflight_leaves_the_media_child_without_the_gpu_and_the
     child_env = worker._guard_gpu(asr_runtime.cuda_runtime_child_env(worker_env))
 
     assert child_env["CUDA_VISIBLE_DEVICES"] == ""
-    assert "SIGSEGV during torch CUDA initialization" in media_jobs.status(vault)["gpu_preflight"]["reason"]
+    recorded = media_jobs.status(vault)["gpu_preflight"]
+    assert (recorded["result"], "SIGSEGV during torch CUDA initialization" in recorded["reason"]) == ("failed", True)
     # A child started with that environment blocks an explicit-CUDA speech job and says why.
     monkeypatch.setenv(cuda_containment.PREFLIGHT_FAILURE_ENV, child_env[cuda_containment.PREFLIGHT_FAILURE_ENV])
     _gpu_with_free_vram(monkeypatch, free_mib=8192, cuda_devices=0)  # the hidden device list leaves CTranslate2 no GPU
@@ -3271,7 +3272,49 @@ def test_a_healthy_gpu_preflight_gives_the_media_child_the_deployments_device_li
     assert worker_env["CUDA_VISIBLE_DEVICES"] == ""  # the serving worker still sees no device
     assert child_env["CUDA_VISIBLE_DEVICES"] == "0"
     assert cuda_containment.PREFLIGHT_FAILURE_ENV not in child_env
-    assert media_jobs.status(vault)["gpu_preflight"] is None
+    assert media_jobs.status(vault)["gpu_preflight"]["result"] == "passed"
+
+
+def test_a_host_with_no_cuda_device_to_initialize_records_the_gpu_as_not_tested(vault) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    child_env = worker._guard_gpu({"CUDA_VISIBLE_DEVICES": ""})
+
+    assert child_env["CUDA_VISIBLE_DEVICES"] == ""
+    recorded = media_jobs.status(vault)["gpu_preflight"]
+    assert (recorded["result"], recorded["reason"]) == ("not tested", "no CUDA device visible; nothing tested")
+
+
+def test_a_restarted_supervisor_drops_the_last_lifetimes_gpu_verdict_and_reports_whether_cuda_is_hidden(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_jobs.MediaJobStore(vault).record_gpu_preflight("failed", "died with SIGSEGV during torch CUDA initialization")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv(cuda_containment.CHILD_DEVICES_ENV, '"0"')
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._stop_event.set()
+
+    worker._supervise()
+
+    status = media_jobs.status(vault)
+    assert (status["gpu_preflight"], status["serving_worker_cuda_hidden"]) == (None, True)
+
+
+def test_the_record_of_a_gpu_wait_ends_once_the_waiting_work_is_gone(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _preserve_media_stub(vault, filename="deleted-while-waiting.m4a")
+    job = media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(job)
+    store.note_gpu_wait("insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed")
+    assert media_jobs.status(vault)["gpu_wait"] is not None
+    store.discard(job)  # the recording is deleted while it waits
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker._wake, "wait", lambda _timeout: worker._stop_event.set() or False)
+
+    worker._supervise()
+    store.enqueue(job)  # a later recording
+
+    assert media_jobs.status(vault)["gpu_wait"] is None  # the old record would still report the first wait
 
 
 def test_a_gpu_that_fills_up_before_the_model_loads_defers_the_job_instead_of_failing_it(
@@ -3298,6 +3341,29 @@ def test_a_gpu_that_fills_up_before_the_model_loads_defers_the_job_instead_of_fa
     [job] = media_jobs.status(vault)["jobs"]
     assert (job["state"], job["attempts"], job["error"]) == (media_jobs.PENDING, 0, None)
     assert "out of memory" in media_jobs.status(vault)["gpu_wait"]["reason"]
+
+
+def test_a_gpu_that_fills_up_while_automatic_mode_loads_the_speech_model_runs_it_on_the_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    _gpu_with_free_vram(monkeypatch, free_mib=8192)
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "auto")
+    devices: list[str] = []
+
+    class _Model:
+        def __init__(self, _name, *, device, **_kwargs):
+            devices.append(device)
+            if device == "cuda":
+                raise RuntimeError("CUDA failed with error out of memory")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_Model))
+    monkeypatch.setattr(extract, "_WHISPER", None)
+
+    assert isinstance(extract._get_whisper(), _Model)
+    assert devices == ["cuda", "cpu"]
 
 
 def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
@@ -3329,7 +3395,8 @@ def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
         if worker._child is None:  # the busy child was handled and the supervisor now waits
             now[0] += 10
             if now[0] == 1010.0:
-                worker.enqueue(binary_path=vault / image.path, sidecar_path=vault / image.sidecar_path, media_type="image")
+                # The way a watcher or an upload queues media: through the store, not through this worker.
+                media_processing.reconcile_media(vault, vault / image.path, explicit=False)
             if now[0] >= 1030.0:
                 worker._stop_event.set()
         return False
@@ -3375,6 +3442,9 @@ def test_supervisor_backs_off_while_children_keep_dying_by_a_signal(vault, monke
 
     # The delay doubles from 2 s; a flat 2 s delay would start a child at every second step.
     assert launches == [1000.0, 1002.0, 1006.0, 1014.0]
+    # Status shows the loop and the job at the head of the queue, so a stuck queue explains itself.
+    crashes = media_jobs.status(vault)["child_crashes"]
+    assert (crashes["signal"], crashes["count"], crashes["head_job"]) == ("SIGSEGV", len(launches), result.path)
 
 
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
@@ -4307,7 +4377,8 @@ def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
     _run_supervisor_for(worker, 2.0)
 
     boundary = [op for op in taken if op and op.startswith("reserved_identity")]
-    assert len(boundary) <= 4, (
+    # Two reads as before, plus the one write at the start of a supervisor lifetime.
+    assert len(boundary) <= 6, (
         f"an idle supervisor took the mutation boundary {len(boundary)} times in "
         f"two seconds ({boundary}); this is the log flood"
     )

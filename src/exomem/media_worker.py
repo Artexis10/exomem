@@ -26,8 +26,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import (
     asr_runtime,
@@ -385,8 +387,6 @@ class MediaWorker:
         self._gpu_preflight: cuda_containment.Preflight | None = None
         #: The supervisor killed the running child itself, so its signal exit is not a crash.
         self._child_stopped = False
-        #: Set when work that needs no GPU is queued; the supervisor then ends a GPU-busy wait early.
-        self._non_speech_queued = threading.Event()
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
@@ -466,8 +466,6 @@ class MediaWorker:
         if self._execution_mode == "process":
             assert self._store is not None
             self._store.enqueue(job)
-            if media_engines.engine_for(media_type) != media_engines.SPEECH:
-                self._non_speech_queued.set()
             self._wake.set()
         else:
             self._q.put(job)
@@ -1698,37 +1696,41 @@ class MediaWorker:
         One verdict per worker lifetime: a repaired driver needs a service restart anyway, and a probe
         costs seconds of CUDA initialization. A failed verdict leaves the child with no device and the
         reason, so an explicit CUDA request blocks with it and an automatic one runs on the CPU.
+        A host with no CUDA device to initialize gets the verdict "not tested", never "passed".
         """
         if self._gpu_preflight is None:
-            # Nothing to protect without an NVIDIA driver or with every device already hidden.
-            guarded = cuda_containment.DEVICES_ENV in env and not env[cuda_containment.DEVICES_ENV]
-            if guarded or resource_status.find_nvidia_smi() is None:
-                self._gpu_preflight = cuda_containment.Preflight(True)
+            if cuda_containment.no_cuda_visible(env):
+                verdict = cuda_containment.Preflight.untested("no CUDA device visible")
+            elif resource_status.find_nvidia_smi() is None:
+                verdict = cuda_containment.Preflight.untested("no NVIDIA driver found")
             else:
-                self._gpu_preflight = cuda_containment.preflight(env)
-                if not self._gpu_preflight.ok:
-                    log.error("media worker: GPU preflight failed (%s); media runs without the GPU", self._gpu_preflight.reason)
-            self._record_gpu_preflight()
+                verdict = cuda_containment.preflight(env)
+                if not verdict.ok:
+                    log.error("media worker: GPU preflight failed (%s); media runs without the GPU", verdict.reason)
+            self._gpu_preflight = verdict
+            self._record_status(MediaJobStore.record_gpu_preflight, verdict.result, verdict.reason)
         if self._gpu_preflight.ok:
             return env
         failure = f"GPU preflight {self._gpu_preflight.reason}; media processing runs without the GPU until the service restarts"
         return cuda_containment.deny_gpu_to_child(env, failure)
 
-    def _record_gpu_preflight(self) -> None:
-        verdict = self._gpu_preflight
-        assert verdict is not None
+    def _record_status(self, record: Callable[..., Any], *args: object, **kwargs: object) -> Any:
+        """Write a status fact; a status record must never keep the supervisor or a child from running."""
         if self._store is None:
-            return
+            return None
         try:
-            self._store.record_gpu_preflight(None if verdict.ok else f"GPU preflight {verdict.reason}")
-        except Exception:  # noqa: BLE001 - a status record must never keep the child from starting
-            log.warning("media worker: could not record the GPU preflight verdict", exc_info=True)
+            return record(self._store, *args, **kwargs)
+        except Exception:  # noqa: BLE001 - see above
+            log.warning("media worker: could not record a status fact", exc_info=True)
+            return None
 
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
         #: The last child exited because the GPU is busy, and the supervisor waits to ask again.
         gpu_hold = False
+        #: The store signature this wait last looked at for work that needs no GPU.
+        hold_signature: tuple[object, ...] | None = None
         #: Children in a row that died by a signal nobody here sent.
         crashes = 0
         # The store signature this supervisor last saw answer "no work", and
@@ -1737,6 +1739,12 @@ class MediaWorker:
         forced_recheck_at = 0.0
         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
         brakes = media_brakes.enabled()
+        #: A GPU wait is recorded that no idle pass has re-checked yet; a restart can keep one for waiting jobs.
+        gpu_wait_recorded = bool(
+            self._record_status(
+                MediaJobStore.reset_runtime_status, serving_worker_cuda_hidden=cuda_containment.hidden_from_worker()
+            )
+        )
         try:
             waits, self._engine_waits = self._engine_waits, []
             if waits:
@@ -1800,11 +1808,18 @@ class MediaWorker:
                     idle_signature = None
                     gpu_hold = False
                     crashed = returncode is not None and returncode < 0 and not self._child_stopped
-                    crashes = crashes + 1 if crashed else 0
+                    crashes_before, crashes = crashes, crashes + 1 if crashed else 0
                     owns_runtime = self._store.worker_pid() == child_pid
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
                         self._store.clear_worker(child_pid)
+                    if crashed:
+                        # After the recovery, so the record names the job that the next child claims.
+                        self._record_status(
+                            MediaJobStore.record_child_crash, crashes, cuda_containment.signal_name(-returncode)
+                        )
+                    elif crashes_before:
+                        self._record_status(MediaJobStore.clear_child_crashes)
                     if returncode == _MEMORY_RECYCLE_EXIT_CODE:
                         delay = 0.5
                     elif returncode == _MEMORY_WAIT_EXIT_CODE:
@@ -1822,7 +1837,8 @@ class MediaWorker:
                         )
                     elif returncode == _GPU_BUSY_EXIT_CODE:
                         delay = _GPU_BUSY_RECHECK_SECONDS
-                        gpu_hold = True
+                        gpu_hold = gpu_wait_recorded = True
+                        hold_signature = _job_store_signature(self._store)  # the child ran everything it could
                         log.info("media child found the GPU busy; retrying after %.1fs", delay)
                     elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
@@ -1858,11 +1874,17 @@ class MediaWorker:
                         self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
                     relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                if gpu_hold and self._non_speech_queued.is_set():
-                    # Work that needs no GPU arrived during the wait. The child that takes it asks the GPU
-                    # once more on the way, so the wait ends early and one probe is the whole cost.
-                    relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
-                    gpu_hold = False
+                if gpu_hold:
+                    # Every path that queues work writes the store, so a changed signature is the cue to look.
+                    # Work that needs no GPU ends the wait early: the child that takes it asks the GPU once
+                    # more on the way, so one probe is the whole cost.
+                    signature = _job_store_signature(self._store)
+                    if signature is None or signature != hold_signature:
+                        if self._store.next_pending(skip_media_types=media_engines.SPEECH_KINDS) is not None:
+                            relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
+                            gpu_hold = False
+                        else:
+                            hold_signature = _job_store_signature(self._store)  # after the read: it can write the WAL
                 if self._child is None and _clock() >= relaunch_after:
                     now = _clock()
                     signature = _job_store_signature(self._store)
@@ -1900,7 +1922,6 @@ class MediaWorker:
                             relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
                         else:
                             try:
-                                self._non_speech_queued.clear()  # the new child sees all queued work
                                 self._child_stopped = False
                                 self._child = self._launch_child()
                                 self._child_started_at = _clock()
@@ -1914,6 +1935,10 @@ class MediaWorker:
                         # store, and that open writes to the WAL, so a
                         # before-signature would never match again and the skip
                         # would never engage.
+                        if gpu_wait_recorded:
+                            # No work is pending, so no speech job waits for a GPU: end the record of that wait.
+                            self._record_status(MediaJobStore.clear_gpu_wait)
+                            gpu_wait_recorded = False
                         idle_signature = _job_store_signature(self._store)
                         forced_recheck_at = _clock() + recheck_interval
                         recheck_interval = min(

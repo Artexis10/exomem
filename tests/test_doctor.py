@@ -474,23 +474,45 @@ def test_media_runtime_compute_block_uses_runtime_remediation(vault: Path, monke
     assert "CUDA/cuBLAS/cuDNN runtime" in check.remediation
 
 
-def test_media_runtime_names_why_the_gpu_is_denied_or_busy(vault: Path, monkeypatch) -> None:
+def test_media_gpu_check_names_why_the_gpu_is_denied_busy_or_untested(vault: Path, monkeypatch) -> None:
     from exomem import media_jobs
 
-    status = {"healthy": True, "counts": {"pending": 2, "blocked": 0, "failed": 0}}
+    status: dict = {"healthy": True, "counts": {"pending": 2, "blocked": 0, "failed": 0}}
     monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
 
-    status["gpu_preflight"] = {"reason": "GPU preflight died with SIGSEGV during torch CUDA initialization"}
-    denied = doctor_module._check_media_runtime(vault)
-    status["gpu_preflight"] = None
+    status["gpu_preflight"] = {"result": "failed", "reason": "died with SIGSEGV during torch CUDA initialization"}
+    denied = doctor_module._check_media_gpu(vault)
+    status["gpu_preflight"] = {"result": "not tested", "reason": "no CUDA device visible; nothing tested"}
+    status["serving_worker_cuda_hidden"] = True
+    untested = doctor_module._check_media_gpu(vault)
     status.update(
         gpu_waiting_count=2,
         gpu_wait={"reason": "insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed", "since": "2026-01-01T00:00:00Z"},
     )
-    busy = doctor_module._check_media_runtime(vault)
+    busy = doctor_module._check_media_gpu(vault)
 
     assert denied is not None and (denied.status, "SIGSEGV during torch CUDA initialization" in denied.message) == ("warn", True)
     assert busy is not None and (busy.status, "512 MiB free, 2048 MiB needed" in busy.message) == ("warn", True)
+    # An untested GPU is never reported as healthy, and the move of torch models to the CPU is disclosed.
+    assert untested is not None and untested.status == "pass"
+    assert "not tested: no CUDA device visible; nothing tested" in untested.message
+    assert "torch models run on the CPU in the serving worker" in untested.message
+
+
+def test_media_runtime_warns_when_children_keep_dying_by_a_signal(vault: Path, monkeypatch) -> None:
+    from exomem import media_jobs
+
+    status = {
+        "healthy": True,
+        "counts": {"pending": 1, "blocked": 0, "failed": 0},
+        "child_crashes": {"count": 4, "signal": "SIGSEGV", "head_job": "Rental/audio/meeting.m4a"},
+    }
+    monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
+
+    check = doctor_module._check_media_runtime(vault)
+
+    assert check is not None and check.status == "warn"
+    assert "SIGSEGV 4 time(s) in a row" in check.message and "Rental/audio/meeting.m4a" in check.message
 
 
 def test_resource_posture_details_include_allocation_free_asr_policy() -> None:

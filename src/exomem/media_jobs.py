@@ -38,10 +38,13 @@ STATUS_JOB_LIMIT = 100
 # Bump when _key's composition changes so existing stores re-key on next open.
 _JOB_KEY_VERSION = "2"
 DISCOVERY_CURSOR_KEY = "discovery_cursor"
-#: `meta` keys for the two GPU facts an operator needs while jobs look merely pending: speech work
-#: waits for a busy GPU, and the media child runs without the GPU after a failed preflight.
+#: `meta` keys for the facts an operator needs while jobs look merely pending: speech work waits for a
+#: busy GPU, the media child runs without the GPU after a failed preflight, the serving worker hides
+#: CUDA from its torch models, and media children keep dying by a signal.
 GPU_WAIT_KEY = "gpu_wait"
 GPU_PREFLIGHT_KEY = "gpu_preflight"
+SERVING_CUDA_HIDDEN_KEY = "serving_worker_cuda_hidden"
+CHILD_CRASHES_KEY = "child_crashes"
 MAX_SHARING_ATTEMPTS = 3
 _SHARING_WINERRORS = frozenset({5, 32})
 _BATCH_WORKSPACE_RE = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$")
@@ -1604,11 +1607,11 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def next_pending(self) -> MediaJob | None:
-        """The job `claim_next` would claim now, without claiming it."""
+    def next_pending(self, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
+        """The job `claim_next` would claim now with the same `skip_media_types`, without claiming it."""
         conn = self._connect(readonly=True)
         try:
-            row = _next_pending_row(conn)
+            row = _next_pending_row(conn, skip_media_types)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -1962,20 +1965,64 @@ class MediaJobStore:
             conn.close()
 
     def clear_gpu_wait(self) -> None:
+        """End the record of a GPU wait; a no-op that writes nothing when none is recorded."""
+        self._clear_meta(GPU_WAIT_KEY)
+
+    def record_gpu_preflight(self, result: str, reason: str | None) -> None:
+        """Record the preflight verdict: "passed", "failed" or "not tested", and why."""
         conn = self._connect()
         try:
             with conn:
-                self._set_meta_json(conn, GPU_WAIT_KEY, None)
+                self._set_meta_json(
+                    conn, GPU_PREFLIGHT_KEY, {"result": result, "reason": reason, "checked_at": time.time()}
+                )
         finally:
             conn.close()
 
-    def record_gpu_preflight(self, failure: str | None) -> None:
-        """Record why the media child runs without the GPU, or clear the record when it may use it."""
+    def reset_runtime_status(self, *, serving_worker_cuda_hidden: bool) -> bool:
+        """Start of a worker lifetime: drop the last lifetime's verdict, crash count and orphaned wait.
+
+        Records whether CUDA is hidden. Returns whether a GPU wait is still recorded for waiting jobs.
+        """
         conn = self._connect()
         try:
             with conn:
-                value = None if failure is None else {"reason": failure, "checked_at": time.time()}
-                self._set_meta_json(conn, GPU_PREFLIGHT_KEY, value)
+                self._set_meta_json(conn, GPU_PREFLIGHT_KEY, None)
+                self._set_meta_json(conn, CHILD_CRASHES_KEY, None)
+                self._set_meta_json(conn, SERVING_CUDA_HIDDEN_KEY, {"hidden": serving_worker_cuda_hidden})
+                if not _pending_speech_count(conn):
+                    self._set_meta_json(conn, GPU_WAIT_KEY, None)  # no waiting job is left to own the old wait
+                return _read_meta_json(conn, GPU_WAIT_KEY) is not None
+        finally:
+            conn.close()
+
+    def record_child_crash(self, count: int, signal_name: str) -> None:
+        """Record that `count` media children in a row died by `signal_name`, and which job is next in the queue."""
+        conn = self._connect()
+        try:
+            with conn:
+                head = _next_pending_row(conn)
+                self._set_meta_json(
+                    conn,
+                    CHILD_CRASHES_KEY,
+                    {
+                        "count": count,
+                        "signal": signal_name,
+                        "head_job": None if head is None else str(head["binary_rel"]),
+                        "checked_at": time.time(),
+                    },
+                )
+        finally:
+            conn.close()
+
+    def clear_child_crashes(self) -> None:
+        self._clear_meta(CHILD_CRASHES_KEY)
+
+    def _clear_meta(self, key: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                self._set_meta_json(conn, key, None)
         finally:
             conn.close()
 
@@ -2533,8 +2580,8 @@ def _read_status_rows(
             parameters,
         )
     )
-    gpu = _read_gpu_state(conn, selector, parameters)
-    return rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, gpu
+    facts = _read_runtime_facts(conn, selector, parameters)
+    return rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts
 
 
 def _read_meta_json(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
@@ -2556,22 +2603,27 @@ def _utc(timestamp: object) -> str | None:
         return None
 
 
-def _read_gpu_state(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
-    """The GPU facts of `status`: speech work that waits for a busy GPU, and a denied GPU."""
+def _pending_speech_count(conn: sqlite3.Connection, selector: str = "", parameters: tuple[object, ...] = ()) -> int:
+    """The pending jobs that a speech engine processes: the only jobs that can wait for the GPU."""
     from . import media_engines
 
+    clause, kinds = _extraction_stage(media_engines.SPEECH_KINDS)
+    return int(
+        conn.execute(
+            f"SELECT count(*) FROM jobs{selector}" + (" AND " if selector else " WHERE ")
+            + f"state = 'pending' AND {clause}",
+            (*parameters, *kinds),
+        ).fetchone()[0]
+    )
+
+
+def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
+    """The facts of `status` that jobs do not show: a busy GPU, the preflight, hidden CUDA, repeated child deaths."""
     wait = _read_meta_json(conn, GPU_WAIT_KEY)
-    waiting = 0
-    if wait is not None:
-        clause, kinds = _extraction_stage(media_engines.SPEECH_KINDS)
-        waiting = int(
-            conn.execute(
-                f"SELECT count(*) FROM jobs{selector}" + (" AND " if selector else " WHERE ")
-                + f"state = 'pending' AND {clause}",
-                (*parameters, *kinds),
-            ).fetchone()[0]
-        )
+    waiting = 0 if wait is None else _pending_speech_count(conn, selector, parameters)
     preflight = _read_meta_json(conn, GPU_PREFLIGHT_KEY)
+    hidden = _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY)
+    crashes = _read_meta_json(conn, CHILD_CRASHES_KEY)
     return {
         "waiting_count": waiting,
         "wait": None
@@ -2583,7 +2635,20 @@ def _read_gpu_state(conn: sqlite3.Connection, selector: str, parameters: tuple[o
         },
         "preflight": None
         if preflight is None
-        else {"reason": str(preflight.get("reason", "")), "checked_at": _utc(preflight.get("checked_at"))},
+        else {
+            "result": str(preflight.get("result", "")),
+            "reason": preflight.get("reason"),
+            "checked_at": _utc(preflight.get("checked_at")),
+        },
+        "serving_worker_cuda_hidden": None if hidden is None else bool(hidden.get("hidden")),
+        "child_crashes": None
+        if crashes is None
+        else {
+            "count": int(crashes.get("count", 0)),
+            "signal": str(crashes.get("signal", "")),
+            "head_job": crashes.get("head_job"),
+            "checked_at": _utc(crashes.get("checked_at")),
+        },
     }
 
 
@@ -2672,6 +2737,8 @@ def status(
         "gpu_waiting_count": 0,
         "gpu_wait": None,
         "gpu_preflight": None,
+        "serving_worker_cuda_hidden": None,
+        "child_crashes": None,
         "jobs": [],
         "errors": [],
     }
@@ -2682,14 +2749,14 @@ def status(
         return empty
     try:
         if diagnostic_snapshot:
-            rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, gpu = _diagnostic_snapshot_rows(
+            rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts = _diagnostic_snapshot_rows(
                 store_path, vault_root=Path(vault_root), binary_rel=path
             )
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)
             try:
-                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, gpu = _read_status_rows(conn, binary_rel=path)
+                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts = _read_status_rows(conn, binary_rel=path)
             finally:
                 conn.close()
         counts = {state: 0 for state in STATES}
@@ -2719,9 +2786,11 @@ def status(
             "over_budget_count": reasons[OVER_BUDGET],
             "engine_waiting_count": reasons[ENGINE_DISABLED],
             # Speech jobs wait as pending while a busy GPU holds the memory; the count and the reason say so.
-            "gpu_waiting_count": gpu["waiting_count"],
-            "gpu_wait": gpu["wait"],
-            "gpu_preflight": gpu["preflight"],
+            "gpu_waiting_count": facts["waiting_count"],
+            "gpu_wait": facts["wait"],
+            "gpu_preflight": facts["preflight"],
+            "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
+            "child_crashes": facts["child_crashes"],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
         }
@@ -2731,19 +2800,21 @@ def status(
 
 #: The `status` fields a tool caller sees. The worker process, the store path and
 #: the per-reason counts are operator detail: a memory reason belongs on operator
-#: surfaces such as doctor, and a job row already shows waiting work as pending. The GPU fields are the
-#: exception: a pending speech job gives no other sign that a busy or denied GPU is why it waits, and the
-#: owner of the machine can act on it.
-TOOL_STATUS_FIELDS = (
-    "healthy", "counts", "reconciliation_required_count", "gpu_waiting_count", "gpu_wait", "gpu_preflight",
-    "jobs", "errors",
+#: surfaces such as doctor, and a job row already shows waiting work as pending.
+TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
+#: Facts about the machine's GPU and media processes. On a personal install the caller owns the machine and
+#: a pending job gives no other sign of them, so the tool shows them. A Cloud cell's tenant does not own the
+#: node, so there they stay in doctor like the memory reasons (see the cloud-media runbook).
+MACHINE_STATUS_FIELDS = (
+    "gpu_waiting_count", "gpu_wait", "gpu_preflight", "serving_worker_cuda_hidden", "child_crashes",
 )
 
 
 def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str, Any]:
     """The `process_media status` view of `status`, without operator detail."""
     full = status(vault_root, path=path)
-    result = {field: full[field] for field in TOOL_STATUS_FIELDS}
+    fields = TOOL_STATUS_FIELDS if media_brakes.enabled() else TOOL_STATUS_FIELDS + MACHINE_STATUS_FIELDS
+    result = {field: full[field] for field in fields}
     result["health_scope"] = "reconciliation"
     if vault_root is not None:
         from . import media_store, originals

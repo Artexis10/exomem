@@ -8,6 +8,7 @@ without dying. This module imports nothing from the package, so any layer may us
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -24,6 +25,8 @@ CHILD_DEVICES_ENV = "EXOMEM_MEDIA_CUDA_VISIBLE_DEVICES"
 PREFLIGHT_FAILURE_ENV = "EXOMEM_MEDIA_GPU_PREFLIGHT_FAILURE"
 #: Cold CUDA initialization on a loaded card takes tens of seconds; a hang past this is a fault.
 PREFLIGHT_TIMEOUT_SECONDS = 60.0
+#: How long to wait for a killed preflight process to be reaped before giving up on it.
+_REAP_SECONDS = 5.0
 
 #: Runs in the throwaway process. Each stage is named before it starts, so the last line printed
 #: names the library that died. The probe allocates one element and loads no model.
@@ -54,16 +57,45 @@ if ctranslate2 is not None:
 
 @dataclass(frozen=True)
 class Preflight:
+    """The preflight verdict. `ok` means the media child may keep its devices; `tested` is False when no CUDA ran."""
+
     ok: bool
     reason: str | None = None
+    tested: bool = True
+
+    @classmethod
+    def untested(cls, why: str) -> Preflight:
+        """Nothing initialized CUDA, so nothing can be said about the GPU: the child's environment stays as it is."""
+        return cls(True, f"{why}; nothing tested", tested=False)
+
+    @property
+    def result(self) -> str:
+        return "not tested" if not self.tested else "passed" if self.ok else "failed"
 
 
 def hide_from_worker(env: Mapping[str, str]) -> dict[str, str]:
-    """The serving worker's environment: no CUDA device, and the deployment's list kept for the media child."""
+    """The serving worker's environment: no CUDA device, and the deployment's list kept for the media child.
+
+    Idempotent: an environment that is hidden already keeps the list it saved the first time.
+    """
     isolated = dict(env)
-    isolated[CHILD_DEVICES_ENV] = json.dumps(env.get(DEVICES_ENV))
+    if not hidden_from_worker(env):
+        isolated[CHILD_DEVICES_ENV] = json.dumps(env.get(DEVICES_ENV))
     isolated[DEVICES_ENV] = ""
     return isolated
+
+
+def no_cuda_visible(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this environment lists no CUDA device: a serving worker with its devices hidden, or a denied media child."""
+    env = os.environ if env is None else env
+    return env.get(DEVICES_ENV) == ""
+
+
+def hide_in_process() -> None:
+    """Hide this process's own CUDA devices, for a serving process that no service manager started."""
+    hidden = hide_from_worker(os.environ)
+    os.environ[CHILD_DEVICES_ENV] = hidden[CHILD_DEVICES_ENV]
+    os.environ[DEVICES_ENV] = hidden[DEVICES_ENV]
 
 
 def deployment_devices(env: Mapping[str, str] | None = None) -> str | None:
@@ -76,7 +108,10 @@ def deployment_devices(env: Mapping[str, str] | None = None) -> str | None:
         devices = json.loads(kept)
     except ValueError:
         return ""  # unreadable: the safe reading is no device
-    return devices if isinstance(devices, str) or devices is None else ""
+    if devices is not None and not isinstance(devices, str):
+        return ""
+    # A NUL cannot be part of an environment value; a list that holds one is damaged, so no device.
+    return "" if devices is not None and "\x00" in devices else devices
 
 
 def hidden_from_worker(env: Mapping[str, str] | None = None) -> bool:
@@ -113,35 +148,49 @@ def preflight_failure(env: Mapping[str, str] | None = None) -> str | None:
 
 
 def preflight(env: Mapping[str, str], *, timeout: float = PREFLIGHT_TIMEOUT_SECONDS) -> Preflight:
-    """Initialize CUDA once in a throwaway process that has the media child's environment.
+    """Initialize CUDA once in a throwaway process that runs as the media child will.
 
     A signal, a timeout or a failure means the child would meet the same fault on a job, so the
-    GPU stays away from it. The process runs the same interpreter in isolated mode.
+    GPU stays away from it. The process has the child's interpreter, flags and environment, so
+    both see the same libraries. It leads its own session: a timeout kills the whole group, and
+    the wait after the kill has a limit too, so a stuck driver cannot hang the caller.
     """
     try:
-        done = subprocess.run(  # noqa: S603 - fixed interpreter and fixed program
-            [sys.executable, "-I", "-c", _PREFLIGHT_CODE],
+        process = subprocess.Popen(  # noqa: S603 - fixed interpreter and fixed program
+            [sys.executable, "-c", _PREFLIGHT_CODE],
             env=dict(env),
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        return Preflight(False, f"timed out after {timeout:g} s during {_last_stage(exc.stdout)}")
     except OSError as exc:
         return Preflight(False, f"could not start: {exc}")
-    if done.returncode == 0:
-        return Preflight(True)
-    stage = _last_stage(done.stdout)
-    if done.returncode < 0:
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stage = _last_stage(exc.stdout)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
         try:
-            name = signal.Signals(-done.returncode).name
-        except ValueError:
-            name = f"signal {-done.returncode}"
-        return Preflight(False, f"died with {name} during {stage}")
-    detail = (done.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-    return Preflight(False, f"exited {done.returncode} during {stage}" + (f": {detail[-1][:200]}" if detail else ""))
+            process.communicate(timeout=_REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            return Preflight(False, f"timed out after {timeout:g} s during {stage}, and the process did not exit when killed")
+        return Preflight(False, f"timed out after {timeout:g} s during {stage}")
+    if process.returncode == 0:
+        return Preflight(True)
+    stage = _last_stage(stdout)
+    if process.returncode < 0:
+        return Preflight(False, f"died with {signal_name(-process.returncode)} during {stage}")
+    detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
+    return Preflight(False, f"exited {process.returncode} during {stage}" + (f": {detail[-1][:200]}" if detail else ""))
+
+
+def signal_name(number: int) -> str:
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return f"signal {number}"
 
 
 def _last_stage(output: bytes | str | None) -> str:

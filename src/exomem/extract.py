@@ -360,14 +360,25 @@ def _get_whisper():
                 selection.device,
                 selection.compute_type,
             )
-            try:
-                _WHISPER = WhisperModel(
+
+            def load(chosen: asr_runtime.ASRSelection):
+                return WhisperModel(
                     WHISPER_MODEL,
-                    device=selection.device,
-                    compute_type=selection.compute_type,
+                    device=chosen.device,
+                    compute_type=chosen.compute_type,
                     cpu_threads=runtime_resources.resolve_policy().cpu_threads,
                     num_workers=1,
                 )
+
+            try:
+                try:
+                    _WHISPER = load(selection)
+                except Exception as exc:
+                    cpu = asr_runtime.cpu_selection_after_cuda_oom(selection, exc)
+                    if cpu is None:
+                        raise
+                    log.warning("the GPU ran out of memory while loading ASR; this media process runs ASR on the CPU: %s", exc)
+                    _WHISPER = load(cpu)
             except Exception as exc:
                 # Out of memory first: cuBLAS reports it as a CUDA runtime failure, which would block the job.
                 busy = asr_runtime.as_gpu_busy(exc)

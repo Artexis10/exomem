@@ -1867,15 +1867,15 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             remediation,
             details=status,
         )
-    preflight = status.get("gpu_preflight")
-    if preflight:
-        # No job is blocked yet in automatic mode, which runs on the CPU, so say it here.
+    crashes = status.get("child_crashes")
+    if crashes:
+        head = f"; the job next in the queue is {crashes['head_job']}" if crashes.get("head_job") else ""
         return _check(
             "media.runtime",
             "warn",
-            f"Media processing runs without the GPU: {preflight['reason']}.",
-            "Repair the NVIDIA driver and the CUDA libraries the media runtime loads, then restart "
-            "the service. The check runs once each time the service starts.",
+            f"The media child died by {crashes['signal']} {crashes['count']} time(s) in a row{head}.",
+            "Read the service log for the crash. If one file triggers it, move or delete that file. "
+            "The supervisor starts the next child after a delay that doubles to 5 minutes.",
             details=status,
         )
     if memory_blocked or over_budget:
@@ -1891,17 +1891,6 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             "that timeout grows (EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS).",
             details=status,
         )
-    gpu_wait = status.get("gpu_wait")
-    if gpu_wait:
-        return _check(
-            "media.runtime",
-            "warn",
-            f"{status['gpu_waiting_count']} speech job(s) wait for the GPU since {gpu_wait['since']}: "
-            f"{gpu_wait['reason']}.",
-            "The jobs run by themselves once another process frees the GPU memory. Close the program "
-            "that holds it, or select the CPU with EXOMEM_ASR_DEVICE=cpu to run them now.",
-            details=status,
-        )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
     waiting = f", {engine_waiting} waiting for a switched-off engine" if engine_waiting else ""
     return _check(
@@ -1910,6 +1899,44 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
         f"Durable media runtime healthy ({queued} queued/running{waiting}).",
         details=status,
     )
+
+
+def _check_media_gpu(vault_root: Path | None) -> DoctorCheck | None:
+    """What the media supervisor knows about the GPU: a denied GPU, a busy GPU, and how CUDA is split."""
+    if vault_root is None:
+        return None
+    from . import media_jobs
+
+    status = media_jobs.status(vault_root, diagnostic_snapshot=True)
+    preflight = status.get("gpu_preflight")
+    if preflight and preflight["result"] == "failed":
+        # Automatic mode runs on the CPU and blocks no job, so say it here.
+        return _check(
+            "media.gpu",
+            "warn",
+            f"Media processing runs without the GPU: GPU preflight {preflight['reason']}.",
+            "Repair the NVIDIA driver and the CUDA libraries the media runtime loads, then restart "
+            "the service. The check runs once each time the service starts.",
+            details=status,
+        )
+    wait = status.get("gpu_wait")
+    if wait:
+        return _check(
+            "media.gpu",
+            "warn",
+            f"{status['gpu_waiting_count']} speech job(s) wait for the GPU since {wait['since']}: {wait['reason']}.",
+            "The jobs run by themselves once another process frees the GPU memory. Close the program "
+            "that holds it, or select the CPU with EXOMEM_ASR_DEVICE=cpu to run them now.",
+            details=status,
+        )
+    facts = []
+    if preflight:
+        facts.append(f"GPU preflight {preflight['result']}" + (f": {preflight['reason']}" if preflight.get("reason") else ""))
+    if status.get("serving_worker_cuda_hidden"):
+        facts.append("torch models run on the CPU in the serving worker: the GPU is reserved for the media child")
+    if not facts:
+        return None
+    return _check("media.gpu", "pass", "; ".join(facts) + ".", details=status)
 
 
 def _check_media_brakes() -> DoctorCheck | None:
@@ -3848,6 +3875,9 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     media_runtime = _check_media_runtime(vault_root)
     if media_runtime is not None:
         checks.append(media_runtime)
+    media_gpu = _check_media_gpu(vault_root)
+    if media_gpu is not None:
+        checks.append(media_gpu)
     checks.append(_check_media_engines())
     media_brakes_check = _check_media_brakes()
     if media_brakes_check is not None:

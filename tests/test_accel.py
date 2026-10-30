@@ -161,15 +161,19 @@ def test_legacy_torch_device_alias_forces_cuda(monkeypatch: pytest.MonkeyPatch) 
     assert accel.select_device() == "cuda"
 
 
-def test_a_worker_with_hidden_cuda_devices_loads_an_explicit_cuda_model_on_the_cpu(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_process_with_no_visible_cuda_device_loads_an_explicit_cuda_model_on_the_cpu_and_says_so_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The service hides CUDA from the serving worker; a model asked onto CUDA there would fail to load."""
+    """The serving worker and a media child denied the GPU both list no device; a CUDA model would fail to load."""
     _set_hw(monkeypatch, cuda=True, mps=False)
-    monkeypatch.setenv("EXOMEM_DEVICE", "cuda")
+    monkeypatch.setenv("EXOMEM_DEVICE", "cuda:1")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    monkeypatch.setenv("EXOMEM_MEDIA_CUDA_VISIBLE_DEVICES", '"0"')
-    assert accel.select_device() == "cpu"
+    accel._warn_cuda_unavailable.cache_clear()
+
+    with caplog.at_level("WARNING", logger=accel.log.name):
+        assert [accel.select_device(), accel.select_device()] == ["cpu", "cpu"]
+
+    assert [record.getMessage().count("EXOMEM_DEVICE=cuda:1") for record in caplog.records] == [1]
 
 
 def test_device_gpu_sentinel_is_probe_gated(monkeypatch: pytest.MonkeyPatch) -> None:
