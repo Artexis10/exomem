@@ -324,3 +324,18 @@ def test_a_relation_review_the_leaf_would_refuse_is_refused_at_proposal(vault: P
         _propose(vault, linked)
 
     assert refused.value.code == "RELATION_REVIEW_NOT_APPLICABLE"
+
+
+def test_a_relation_review_on_a_page_the_leaf_does_not_review_still_applies(vault: Path) -> None:
+    log = _create_step(
+        "log", "curation-log", "## Observations\n\n- [finding] Recorded the take. ^log\n"
+    )
+    log["args"].update(
+        note_type="production-log",
+        medium="reels",
+        recorded="2026-10-01",
+        relation_disposition="reviewed_none",
+        relation_review_reason="A production log carries no relations.",
+    )
+
+    assert _apply(vault, _propose(vault, log))["phase"] == "completed"
