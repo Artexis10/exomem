@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.150.0](https://github.com/Artexis10/exomem/compare/v0.149.0...v0.150.0) (2026-10-30)
+
+
+### Features
+
+* **cloud:** add encrypted media storage and signed-in file transfer ([#2140](https://github.com/Artexis10/exomem/issues/2140)) ([363c947](https://github.com/Artexis10/exomem/commit/363c947fbe32a74782dcdf342686887642f34d2e))
+* **media:** speech language hints, batched GPU decoding, recorded ASR decisions and explicit reprocess ([#2202](https://github.com/Artexis10/exomem/issues/2202)) ([cfcadb6](https://github.com/Artexis10/exomem/commit/cfcadb655d91ae8245ab8668797f344067d0fc15))
+
+
+### Bug Fixes
+
+* **contract:** explain refusals that block a retype across folders ([#2204](https://github.com/Artexis10/exomem/issues/2204)) ([1d12e1f](https://github.com/Artexis10/exomem/commit/1d12e1f001dbb2da38a0dbc1f01be189e45da4e5))
+* **curation:** let remote clients run the governed curation workflow ([#2198](https://github.com/Artexis10/exomem/issues/2198)) ([ec22fae](https://github.com/Artexis10/exomem/commit/ec22fae3793675004a96455c32ff4a225a5973f8))
+* preserve media custody and resume source uploads ([#2188](https://github.com/Artexis10/exomem/issues/2188)) ([1a3dee1](https://github.com/Artexis10/exomem/commit/1a3dee1522a3bac3900ab13eb10d16088f5bec90))
+* **recall:** retire pending custody for pages a lane never indexes ([#2203](https://github.com/Artexis10/exomem/issues/2203)) ([6df27ff](https://github.com/Artexis10/exomem/commit/6df27ff4e57f871f9a7e6c7c26226c4e36ff6992))
+* **refs:** let ordinary writes go through while indexing catches up ([#2199](https://github.com/Artexis10/exomem/issues/2199)) ([0b8fd1f](https://github.com/Artexis10/exomem/commit/0b8fd1f870a359bca0eda0243b8795caab51b3c1))
+* **vault:** hash a binary where its bytes change hands, not at every check ([#2201](https://github.com/Artexis10/exomem/issues/2201)) ([c3768f5](https://github.com/Artexis10/exomem/commit/c3768f5b96e8a9d4cba73ee74eaf61d089e33269))
+
+
+### Performance
+
+* **activation:** bound maps activation latency and settle the packet budget ([#2206](https://github.com/Artexis10/exomem/issues/2206)) ([066baec](https://github.com/Artexis10/exomem/commit/066baec972f1929e875fb847a8df395f33bfeac7))
+
 ## [0.149.0](https://github.com/Artexis10/exomem/compare/v0.148.0...v0.149.0) (2026-10-29)
 
 
