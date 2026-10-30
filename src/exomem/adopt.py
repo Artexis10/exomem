@@ -503,6 +503,60 @@ def note_body(planned: Mapping[str, Any], text: str) -> str:
     return body + separator + "\n".join(links)
 
 
+def _draft_arguments(
+    root: Path,
+    planned: Mapping[str, Any],
+    text: str,
+    *,
+    source_path: str,
+    collection: str | None,
+    date_iso: str,
+) -> dict[str, Any]:
+    """The note leaf's arguments for one own note: the same for its validation and its commit."""
+    from . import find as find_module
+
+    # The Source is committed, but deferred fan-out has not updated the writer
+    # resolver. Register its namespace; the note leaf still checks its custody.
+    find_module.shared_resolver(root).add_pending(source_path.removesuffix(".md"))
+
+    note = planned["note"]
+    return {
+        "content": note_body(planned, text),
+        "note_type": note["note_type"],
+        "title": note["title"],
+        "slug": note.get("slug"),
+        "project": note.get("project"),
+        "domain": note.get("domain"),
+        "tags": list(planned.get("tags") or []),
+        "sources": [adoption_plan.wikilink_for(source_path)],
+        "status": note["status"],
+        "_extra_frontmatter": adoption_plan.note_extra_frontmatter(planned, collection),
+        "_verbatim_body": True,
+        "_path_date": date_iso,
+    }
+
+
+def _validate_draft(root: Path, planned: Mapping[str, Any], arguments: dict[str, Any]) -> Any:
+    """Validate one own note's draft; it must land where the plan froze it."""
+    from . import note as note_module
+
+    note = planned["note"]
+    preflight = note_module.note(root, validate_only=True, **arguments)
+    if preflight.destination != note["target_path"]:
+        # The leaf moves a note off a taken name; it also moves one when its placement
+        # changed since the plan was made. The first is a conflict, the second a stale plan.
+        if os.path.lexists(root / note["target_path"]):
+            raise AdoptError(
+                "TARGET_OCCUPIED",
+                f"{note['target_path']} already exists and is not an import of this file",
+            )
+        raise AdoptError(
+            "PLAN_STALE",
+            f"the note leaf now places this note at {preflight.destination}; re-plan this import",
+        )
+    return preflight
+
+
 def create_draft_note(
     root: Path,
     planned: Mapping[str, Any],
@@ -521,46 +575,89 @@ def create_draft_note(
     one the plan froze. Returns the leaf's result; the leaf's `NoteError` reaches
     the caller unchanged.
     """
-    from . import find as find_module
     from . import note as note_module
 
-    # The Source is committed, but deferred fan-out has not updated the writer
-    # resolver. Register its namespace; the note leaf still checks its custody.
-    find_module.shared_resolver(root).add_pending(source_path.removesuffix(".md"))
-
-    note = planned["note"]
-    arguments: dict[str, Any] = {
-        "content": note_body(planned, text),
-        "note_type": note["note_type"],
-        "title": note["title"],
-        "slug": note.get("slug"),
-        "project": note.get("project"),
-        "domain": note.get("domain"),
-        "tags": list(planned.get("tags") or []),
-        "sources": [adoption_plan.wikilink_for(source_path)],
-        "status": note["status"],
-        "_extra_frontmatter": adoption_plan.note_extra_frontmatter(planned, collection),
-        "_verbatim_body": True,
-        "_path_date": date_iso,
-    }
-    preflight = note_module.note(root, validate_only=True, **arguments)
-    if preflight.destination != note["target_path"]:
-        # The leaf moves a note off a taken name; it also moves one when its placement
-        # changed since the plan was made. The first is a conflict, the second a stale plan.
-        if os.path.lexists(root / note["target_path"]):
-            raise AdoptError(
-                "TARGET_OCCUPIED",
-                f"{note['target_path']} already exists and is not an import of this file",
-            )
-        raise AdoptError(
-            "PLAN_STALE",
-            f"the note leaf now places this note at {preflight.destination}; re-plan this import",
-        )
+    arguments = _draft_arguments(
+        root, planned, text, source_path=source_path, collection=collection, date_iso=date_iso
+    )
+    preflight = _validate_draft(root, planned, arguments)
     return note_module.note(
         root, **arguments,
         draft_id=preflight.draft_id, draft_hash=preflight.draft_hash,
         draft_token=preflight.draft_token,
     )
+
+
+@dataclass(frozen=True)
+class DraftNote:
+    """One own note to create: its plan item, its original text and its Source's path."""
+
+    planned: Mapping[str, Any]
+    text: str
+    source_path: str
+
+
+@dataclass(frozen=True)
+class DraftNoteOutcome:
+    """What became of one `DraftNote`: the note leaf's result, or the error that refused it."""
+
+    created: Any | None = None
+    error: Exception | None = None
+
+
+def create_draft_notes(
+    root: Path,
+    notes: Sequence[DraftNote],
+    *,
+    collection: str | None,
+    date_iso: str,
+) -> list[DraftNoteOutcome]:
+    """Create the draft notes of a chunk, one outcome per note, in `notes` order.
+
+    Each note is validated and bound to its own draft token one at a time, as
+    `create_draft_note` does. The notes that pass commit as one canonical batch, with one
+    index and one log update, which is the per-note guarantees at a fraction of the cost.
+    When the batch refuses, each of its notes is created alone, so every note gets the
+    outcome `create_draft_note` gives it. A refused note holds only its own outcome. A note
+    that an earlier failed batch already wrote reports `TARGET_OCCUPIED` when created alone;
+    the caller's identity check records it as applied.
+    """
+    from . import note as note_module
+
+    settled: dict[int, DraftNoteOutcome] = {}
+    prepared: dict[int, Any] = {}
+    for index, item in enumerate(notes):
+        try:
+            arguments = _draft_arguments(
+                root, item.planned, item.text,
+                source_path=item.source_path, collection=collection, date_iso=date_iso,
+            )
+            preflight = _validate_draft(root, item.planned, arguments)
+            prepared[index] = note_module.note(
+                root, **arguments,
+                draft_id=preflight.draft_id, draft_hash=preflight.draft_hash,
+                draft_token=preflight.draft_token,
+                _return_prepared=True, _defer_navigation=True,
+            )
+        except Exception as error:  # noqa: BLE001 - a refused note is this note's outcome
+            settled[index] = DraftNoteOutcome(error=error)
+    if prepared:
+        try:
+            created = note_module.commit_prepared_notes(root, list(prepared.values()))
+        except Exception:  # noqa: BLE001 - the batch refused; each note then commits alone
+            for index in prepared:
+                item = notes[index]
+                try:
+                    settled[index] = DraftNoteOutcome(created=create_draft_note(
+                        root, item.planned, item.text,
+                        source_path=item.source_path, collection=collection, date_iso=date_iso,
+                    ))
+                except Exception as error:  # noqa: BLE001 - a refused note is its own outcome
+                    settled[index] = DraftNoteOutcome(error=error)
+        else:
+            for index, result in zip(prepared, created, strict=True):
+                settled[index] = DraftNoteOutcome(created=result)
+    return [settled[index] for index in range(len(notes))]
 
 
 def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict:
