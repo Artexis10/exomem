@@ -24,4 +24,5 @@
 - [x] 4.5 Hide the devices in the server entry point as well, so a foreground or standard-input serve is covered, and keep the hiding idempotent.
 - [x] 4.6 Run the preflight with the media child's interpreter flags and environment, bound its wait after a kill, and report a host with nothing to test as "not tested".
 - [x] 4.7 End a GPU wait when any path queues work that needs no GPU, record the preflight verdict and the crash loop in status, and keep these facts out of a Cloud cell's tool status.
-- [ ] 4.8 After the stale NVIDIA package is repaired on the affected host, install the release, confirm that the preflight passes and that the worker stays up, and run one speech job on the GPU.
+- [x] 4.8 Run doctor's GPU probe in a throwaway process, show the crash loop in a check of its own, and disclose the CPU move only where an NVIDIA driver exists.
+- [ ] 4.9 After the stale NVIDIA package is repaired on the affected host, install the release, confirm that the preflight passes and that the worker stays up, and run one speech job on the GPU.

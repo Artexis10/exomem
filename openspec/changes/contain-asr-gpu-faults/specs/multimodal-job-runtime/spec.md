@@ -123,8 +123,15 @@ Exomem SHALL NOT let a CUDA library fault end the process that serves requests. 
 
 #### Scenario: A model asks for CUDA in a process with no visible device
 - **WHEN** a torch model is asked to use CUDA in the serving worker, or in a media process denied the GPU
-- **THEN** the model runs on the CPU and the process logs that once
-- **AND** doctor tells the operator that torch models run on the CPU in the serving worker
+- **THEN** the model runs on the CPU and the process logs that once, with the supervisor's reason when it denied the GPU
+- **AND** on a host with an NVIDIA driver, doctor tells the operator that CUDA is hidden from the serving process and the media child uses the GPU
+- **AND** a host with no NVIDIA driver gets no such line
+
+#### Scenario: Doctor meets a CUDA fault
+- **WHEN** CUDA initialization crashes on the host and an operator runs doctor
+- **THEN** doctor runs its GPU probe in a throwaway process, as the preflight does, and survives
+- **AND** doctor reports the probe as passed, as failed with the signal and the stage, or as not tested
+- **AND** doctor does not initialize CUDA in its own process after a failed probe
 
 #### Scenario: A restart clears the earlier verdict
 - **WHEN** the service restarts after a failed preflight
@@ -135,3 +142,4 @@ Exomem SHALL NOT let a CUDA library fault end the process that serves requests. 
 - **THEN** each restart waits twice as long as the one before, up to a ceiling
 - **AND** the supervisor does not start a process every few seconds
 - **AND** status and doctor show the number of deaths in a row and the job at the head of the queue
+- **AND** doctor shows this beside, not behind, an old failed or blocked job
