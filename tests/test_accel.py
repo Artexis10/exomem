@@ -161,6 +161,17 @@ def test_legacy_torch_device_alias_forces_cuda(monkeypatch: pytest.MonkeyPatch) 
     assert accel.select_device() == "cuda"
 
 
+def test_a_worker_with_hidden_cuda_devices_loads_an_explicit_cuda_model_on_the_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service hides CUDA from the serving worker; a model asked onto CUDA there would fail to load."""
+    _set_hw(monkeypatch, cuda=True, mps=False)
+    monkeypatch.setenv("EXOMEM_DEVICE", "cuda")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("EXOMEM_MEDIA_CUDA_VISIBLE_DEVICES", '"0"')
+    assert accel.select_device() == "cpu"
+
+
 def test_device_gpu_sentinel_is_probe_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     """`EXOMEM_DEVICE=gpu` opts in politely: uses CUDA only if capable, else degrades."""
     _set_hw(monkeypatch, cuda=True, mps=False, free_gb=8.0)

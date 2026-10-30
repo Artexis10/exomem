@@ -13,15 +13,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import cuda_containment, resource_status
 from . import mode as mode_module
-from . import resource_status
 
 ASR_DEVICE_ENV = "EXOMEM_ASR_DEVICE"
 ASR_COMPUTE_TYPE_ENV = "EXOMEM_ASR_COMPUTE_TYPE"
 CPU_DEFAULT_COMPUTE_TYPE = "int8"
 CUDA_DEFAULT_COMPUTE_TYPE = "float16"
-#: The free VRAM the large ASR model needs before CTranslate2 may load it.
-_MIN_FREE_VRAM_MIB = 2048
 _INT8_TYPES = frozenset({"int8", "int8_float16", "int8_float32", "int8_bfloat16"})
 COMPUTE_RUNTIME_MARKERS = (
     "cublas",
@@ -51,12 +49,11 @@ class ASRRuntimeRefusal(ASRComputeRuntimeError):
 
 
 class ASRGpuBusy(RuntimeError):
-    """An explicitly requested GPU is healthy but has too little free VRAM right now.
+    """An explicitly requested GPU is healthy but another process holds its memory right now.
 
-    Another process holds the memory, which is a passing state and not a broken
-    runtime. It deliberately is not an `ASRComputeRuntimeError`: that type blocks
-    the job until the operator repairs something, while the caller of this one
-    keeps the job pending and tries again later.
+    That is a passing state and not a broken runtime. It deliberately is not an
+    `ASRComputeRuntimeError`: that type blocks the job until the operator repairs
+    something, while the caller of this one keeps the job pending and tries again later.
     """
 
 
@@ -67,7 +64,7 @@ class ASRProbe:
     cpu_types: frozenset[str]
     compute_capability: tuple[int, int] | None
     reason: str | None = None
-    #: The device works but is short of free VRAM now; `cuda_available` is False meanwhile.
+    #: The device works but another process holds its memory now; `cuda_available` is False meanwhile.
     busy: bool = False
 
 
@@ -171,22 +168,29 @@ def probe_asr_runtime() -> ASRProbe:
         cpu_types = frozenset(ctranslate2.get_supported_compute_types("cpu"))
         count = int(ctranslate2.get_cuda_device_count())
         if count < 1:
-            return ASRProbe(False, frozenset(), cpu_types, None, "no CTranslate2 CUDA device")
+            # A failed preflight hid the devices, so the supervisor's reason says more than "none".
+            reason = cuda_containment.preflight_failure() or "no CTranslate2 CUDA device"
+            return ASRProbe(False, frozenset(), cpu_types, None, reason)
         cuda_types = frozenset(ctranslate2.get_supported_compute_types("cuda", 0))
     except Exception as exc:  # noqa: BLE001 - broken CT2 is a soft CPU posture unless explicit CUDA
         return ASRProbe(False, frozenset(), frozenset({CPU_DEFAULT_COMPUTE_TYPE}), None, str(exc))
     try:
-        capability, free_mib = _nvidia_headroom()
+        capability, free_mib, total_mib = _nvidia_headroom()
     except Exception as exc:  # noqa: BLE001 - nvidia-smi is an optional admission source
         return ASRProbe(False, cuda_types, cpu_types, None, f"NVIDIA headroom probe failed: {exc}")
-    if free_mib < _MIN_FREE_VRAM_MIB:
-        reason = f"insufficient free GPU memory for ASR: {free_mib} MiB free, {_MIN_FREE_VRAM_MIB} MiB needed"
+    needed_mib = resource_status.min_free_vram_mb()
+    if total_mib < needed_mib:
+        # No amount of waiting frees memory the card does not have, so this stays a visible refusal.
+        reason = f"the GPU has {total_mib} MiB of memory in total and ASR needs {needed_mib} MiB free"
+        return ASRProbe(False, cuda_types, cpu_types, capability, reason)
+    if free_mib < needed_mib:
+        reason = f"insufficient free GPU memory for ASR: {free_mib} MiB free, {needed_mib} MiB needed"
         return ASRProbe(False, cuda_types, cpu_types, capability, reason, busy=True)
     return ASRProbe(True, cuda_types, cpu_types, capability)
 
 
-def _nvidia_headroom() -> tuple[tuple[int, int], int]:
-    """Read compute capability and free MiB through nvidia-smi; it never creates a CUDA context.
+def _nvidia_headroom() -> tuple[tuple[int, int], int, int]:
+    """Read compute capability, free MiB and total MiB through nvidia-smi; it never creates a CUDA context.
 
     Raises when nvidia-smi is absent or cannot answer, which is a broken probe and not a busy GPU.
     """
@@ -194,7 +198,7 @@ def _nvidia_headroom() -> tuple[tuple[int, int], int]:
     if exe is None:
         raise FileNotFoundError("nvidia-smi not found")
     result = subprocess.run(
-        [exe, "--query-gpu=compute_cap,memory.free", "--format=csv,noheader,nounits"],
+        [exe, "--query-gpu=compute_cap,memory.free,memory.total", "--format=csv,noheader,nounits"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -204,7 +208,7 @@ def _nvidia_headroom() -> tuple[tuple[int, int], int]:
     )
     row = result.stdout.splitlines()[0].split(",")
     major, minor = (int(part) for part in row[0].strip().split(".", 1))
-    return (major, minor), int(row[1].strip())
+    return (major, minor), int(row[1].strip()), int(row[2].strip())
 
 
 def is_compute_runtime_failure(error: BaseException | str) -> bool:
@@ -227,6 +231,18 @@ def is_cuda_out_of_memory(error: BaseException) -> bool:
     )
 
 
+def as_gpu_busy(error: BaseException) -> ASRGpuBusy | None:
+    """A failed CUDA allocation on an explicit CUDA device means another process took the memory since the probe.
+
+    The free-memory probe is a cheap pre-check: it cannot know what loading the model needs, and the
+    card can fill between the probe and the load. Automatic mode is not covered: it already
+    chose CUDA only for a card that admitted ASR, and an explicit device is the one that must wait.
+    """
+    if not is_cuda_out_of_memory(error) or _requested_device()[0] != "cuda":
+        return None
+    return ASRGpuBusy(f"the GPU ran out of memory while loading the speech model: {error}")
+
+
 def as_compute_runtime_error(error: BaseException) -> ASRComputeRuntimeError | None:
     if not is_compute_runtime_failure(error):
         return None
@@ -239,8 +255,8 @@ def cuda_runtime_child_env(
     roots: list[Path] | None = None,
     platform_name: str | None = None,
 ) -> dict[str, str]:
-    """Prepend CUDA-12 wheel directories before the media child interpreter starts."""
-    env = dict(os.environ if parent is None else parent)
+    """The media child's environment: its CUDA device list back, and CUDA-12 wheel directories first."""
+    env = cuda_containment.give_devices_to_child(os.environ if parent is None else parent)
     platform_name = platform_name or sys.platform
     if platform_name not in {"linux", "win32"}:
         return env

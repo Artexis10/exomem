@@ -369,6 +369,10 @@ def _get_whisper():
                     num_workers=1,
                 )
             except Exception as exc:
+                # Out of memory first: cuBLAS reports it as a CUDA runtime failure, which would block the job.
+                busy = asr_runtime.as_gpu_busy(exc)
+                if busy is not None:
+                    raise busy from exc
                 typed = asr_runtime.as_compute_runtime_error(exc)
                 if typed is not None:
                     raise typed from exc

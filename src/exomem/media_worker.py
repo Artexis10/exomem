@@ -31,6 +31,7 @@ from pathlib import Path
 
 from . import (
     asr_runtime,
+    cuda_containment,
     deferred_index,
     embeddings,
     epistemic_graph,
@@ -45,6 +46,7 @@ from . import (
     prior_extraction,
     provenance,
     recall_policy,
+    resource_status,
     runtime_resources,
     scene_frames,
     semantic_segments,
@@ -162,6 +164,10 @@ _TRANSIENT_RECHECK_SECONDS = 5.0
 #: How long the supervisor waits before it asks again whether a busy GPU has freed up. Each ask
 #: costs one child process, and another process holding the GPU can last for hours.
 _GPU_BUSY_RECHECK_SECONDS = 60.0
+#: A media child killed by a signal it did not get from the supervisor (a native library fault, the
+#: kernel's memory killer) leaves its job to run again. The restart delay doubles from the plain
+#: failure delay to this ceiling, so a job that always kills its child costs one start per ceiling.
+_CHILD_CRASH_BACKOFF_MAX_SECONDS = 300.0
 _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: How long the supervisor sleeps between passes.  Deliberately unchanged: the
 #: cost being removed below is the store open, not the wakeup, and stretching
@@ -375,6 +381,12 @@ class MediaWorker:
         #: The anonymous bytes of the slot the next child is started under.
         self._leased_anon_bytes: int | None = None
         self._asr_runtime_failure: str | None = None
+        #: The GPU preflight verdict, taken once per worker lifetime before the first child starts.
+        self._gpu_preflight: cuda_containment.Preflight | None = None
+        #: The supervisor killed the running child itself, so its signal exit is not a crash.
+        self._child_stopped = False
+        #: Set when work that needs no GPU is queued; the supervisor then ends a GPU-busy wait early.
+        self._non_speech_queued = threading.Event()
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
@@ -454,6 +466,8 @@ class MediaWorker:
         if self._execution_mode == "process":
             assert self._store is not None
             self._store.enqueue(job)
+            if media_engines.engine_for(media_type) != media_engines.SPEECH:
+                self._non_speech_queued.set()
             self._wake.set()
         else:
             self._q.put(job)
@@ -1082,6 +1096,7 @@ class MediaWorker:
                 cell.anon,
                 f", brakes unavailable: {cell.problem}" if cell.problem else "",
             )
+        self._child_stopped = True
         with contextlib.suppress(OSError):
             os.killpg(child.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -1663,7 +1678,7 @@ class MediaWorker:
         if self._leased_anon_bytes is not None:
             args += ["--leased-anon-bytes", str(self._leased_anon_bytes)]
         log.info("media worker: starting disposable child")
-        env = asr_runtime.cuda_runtime_child_env(os.environ)
+        env = self._guard_gpu(asr_runtime.cuda_runtime_child_env(os.environ))
         if media_brakes.enabled():
             # OpenBLAS reserves data segment for one thread per host CPU when numpy
             # loads (about 40 MiB each), so the child's VmData limit would follow the
@@ -1677,9 +1692,45 @@ class MediaWorker:
             start_new_session=media_brakes.enabled(),
         )
 
+    def _guard_gpu(self, env: dict[str, str]) -> dict[str, str]:
+        """Give the child its GPU devices only if a throwaway process initialized CUDA without a fault.
+
+        One verdict per worker lifetime: a repaired driver needs a service restart anyway, and a probe
+        costs seconds of CUDA initialization. A failed verdict leaves the child with no device and the
+        reason, so an explicit CUDA request blocks with it and an automatic one runs on the CPU.
+        """
+        if self._gpu_preflight is None:
+            # Nothing to protect without an NVIDIA driver or with every device already hidden.
+            guarded = cuda_containment.DEVICES_ENV in env and not env[cuda_containment.DEVICES_ENV]
+            if guarded or resource_status.find_nvidia_smi() is None:
+                self._gpu_preflight = cuda_containment.Preflight(True)
+            else:
+                self._gpu_preflight = cuda_containment.preflight(env)
+                if not self._gpu_preflight.ok:
+                    log.error("media worker: GPU preflight failed (%s); media runs without the GPU", self._gpu_preflight.reason)
+            self._record_gpu_preflight()
+        if self._gpu_preflight.ok:
+            return env
+        failure = f"GPU preflight {self._gpu_preflight.reason}; media processing runs without the GPU until the service restarts"
+        return cuda_containment.deny_gpu_to_child(env, failure)
+
+    def _record_gpu_preflight(self) -> None:
+        verdict = self._gpu_preflight
+        assert verdict is not None
+        if self._store is None:
+            return
+        try:
+            self._store.record_gpu_preflight(None if verdict.ok else f"GPU preflight {verdict.reason}")
+        except Exception:  # noqa: BLE001 - a status record must never keep the child from starting
+            log.warning("media worker: could not record the GPU preflight verdict", exc_info=True)
+
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
+        #: The last child exited because the GPU is busy, and the supervisor waits to ask again.
+        gpu_hold = False
+        #: Children in a row that died by a signal nobody here sent.
+        crashes = 0
         # The store signature this supervisor last saw answer "no work", and
         # when to stop trusting it.  `None` means "ask the store".
         idle_signature: tuple[object, ...] | None = None
@@ -1747,6 +1798,9 @@ class MediaWorker:
                     self._child = None
                     self._release_slot()
                     idle_signature = None
+                    gpu_hold = False
+                    crashed = returncode is not None and returncode < 0 and not self._child_stopped
+                    crashes = crashes + 1 if crashed else 0
                     owns_runtime = self._store.worker_pid() == child_pid
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
@@ -1768,6 +1822,7 @@ class MediaWorker:
                         )
                     elif returncode == _GPU_BUSY_EXIT_CODE:
                         delay = _GPU_BUSY_RECHECK_SECONDS
+                        gpu_hold = True
                         log.info("media child found the GPU busy; retrying after %.1fs", delay)
                     elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
@@ -1777,6 +1832,15 @@ class MediaWorker:
                         )
                         log.info(
                             "media child deferred work; retrying after %.1fs",
+                            delay,
+                        )
+                    elif crashed:
+                        delay = min(2.0 * 2 ** (crashes - 1), _CHILD_CRASH_BACKOFF_MAX_SECONDS)
+                        log.error(
+                            "media child died with signal %d (%d in a row); recovered %d job(s); retrying after %.0fs",
+                            -returncode,
+                            crashes,
+                            recovered,
                             delay,
                         )
                     elif returncode:
@@ -1794,6 +1858,11 @@ class MediaWorker:
                         self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
                     relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                if gpu_hold and self._non_speech_queued.is_set():
+                    # Work that needs no GPU arrived during the wait. The child that takes it asks the GPU
+                    # once more on the way, so the wait ends early and one probe is the whole cost.
+                    relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
+                    gpu_hold = False
                 if self._child is None and _clock() >= relaunch_after:
                     now = _clock()
                     signature = _job_store_signature(self._store)
@@ -1831,6 +1900,8 @@ class MediaWorker:
                             relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
                         else:
                             try:
+                                self._non_speech_queued.clear()  # the new child sees all queued work
+                                self._child_stopped = False
                                 self._child = self._launch_child()
                                 self._child_started_at = _clock()
                             except OSError:
@@ -2463,6 +2534,8 @@ def run_child(
     #: Set once the speech engine found the GPU busy. This child then leaves speech work pending and
     #: claims the rest, so one busy GPU neither blocks the jobs behind it nor stays on the books.
     gpu_busy = False
+    #: The jobs this child returned to pending for that reason; it asks the GPU about each only once.
+    deferred_for_gpu: set[int] = set()
 
     def budget_of(job: _Job) -> media_brakes.Budget:
         assert config is not None
@@ -2523,6 +2596,10 @@ def run_child(
                     return 0
                 time.sleep(min(0.25, idle_seconds))
                 continue
+            if job.id in deferred_for_gpu:
+                # The claim skips speech work once the GPU is busy; a job back here anyway would spin.
+                store.defer(job)
+                return _GPU_BUSY_EXIT_CODE
             idle_signature = None
             last_work = _clock()
             try:
@@ -2565,6 +2642,8 @@ def run_child(
                 assert job.id is not None
                 store.defer(job)
                 gpu_busy = True
+                deferred_for_gpu.add(job.id)
+                store.note_gpu_wait(str(exc))
                 log.info("media worker: deferred %s while the GPU is busy: %s", job.binary_path, exc)
                 continue  # it ran nothing, so no fresh child is needed before the next job
             except OpError as exc:
@@ -2604,6 +2683,8 @@ def run_child(
                 fail(job, f"{type(exc).__name__}: {exc}")
             else:
                 assert job.id is not None
+                if job.do_ocr and media_engines.engine_for(job.media_type) == media_engines.SPEECH:
+                    store.clear_gpu_wait()  # the speech engine got the GPU, so nothing waits for it
                 if outcome.state == _HANDOFF:
                     # Durable result custody now belongs to the long-lived parent.
                     # In particular, do not run later CLIP/re-embed stages or

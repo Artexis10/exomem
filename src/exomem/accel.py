@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 
+from . import cuda_containment
 from . import mode as mode_module
 
 log = logging.getLogger(__name__)
@@ -179,6 +180,9 @@ def select_device(
         if value.lower() == "mps":
             _enable_mps_fallback()
             return "mps"
+        if value.lower().startswith("cuda") and cuda_containment.hidden_from_worker():
+            # The service hides CUDA from the serving worker; a CUDA model would fail to load there.
+            return "cpu"
         return value  # verbatim: cpu / cuda / cuda:1 / ...
 
     m = mode_module.resolve_mode()

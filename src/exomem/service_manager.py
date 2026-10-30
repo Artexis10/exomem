@@ -1204,6 +1204,20 @@ class WorkerRuntime:
             return environment
         return {name: value for name, value in inherited.items() if name != INGRESS_KEY_ENV}
 
+    def _owned_child_environment(self, overlay: dict[str, str] | None) -> dict[str, str]:
+        """The environment of every child this manager owns: worker, standby and migrator.
+
+        A CUDA library can crash the process that initializes it, and the worker loads the models
+        that serve requests. The worker therefore sees no CUDA device; the disposable media child
+        gets the deployment's device list back from the media supervisor.
+        """
+        from . import cuda_containment
+
+        inherited = self._spawn_environment()
+        if overlay:
+            inherited = {**(os.environ if inherited is None else inherited), **overlay}
+        return cuda_containment.hide_from_worker(os.environ if inherited is None else inherited)
+
     @staticmethod
     def _parse_environment(text: str) -> dict[str, str]:
         """Read systemd `KEY=value` assignments; never log a value."""
@@ -1340,9 +1354,7 @@ class WorkerRuntime:
                 raise RuntimeError("standby requires a live serving worker")
         elif _descendants(ignore_sessions=self._standby_session()):
             raise RuntimeError("previous owned process exit has not been proven")
-        inherited = self._spawn_environment()
-        if environment:
-            inherited = {**(os.environ if inherited is None else inherited), **environment}
+        inherited = self._owned_child_environment(environment)
         pending = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *command,

@@ -474,6 +474,25 @@ def test_media_runtime_compute_block_uses_runtime_remediation(vault: Path, monke
     assert "CUDA/cuBLAS/cuDNN runtime" in check.remediation
 
 
+def test_media_runtime_names_why_the_gpu_is_denied_or_busy(vault: Path, monkeypatch) -> None:
+    from exomem import media_jobs
+
+    status = {"healthy": True, "counts": {"pending": 2, "blocked": 0, "failed": 0}}
+    monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
+
+    status["gpu_preflight"] = {"reason": "GPU preflight died with SIGSEGV during torch CUDA initialization"}
+    denied = doctor_module._check_media_runtime(vault)
+    status["gpu_preflight"] = None
+    status.update(
+        gpu_waiting_count=2,
+        gpu_wait={"reason": "insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed", "since": "2026-01-01T00:00:00Z"},
+    )
+    busy = doctor_module._check_media_runtime(vault)
+
+    assert denied is not None and (denied.status, "SIGSEGV during torch CUDA initialization" in denied.message) == ("warn", True)
+    assert busy is not None and (busy.status, "512 MiB free, 2048 MiB needed" in busy.message) == ("warn", True)
+
+
 def test_resource_posture_details_include_allocation_free_asr_policy() -> None:
     check = doctor_module._check_resource_posture("lean")
     assert "asr" in check.details

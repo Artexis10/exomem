@@ -13,6 +13,7 @@ import yaml
 
 from exomem import (
     asr_runtime,
+    cuda_containment,
     deferred_index,
     embeddings,
     epistemic_graph,
@@ -24,6 +25,7 @@ from exomem import (
     media_processing,
     media_worker,
     preserve,
+    resource_status,
     runtime_resources,
     server_runtime,
 )
@@ -3144,7 +3146,7 @@ def test_child_marks_explicit_cuda_refusal_blocked_with_runtime_remediation(
     assert "runtime" in status["next_action"]
 
 
-def _gpu_with_free_vram(monkeypatch: pytest.MonkeyPatch, free_mib: int) -> dict[str, int]:
+def _gpu_with_free_vram(monkeypatch: pytest.MonkeyPatch, free_mib: int, *, cuda_devices: int = 1) -> dict[str, int]:
     """An explicit-CUDA install whose GPU has `free_mib` free; change `["free"]` to free or fill it.
 
     The real probe and selection run; only CTranslate2 and nvidia-smi are faked. Fake extraction
@@ -3156,10 +3158,10 @@ def _gpu_with_free_vram(monkeypatch: pytest.MonkeyPatch, free_mib: int) -> dict[
     vram = {"free": free_mib}
     fake_ctranslate2 = types.SimpleNamespace(
         get_supported_compute_types=lambda device, index=0: {"float16"} if device == "cuda" else {"int8"},
-        get_cuda_device_count=lambda: 1,
+        get_cuda_device_count=lambda: cuda_devices,
     )
     monkeypatch.setitem(sys.modules, "ctranslate2", fake_ctranslate2)
-    monkeypatch.setattr(asr_runtime, "_nvidia_headroom", lambda: ((8, 9), vram["free"]))
+    monkeypatch.setattr(asr_runtime, "_nvidia_headroom", lambda: ((8, 9), vram["free"], 24576))
     monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
@@ -3187,11 +3189,16 @@ def test_busy_gpu_defers_speech_jobs_and_a_later_attempt_runs_them(
 
     statuses = media_jobs.status(vault)["jobs"]
     assert [(job["state"], job["attempts"], job["error"]) for job in statuses] == [(media_jobs.PENDING, 0, None)] * 2
+    # The wait is visible: a pending job alone would not say why it does not run.
+    waiting = media_jobs.status(vault)
+    assert waiting["gpu_waiting_count"] == 2
+    assert "512 MiB free, 2048 MiB needed" in waiting["gpu_wait"]["reason"]
 
     vram["free"] = 8192
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
     media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
 
+    assert media_jobs.status(vault)["gpu_wait"] is None
     assert store.counts()[media_jobs.BLOCKED] == 0
     assert store.counts()[media_jobs.PENDING] == 0
     for result in results:
@@ -3214,6 +3221,160 @@ def test_busy_gpu_does_not_hold_back_an_image_queued_behind_the_speech_job(
     assert "RECEIPT 42" in (vault / image.sidecar_path).read_text(encoding="utf-8")
     [waiting] = media_jobs.status(vault)["jobs"]
     assert (waiting["state"], waiting["attempts"]) == (media_jobs.PENDING, 0)
+
+
+def _gpu_host(monkeypatch: pytest.MonkeyPatch, preflight_program: str) -> dict[str, str]:
+    """The serving worker's environment on a host whose deployment lists device 0.
+
+    The preflight subprocess is real and only its program is replaced, since CI has no CUDA stack to fault.
+    """
+    monkeypatch.setattr(cuda_containment, "_PREFLIGHT_CODE", preflight_program)
+    monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "nvidia-smi")
+    return cuda_containment.hide_from_worker({**os.environ, "CUDA_VISIBLE_DEVICES": "0"})
+
+
+def test_a_crashing_gpu_preflight_leaves_the_media_child_without_the_gpu_and_the_speech_job_blocked(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_env = _gpu_host(
+        monkeypatch, "import os, signal; print('torch CUDA initialization', flush=True); os.kill(os.getpid(), signal.SIGSEGV)"
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    child_env = worker._guard_gpu(asr_runtime.cuda_runtime_child_env(worker_env))
+
+    assert child_env["CUDA_VISIBLE_DEVICES"] == ""
+    assert "SIGSEGV during torch CUDA initialization" in media_jobs.status(vault)["gpu_preflight"]["reason"]
+    # A child started with that environment blocks an explicit-CUDA speech job and says why.
+    monkeypatch.setenv(cuda_containment.PREFLIGHT_FAILURE_ENV, child_env[cuda_containment.PREFLIGHT_FAILURE_ENV])
+    _gpu_with_free_vram(monkeypatch, free_mib=8192, cuda_devices=0)  # the hidden device list leaves CTranslate2 no GPU
+    result = _preserve_media_stub(vault, filename="meeting.m4a")
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    )
+
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.BLOCKED
+    assert "GPU preflight died with SIGSEGV during torch CUDA initialization" in job["error"]
+
+
+def test_a_healthy_gpu_preflight_gives_the_media_child_the_deployments_device_list(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_env = _gpu_host(monkeypatch, "print('torch CUDA initialization', flush=True)")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    child_env = worker._guard_gpu(asr_runtime.cuda_runtime_child_env(worker_env))
+
+    assert worker_env["CUDA_VISIBLE_DEVICES"] == ""  # the serving worker still sees no device
+    assert child_env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert cuda_containment.PREFLIGHT_FAILURE_ENV not in child_env
+    assert media_jobs.status(vault)["gpu_preflight"] is None
+
+
+def test_a_gpu_that_fills_up_before_the_model_loads_defers_the_job_instead_of_failing_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    _gpu_with_free_vram(monkeypatch, free_mib=8192)  # the cheap pre-check admits the card
+
+    class _FullCard:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError("CUDA failed with error out of memory")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FullCard))
+    monkeypatch.setattr(extract, "_WHISPER", None)
+    monkeypatch.setattr(extract, "extract_text", lambda _path, **_kwargs: extract._get_whisper())
+    result = _preserve_media_stub(vault, filename="meeting.m4a")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == media_worker._GPU_BUSY_EXIT_CODE
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert (job["state"], job["attempts"], job["error"]) == (media_jobs.PENDING, 0, None)
+    assert "out of memory" in media_jobs.status(vault)["gpu_wait"]["reason"]
+
+
+def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    speech = _preserve_media_stub(vault, filename="waits-for-gpu.m4a")
+    image = preserve.preserve_bytes(vault, scope="Rental", category="photos", filename="receipt.png", data=b"\x89PNG fake")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(binary_path=vault / speech.path, sidecar_path=vault / speech.sidecar_path, media_type="audio")
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _BusyChild:
+        pid = 2_147_483_645
+        returncode = media_worker._GPU_BUSY_EXIT_CODE
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        return _BusyChild()
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:  # the busy child was handled and the supervisor now waits
+            now[0] += 10
+            if now[0] == 1010.0:
+                worker.enqueue(binary_path=vault / image.path, sidecar_path=vault / image.sidecar_path, media_type="image")
+            if now[0] >= 1030.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    # The image arrived at 1010, inside the 60 s wait, and its child started then, not at 1060.
+    assert launches == [1000.0, 1010.0]
+
+
+def test_supervisor_backs_off_while_children_keep_dying_by_a_signal(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _preserve_media_stub(vault, filename="kills-its-child.m4a")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _CrashedChild:
+        pid = 2_147_483_645
+        returncode = -11  # SIGSEGV
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        return _CrashedChild()
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:  # the crashed child was handled
+            now[0] += 1
+            if now[0] >= 1020.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    # The delay doubles from 2 s; a flat 2 s delay would start a child at every second step.
+    assert launches == [1000.0, 1002.0, 1006.0, 1014.0]
 
 
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
@@ -4051,6 +4212,7 @@ def test_the_boolean_probe_is_derived_from_the_code_probe(monkeypatch) -> None:
 
 def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypatch) -> None:
     worker = media_worker.MediaWorker(tmp_path, execution_mode="process")
+    worker._gpu_preflight = cuda_containment.Preflight(True)  # the verdict is not this test's subject
     captured = {}
 
     monkeypatch.setattr(

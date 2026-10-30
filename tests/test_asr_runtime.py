@@ -47,20 +47,6 @@ def test_explicit_cuda_never_falls_back_when_probe_declines(monkeypatch: pytest.
         asr_runtime.select_asr_runtime(probe=_probe(cuda=False))
 
 
-def test_explicit_cuda_defers_when_the_gpu_is_busy_instead_of_refusing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
-    busy = asr_runtime.ASRProbe(
-        cuda_available=False,
-        cuda_types=frozenset({"float16"}),
-        cpu_types=frozenset({"int8"}),
-        compute_capability=(8, 9),
-        reason="insufficient free GPU memory for ASR",
-        busy=True,
-    )
-    with pytest.raises(asr_runtime.ASRGpuBusy, match="insufficient free GPU memory"):
-        asr_runtime.select_asr_runtime(probe=busy)
-
-
 @pytest.fixture
 def cuda_device_present(monkeypatch: pytest.MonkeyPatch) -> None:
     """CTranslate2 reports one CUDA device, so only the nvidia-smi headroom decides."""
@@ -71,28 +57,27 @@ def cuda_device_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "ctranslate2", fake)
 
 
-def _nvidia_smi_reports(monkeypatch: pytest.MonkeyPatch, free_mib: int) -> list[str]:
-    """Answer every nvidia-smi run with this free memory; returns the executables that were run."""
+def _nvidia_smi_reports(monkeypatch: pytest.MonkeyPatch, free_mib: int, total_mib: int = 24576) -> list[str]:
+    """Answer every nvidia-smi run with this memory; returns the executables that were run."""
     executables: list[str] = []
 
     def run(argv, **_kwargs):
         executables.append(argv[0])
-        return subprocess.CompletedProcess(argv, 0, stdout=f"8.9, {free_mib}\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=f"8.9, {free_mib}, {total_mib}\n", stderr="")
 
     monkeypatch.setattr(asr_runtime.subprocess, "run", run)
     return executables
 
 
-def test_probe_marks_low_free_vram_busy_and_keeps_the_device_healthy(
+def test_a_card_too_small_for_asr_is_refused_instead_of_waited_for(
     monkeypatch: pytest.MonkeyPatch, cuda_device_present: None
 ) -> None:
     monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "nvidia-smi")
-    _nvidia_smi_reports(monkeypatch, free_mib=512)
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
+    _nvidia_smi_reports(monkeypatch, free_mib=900, total_mib=1024)
 
-    probe = asr_runtime.probe_asr_runtime()
-
-    assert (probe.cuda_available, probe.busy) == (False, True)
-    assert "512 MiB free" in probe.reason
+    with pytest.raises(asr_runtime.ASRRuntimeRefusal, match="1024 MiB of memory in total"):
+        asr_runtime.select_asr_runtime()
 
 
 def test_probe_that_cannot_run_nvidia_smi_is_a_refusal_not_a_busy_gpu(

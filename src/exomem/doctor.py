@@ -1867,6 +1867,17 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             remediation,
             details=status,
         )
+    preflight = status.get("gpu_preflight")
+    if preflight:
+        # No job is blocked yet in automatic mode, which runs on the CPU, so say it here.
+        return _check(
+            "media.runtime",
+            "warn",
+            f"Media processing runs without the GPU: {preflight['reason']}.",
+            "Repair the NVIDIA driver and the CUDA libraries the media runtime loads, then restart "
+            "the service. The check runs once each time the service starts.",
+            details=status,
+        )
     if memory_blocked or over_budget:
         # Operator-only: tenants see memory-blocked work as waiting.
         return _check(
@@ -1878,6 +1889,17 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             "files resume when the cell's memory limit or the engine's budget changes "
             "(EXOMEM_MEDIA_BUDGETS), or, for a file that ran past the job timeout, when "
             "that timeout grows (EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS).",
+            details=status,
+        )
+    gpu_wait = status.get("gpu_wait")
+    if gpu_wait:
+        return _check(
+            "media.runtime",
+            "warn",
+            f"{status['gpu_waiting_count']} speech job(s) wait for the GPU since {gpu_wait['since']}: "
+            f"{gpu_wait['reason']}.",
+            "The jobs run by themselves once another process frees the GPU memory. Close the program "
+            "that holds it, or select the CPU with EXOMEM_ASR_DEVICE=cpu to run them now.",
             details=status,
         )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
