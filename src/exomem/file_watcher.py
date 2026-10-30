@@ -759,11 +759,16 @@ def register_self_write(
     paths: Iterable[Path],
     *,
     return_publication_result: bool = False,
+    publish_registry: bool = True,
 ) -> set[_PublicationIntent] | tuple[set[_PublicationIntent], bool]:
     """Record server-authored markdown replacements so their watcher echo is
     dropped. Best-effort: unreadable/gone files are skipped (they simply won't
     be suppressed). Also publishes the change to the freshness/inbound
-    registries, since the suppressed watcher echo won't."""
+    registries, since the suppressed watcher echo won't.
+
+    ``publish_registry=False`` only proves and records the installed bytes and
+    leaves the publication to the caller; the publication result it returns is
+    then False. Derived batch custody uses it, because the drain publishes."""
     paths = list(paths)
     # Every file the service writes joins the free-text census, Markdown or not.
     from .governance import artifact_census
@@ -827,8 +832,10 @@ def register_self_write(
             if intent is not None:
                 registered.add(intent)
         _prune_locked(now)
-    published = _publish_registry_change(vault_root, changed=paths, deleted_rels=[])
-    if published:
+    published = publish_registry and _publish_registry_change(
+        vault_root, changed=paths, deleted_rels=[]
+    )
+    if published or not publish_registry:
         registered, verification_failures = _verify_publication_intents_after_publish(
             intended.values()
         )
@@ -844,6 +851,32 @@ def register_self_write(
     if return_publication_result:
         return registered, corpus_published
     return registered
+
+
+def settle_custody_self_write(
+    vault_root: Path, paths: Iterable[Path], intents: Iterable[_PublicationIntent]
+) -> None:
+    """Close the publication intents of a batch that derived custody carries.
+
+    The synchronous writer registers its echo after publishing the corpus delta
+    itself. Under derived batch custody the drain publishes that delta behind the
+    reply, so this proves only that the installed bytes are the bytes the
+    intents promised, then closes them. A later event that matches is the
+    writer's own echo; one that differs stays an outside edit. A failed proof
+    aborts every intent of the batch and replays its paths to the watchers, as
+    the synchronous path does.
+    """
+    paths = list(paths)
+    intents = tuple(intents)
+    try:
+        registered = register_self_write(vault_root, paths, publish_registry=False)
+        if all(intent in registered for intent in intents):
+            finalize_publication_intents(intents, succeeded=registered)
+        else:
+            abort_publication_intents(intents, force_paths=paths)
+    except Exception:  # noqa: BLE001 — suppression is best-effort
+        abort_publication_intents(intents, force_paths=paths)
+        log.debug("custody self-write registration failed", exc_info=True)
 
 
 def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:

@@ -5241,11 +5241,9 @@ def _batch_atomic_write_locked(
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
     publication_intents: list[Any] = []
-    publication_intents_enabled = False
-    if vault_root is not None and (post_commit_fanout or publication_intents_out is not None):
-        from .writer_lease import active_derived_batch_custody
-
-        publication_intents_enabled = not active_derived_batch_custody(Path(vault_root))
+    publication_intents_enabled = vault_root is not None and (
+        post_commit_fanout or publication_intents_out is not None
+    )
     if vault_root is not None:
         from . import graph_sync
 
@@ -5934,7 +5932,7 @@ def _batch_atomic_write_locked(
     if vault_root is not None:
         # Before the write acknowledges, so the free-text census names every
         # file this batch installed, whatever its kind and whichever fan-out
-        # route follows. The fast-receipt route skips the watcher registration.
+        # route follows. The fast-receipt route registers only the echo proof.
         from .governance import artifact_census
 
         artifact_census.note_created(vault_root, replaced)
@@ -5944,6 +5942,17 @@ def _batch_atomic_write_locked(
             raise RuntimeError("derived receipt has no canonical commit timestamp")
         from .writer_lease import complete_active_derived_batch
 
+        if publication_intents:
+            # The echo of these files is this batch's own write. The drain
+            # publishes their index and registry delta behind the reply, so only
+            # the echo's proof is settled here, and no caller is left a fan-out
+            # to finish: it sees no intent to abort.
+            from . import file_watcher
+
+            file_watcher.settle_custody_self_write(
+                vault_root, replaced, publication_intents
+            )
+            publication_intents.clear()
         complete_active_derived_batch(
             fast_receipt,
             canonical_commit_monotonic=canonical_commit_monotonic,
