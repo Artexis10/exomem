@@ -1,11 +1,12 @@
 """A write under derived batch custody (fast durable ack) is not an outside edit.
 
 The live-index-freshness contract suppresses the watcher's echo of a write
-Exomem made itself. Fast ack moves the index and registry publication behind
-the reply, and the echo suppression has to stay with the write: otherwise every
-filesystem event of a Planning add or a Records append reaches the watcher as
-somebody else's edit, marks the vault external-pending and repeats the drain's
-fan-out on the watcher thread.
+Exomem made itself. Fast ack moves the index publication behind the reply, and
+the echo suppression has to stay with the write: otherwise every filesystem
+event of a Planning add or a Records append reaches the watcher as somebody
+else's edit, marks the vault external-pending and repeats the drain's fan-out
+on the watcher thread. The suppressed echo also stops fencing readers, so the
+write has to publish its registry delta before the reply.
 
 These tests drive a real watchdog observer over a real vault and the real
 lease, receipt store and drain.
@@ -34,6 +35,7 @@ from exomem import (
     writer_lease,
 )
 from exomem import find as find_module
+from exomem import move_file as move_file_module
 from exomem import vault as vault_module
 
 pytestmark = pytest.mark.skipif(
@@ -169,10 +171,6 @@ def test_planning_add_and_records_append_under_fast_ack_are_not_outside_edits(
 ) -> None:
     vault, observed = watched
     initiative = fixtures.initiative_ref(vault)
-    # A live inbound-link index, as a running server has: the write must patch it.
-    link_target = "Knowledge Base/log.md"
-    vault_module.find_inbound_wikilinks(vault, link_target)
-    assert vault_module.cached_inbound_wikilinks(vault, link_target) is not None
 
     _governed(
         tmp_path,
@@ -210,44 +208,53 @@ def test_planning_add_and_records_append_under_fast_ack_are_not_outside_edits(
     assert {path for batch in observed.batches for path in batch} == {control}
 
     _drain(vault)
-    # The drain published both writes, which the watcher no longer does: the
-    # recall registries and the lexical catalogue name one live state, and the
-    # inbound-link index took the same delta.
+    # The recall registries and the lexical catalogue name one live state.
     assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
-    assert vault_module.cached_inbound_wikilinks(vault, link_target) is not None
 
 
-def test_an_outside_edit_to_a_self_written_file_is_still_dispatched(
+def test_a_page_written_under_fast_ack_is_linked_before_the_drain_runs(
     watched, tmp_path: Path
 ) -> None:
+    """A move right after the reply must rewrite the links the write just made."""
     vault, observed = watched
+    target = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    renamed = "Knowledge Base/Notes/Insights/renamed-disclosure.md"
+    referrer = vault / "Knowledge Base" / "Notes" / "Insights" / "custody-referrer.md"
+    # A live inbound-link index, as a running server has.
+    assert vault_module.find_inbound_wikilinks(vault, target) == []
+
+    def write_referrer(root: Path) -> None:
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(
+                    referrer,
+                    "---\ntype: insight\nstatus: draft\ncreated: 2026-10-01\n"
+                    "updated: 2026-10-01\ntags: []\n---\n# Referrer\n\n"
+                    f"See [[{target.removesuffix('.md')}]].\n",
+                    create_only=True,
+                )
+            ],
+            vault_root=root,
+        )
+
+    _governed(tmp_path, vault, "remember", write_referrer)
+
+    # No drain has run. The index is current only if it holds the new link.
+    inbound = vault_module.cached_inbound_wikilinks(vault, target)
+    assert inbound is not None
+    assert [link.path for link in inbound] == ["Knowledge Base/Notes/Insights/custody-referrer.md"]
+
+    moved: list = []
     _governed(
         tmp_path,
         vault,
-        "plan_memory",
-        lambda root: planning.add(
-            root,
-            fixtures.PLANNING_PATH,
-            item={
-                "title": "Draft the roadmap",
-                "status": "planned",
-                "commitment": "committed",
-                "horizon": "week",
-                "parent": fixtures.initiative_ref(root),
-            },
-            why="queue the roadmap",
+        "move_memory",
+        lambda root: moved.append(
+            move_file_module.move_file(root, old_path=target, new_path=renamed)
         ),
     )
-    _let_events_arrive(vault, observed)
-    observed.batches.clear()
-    observed.marks.clear()
-    item = next(
-        path
-        for path in (vault / "Knowledge Base" / "Planning" / "Delivery").rglob("*.md")
-        if "Draft the roadmap" in path.read_text(encoding="utf-8")
-    )
 
-    item.write_text(item.read_text(encoding="utf-8") + "\nAn outside editor wrote this.\n")
-
-    observed.wait_for(lambda: any(item in batch for batch in observed.batches), "the edit's batch")
-    assert (item,) in observed.marks
+    assert moved[0].wikilinks_updated == 1
+    text = referrer.read_text(encoding="utf-8")
+    assert "renamed-disclosure" in text
+    assert "progressive-disclosure-without-mode-fragmentation" not in text

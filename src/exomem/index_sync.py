@@ -2278,25 +2278,6 @@ def converge_paths_from_current_bytes(
     return all(not report.reconcile_required for report in reports)
 
 
-def _patch_inbound_index(vault_root: Path, changed_rels: Sequence[str]) -> None:
-    """Apply a published corpus delta to the cached inbound-link index.
-
-    Nothing in `upsert_after_write` reaches that index. The synchronous writer
-    patches it through its watcher registration, which a batch under derived
-    custody replaces with `file_watcher.settle_custody_self_write`, so the
-    watcher no longer does it for this batch's echo. The registry delta must be
-    published first: the patch is proven against it. A failure leaves the
-    index behind the registry, where no reader accepts it and the next read
-    rebuilds it.
-    """
-    from . import vault
-
-    try:
-        vault.on_inbound_files_changed(vault_root, changed_rels, [])
-    except Exception:  # noqa: BLE001 - a lagging projection is rebuilt, not a failed batch
-        log.warning("derived inbound-link patch failed", exc_info=True)
-
-
 def converge_derived_component(
     vault_root: Path,
     receipt: Any,
@@ -2384,9 +2365,6 @@ def converge_derived_component(
         reports = tuple(publications)
         if any(item.reconcile_required for item in reports):
             return False
-        _patch_inbound_index(
-            root, [path.rel_path for path in receipt.paths if path.after_hash is not None]
-        )
         _derived_memo_put(memo_key, reports)
     if semantic_outcome is not None:
         return semantic_outcome
