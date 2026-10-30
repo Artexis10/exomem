@@ -2,7 +2,7 @@
 
 ### Requirement: Bound originals are written through to the cell's media store
 
-On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded. Offload SHALL apply the classification rule before it encrypts. An original that the rule calls resident SHALL get a recorded refusal, and offload SHALL write no temporary file for it. Offload SHALL reserve its ciphertext temporary file from the hydration capacity. An offload that finds the capacity in use SHALL wait and try again, with no attempt consumed.
+On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded. Offload SHALL apply the classification rule before it encrypts. An original that the rule calls resident SHALL get a recorded refusal, and offload SHALL write no temporary file for it. Offload SHALL reserve the bytes of its ciphertext temporary file from the hydration capacity, and SHALL NOT take a hydration slot. An offload that finds too few bytes free SHALL wait and try again, with no attempt consumed.
 
 #### Scenario: A recording is captured on a selected cell
 
@@ -20,6 +20,12 @@ On a cell selected for the media store, every original that a governed sidecar b
 
 - **WHEN** an offload job reaches a 5 GiB recording while a hydration holds most of the hydration capacity
 - **THEN** the offload waits with its attempt count unchanged, and runs once the hydration ends
+
+#### Scenario: An offload leaves the hydration slot free
+
+- **WHEN** `max_hydrations` is 1, the hydration capacity is 5.25 GiB, and a 0.1 GiB PDF offloads
+- **AND** an owner opens a 1 GiB evicted recording
+- **THEN** the recording hydrates while the offload runs
 
 #### Scenario: The store is unreachable
 
@@ -238,7 +244,7 @@ When adoption files an offloadable artifact on a cell selected for the media sto
 
 ### Requirement: Hydration verifies an original before it reappears
 
-The cell SHALL hydrate an evicted original in one stream: it fetches the version that its reference names through the media edge and decrypts it into one temporary file in the original's folder. It SHALL verify the ciphertext digest and the original's size and SHA-256 against the sidecar. Only then SHALL it link the file into place with no replace. Hydration SHALL write no other full copy of the original or its ciphertext on the volume. It SHALL reserve the original's plaintext size from the hydration capacity. A stop SHALL leave nothing at the original's path, and no temporary file that outlives the next start. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
+The cell SHALL hydrate an evicted original in one stream: it fetches the version that its reference names through the media edge and decrypts it into one temporary file in the original's folder. It SHALL verify the ciphertext digest and the original's size and SHA-256 against the sidecar. Only then SHALL it link the file into place with no replace. Hydration SHALL write no other full copy of the original or its ciphertext on the volume. It SHALL reserve the original's plaintext size from the hydration capacity. A stop SHALL leave nothing at the original's path. The hydration SHALL record its temporary file's name in its reservation. When the cell clears the reservation of a dead process, it SHALL also remove that file. A reservation SHALL name its process by ID and start time, so that a reused process ID does not keep it. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
 
 #### Scenario: Playback of an evicted lecture
 
@@ -260,6 +266,12 @@ The cell SHALL hydrate an evicted original in one stream: it fetches the version
 
 - **WHEN** a 5 GiB evicted original hydrates
 - **THEN** volume use rises by about 5 GiB at most while it hydrates, and the hydration reserves 5 GiB of the hydration capacity
+
+#### Scenario: A hydration stops part-way
+
+- **WHEN** a hold stops the runtime while a 5 GiB hydration writes its temporary file, and the restarted runtime reuses the old process ID
+- **THEN** the next hydration's reservation clears the dead reservation and removes the temporary file
+- **AND** the hydration capacity is free again
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
@@ -380,7 +392,7 @@ No age or time cutoff SHALL decide destruction. cellctl SHALL delete the manifes
 
 ### Requirement: Owners retrieve originals only with their own authority
 
-The gateway SHALL serve a download route for originals that works only with the owner's signed-in session. The route SHALL forward to the cell, which SHALL hydrate an evicted original if needed and stream it with byte-range support. The cell SHALL stream the original from its copy on the volume and SHALL NOT write another full copy for the download. It SHALL hash that copy before the first byte, and stop the response when the file changes before the last byte. A tool result MAY carry this route's link, because the link grants nothing without the session. A tool result SHALL NOT carry a bearer link, a presigned URL or ciphertext metadata. `exomem cloud download` SHALL fetch an original over OAuth, stream it to a temporary file, verify size and SHA-256 against the record, and rename it into place only after both match; any failure SHALL delete the partial file.
+The gateway SHALL serve a download route for originals that works only with the owner's signed-in session. The route SHALL forward to the cell, which SHALL hydrate an evicted original if needed and stream it with byte-range support. The cell SHALL stream the original from its copy on the volume and SHALL NOT write another full copy for the download. When that copy matches its recorded cache identity, the cell SHALL NOT hash it again. Otherwise the cell SHALL hash it before the first byte. The cell SHALL stop the response when the file changes before the last byte. A tool result MAY carry this route's link, because the link grants nothing without the session. A tool result SHALL NOT carry a bearer link, a presigned URL or ciphertext metadata. `exomem cloud download` SHALL fetch an original over OAuth, stream it to a temporary file, verify size and SHA-256 against the record, and rename it into place only after both match; any failure SHALL delete the partial file.
 
 #### Scenario: A link is opened without a session
 
@@ -396,6 +408,11 @@ The gateway SHALL serve a download route for originals that works only with the 
 
 - **WHEN** an owner downloads a 5 GiB evicted original
 - **THEN** volume use rises by the hydrated copy alone, and the route serves that copy
+
+#### Scenario: Seeks in a hydrated recording
+
+- **WHEN** an owner seeks three times in a hydrated 5 GiB recording whose cache identity matches
+- **THEN** the cell answers each byte-range request without hashing the file
 
 #### Scenario: A local agent downloads an original
 
@@ -518,7 +535,7 @@ A failed listing or an unobserved edge generation MUST NOT count as done.
 
 ### Requirement: The media store is off by default and drains on disable
 
-The media store SHALL be off unless a cell is on the canary list or the fleet switch is on. A cell that was never selected SHALL have no media edge egress, no offload and no eviction. Turning the store off for a selected cell SHALL stop new offload at once. When the volume can hold every evicted original within its size cap, eviction SHALL also stop at once. The cell SHALL then hydrate every evicted original back. cellctl SHALL keep the cell's media key, edge credential, edge egress and active-set entry until a report from the cell shows no evicted original. Only then SHALL cellctl remove them. When no such report exists, or cellctl cannot read it, cellctl SHALL keep them. A cell whose evicted originals do not fit SHALL follow the requirement "A cell that cannot drain keeps its stored media readable".
+The media store SHALL be off unless a cell is on the canary list or the fleet switch is on. A cell that was never selected SHALL have no media edge egress, no offload and no eviction. Turning the store off for a selected cell SHALL stop new offload at once. When the volume can hold every evicted original within its size cap, eviction SHALL also stop at once. The cell SHALL then hydrate every evicted original back. cellctl SHALL keep the cell's media key, edge credential, edge egress and active-set entry until a report from the cell shows no evicted original. Only then SHALL cellctl remove them. When no such report exists, or cellctl cannot read it, cellctl SHALL keep them. Only a report that the cell captured after the store was turned off SHALL count for that removal. A report SHALL give its evicted count as unknown, never 0, when its census of sidecars is incomplete. cellctl SHALL treat unknown as evicted originals present. Cell deletion and key retirement override this rule: a cell row that becomes `deleted` follows the requirement "Deleting originals and cells removes their stored objects". A cell whose evicted originals do not fit SHALL follow the requirement "A cell that cannot drain keeps its stored media readable".
 
 #### Scenario: Default installation
 
@@ -535,9 +552,24 @@ The media store SHALL be off unless a cell is on the canary list or the fleet sw
 - **WHEN** the store is turned off for a cell, and cellctl has read no report from the cell since then
 - **THEN** cellctl keeps the cell's media key, edge credential, edge egress and active-set entry
 
+#### Scenario: A report from before the store was turned off
+
+- **WHEN** the newest report shows no evicted original, and the cell captured it before the store was turned off
+- **THEN** cellctl keeps the cell's media key, edge credential, edge egress and active-set entry
+
+#### Scenario: An incomplete census
+
+- **WHEN** a turned-off cell's backup Job cannot read every sidecar
+- **THEN** its report gives the evicted count as unknown, and cellctl keeps the media key and edge egress
+
+#### Scenario: A turned-off cell is deleted
+
+- **WHEN** a turned-off cell with evicted originals has its row set to `deleted`
+- **THEN** cellctl removes it from the edge's active set and retires its media keys without waiting for a report
+
 ### Requirement: A cell that cannot drain keeps its stored media readable
 
-This requirement covers a turned-off cell whose volume cannot hold every evicted original within its size cap. Such a cell SHALL keep its media key, its edge credential and its edge egress. Its reports show evicted originals, so cellctl keeps them. Owner reads and media jobs SHALL hydrate its evicted originals as before. Offload SHALL stay off. Eviction SHALL keep running, so that a hydrated copy leaves the volume again. The cell SHALL report the shortfall in bytes. When the shortfall reaches zero, for example after the volume grows or the owner deletes media, the cell SHALL drain. The drain follows the requirement "The media store is off by default and drains on disable".
+This requirement covers a turned-off cell whose volume cannot hold every evicted original within its size cap. Such a cell SHALL keep its media key, its edge credential, its edge egress and its active-set entry. Its reports show evicted originals, so cellctl keeps them. The edge's active set SHALL include such a cell although the edge no longer selects it. Owner reads and media jobs SHALL hydrate its evicted originals as before. Offload SHALL stay off. Eviction SHALL keep running, so that a hydrated copy leaves the volume again. The cell SHALL report the shortfall in bytes. When the shortfall reaches zero, for example after the volume grows or the owner deletes media, the cell SHALL drain. The drain follows the requirement "The media store is off by default and drains on disable".
 
 #### Scenario: Stored media exceed the volume
 

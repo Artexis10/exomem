@@ -94,7 +94,8 @@ The CLI SHALL treat a cell that reports no window budget as an older cell, or as
 
 Before the first upload, the CLI SHALL refuse a series in each of these cases and list the files concerned:
 - 2 × its text bytes + its resident artifact bytes exceed the reachable budget that the cell reports;
-- its offloadable bytes exceed the remaining media allowance that the cell reports.
+- its offloadable bytes exceed the remaining media allowance that the cell reports;
+- an offloadable member exceeds the effective file limit that the cell reports (pending operator confirmation). The CLI SHALL list each such member with its size, and give the limit.
 
 #### Scenario: Resident files do not fit
 
@@ -102,6 +103,13 @@ Before the first upload, the CLI SHALL refuse a series in each of these cases an
 - **AND** the series holds 3 GiB of text and 3 GiB of artifacts above the largest offloadable file
 - **THEN** the CLI refuses the series before any upload
 - **AND** it lists the resident files with their sizes and gives both figures
+
+#### Scenario: A member above the effective file limit
+
+- **WHEN** the cell reports a largest offloadable file of 5 GiB and an effective file limit of 2.5 GiB
+- **AND** the series holds a 4 GiB video
+- **THEN** the CLI refuses the series before any upload
+- **AND** it lists the video with its size and gives the effective file limit
 
 #### Scenario: A series larger than the remaining allowance
 
@@ -162,6 +170,7 @@ The Adoption Studio status SHALL report these figures. Each figure that the cell
 - The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity and `max_hydrations` × the largest offloadable file.
 - The reachable budget: the window budget once the agent files every landed window, pending offloads finish and eviction frees every eligible original. It SHALL leave out an original that an owner read within the minimum idle age.
 - The job-pinned bytes: the offloadable originals that claimed, unfinished media jobs keep on the volume, the copies that the worker hydrated for them included.
+- The effective file limit (pending operator confirmation): the largest offloadable member that can land now. It is the reachable budget plus the job-pinned bytes, capped by the largest offloadable file.
 - The inputs of the classification rule: the object bound, the hydration capacity, the volume fraction, the volume size and the inline text limit, and the largest offloadable file that they allow.
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
@@ -182,6 +191,11 @@ A status call MAY carry a series ID and the next window's bytes. The cell SHALL 
 - **WHEN** the window budget is 1 GiB, 6 GiB of eligible originals are cached, and landed windows hold 2 GiB of unfiled offloadable members
 - **AND** an owner read another 1 GiB of originals within the minimum idle age
 - **THEN** the status reports a reachable budget of 9 GiB
+
+#### Scenario: The effective file limit
+
+- **WHEN** the largest offloadable file is 5 GiB, the reachable budget is 2 GiB and the job-pinned bytes are 0.5 GiB
+- **THEN** the status reports an effective file limit of 2.5 GiB
 
 #### Scenario: A landed window with no run
 
@@ -215,7 +229,7 @@ For an `adopt` import, the import Job SHALL record each member's identity in the
 
 ### Requirement: A discard keeps a residual record
 
-When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: `import_discard` with `walk_stage` set. That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A retried walk SHALL keep the record that an earlier walk wrote. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
+When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: `import_discard` with `walk_stage` set. That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A discard SHALL refuse `walk_stage` with `IMPORT_REQUEST_INVALID` when it can read the receipt, and keep the stage. A retried walk SHALL keep the record that an earlier walk wrote. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
 
 #### Scenario: A discard after a path conflict
 
@@ -238,6 +252,11 @@ When the discard Job discards a recorded stage, it SHALL keep a residual record 
 - **WHEN** an agent discards that window again with `walk_stage` set
 - **THEN** a separate record lists each staged file except the series file, with the code `receipt_unreadable`
 - **AND** the unreadable receipt stays, the stage folder is gone, and the status lists those files as "discarded, not filed"
+
+#### Scenario: A walk with a readable receipt
+
+- **WHEN** an agent discards a window with `walk_stage` set, and the Job can read its receipt
+- **THEN** the discard refuses with `IMPORT_REQUEST_INVALID`, writes no record, and the stage stays
 
 ### Requirement: Each window carries the series file
 
