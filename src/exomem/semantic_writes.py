@@ -33,6 +33,7 @@ from . import (
     promotions,
     provenance,
     relation_barrier,
+    relation_offer,
     relation_registry,
     relation_review,
     semantic_authoring,
@@ -956,6 +957,8 @@ class CreationPreflight:
     provenance_server_at: str | None = None
     #: A `generic` disposition or per-edge reasons, and the generic edges they kept.
     generic_cleared: relation_barrier.Cleared | None = None
+    #: Generic edges between two notes that a specific relation fits, offered after the commit.
+    specific_offers: tuple[relation_barrier.Offer, ...] = ()
 
     @property
     def draft_hash(self) -> str | None:
@@ -1025,7 +1028,7 @@ class CreationCommit:
     undeclared_referents: dict[str, Any] | None = None
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
-    relation_advisory_context: dict[str, str] | None = None
+    relation_advisory_context: dict[str, Any] | None = None
     vocabulary_resolution: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -1102,6 +1105,8 @@ class ExistingPreflight:
     provenance_server_at: str | None = None
     #: A `generic` disposition and the generic edges it kept; None when none was given.
     generic_cleared: relation_barrier.Cleared | None = None
+    #: Generic edges between two notes that a specific relation fits, offered after the commit.
+    specific_offers: tuple[relation_barrier.Offer, ...] = ()
 
     @property
     def before_hash(self) -> str:
@@ -1156,7 +1161,7 @@ class ExistingCommit:
     entity_candidate: dict[str, Any] | None = None
     # A FIFTH kind, as in `CreationResult`: the names this write newly links with no page behind them.
     undeclared_referents: dict[str, Any] | None = None
-    relation_advisory_context: dict[str, str] | None = None
+    relation_advisory_context: dict[str, Any] | None = None
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
     after_hash: str | None = None
@@ -2200,7 +2205,7 @@ def _preflight_existing(
             "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
             "review hash does not match the validated transition",
         )
-    generic_edges, refusal = relation_barrier.evaluate(
+    verdict = relation_barrier.evaluate(
         after,
         after_corpus,
         prior=before,
@@ -2208,6 +2213,7 @@ def _preflight_existing(
         operation=operation,
         choice=choice,
     )
+    generic_edges, refusal = verdict.kept, verdict.refusal
     if refusal is not None:
         raise SemanticWriteError(
             relation_barrier.CODE,
@@ -2294,6 +2300,7 @@ def _preflight_existing(
         generic_cleared=(
             relation_barrier.Cleared(choice, generic_edges) if choice is not None else None
         ),
+        specific_offers=verdict.offers,
     )
 
 
@@ -3006,6 +3013,29 @@ def _undeclared_referents_block(
         return None
 
 
+def _relation_advisory_context(
+    vault_root: Path,
+    state: Any,
+    offers: tuple[relation_barrier.Offer, ...],
+    *,
+    path: str,
+    source: str,
+) -> dict[str, Any]:
+    """What the mutation terminal needs to build a write's `relation_advisory`.
+
+    The lookup hints are always present; `specific_options` is present only when the write
+    has options to offer, so a write without any keeps the context it always had.
+    """
+    context: dict[str, Any] = {
+        "vault": str(Path(vault_root)),
+        "registry_hash": state.relation_registry_hash,
+    }
+    options = relation_offer.specific_options(vault_root, offers, path=path, source=source)
+    if options:
+        context["specific_options"] = options
+    return context
+
+
 def _predecessor_state(corpus: Any, predecessor_path: str | None) -> Any:
     """The predecessor page's state in the preflight corpus, or None when there is no predecessor."""
     pages = getattr(corpus, "pages", None)
@@ -3083,10 +3113,13 @@ def commit_existing(
         previous_state=preflight.before,
         candidate=candidate,
     )
-    context = {
-        "vault": str(Path(vault_root)),
-        "registry_hash": preflight.after.relation_registry_hash,
-    }
+    context = _relation_advisory_context(
+        vault_root,
+        preflight.after,
+        preflight.specific_offers,
+        path=preflight.path,
+        source=preflight.after_source,
+    )
     return replace(
         committed,
         structure_suggestion=suggestion,
@@ -4599,7 +4632,7 @@ def _preflight_creation(
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
         validation = attempt.validation
         artifact = attempt.artifact
-        cleared = _creation_barrier(
+        cleared, offers = _creation_barrier(
             state,
             after_corpus,
             before_corpus,
@@ -4661,6 +4694,7 @@ def _preflight_creation(
             relation_review.prevalidated_attempt(attempt, census_token),
             provenance_server_at=provenance_server_at,
             generic_cleared=cleared,
+            specific_offers=offers,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4668,7 +4702,7 @@ def _preflight_creation(
         else "not_semantic"
     )
     # A structural page has no draft hash, so its retry carries the reason alone.
-    cleared = _creation_barrier(
+    cleared, offers = _creation_barrier(
         state,
         after_corpus,
         before_corpus,
@@ -4707,6 +4741,7 @@ def _preflight_creation(
         origin_inputs,
         provenance_server_at=_new_provenance_time(root) if cleared and cleared.edges else None,
         generic_cleared=cleared,
+        specific_offers=offers,
     )
 
 
@@ -4719,9 +4754,9 @@ def _creation_barrier(
     choice: relation_barrier.Choice | None,
     predecessor_path: str | None,
     retry: dict[str, Any],
-) -> relation_barrier.Cleared | None:
-    """Refuse an unanswered generic edge to an entity; else the choice and the edges it kept."""
-    edges, refusal = relation_barrier.evaluate(
+) -> tuple[relation_barrier.Cleared | None, tuple[relation_barrier.Offer, ...]]:
+    """Refuse an unanswered generic edge to an entity; else the choice with its kept edges, and the offers."""
+    verdict = relation_barrier.evaluate(
         state,
         after_corpus,
         prior=before_corpus.pages.get(predecessor_path) if predecessor_path is not None else None,
@@ -4729,11 +4764,14 @@ def _creation_barrier(
         operation=operation,
         choice=choice,
     )
-    if refusal is not None:
+    if verdict.refusal is not None:
         raise SemanticWriteError(
-            relation_barrier.CODE, refusal.reason, details={**refusal.details(), **retry}
+            relation_barrier.CODE,
+            verdict.refusal.reason,
+            details={**verdict.refusal.details(), **retry},
         )
-    return relation_barrier.Cleared(choice, edges) if choice is not None else None
+    cleared = relation_barrier.Cleared(choice, verdict.kept) if choice is not None else None
+    return cleared, verdict.offers
 
 
 def _entry_commit_generation(root: Path):  # noqa: ANN201 - int | None
@@ -4871,10 +4909,13 @@ def commit_creation(
         previous_state=_predecessor_state(preflight.corpus, predecessor_path),
         candidate=candidate,
     )
-    context = {
-        "vault": str(Path(vault_root)),
-        "registry_hash": preflight.semantic_state.relation_registry_hash,
-    }
+    context = _relation_advisory_context(
+        vault_root,
+        preflight.semantic_state,
+        preflight.specific_offers,
+        path=preflight.destination,
+        source=preflight.source,
+    )
     return replace(
         committed,
         structure_suggestion=suggestion,

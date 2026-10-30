@@ -6,6 +6,9 @@ pages, the write stops before it commits. The caller then writes the edge as one
 those relations, or keeps it generic and says why. The reason is logged against the
 edge itself (`relation_census.operation_provenance`), so a later review reads it.
 
+A generic edge between two notes is never refused. It joins `Verdict.offers`, and
+`relation_offer` offers the swap to a specific relation once the write has committed.
+
 The barrier judges only an edge this call adds (`relation_census.added_edges`), so an
 edge a successor carries from its predecessor is never asked about again. A page
 that is not live, a bulk operation, and an edge to a target the writer cannot
@@ -76,6 +79,26 @@ class Refusal:
         return f"{edges} to an entity, where a specific relation fits"
 
 
+@dataclass(frozen=True)
+class Offer:
+    """A generic edge between two notes, with the specific relations that fit both pages.
+
+    Never a refusal: the edge commits, and `relation_offer` offers the swap afterwards.
+    """
+
+    fact: semantic_contract.RelationFact
+    options: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What the barrier found: the edges `choice` kept, the refusal, and the offers to make later."""
+
+    kept: tuple[tuple[str, str], ...] = ()
+    refusal: Refusal | None = None
+    offers: tuple[Offer, ...] = ()
+
+
 def call_choice(disposition: str | None, reason: str | None) -> Choice | None:
     """The call-wide choice a `generic` disposition makes; None for any other disposition.
 
@@ -94,14 +117,14 @@ def evaluate(
     prior_corpus: semantic_contract.SemanticCorpusContext,
     operation: str,
     choice: Choice | None,
-) -> tuple[tuple[tuple[str, str], ...], Refusal | None]:
-    """The generic edges `choice` keeps, and the refusal for those it leaves unanswered.
+) -> Verdict:
+    """The generic edges `choice` keeps, the refusal for those it leaves unanswered, and the offers.
 
     `prior` is the page this write replaces: the page before an edit, or the predecessor
     of a successor, in `prior_corpus`. An edge it already authored is not added by this call.
     """
     if operation in semantic_contract.BARRIER_EXEMPT_OPERATIONS or page.status_class != "live":
-        return (), None
+        return Verdict()
     registry = corpus.registry_for(page.path)
     current = semantic_contract.writer_authored_facts(page, corpus)
 
@@ -110,7 +133,7 @@ def evaluate(
         return definition is not None and definition.generic
 
     if not any(generic(fact) for fact in current):
-        return (), None
+        return Verdict()
     from . import relation_census
 
     added = relation_census.added_edges(
@@ -128,6 +151,7 @@ def evaluate(
     types = semantic_contract.entity_type_registry(corpus.vault_root)
     kept: list[tuple[str, str]] = []
     refused: list[tuple[Any, list[dict[str, Any]]]] = []
+    offers: list[Offer] = []
     for edge in added.edges:
         fact = edge.fact
         # An unresolved target is all a restricted writer sees of a withheld page, so it passes.
@@ -140,8 +164,6 @@ def evaluate(
         # A page whose note type cannot say what it is leaves the question open, never a refusal.
         if subject is None or target is None:
             continue
-        if relation_endpoints.ENTITY_ROLE not in (subject.role, target.role):
-            continue
         options = relation_options.fitting_options(
             registry,
             subject,
@@ -151,12 +173,18 @@ def evaluate(
         )
         if not options:
             continue
+        # An edge between two notes is offered its options once committed, never asked about.
+        if relation_endpoints.ENTITY_ROLE not in (subject.role, target.role):
+            offers.append(Offer(fact, options))
+            continue
         reason = choice.reason_for(fact.raw_relation, fact.logical_target_path) if choice is not None else None
         if reason is None:
             refused.append((fact, options))
         else:
             kept.append((edge.identity, reason))
     if not refused:
-        return tuple(kept), None
+        return Verdict(tuple(kept), None, tuple(offers))
     fact, options = refused[0]
-    return tuple(kept), Refusal(options, fact.raw_relation, fact.raw_target, len(refused))
+    return Verdict(
+        tuple(kept), Refusal(options, fact.raw_relation, fact.raw_target, len(refused)), tuple(offers)
+    )

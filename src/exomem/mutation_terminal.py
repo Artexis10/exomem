@@ -1528,8 +1528,29 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The specific-relation options the semantic writer built for this committed write.
+
+    The writer nests them with the advisory context, so a creation or an edit carries them one
+    level down. It has already bounded the list and shaped each entry.
+    """
+    options: Any = None
+    for container_key in ("creation", "semantic", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        context = (
+            container.get("_relation_advisory_context") if isinstance(container, Mapping) else None
+        )
+        options = context.get("specific_options") if isinstance(context, Mapping) else None
+        if options:
+            break
+    if not isinstance(options, (list, tuple)):
+        return []
+    return [dict(option) for option in options if isinstance(option, Mapping)]
+
+
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
-    """Project just-parsed unregistered facts plus optional indexed recurrence.
+    """Project just-parsed unregistered facts plus optional indexed recurrence, and the
+    specific relations a note-to-note generic edge could take.
 
     The fact scan is bounded by the semantic feedback renderer. Recurrence is a
     point lookup against one already-current graph snapshot and is deliberately
@@ -1582,8 +1603,9 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)
+    specific = _specific_options_projection(leaf)
     if not labels:
-        return None
+        return {"specific_options": specific} if specific else None
     ordered = sorted(labels)
     retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
     truncated = facts_truncated or len(ordered) > len(retained)
@@ -1656,7 +1678,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
         except Exception:  # noqa: BLE001 - advisory evidence never breaks a commit
             recurrence_available = False
             occurrences = []
-    return {
+    advisory = {
         "raw_relations": retained,
         "registry_hash": registry_hash,
         "recurrence_available": recurrence_available,
@@ -1668,6 +1690,9 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             "args": {"operation": "resolve-relation"},
         },
     }
+    if specific:
+        advisory["specific_options"] = specific
+    return advisory
 
 
 def _without_relation_advisory_context(result: Any) -> Any:
