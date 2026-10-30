@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
+import json
 import logging
 import sqlite3
 import threading
@@ -1293,43 +1295,56 @@ def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str
     return rendered, identity
 
 
-def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
-    """Plan or atomically add IDs to frontmatter-bearing governed pages."""
-    writes: list[vault_module.PlannedWrite] = []
-    missing: list[str] = []
-    skipped: list[dict[str, str]] = []
-    assigned: dict[str, str] = {}
-    identity_issues = scan_issues(vault_root)
+#: Most pages one backfill job commits under a single hold of the mutation boundary.
+BACKFILL_CHUNK_PAGES = 100
+
+
+def _pages_without_id(
+    vault_root: Path, skipped: list[dict[str, str]]
+) -> Iterator[tuple[str, Path, str, Any]]:
+    """Yield `(rel, path, text, guard)` for each governed page that has frontmatter but no ID.
+
+    Pages that cannot be read, have no frontmatter, or carry a malformed ID go to `skipped`.
+    """
     kb = Path(vault_root) / kb_dirname()
-    if kb.is_dir():
-        for path in sorted(kb.rglob("*.md")):
-            rel = _relative_markdown(vault_root, path)
-            if rel is None:
-                continue
-            try:
-                raw, guard = vault_module.read_guarded_text(vault_root, path)
-            except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
-                skipped.append({"path": rel, "reason": str(exc)})
-                continue
-            fm, _, fm_text = vault_module.parse_frontmatter(raw)
-            if fm_text is None:
-                skipped.append({"path": rel, "reason": "missing frontmatter"})
-                continue
-            if ID_FIELD in fm:
-                if normalize_id(fm.get(ID_FIELD)) is None:
-                    skipped.append({"path": rel, "reason": "malformed exomem_id"})
-                continue
-            updated, identity = add_id_to_markdown(raw)
-            missing.append(rel)
-            assigned[rel] = memory_ref(identity)
-            writes.append(
-                vault_module.PlannedWrite(
-                    path=path, content=updated, guard=guard,
-                    expected_hash=vault_module.content_hash(raw),
-                )
-            )
+    if not kb.is_dir():
+        return
+    for path in sorted(kb.rglob("*.md")):
+        rel = _relative_markdown(vault_root, path)
+        if rel is None:
+            continue
+        try:
+            raw, guard = vault_module.read_guarded_text(vault_root, path)
+        except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
+            skipped.append({"path": rel, "reason": str(exc)})
+            continue
+        fm, _, fm_text = vault_module.parse_frontmatter(raw)
+        if fm_text is None:
+            skipped.append({"path": rel, "reason": "missing frontmatter"})
+            continue
+        if ID_FIELD in fm:
+            if normalize_id(fm.get(ID_FIELD)) is None:
+                skipped.append({"path": rel, "reason": "malformed exomem_id"})
+            continue
+        yield rel, path, raw, guard
+
+
+def _backfill_plan_id(pages: Iterable[tuple[str, str]]) -> str:
+    """The identity of one backfill: the pages that lack an ID, each with the hash of its text.
+
+    Counts and minted IDs stay out of it, so the same pages give the same plan on every preview.
+    """
+    payload = json.dumps(
+        {"mode": "backfill-ids", "flags": {}, "pages": sorted(pages)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _refuse_duplicates(identity_issues: list[dict[str, str]]) -> None:
     duplicates = [item for item in identity_issues if item["kind"] == "duplicate"]
-    if duplicates and not dry_run:
+    if duplicates:
         duplicate_ids = sorted({item["value"] for item in duplicates})
         # A count, not the identities: an `exomem_id` is a reference to a
         # stored page, and the caller did not supply these. The per-identity
@@ -1340,16 +1355,149 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
             f"cannot backfill while {len(duplicate_ids)} duplicate exomem_id "
             "values exist",
         )
+
+
+def backfill_ids(vault_root: Path, *, dry_run: bool = True, plan_id: str | None = None) -> dict:
+    """Plan or atomically add IDs to frontmatter-bearing governed pages.
+
+    Every result carries the `plan_id` of the pages it covers. A write that names
+    a `plan_id` is a reviewed one: it re-plans, refuses a changed plan, and commits
+    in chunks (`_backfill_planned`).
+    """
+    if plan_id is not None:
+        return _backfill_planned(vault_root, plan_id)
+    writes: list[vault_module.PlannedWrite] = []
+    missing: list[str] = []
+    skipped: list[dict[str, str]] = []
+    assigned: dict[str, str] = {}
+    hashes: list[tuple[str, str]] = []
+    identity_issues = scan_issues(vault_root)
+    for rel, path, raw, guard in _pages_without_id(vault_root, skipped):
+        updated, identity = add_id_to_markdown(raw)
+        digest = vault_module.content_hash(raw)
+        missing.append(rel)
+        assigned[rel] = memory_ref(identity)
+        hashes.append((rel, digest))
+        writes.append(
+            vault_module.PlannedWrite(path=path, content=updated, guard=guard, expected_hash=digest)
+        )
+    if not dry_run:
+        _refuse_duplicates(identity_issues)
     if writes and not dry_run:
         vault_module.batch_atomic_write(writes, vault_root=vault_root)
         ReferenceIndex(vault_root).rebuild_all()
     return {
         "dry_run": dry_run,
+        "plan_id": _backfill_plan_id(hashes),
         "would_update": missing,
         "updated": [] if dry_run else missing,
         "assigned_refs": assigned if not dry_run else {},
         "identity_issues": identity_issues,
         "skipped": skipped,
+    }
+
+
+def _rebuild_reference_index(vault_root: Path) -> None:
+    from . import maintenance_jobs
+
+    # Not stoppable: a stop must not leave the index behind chunks that already committed.
+    with maintenance_jobs.chunk_hold(vault_root, "backfill_ids_index", stoppable=False):
+        ReferenceIndex(vault_root).rebuild_all()
+
+
+def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
+    """Add IDs to the pages of one reviewed plan, in chunks that each verify and commit alone.
+
+    Planning reads every page before any hold. Each chunk then takes the mutation
+    boundary itself, re-reads its pages under it and skips any that changed since
+    the plan, so a chunk's hold lasts for 100 pages and a concurrent edit is never
+    overwritten. A stop between chunks keeps the chunks that committed.
+    """
+    from . import maintenance_jobs
+    from .cli_ops import OpError
+
+    root = Path(vault_root)
+    maintenance_jobs.checkpoint("planning")
+    skipped: list[dict[str, str]] = []
+    pending = [
+        (rel, path, vault_module.content_hash(raw))
+        for rel, path, raw, _ in _pages_without_id(root, skipped)
+    ]
+    fresh = _backfill_plan_id((rel, digest) for rel, _, digest in pending)
+    if fresh != plan_id:
+        raise OpError(
+            "STALE_MAINTENANCE_PLAN",
+            "the pages that lack an exomem_id changed since the preview",
+            "Preview backfill-ids again, then start the new plan_id.",
+            details={"status": "terminal", "committed": False, "plan_id": fresh},
+        )
+    identity_issues = scan_issues(root)
+    _refuse_duplicates(identity_issues)
+    assigned: dict[str, str] = {}
+    changed: list[str] = []
+    processed = 0
+    try:
+        for start in range(0, len(pending), BACKFILL_CHUNK_PAGES):
+            maintenance_jobs.checkpoint("committing", done=processed, total=len(pending))
+            minted: dict[str, str] = {}
+            moved: list[str] = []
+            writes: list[vault_module.PlannedWrite] = []
+            failure: BaseException | None = None
+            with maintenance_jobs.chunk_hold(root, "backfill_ids_chunk"):
+                for rel, path, digest in pending[start : start + BACKFILL_CHUNK_PAGES]:
+                    try:
+                        raw, guard = vault_module.read_guarded_text(root, path)
+                    except (OSError, UnicodeDecodeError, vault_module.PathGuardError):
+                        moved.append(rel)
+                        continue
+                    if vault_module.content_hash(raw) != digest:
+                        moved.append(rel)
+                        continue
+                    updated, identity = add_id_to_markdown(raw)
+                    minted[rel] = memory_ref(identity)
+                    writes.append(
+                        vault_module.PlannedWrite(path=path, content=updated, guard=guard, expected_hash=digest)
+                    )
+                if writes:
+                    try:
+                        vault_module.batch_atomic_write(writes, vault_root=root)
+                    except BaseException as error:  # noqa: BLE001 - recorded, then re-raised below
+                        failure = error
+            if failure is not None:
+                # A failed commit may have written some of its pages: say so instead of "none".
+                maintenance_jobs.record_chunk(
+                    skipped_changed=len(moved),
+                    outcome_unknown=len(writes),
+                    detail={"skipped_changed": moved, "outcome_unknown": sorted(minted)},
+                )
+                raise failure
+            maintenance_jobs.record_chunk(
+                committed=len(writes),
+                skipped_changed=len(moved),
+                committed_paths=list(minted),
+                detail={"minted": minted, "skipped_changed": moved},
+            )
+            assigned.update(minted)
+            changed.extend(moved)
+            processed += len(writes) + len(moved)
+        maintenance_jobs.checkpoint("indexing", done=processed, total=len(pending))
+    except BaseException:
+        if assigned:
+            # The stop is what the job reports; the index still learns of the chunks that committed.
+            with contextlib.suppress(Exception):
+                _rebuild_reference_index(root)
+        raise
+    if assigned:
+        _rebuild_reference_index(root)
+    return {
+        "dry_run": False,
+        "plan_id": plan_id,
+        "would_update": [rel for rel, _, _ in pending],
+        "updated": list(assigned),
+        "assigned_refs": assigned,
+        "identity_issues": identity_issues,
+        "skipped": skipped,
+        "skipped_changed": changed,
     }
 
 

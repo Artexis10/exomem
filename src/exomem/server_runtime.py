@@ -257,6 +257,10 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
+        self._start_component("maintenance jobs", self._recover_maintenance_jobs)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
@@ -357,9 +361,11 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
-        from . import working_set_runtime
+        from . import maintenance_jobs, working_set_runtime
 
         working_set_runtime.stop_builds(self.vault_root)
+        # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
+        maintenance_jobs.stop_all()
         with self._lock:
             # The retry lock prevents any later repair scheduling after stop.
             self._catalogue_stop.set()
@@ -445,6 +451,12 @@ class LocalRuntimeActivation:
         from .server_transfer import resume_upload_sessions
 
         resume_upload_sessions(vault_root)
+
+    def _recover_maintenance_jobs(self, vault_root: Path) -> None:
+        """Record the jobs that a previous process left running as interrupted."""
+        from . import maintenance_jobs
+
+        maintenance_jobs.sweep_dead(vault_root)
 
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)

@@ -1061,21 +1061,7 @@ def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     ) is True
 
 
-@pytest.mark.parametrize("surface", ["mcp", "rest"])
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"mode": "reconcile"},
-        {"mode": "fix", "dry_run": False},
-        {"mode": "backfill-ids", "dry_run": False},
-    ],
-)
-def test_remote_write_maintenance_is_refused_before_manager_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    surface: str,
-    kwargs: dict[str, object],
-) -> None:
+def _remote_maintain(surface: str):
     from exomem.commands import product_commands_for
 
     command = next(
@@ -1087,6 +1073,56 @@ def test_remote_write_maintenance_is_refused_before_manager_dispatch(
         tier2_enabled=True,
         product_commands=("maintain_memory",),
     )
+    return command, descriptor
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "reconcile"},
+        {"mode": "fix", "dry_run": False},
+        {"mode": "backfill-ids", "dry_run": False},
+        {"mode": "backfill-ids", "dry_run": False, "plan_id": "plan"},
+        {"mode": "backfill-ids", "dry_run": False, "why": "reason"},
+    ],
+)
+def test_remote_write_maintenance_without_a_plan_and_reason_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    kwargs: dict[str, object],
+) -> None:
+    command, descriptor = _remote_maintain(surface)
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("remote write maintenance reached manager dispatch"),
+    )
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(command, tmp_path, **kwargs)
+
+    assert raised.value.code == "MAINTENANCE_PLAN_REQUIRED"
+    assert raised.value.details == {"status": "terminal", "committed": False}
+    assert raised.value.remediation is not None
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "reconcile", "plan_id": "plan", "why": "reason"},
+        {"mode": "fix", "dry_run": False, "plan_id": "plan", "why": "reason"},
+    ],
+)
+def test_remote_write_maintenance_without_a_job_kind_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    kwargs: dict[str, object],
+) -> None:
+    command, descriptor = _remote_maintain(surface)
     monkeypatch.setattr(
         writer_lease,
         "get_manager",
@@ -1160,7 +1196,7 @@ def test_mcp_write_maintenance_returns_terminal_operator_refusal(
         lambda: pytest.fail("MCP write maintenance reached manager dispatch"),
     )
 
-    result = bound(mode="reconcile")
+    result = bound(mode="reconcile", plan_id="plan", why="reason")
 
     assert result["success"] is False
     assert result["error"]["code"] == "MAINTENANCE_REQUIRES_CLI"

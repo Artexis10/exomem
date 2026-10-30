@@ -206,6 +206,9 @@ _CONFLICT_CODES = frozenset(
         "MUTATION_ACKNOWLEDGEMENT_PENDING",
         "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
         "MUTATION_OUTCOME_UNKNOWN",
+        # A maintenance job holds the one slot, or its plan changed since the preview.
+        "MAINTENANCE_JOB_ACTIVE",
+        "STALE_MAINTENANCE_PLAN",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
         # proposal whose bound content changed since review is a conflict, not a
         # plain bad-request — the client's honest recourse is to re-scan/re-read,

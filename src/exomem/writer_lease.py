@@ -81,16 +81,26 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest"})
 # Maintenance modes whose writes remote surfaces admit. Each one is governed by
 # an exact reviewed plan or preview identity, so remote callers get the same
 # capability as the CLI. Closed set: the maintain_memory mode literal fixes it.
-REMOTE_WRITE_MAINTENANCE_MODES = frozenset({"structured-files", "tag-variants", "curation"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+REMOTE_WRITE_MAINTENANCE_MODES = frozenset({"structured-files", "tag-variants", "curation", "maintenance-job-cancel"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+
+
+def remote_admitted_maintenance_modes() -> frozenset[str]:
+    """Maintenance write modes a request-bound surface admits: the direct ones and the plan-bound job modes."""
+    from .maintenance_jobs import JOB_MODES
+
+    return REMOTE_WRITE_MAINTENANCE_MODES | JOB_MODES
+
+
 REMOTE_MAINTENANCE_MESSAGE = (
     "write-mode maintenance is unavailable through request-bound remote commands"
 )
 
 
 REMOTE_MAINTENANCE_REMEDIATION = (
-    "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
-    "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
-    "--no-dry-run`. Use audit or dry_run=true remotely."
+    "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host. "
+    "Remote backfill-ids runs as a maintenance job: preview it with dry_run=true, "
+    "then repeat it with dry_run=false, the preview's plan_id and a why. "
+    "Use audit or dry_run=true remotely."
 )
 
 # Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
@@ -6185,6 +6195,17 @@ class LeaseManager:
             and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        from . import maintenance_jobs
+
+        # A maintenance job's start only claims a row and launches a thread, and its
+        # cancel only flags one; neither touches the vault. The job's own dispatch
+        # (`plan_id` and `dry_run=False`) holds the boundary per chunk in its leaf, so
+        # a job can start, and be cancelled, while another writer holds the boundary.
+        # `EXOMEM_WIDE_MUTATION_BOUNDARY` does not widen it: a job under the wide
+        # boundary would hold it for the whole run.
+        narrow_maintenance_job = command.name == "maintain_memory" and (
+            kwargs.get("mode") == "maintenance-job-cancel" or maintenance_jobs.is_job_write(kwargs)
+        )
         # A curation proposal prepares read-only, then seals; `seal_proposal` takes
         # the mutation boundary itself and re-checks every binding under it, so
         # preparation can run without the lock. Apply, resume and compensation
@@ -6209,6 +6230,7 @@ class LeaseManager:
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_maintenance_job
             or narrow_curation_proposal
             or narrow_episode_record
             or (
@@ -7885,7 +7907,7 @@ def _foreground_priority_request(func):
     def wrapped(command, *injected, **kwargs):
         from . import foreground_priority
 
-        with foreground_priority.foreground():
+        with foreground_priority.request_foreground():
             return func(command, *injected, **kwargs)
 
     return wrapped
@@ -7957,20 +7979,31 @@ def invoke_command(
             )
 
     active_surface = capabilities_module.current_active_surface()
+    job_start = False
     if (
         command.name == "maintain_memory"
-        and kwargs.get("mode") not in REMOTE_WRITE_MAINTENANCE_MODES
         and not read_only
         and selector_error is None
         and active_surface is not None
         and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
     ):
-        raise OpError(
-            "MAINTENANCE_REQUIRES_CLI",
-            REMOTE_MAINTENANCE_MESSAGE,
-            REMOTE_MAINTENANCE_REMEDIATION,
-            details={"status": "terminal", "committed": False},
-        )
+        from . import maintenance_jobs
+
+        mode = kwargs.get("mode")
+        if mode in maintenance_jobs.PLAN_BOUND_MODES:
+            # Before the writer manager and before any job row: a remote write has no
+            # run without the plan the owner previewed and a reason.
+            maintenance_jobs.require_plan(mode, kwargs)
+            if mode in maintenance_jobs.JOB_MODES:
+                maintenance_jobs.require_owner(injected[0])
+                job_start = True
+        if not job_start and mode not in remote_admitted_maintenance_modes():
+            raise OpError(
+                "MAINTENANCE_REQUIRES_CLI",
+                REMOTE_MAINTENANCE_MESSAGE,
+                REMOTE_MAINTENANCE_REMEDIATION,
+                details={"status": "terminal", "committed": False},
+            )
 
     if reserved_hit is not None:
         if read_only:
@@ -7987,6 +8020,11 @@ def invoke_command(
         validate_process_media_operation(kwargs.get("operation", "process"))
 
     dispatch_command = command
+    if job_start:
+        # A job start returns a handle and a later poll reads the live state: replaying a
+        # stored handle for 600 s after a cancel would hand back a dead job.
+        implicit_idempotency_scope = None
+        dispatch_command = replace(command, leaf=maintenance_jobs.start_leaf(command, injected, kwargs))
     if selector_error is not None:
 
         def reject_uncovered_selector(*_args: Any, **_kwargs: Any) -> Any:

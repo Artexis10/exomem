@@ -29,7 +29,7 @@ import re
 import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
@@ -10842,6 +10842,8 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "maintenance-job",
+        "maintenance-job-cancel",
         "collections-store",
         "collections-store-adopt-local",
         "collections-store-export",
@@ -10884,7 +10886,10 @@ def op_maintain_memory(
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    Remote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.
+    A remote backfill-ids write runs as a maintenance job: preview with dry_run=true,
+    then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
+    maintenance-job reads one job (run_id) or lists them; maintenance-job-cancel
+    (run_id, why) stops one. Remote fix/reconcile writes return MAINTENANCE_REQUIRES_CLI.
     Run those writes with exomem maintain on the host; remote dry_run=true works.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
@@ -10906,7 +10911,7 @@ def op_maintain_memory(
         source_snapshot: Preview snapshot required to apply structured-files.
         why: Audit reason required to apply.
         curation_action: Curation step when mode is curation.
-        run_id: Curation run identity.
+        run_id: Curation run or maintenance job identity.
         plan: Closed agent-authored plan for curation propose.
         refs: Memory refs for curation work-item.
         paths: Vault paths for curation work-item.
@@ -11132,6 +11137,33 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "maintenance-job" or mode == "maintenance-job-cancel":
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        cancel = mode == "maintenance-job-cancel"
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or apply is not None
+            or plan_id is not None
+            or (why is not None) != cancel
+            or (cancel and run_id is None)
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: maintenance-job takes an optional run_id; "
+                "maintenance-job-cancel takes run_id and why"
+            )
+        if cancel:
+            return maintenance_jobs_module.request_cancel(vault_root, run_id, why)
+        if run_id is None:
+            return maintenance_jobs_module.job_list(vault_root)
+        return maintenance_jobs_module.job_status(vault_root, run_id)
     if mode == "collections-store":
         if (
             categories is not None
@@ -11228,16 +11260,37 @@ def op_maintain_memory(
             )
         return _carrying_batch_advisories(vault_root, report)
     if mode == "backfill-ids":
-        with due_state_module.batch_scope(vault_root):
-            report = memory_refs_module.backfill_ids(
-                vault_root, dry_run=True if dry_run is None else dry_run
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        # A plan_id names a remote job's reviewed plan; the local command applies in one call without it.
+        if (plan_id is None) != (why is None) or (plan_id is not None and dry_run is not False):
+            raise ValueError(
+                "INVALID_ARGUMENTS: backfill-ids applies a reviewed plan with dry_run=false, "
+                "plan_id and why together"
             )
+        if plan_id is not None and not maintenance_jobs_module.active():
+            raise ValueError(
+                "INVALID_ARGUMENTS: plan_id names the plan of a remote maintenance job; "
+                "the local command applies with dry_run=false alone"
+            )
+
+        with due_state_module.batch_scope(vault_root):
+            try:
+                report = memory_refs_module.backfill_ids(
+                    vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id
+                )
+            except BaseException:
+                # A stopped job keeps the chunks it committed, so the projection learns of them too.
+                # Best effort, as in the success path: it must not hide why the job stopped.
+                with suppress(Exception):
+                    _apply_batch_deltas(vault_root, maintenance_jobs_module.committed_paths())
+                raise
             _apply_batch_deltas(vault_root, list(report.get("updated") or []))
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, tag-variants, collections-store-adopt-local, "
-        "or collections-store-export"
+        "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
+        "maintenance-job-cancel, collections-store-adopt-local, or collections-store-export"
     )
 
 
@@ -14287,16 +14340,15 @@ def product_commands_for(
     )
     if surface not in {"mcp", "rest"}:
         return selected
-    from .writer_lease import REMOTE_WRITE_MAINTENANCE_MODES
+    from .writer_lease import remote_admitted_maintenance_modes
 
     # Publish only the maintenance writes that remote admission accepts.
+    admitted = remote_admitted_maintenance_modes()
     return tuple(replace(command, renderings=tuple(
         replace(rendering, variants=tuple(variant for variant in rendering.variants
-                                          if variant.effect == "read"
-                                          or variant.action in REMOTE_WRITE_MAINTENANCE_MODES))
+                                          if variant.effect == "read" or variant.action in admitted))
         for rendering in command.renderings
-        if any(variant.effect == "read" or variant.action in REMOTE_WRITE_MAINTENANCE_MODES
-               for variant in rendering.variants)
+        if any(variant.effect == "read" or variant.action in admitted for variant in rendering.variants)
     )) if command.name == "maintain_memory" else command for command in selected)
 
 

@@ -508,6 +508,12 @@ _REGISTRY = (
         ),
     ),
     InternalStateDescriptor(
+        "maintenance-jobs-store",
+        "maintenance_jobs",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".maintenance-jobs.sqlite"),
+    ),
+    InternalStateDescriptor(
         "idempotency-store",
         "idempotency",
         StatePlacement.EXTERNAL_STATE,

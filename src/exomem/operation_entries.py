@@ -769,8 +769,12 @@ def _maintenance_rows():
         fields = ("categories", "dry_run", "rebuild_embeddings", "rebuild_graph", "detail", "legacy_sample_limit")
         for value in (True, False, None):
             read = value is True if action == "reconcile" else value is not False
-            rows.append(_row(action, "check_memory" if read else "repair_memory", fields,
+            # A remote write names the preview it runs and why; the dispatcher refuses it without both.
+            rows.append(_row(action, "check_memory" if read else "repair_memory",
+                             fields if read else (*fields, "plan_id", "why"),
                              constraints=(_literal(field, value, value is default),), destructive=not read))
+    rows.append(_row("maintenance-job", "check_memory", ("run_id",)))
+    rows.append(_row("maintenance-job-cancel", "repair_memory", ("run_id", "why"), ("run_id", "why")))
     for action in ("structured-files", "tag-variants", "collections-store-adopt-local", "collections-store-export"):
         fields = ("collection", "apply", "plan_id", "source_snapshot", "why", "exclude_groups", "acknowledge_skipped")
         for value in (None, False, True):
