@@ -133,10 +133,10 @@ approved forward or compensation plan.
 
 Proposal SHALL render a later step's links to a page that an earlier step of
 the same plan creates as the writer renders a link to an existing page, so the
-sealed draft matches at execution. Only that rendering SHALL be projected;
-every other check SHALL read the vault as it is, and a page that another writer
-creates, edits or removes after proposal SHALL still make the affected step
-refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT`
+sealed draft matches at execution. Only the writer's link resolution SHALL be
+projected; every other check SHALL read the vault as it is, and a page that
+another writer creates, edits or removes after proposal SHALL still make the
+affected step refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT`
 these plans, which could not then run as sealed:
 
 - a later step bound to a path that an earlier step writes;
