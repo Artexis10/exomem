@@ -2,7 +2,9 @@
 
 ## Purpose
 Provide a durable, resumable, governed workflow for bringing an existing folder of material into the knowledge base: read-only scan, server-materialized selection, exact preview bound to plan identity, apply with write-time re-validation, and reviewable agent proposals. Originals are never modified, and interrupted, partial or stale runs are visible and recoverable.
+
 ## Requirements
+
 ### Requirement: Deterministic read-only scan and candidate inventory
 
 `adoption_studio(action="start")` SHALL perform a read-only `overview` scan of the target subtree and record, in the run object, a compact `scan_summary`, `pack_suggestions`, and a candidate `inventory` containing every adoption-relevant file outside `Knowledge Base/` with its vault-relative path, byte size, mtime, and import form (`text` for a text-like suffix, `artifact` for any other regular file). `start` SHALL accept an optional `collection` label and SHALL default it to the scanned folder's name, or to the single top-level folder inside an `_Imports/<import_id>/` stage. A skipped hidden folder SHALL be recorded as one inventory row with its file count and reason. Ineligible candidates SHALL be retained in the inventory with a machine-readable `reason` (never silently dropped), the inventory SHALL be capped at a configurable `max_candidates` with an explicit `inventory_truncated` counter, and a stat-based `inventory_fingerprint` SHALL be computed over the sorted eligible rows. The scan SHALL write nothing outside the run object. `start` SHALL require `Knowledge Base/` to exist and refuse with `KB_NOT_INITIALIZED` unless `initialize_kb=true`, in which case it initializes the scaffold first; pure pre-init discovery remains `adopt_vault(mode="scan-only")`, unchanged.
@@ -341,7 +343,7 @@ A `select` folder rule SHALL accept `adopt_as` with the values `source` (the def
 
 For an own-note item, `plan` SHALL preview the Source copy exactly as for a `source` item and SHALL also preview a note target, title and front matter. The note body SHALL be the original note body after its front matter, unchanged, followed by the generated `## Links` section that a Source carries; its title, tags and aliases SHALL come from the parsed front matter, and its title is the front matter's `title` when it has one. The note's `sources:` SHALL cite the item's Source copy, and the note SHALL carry the item's `import_collection` and `collection_path`. A link from an own note to another own-note item SHALL resolve to that item's planned note; any other resolved link SHALL resolve as it does for Sources. The note target SHALL be part of the planned actions hashed into `plan_id`.
 
-`apply` SHALL commit each chunk's Sources as for `source` items, then create each own-note item's note with status `draft` through the governed two-phase note creation, recording the note's outcome in the run object with its commit. An own-note item SHALL be complete only when both its Source and its note exist. An item whose Source exists and whose note is still owed SHALL report the outcome `source-applied`, and progress SHALL count it as remaining, not as applied. The identity check SHALL find a note that an earlier run, a retry or a crashed apply created for the same collection path and record it as `already-applied` instead of creating another. An occupied note target SHALL fail the item with `TARGET_OCCUPIED`. For an item whose original changed since an earlier import, `plan` SHALL record the earlier note as `previous_note`, and `apply` SHALL create only the new Source.
+`apply` SHALL commit each chunk's Sources as for `source` items, then create each own-note item's note with status `draft` through the governed two-phase note creation, recording the note's outcome in the run object with its commit. The server SHALL validate each note and bind it to its own draft token one at a time, and SHALL commit the notes of a chunk that pass in canonical batches with one Recent-activity bullet and one log entry per note. A call SHALL time its first note alone; after that, a batch SHALL hold as many of the chunk's notes as fit in the time that the call has left. A batch that refuses before it writes SHALL fall back to creating each note of the chunk alone, so that each item receives the outcome that it receives alone. A batch that is written SHALL NOT fall back: each of its notes SHALL be created, and a note whose own step after the write failed SHALL report that error, as it does when the note is created alone. An own-note item SHALL be complete only when both its Source and its note exist. An item whose Source exists and whose note is still owed SHALL report the outcome `source-applied`, and progress SHALL count it as remaining, not as applied. The identity check SHALL find a note that an earlier run, a retry or a crashed apply created for the same collection path and record it as `already-applied` instead of creating another. An occupied note target SHALL fail the item with `TARGET_OCCUPIED`. For an item whose original changed since an earlier import, `plan` SHALL record the earlier note as `previous_note`, and `apply` SHALL create only the new Source.
 
 Own-note creation SHALL only create pages that did not exist; it SHALL NOT edit, move or delete an existing page. The plan confirmation that `apply` binds to `plan_id` SHALL be the only confirmation the import needs.
 
@@ -371,6 +373,29 @@ Own-note creation SHALL only create pages that did not exist; it SHALL NOT edit,
 
 - **WHEN** `apply` reaches its request budget after committing a chunk's Sources and some of its notes
 - **THEN** it returns a continuation, and the next call creates only the remaining notes
+
+#### Scenario: A chunk of own notes commits as one batch
+
+- **WHEN** `apply` creates the notes of a chunk whose Sources are committed, and the call has room for every note
+- **THEN** the call times its first note alone, the other notes commit as one canonical batch, and each note has one Recent-activity bullet and one log entry
+- **AND** a note whose target another writer took fails with `TARGET_OCCUPIED` and the other notes commit
+
+#### Scenario: A refused batch falls back to one commit per note
+
+- **WHEN** a chunk's batch refuses before it writes
+- **THEN** each note of the chunk is created alone and every item receives the outcome that it receives alone
+
+#### Scenario: A failure after the batch is written
+
+- **WHEN** a step after the batch's write fails for one note of the chunk
+- **THEN** every other note is created and that note reports the error
+- **AND** no note of the chunk is created a second time
+
+#### Scenario: The write fails after its commit point
+
+- **WHEN** the batch's write fails after its commit point
+- **THEN** no note of the chunk is created a second time
+- **AND** the identity check records each note of the batch as `already-applied`
 
 ### Requirement: Media apply acknowledges durable custody without joining derived work
 
