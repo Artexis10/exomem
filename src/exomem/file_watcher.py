@@ -846,6 +846,37 @@ def register_self_write(
     return registered
 
 
+def register_self_write_and_close(
+    vault_root: Path, paths: Iterable[Path], intents: Iterable[_PublicationIntent]
+) -> bool:
+    """Register a batch's self-writes, then close its publication intents.
+
+    Returns whether the corpus delta was published. A published delta finalizes
+    the intents, so a later event with the same bytes is the writer's own echo
+    and one with different bytes stays an outside edit. Otherwise every intent
+    aborts and its paths replay to the watchers. Best-effort: a failure aborts
+    the intents too. The synchronous fan-out and a batch under derived custody
+    both close their intents here, so readers see the published delta before
+    the reply in either route.
+    """
+    paths = list(paths)
+    intents = tuple(intents)
+    published = False
+    try:
+        registered, published = register_self_write(
+            vault_root, paths, return_publication_result=True
+        )
+        if published:
+            finalize_publication_intents(intents, succeeded=registered)
+        elif intents:
+            abort_publication_intents(intents, force_paths=paths)
+    except Exception:  # noqa: BLE001 — suppression is best-effort
+        if intents:
+            abort_publication_intents(intents, force_paths=paths)
+        log.debug("self-write suppression registration failed", exc_info=True)
+    return published
+
+
 def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:
     """Record server-authored markdown removals (delete/trash/move-away) so
     their watcher echo is dropped. TTL-bounded — there is no file left to
