@@ -98,14 +98,14 @@ def watched(vault: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(watcher, "_dispatch_batch", dispatch)
     monkeypatch.setattr(freshness, "mark_external_pending", mark)
     assert watcher.start() is True
-    assert watcher.wait_until_seeded(_WAIT_SECONDS) is True
-    # A graph rebuild that the seeding started reconciles the freshness registry
-    # from its own walk and holds the inbound index while it reads. Begin the
-    # test only once it has landed, so no write below meets that walk.
-    assert graph_sync.drain_active_rebuilds(_WAIT_SECONDS), (
-        "the seeding's graph rebuild did not settle"
-    )
     try:
+        assert watcher.wait_until_seeded(_WAIT_SECONDS) is True
+        # A graph rebuild that the seeding started reconciles the freshness registry
+        # from its own walk and holds the inbound index while it reads. Begin the
+        # test only once it has landed, so no write below meets that walk.
+        assert graph_sync.drain_active_rebuilds(_WAIT_SECONDS), (
+            "the seeding's graph rebuild did not settle"
+        )
         yield vault, observed
     finally:
         watcher.stop()
