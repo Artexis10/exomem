@@ -990,3 +990,42 @@ def test_a_call_whose_worker_dies_before_answering_gets_a_retryable_answer() -> 
             await ingress.aclose()
 
     asyncio.run(scenario())
+
+
+class _HalfWrittenEventStream(httpx.AsyncByteStream):
+    """A worker that dies part-way through writing its result event."""
+
+    async def __aiter__(self):  # noqa: ANN201
+        yield b'event: message\ndata: {"jsonrpc":"2.0","id":"call-11","result":{"content":[{"te'
+        raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+
+    async def aclose(self) -> None:
+        pass
+
+
+def test_a_half_written_event_does_not_swallow_the_retryable_answer() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            await request.aread()
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=_HalfWrittenEventStream()
+            )
+
+        async with _client(handler) as client:
+            ingress = ServiceIngress()
+            ingress.resume(client)
+            sent = await _call(
+                ingress, body=b'{"jsonrpc":"2.0","id":"call-11","method":"tools/call"}'
+            )
+            last_event = _body(sent).strip().split(b"\n\n")[-1]
+            data = b"".join(
+                line.removeprefix(b"data: ")
+                for line in last_event.splitlines()
+                if line.startswith(b"data: ")
+            )
+            answer = json.loads(data)
+            assert answer["id"] == "call-11"
+            assert answer["error"]["data"] == {"status": "retryable"}
+            await ingress.aclose()
+
+    asyncio.run(scenario())

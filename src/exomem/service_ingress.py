@@ -191,49 +191,39 @@ async def _reply(send: Send, status: int, body: bytes, content_type: bytes) -> N
     await send({"type": "http.response.body", "body": body})
 
 
+def _jsonrpc_error(request_id: object, message: str, data: dict | None = None) -> bytes:
+    error: dict[str, object] = {"code": -32000, "message": message}
+    if data is not None:
+        error["data"] = data
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": request_id, "error": error}, separators=(",", ":")
+    ).encode()
+
+
 async def _undispatched(send: Send, status: int, reason: str, body: bytes | None = None) -> None:
     request_id = _request_id(body) if body is not None else _MISSING
     if request_id is not _MISSING:
-        payload = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32000, "message": f"Request not dispatched: {reason}"},
-            },
-            separators=(",", ":"),
-        ).encode()
+        payload = _jsonrpc_error(request_id, f"Request not dispatched: {reason}")
         await _reply(send, 200, payload, b"application/json")
     else:
         await _reply(send, status, b"Request not dispatched", b"text/plain; charset=utf-8")
 
 
-_WORKER_STOPPED_MESSAGE = (
-    "The Exomem worker stopped before this call finished. Retry the identical call. "
-    "A write is never applied twice: the retry returns its committed result, or says "
-    "that its outcome needs checking."
-)
-
-
 def _worker_stopped(request_id: object) -> bytes:
     """The JSON-RPC answer for a call whose worker died before it could answer."""
-    return json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {
-                "code": -32000,
-                "message": _WORKER_STOPPED_MESSAGE,
-                "data": {"status": "retryable"},
-            },
-        },
-        separators=(",", ":"),
-    ).encode()
+    return _jsonrpc_error(
+        request_id,
+        "The Exomem worker stopped before this call finished. Retry the identical call now: "
+        "a memory write retried this way returns its committed result, or says that its "
+        "outcome needs checking, and is not applied twice.",
+        {"status": "retryable"},
+    )
 
 
 async def _body_stream(
-    receive: Receive, completed: asyncio.Event, seen: bytearray, keep_bytes: int
+    receive: Receive, completed: asyncio.Event, seen: bytearray | None, keep_bytes: int
 ) -> AsyncIterator[bytes]:
-    """Stream the request body, keeping up to `keep_bytes` of it to answer by request id."""
+    """Stream the request body, keeping up to `keep_bytes` of it in `seen` when one is given."""
     while True:
         message = await receive()
         if message["type"] == "http.disconnect":
@@ -242,8 +232,12 @@ async def _body_stream(
             continue
         chunk = message.get("body", b"")
         if chunk:
-            if len(seen) <= keep_bytes:
+            if seen is not None:
                 seen.extend(chunk)
+                if len(seen) > keep_bytes:
+                    # Past the cap the prefix can never parse: hold nothing.
+                    seen.clear()
+                    seen = None
             yield chunk
         if not message.get("more_body", False):
             completed.set()
@@ -475,7 +469,8 @@ class ServiceIngress:
         body_complete = asyncio.Event()
         if body is not None:
             body_complete.set()
-        seen = bytearray()
+        # Only an MCP call carries a JSON-RPC id to answer by; uploads are never kept.
+        seen = bytearray() if scope.get("method") == "POST" and scope.get("path") == "/mcp" else None
         request = httpx.Request(
             scope["method"],
             url,
@@ -488,11 +483,20 @@ class ServiceIngress:
         def request_id() -> object:
             if not body_complete.is_set():
                 return _MISSING
-            return _request_id(body if body is not None else bytes(seen))
+            if body is not None:
+                return _request_id(body)
+            return _request_id(bytes(seen)) if seen else _MISSING
 
         try:
             response = await client.send(request, stream=True, follow_redirects=False)
-        except Exception:  # noqa: BLE001 - transport failure has ambiguous dispatch status
+        except Exception as error:  # noqa: BLE001 - transport failure has ambiguous dispatch status
+            if isinstance(error, httpx.ConnectError) and body is not None:
+                # A queued call whose worker refused the connection was never sent.
+                try:
+                    await _undispatched(send, 503, "worker unavailable", body)
+                except Exception:  # noqa: BLE001 - downstream is gone
+                    pass
+                return
             answered = request_id()
             try:
                 if answered is _MISSING:
@@ -543,19 +547,23 @@ class ServiceIngress:
                                 )
                             except Exception:  # noqa: BLE001 - keep draining after disconnect
                                 deliver = False
-                except httpx.TransportError:
+                except httpx.TransportError as error:
                     # The worker died mid-response. An event stream can still carry the
                     # call's answer; a partial JSON body cannot, so that one stays broken.
                     answered = request_id()
                     if not _is_sse(response) or answered is _MISSING:
                         raise
-                    logger.warning("worker stopped before answering a streamed call")
+                    logger.warning(
+                        "worker stopped before answering a streamed call: %s",
+                        type(error).__name__,
+                    )
                     if deliver:
                         try:
                             await send(
                                 {
                                     "type": "http.response.body",
-                                    "body": b"event: message\ndata: "
+                                    # The blank line ends any event the worker left half-written.
+                                    "body": b"\n\nevent: message\ndata: "
                                     + _worker_stopped(answered)
                                     + b"\n\n",
                                     "more_body": True,
