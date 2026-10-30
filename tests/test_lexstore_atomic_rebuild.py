@@ -2306,3 +2306,117 @@ def test_normal_reconcile_paths_do_not_nested_lock_or_deadlock(
     contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
     assert any("one" in c for c in contents)
     assert any("two" in c for c in contents)
+
+
+# --------------------------------------------------------------------------- #
+# A repair of an identity-current catalogue parses only the pages that moved.
+# --------------------------------------------------------------------------- #
+
+
+def _record_parsed_pages(
+    store: lexstore.LexicalStore, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Record the vault path of every page the store parses into a catalogue."""
+    parsed: list[str] = []
+    real_insert = store._insert_page
+
+    def recording_insert(conn: sqlite3.Connection, path: Path, *args: Any) -> None:
+        parsed.append(path.relative_to(root).as_posix())
+        real_insert(conn, path, *args)
+
+    monkeypatch.setattr(store, "_insert_page", recording_insert)
+    return parsed
+
+
+def _catalogue_rows(path: Path) -> tuple[list[tuple], list[tuple]]:
+    conn = sqlite3.connect(path)
+    try:
+        return (
+            conn.execute("SELECT * FROM pages ORDER BY path").fetchall(),
+            conn.execute(
+                "SELECT * FROM semantic_units ORDER BY parent_path, source_order"
+            ).fetchall(),
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+def test_a_full_repair_of_an_identity_current_catalogue_reparses_only_the_changed_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("kept-1.md", "kept-2.md", "kept-3.md"):
+        _kb_file(tmp_path, name, "- [config] steadyword ^u1")
+    edited = _kb_file(tmp_path, "edited.md", "- [config] beforeword ^u1")
+    deleted = _kb_file(tmp_path, "deleted.md", "- [config] goneword ^u1")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    edited.write_text(_page_text("edited", "- [config] afterword ^u1"), encoding="utf-8")
+    deleted.unlink()
+    _kb_file(tmp_path, "added.md", "- [config] newword ^u1")
+    parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
+    assert store.rebuild_atomic() is True
+
+    assert sorted(parsed) == ["Knowledge Base/added.md", "Knowledge Base/edited.md"]
+    terms = ("steadyword", "beforeword", "afterword", "goneword", "newword")
+    reconciled_hits = {
+        term: lexstore.search_bm25(tmp_path, term, k=10, scope="kb") for term in terms
+    }
+    assert [path for path, _score in reconciled_hits["afterword"]] == ["Knowledge Base/edited.md"]
+    assert [path for path, _score in reconciled_hits["newword"]] == ["Knowledge Base/added.md"]
+    assert reconciled_hits["beforeword"] == reconciled_hits["goneword"] == []
+    reconciled_rows = _catalogue_rows(store.path)
+
+    # The same vault parsed whole into an empty catalogue answers the same.
+    monkeypatch.undo()
+    lexstore.clear_stores()
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{store.path}{suffix}").unlink(missing_ok=True)
+    assert lexstore.get_store(tmp_path).rebuild_atomic() is True
+    assert _catalogue_rows(store.path) == reconciled_rows
+    assert {
+        term: lexstore.search_bm25(tmp_path, term, k=10, scope="kb") for term in terms
+    } == reconciled_hits
+
+
+@pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+def test_a_replacement_that_keeps_its_mtime_is_still_reparsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = _kb_file(tmp_path, "page.md", "- [config] kestrel ^u1")
+    _kb_file(tmp_path, "other.md", "- [config] steadyword ^u1")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    before = page.stat()
+
+    # Same length and the old mtime: only the bytes tell the two versions apart.
+    page.write_text(_page_text("page", "- [config] harrier ^u1"), encoding="utf-8")
+    os.utime(page, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert page.stat().st_size == before.st_size
+    parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
+    assert store.rebuild_atomic() is True
+
+    assert parsed == ["Knowledge Base/page.md"]
+    hits = lexstore.search_bm25(tmp_path, "harrier", k=5, scope="kb")
+    assert [path for path, _score in hits] == ["Knowledge Base/page.md"]
+    assert lexstore.search_bm25(tmp_path, "kestrel", k=5, scope="kb") == []
+
+
+def test_an_identity_change_still_rebuilds_the_whole_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("a.md", "b.md", "c.md"):
+        _kb_file(tmp_path, name, "- [config] steadyword ^u1")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    monkeypatch.setattr(lexstore, "catalog_semantic_identity", lambda _root: "moved")
+    parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
+    assert store.rebuild_atomic() is True
+
+    assert sorted(parsed) == [
+        "Knowledge Base/a.md",
+        "Knowledge Base/b.md",
+        "Knowledge Base/c.md",
+    ]
