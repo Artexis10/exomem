@@ -4,6 +4,8 @@ Each case warms the proof first and checks that the next decision reused it, so 
 hits cannot pass. Only the bytes, the store and the tombstones change between decisions.
 """
 
+import sqlite3
+
 import pytest
 from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
 from test_collection_store_writer import store as store
@@ -82,6 +84,39 @@ def test_a_policy_or_audience_change_flips_the_verdict_while_the_proof_stays_war
         with request_scope(owner_principal()):
             assert egress.filter_withheld_entries(store.root, payload) == payload
         assert len(renders) == warm
+
+
+def test_a_commit_from_another_connection_ends_the_proof_though_the_cache_restamps_past_it(
+    store, renders, monkeypatch
+):
+    """A rolled-back write that changed no rows restamps the cache after its ROLLBACK. A commit from
+    another connection landing just before that restamp is then invisible to the cache's own check,
+    so the proof has to notice it from the store stamp it was made at.
+    """
+    path, payload, _ = _published_page(store)
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        warm = len(renders)
+
+        cache, finish, elsewhere = store.handle.release_cache, store.handle.release_cache.finish, []
+
+        def commit_elsewhere_then_finish(committed):
+            if not committed and not elsewhere:
+                other = sqlite3.connect(store.handle.path, timeout=5, isolation_level=None)
+                try:
+                    other.execute("UPDATE items SET body=? WHERE view_path=?", ("Edited elsewhere", path))
+                finally:
+                    other.close()
+                elsewhere.append(path)
+            return finish(committed)
+
+        monkeypatch.setattr(cache, "finish", commit_elsewhere_then_finish)
+        with pytest.raises(RuntimeError), store.handle.transaction():
+            raise RuntimeError("a write that changes no rows")
+        assert elsewhere
+
+        assert egress.filter_withheld_entries(store.root, payload) == {"items": []}
+        assert len(renders) > warm
 
 
 def test_a_tombstone_written_then_removed_is_seen_by_the_next_decision(store, renders):

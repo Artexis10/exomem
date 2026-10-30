@@ -595,8 +595,10 @@ class ReleaseCache:
         self.contracts = OrderedDict()
         self.memberships = OrderedDict()
         self.decisions = OrderedDict()
-        #: (view path, sha256 of its bytes) proven equal to the render of the committed rows. A render is
-        #: a function of the store alone, so any store change drops every proof (see ``check`` and ``finish``).
+        #: (view path, sha256 of its bytes) -> the store stamp at which those bytes were proven equal to the
+        #: render of the committed rows. A render is a function of the store alone, so the proof holds only
+        #: at that exact stamp: this connection's writes, another connection's commit and a schema change
+        #: each move it.
         self.render_proofs = OrderedDict()
         self.pending = None
         self.replacements = {}
@@ -739,10 +741,6 @@ class ReleaseCache:
 
     def finish(self, committed):
         changed = self.conn.total_changes != self.observed[0]
-        if changed or self.unmanaged:
-            # A managed commit keeps the incremental caches below, but a proof of one view's bytes
-            # holds only for the store that rendered it.
-            self.render_proofs.clear()
         if committed and not self.unmanaged and self.conn.total_changes == self.accounted:
             for cid, identities in self.pending.items():
                 state = self.replacements.get(cid) or self.states.get(cid)
@@ -1895,20 +1893,22 @@ class OperationAuthorization:
         """Whether ``content`` is the current render of ``projection``, or a migrated original.
 
         This proof is a function of the store and the bytes alone, never of the caller or the policy,
-        so a repeat over the same store keeps it. The verdict built on it is decided again each time.
+        so a repeat at the same store stamp keeps it. The verdict built on it is decided again each time.
         """
         from . import legacy_originals, views
 
         cache, key = self.cache, (projection["path"], digest)
+        # Read before the render, so a commit that lands in between can only make a later lookup miss.
+        stamp = cache._stamp()
         # A relationship label reads vault files through this operation; a history page is not proved
         # to depend on the store alone. Neither is kept. Nor is any proof made mid-write or past an
-        # unseen store change.
+        # unseen write of this connection.
         presentation = manifest.item_presentation
         keepable = (projection["kind"] != "history"
                     and (presentation is None or not presentation.relationships)
                     and cache.pending is None and not cache.unmanaged
-                    and self.conn.total_changes == cache.observed[0])
-        if keepable and key in cache.render_proofs:
+                    and stamp[0] == cache.observed[0])
+        if keepable and cache.render_proofs.get(key) == stamp:
             cache.render_proofs.move_to_end(key)
             return True
         _version, rendered = views.render_view(
@@ -1917,7 +1917,7 @@ class OperationAuthorization:
         )
         if content == rendered.encode("utf-8"):
             if keepable:
-                cache._remember(cache.render_proofs, key, True, 65536)
+                cache._remember(cache.render_proofs, key, stamp, _MAX_CACHED_SUBJECTS)
             return True
         # Migration preserves initial source bytes before asynchronous stamping.
         return legacy_originals.current_view_matches(self.conn, projection, content)
