@@ -85,8 +85,9 @@ HOLD_SECONDS = 1.0
 #: Most pages one chunk writes: the contract bounds a chunk by pages as well as by time.
 CHUNK_PAGES = 100
 #: Pages one atomic write commits inside a hold. A batch costs a fixed index and graph fan-out plus
-#: a per-page share (about 0.5 s plus 0.1 s per page on a development host), so four pages keep one
-#: batch close to ``HOLD_SECONDS``: the hold cannot end between the pages of a batch.
+#: a per-page share, and the hold cannot end between the pages of a batch, so a small batch keeps
+#: one hold near ``HOLD_SECONDS``. Four is a judgment, not a measured optimum: review runs saw
+#: 4-page batches take 2.6-6.0 s on a loaded development host.
 BATCH_PAGES = 4
 #: Largest field of a leaf report that the receipt keeps; a larger one is reduced to its size.
 RESULT_FIELD_BYTES = 1024
@@ -711,7 +712,7 @@ def _run(
     principal: Any,
     admitted_surface: Any,
 ) -> None:
-    from . import capabilities, foreground_priority, writer_lease
+    from . import capabilities, foreground_priority
     from .governance import principal as principal_module
 
     descriptor = (
@@ -729,8 +730,10 @@ def _run(
             foreground_priority.bulk(stop=live.stop),
         ):
             _JOB.set(live)
-            with _whole_run_hold(live, command.name, kwargs.get("mode")):
-                result = writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
+            result = _dispatch(live, command, injected, kwargs)
+            if isinstance(result, Mapping) and "graph_sync" in result:
+                # The dispatcher joined the graph after the leaf, so its outcome replaces the leaf's "pending".
+                note(graph=result["graph_sync"])
         state, error_code, outcome = COMPLETED, None, {"result": _bounded(result)}
     except JobStop as stop:
         state, error_code, outcome = stop.state, stop.code, {}
@@ -745,19 +748,29 @@ def _run(
         _finish(live, state, error_code, outcome)
 
 
-@contextmanager
-def _whole_run_hold(live: _Live, operation: str, mode: Any) -> Iterator[None]:
-    """Wait out a busy boundary before a whole-run job's dispatch, which then nests in this hold.
+def _dispatch(live: _Live, command: Any, injected: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """Run the job's leaf, retrying a whole-run dispatch that met another writer's turn.
 
-    The manager's own wide guard gives up after seconds and would fail a job that only met another
-    writer's turn. Waiting here is bounded by ``BUSY_BUDGET_SECONDS`` and ends at once on a stop.
-    A chunked job needs none: it holds the boundary per chunk, through ``chunk_hold``.
+    A whole-run mode takes the manager's own wide guard, as the CLI does, so the guard releases
+    before the graph join that follows the leaf. That guard gives up after seconds and refuses
+    before anything commits, so the job tries again until ``BUSY_BUDGET_SECONDS`` and ends at
+    once on a stop. A chunked job holds the boundary per chunk, through ``chunk_hold``.
     """
-    if mode not in WHOLE_RUN_MODES:
-        yield
-        return
-    with chunk_hold(live.vault_root, operation):
-        yield
+    from . import writer_lease
+
+    deadline = time.monotonic() + BUSY_BUDGET_SECONDS
+    while True:
+        raise_if_stopped()
+        try:
+            return writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
+        except OpError as error:
+            if (
+                kwargs.get("mode") not in WHOLE_RUN_MODES
+                or error.code != "MUTATION_BUSY"
+                or error.details.get("committed") is not False
+                or time.monotonic() >= deadline
+            ):
+                raise
 
 
 def _error_code(error: BaseException) -> str:
@@ -1004,6 +1017,7 @@ def commit_pages(
         position += _commit_chunk(
             vault_root, operation, entries[position : position + CHUNK_PAGES], rewrite, receipt_value, committed, skipped
         )
+    checkpoint("committing", done=position, total=len(entries))
     return committed, skipped
 
 

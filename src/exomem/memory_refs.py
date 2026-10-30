@@ -1389,14 +1389,6 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True, plan_id: str | None 
     }
 
 
-def _rebuild_reference_index(vault_root: Path) -> None:
-    from . import maintenance_jobs
-
-    # Not stoppable: a stop must not leave the index behind chunks that already committed.
-    with maintenance_jobs.chunk_hold(vault_root, "backfill_ids_index", stoppable=False):
-        ReferenceIndex(vault_root).rebuild_all()
-
-
 def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
     """Add IDs to the pages of one reviewed plan, in chunks that each verify and commit alone.
 
@@ -1425,19 +1417,11 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
         assigned[rel] = memory_ref(identity)
         return updated
 
-    try:
-        _, changed = maintenance_jobs.commit_pages(
-            root, "backfill_ids_chunk", pending, add_id, receipt_value=assigned.__getitem__
-        )
-        maintenance_jobs.checkpoint("indexing", done=len(pending), total=len(pending))
-    except BaseException:
-        if assigned:
-            # The stop is what the job reports; the index still learns of the chunks that committed.
-            with contextlib.suppress(Exception):
-                _rebuild_reference_index(root)
-        raise
-    if assigned:
-        _rebuild_reference_index(root)
+    # Each batch's write fan-out refreshes the reference index for the pages it wrote, so the job
+    # needs no full rebuild, which holds the boundary for seconds on a large vault.
+    _, changed = maintenance_jobs.commit_pages(
+        root, "backfill_ids_chunk", pending, add_id, receipt_value=assigned.__getitem__
+    )
     return {
         "dry_run": False,
         "plan_id": plan_id,

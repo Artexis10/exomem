@@ -6312,7 +6312,8 @@ class LeaseManager:
                             mutation_subject,
                             request_id=request_id,
                             operation=command.name,
-                            holder_kind="command",
+                            # A whole-run job's dispatch: a blocked writer learns that a job holds the boundary.
+                            holder_kind="maintenance-job" if maintenance_jobs.current_run_id() else "command",
                             session_open_admission=session_open_admission,
                         )
                     )

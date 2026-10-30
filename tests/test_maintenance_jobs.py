@@ -746,6 +746,9 @@ def test_remote_reconcile_heals_the_drift_and_removes_the_orphan_the_preview_nam
     assert summary["plan_id"] == preview["plan_id"]
     assert summary["frame_orphans_removed"] == 1
     assert summary["indexes_updated"] == len(preview["indexes_updated"]) >= 1
+    # The job releases the boundary before the graph join, as the CLI does, so the graph it started converges.
+    assert final["receipt"]["result"]["graph_sync"] == "completed"
+    assert final["receipt"]["notes"]["graph"] == "completed"
 
 
 def test_an_orphan_that_appears_after_the_reconcile_preview_stops_the_job_with_nothing_written(
