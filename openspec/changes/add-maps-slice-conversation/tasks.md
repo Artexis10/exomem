@@ -14,7 +14,7 @@
 - [x] 2.3 Test with twin vaults that a restricted caller's conversation naming a withheld anchor and page gives byte-identical packets.
 - [x] 2.4 Test the `generation.continuity` and `generation.conversation` reports, including a token after a write that moved the map generation, and the setting off.
 - [x] 2.5 Run the existing leads-only versus full-compile equality test with a conversation.
-- [ ] 2.6 Add a conversation case to the latency gate's paired slice-on-minus-off difference, under the existing bound.
+- [x] 2.6 Add a conversation case to the latency gate's paired slice-on-minus-off difference, under the existing bound.
 - [x] 2.7 Prove that a `maps` request with a conversation and a token writes no session, heat or learning record.
 
 ## 3. Verification and delivery
