@@ -1,5 +1,5 @@
-"""`capture-survives-contention` part 2: an idempotent capture write waits out
-an ordinary busy mutation boundary on the server.
+"""`capture-survives-contention` part 2: a keyed write waits out an ordinary
+busy mutation boundary on the server.
 
 `MUTATION_BUSY` used to reach the client whenever another write held the
 boundary past the short acquire budget, so a valid `observe_memory`, `remember`,
@@ -266,14 +266,43 @@ def test_an_exhausted_wait_is_refused_with_its_own_cause(
     assert raised.value.details["committed"] is False
 
 
-def test_only_idempotent_capture_writes_wait(vault: Path) -> None:
-    absorbs = writer_lease._capture_write_absorbs_contention
-    for name in ("observe_memory", "remember", "episode_memory"):
-        assert absorbs(name, {})
-    assert absorbs("record_memory", {"action": "append"})
-    assert not absorbs("record_memory", {"action": "update"})
-    assert not absorbs("edit_memory", {})
-    assert not absorbs("manage_memory_file", {"operation": "move"})
+def test_a_guarded_record_update_waits_out_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A curated edit waits too: a client cannot act on ordinary contention."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    log = tmp_path / "Knowledge Base/log.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    record = parsed.records[0]
+    writer, holder = _managers(tmp_path / "state")
+    command = _command("record_memory")
+    with _Contention(monkeypatch, holder, tmp_path, refusals=1) as contention:
+        (result,) = _run_concurrently(
+            [
+                lambda: writer.invoke(
+                    command,
+                    (tmp_path,),
+                    {
+                        "action": "update",
+                        "collection": (fixture / "_collection.md").relative_to(tmp_path).as_posix(),
+                        "item_key": record.identity.key,
+                        "changes": {"provider": "Invented Garage Three"},
+                        "expected_container_hash": parsed.snapshot,
+                        "expected_item_version": record.source.hash,
+                        "why": "correct the provider",
+                    },
+                    implicit_idempotency_scope="principal:test",
+                )
+            ],
+            contention,
+        )
+    assert result
+    stored = record_formats.load_adapter(tmp_path, manifest).read()
+    (updated,) = [item for item in stored.records if item.identity.key == record.identity.key]
+    assert updated.values["provider"] == "Invented Garage Three"
 
 
 def test_a_record_append_waits_out_the_boundary(

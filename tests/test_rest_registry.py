@@ -12,7 +12,7 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
-from exomem import access, commands, server, writer_lease
+from exomem import access, commands, mutation_lock, server, writer_lease
 from exomem import commands as commands_module
 from exomem import find as find_module
 from exomem import vault as vault_module
@@ -363,26 +363,28 @@ def test_committed_batch_failure_rest_replay_is_exact_409_and_invokes_once(
     assert calls == 1
 
 
+# "0" sends the lock's plain busy through; "1" sends the refusal after a server-side wait.
+@pytest.mark.parametrize("absorb", ["1", "0"])
 def test_structured_busy_error_matches_openapi_and_preserves_public_identity(
-    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch, absorb: str
 ) -> None:
+    contention = mutation_lock._LocalLockState()
+    mutation_lock._note_release(
+        contention, request_id="opaque-earlier", operation="edit_memory", holder_kind="command"
+    )
+    snapshot = {
+        "state": "held",
+        "request_id": "opaque-request",
+        "operation": "edit_memory",
+        "holder_kind": "command",
+        "age_seconds": 1.25,
+        "overdue": False,
+    }
+
     def busy_before_commit(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
-        raise OpError(
-            "MUTATION_BUSY",
-            "vault mutation boundary is busy",
-            details={
-                "status": "retryable",
-                "committed": False,
-                "retry_after_ms": 750,
-                "holder": {
-                    "state": "held",
-                    "request_id": "opaque-request",
-                    "operation": "edit_memory",
-                    "holder_kind": "command",
-                    "age_seconds": 1.25,
-                    "overdue": False,
-                },
-            },
+        # The lock's own builder, so every field a real refusal carries meets the schema.
+        raise mutation_lock._mutation_busy(
+            {**snapshot, "contention": mutation_lock._contention_view(contention)}, wait_ms=100.18
         )
 
     writer_lease.reset_managers_for_tests()
@@ -392,6 +394,9 @@ def test_structured_busy_error_matches_openapi_and_preserves_public_identity(
         monkeypatch,
         EXOMEM_REST_API_KEY="sekret",
         EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+        # The leaf stays busy, so the server-side wait runs out; keep it short.
+        EXOMEM_CAPTURE_WAIT_SECONDS="0.2",
+        EXOMEM_CAPTURE_CONTENTION_ABSORB=absorb,
     )
     request_id = "11111111-1111-4111-8111-111111111111"
     response = client.post(
@@ -454,6 +459,8 @@ def test_busy_holder_telemetry_matches_nested_openapi_schema(
         monkeypatch,
         EXOMEM_REST_API_KEY="sekret",
         EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+        # The leaf stays busy, so the server-side wait runs out; keep it short.
+        EXOMEM_CAPTURE_WAIT_SECONDS="0.2",
     )
     response = client.post(
         "/api/manage_memory_file",

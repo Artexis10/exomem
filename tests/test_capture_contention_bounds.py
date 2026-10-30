@@ -33,7 +33,7 @@ def _run(manager, run, *, budget: float | None = None):
         token = request_budget.set_current(request_budget.RequestBudget(seconds=budget))
     try:
         return manager._run_absorbing_capture_contention(
-            command, {}, run, key="k", commit_state={"observed": False}, request_id="r"
+            command, run, key="k", commit_state={"observed": False}, request_id="r"
         )
     finally:
         if token is not None:
@@ -100,6 +100,66 @@ def test_a_wait_never_outlives_the_request_budget(
         _run(manager, slow_busy, budget=budget)
     elapsed = time.monotonic() - started
     assert elapsed <= budget - 3.0 + 0.2, elapsed
+
+
+def test_a_slow_attempt_is_not_started_again_past_the_request_budget(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline leaves room for one guard timeout, not for slow preparation."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "40")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path), mutation_timeout_seconds=0.2
+    )
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 1.0)
+    attempts: list[float] = []
+
+    def slow_preparation_then_busy():
+        attempts.append(time.monotonic())
+        time.sleep(1.2)  # preparation before the leaf's own guard
+        raise _busy()
+
+    budget = 3.0
+    started = time.monotonic()
+    with pytest.raises(OpError) as refused:
+        _run(manager, slow_preparation_then_busy, budget=budget)
+    elapsed = time.monotonic() - started
+
+    assert refused.value.details["cause"] == "capture_wait_exhausted"
+    assert len(attempts) == 1
+    assert elapsed <= budget - 1.0, elapsed
+
+
+def test_a_wait_in_line_is_counted_before_a_slow_attempt_starts_again(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writers ahead in line can spend the budget a slow attempt needs."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "40")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path), mutation_timeout_seconds=0.2
+    )
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 1.0)
+
+    def behind_other_writers(_ticket, _deadline):
+        time.sleep(1.5)
+        return True
+
+    monkeypatch.setattr(manager._capture_queue, "wait_turn", behind_other_writers)
+    attempts: list[float] = []
+
+    def slow_preparation_then_busy():
+        attempts.append(time.monotonic())
+        time.sleep(1.0)
+        raise _busy()
+
+    budget = 4.0
+    started = time.monotonic()
+    with pytest.raises(OpError) as refused:
+        _run(manager, slow_preparation_then_busy, budget=budget)
+    elapsed = time.monotonic() - started
+
+    assert refused.value.details["cause"] == "capture_wait_exhausted"
+    assert len(attempts) == 1
+    assert elapsed <= budget - 1.0, elapsed
 
 
 def test_absorbed_retries_do_not_count_as_client_visible_busy(
@@ -179,7 +239,7 @@ def test_nested_ineligible_capture_cannot_borrow_preparation_admission(
         if ineligible == "disabled":
             monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
         return manager._run_absorbing_capture_contention(
-            SimpleNamespace(name="episode_memory"), {},
+            SimpleNamespace(name="episode_memory"),
             lambda: writer_lease._active_capture_preparation_retry(),
             key=None if ineligible == "unkeyed" else "nested",
             commit_state={"observed": False}, request_id="nested",

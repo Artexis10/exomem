@@ -79,7 +79,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
-from . import call_spans, foreground_priority, request_budget, reserved_paths
+from . import call_spans, foreground_priority, request_budget, reserved_paths, state_paths
 from .find_types import RankingPage
 from .kbdir import kb_dirname
 from .published_admission import Admission, admission_of, deciding
@@ -2404,7 +2404,9 @@ def _schedule_repair(
                 )
                 targeted_started = time.monotonic()
                 try:
-                    full_pass = rebuild or not store.retry_deferred_upsert(paths)
+                    # One pass reuses placement for its pages; it starts no task.
+                    with state_paths.resolution_scope():
+                        full_pass = rebuild or not store.retry_deferred_upsert(paths)
                 except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
                     if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
                         raise
@@ -2450,7 +2452,8 @@ def _schedule_repair(
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _FULL_REBUILDS_IN_FLIGHT.add(key)
                         _set_repair_progress(key, "building")
-                    repaired = store.rebuild_atomic()
+                    with state_paths.resolution_scope():  # as above: one pass, no task
+                        repaired = store.rebuild_atomic()
                     # Telemetry is observational, never part of the scheduler's
                     # store protocol. Minimal stores used by tests/integrations
                     # may expose only `rebuild_atomic`.
@@ -2763,6 +2766,7 @@ def _admitted_corpus(
         else:
             length, terms = _page_terms(text)
             pages[path] = (digests[path], length, terms)
+            call_spans.measure(call_spans.PAGES_TOKENIZED)
     # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
     ordered = sorted(pages)
     if base is None:
@@ -8699,7 +8703,9 @@ class LexicalStore:
             admission = admission_of(context.visible)
             identity = admission.identity() if admission is not None else None
             if identity is None:
-                context.admitted_paths = {path for path in candidates if context.visible(path)}
+                # A collection store decides its pages on one thread: the pages it owns share one store request.
+                with deciding(candidates):
+                    context.admitted_paths = {path for path in candidates if context.visible(path)}
             else:
                 plan = self._published_plan(
                     (scope, identity), snapshot, col, tuple(candidates), frozenset(),

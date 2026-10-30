@@ -3019,7 +3019,11 @@ def test_identical_retry_never_replays_an_outcome_unknown_execution(
     assert calls == []
 
 
-def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
+def test_different_identity_busy_is_precommit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A keyed write waits out contention; a short wait keeps its refusal quick.
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.2")
     leaf_started = threading.Event()
     release_leaf = threading.Event()
     first_calls: list[str] = []
@@ -3072,7 +3076,7 @@ def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
     busy_payload = error_dict(busy.value)
     assert busy_payload["status"] == "retryable"
     assert busy_payload["committed"] is False
-    assert busy_payload["retry_after_ms"] == 750
+    assert busy_payload["cause"] == "capture_wait_exhausted"
     assert busy_payload["request_id"]
     assert busy_payload["idempotency_key"] == "second"
     assert busy_payload["receipt_id"]

@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -340,6 +341,8 @@ class Arm:
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(_HOST_PREFIXES) and not key.endswith(_HOST_SUFFIXES)}
         root = self.root
+        # Unlike the service, the arms run without the file watcher: with it, each fixture write cost about
+        # two more CPU-seconds on the reference corpus and activation still abstained as warming when timed.
         environment.update({
             "EXOMEM_VAULT_PATH": str(self.vault), "EXOMEM_STATE_ROOT": str(self.state),
             "EXOMEM_WRITER_LEASE_STATE_DIR": str(self.lease), "EXOMEM_LOG_DIR": str(self.logs),
@@ -690,12 +693,19 @@ def build_arms(arm_roots: dict[str, Path], pythons: dict[str, Path | str], setti
     return {name: Arm(name, pythons[name], arm_roots[name], sockets, worker_settings=settings) for name in ("base", "head")}
 
 
-def seed_reference_notes(arm: Arm, source: Path, python: Path | None, recall: Any, profile: dict) -> dict:
-    """Prepare one arm's notes state with the recall gate's seeded-vector startup; returns its inputs."""
+def seed_reference_notes(arm: Arm, source: Path, python: Path | None, recall: Any, profile: dict, *,
+                         slot: int = 0, generate_only: bool = False) -> dict:
+    """Prepare one arm's notes state with the recall gate's seeded-vector startup; returns its inputs.
+
+    `slot` picks this arm's own reference CPUs, so two arms can seed at once on a host that has enough.
+    `generate_only` writes the corpus and its manifest without seeding any state.
+    """
     runtime = ({"python": python, "runtime_prefix": python.parent.parent, "runtime_policy": "frozen-tag-runtime"}
                if python is not None else {})
-    cpus = sorted(os.sched_getaffinity(0))[: recall.REFERENCE["reference_cpus"]]
-    worker = recall._Worker(source, arm.vault, arm.state, cpus, profile, **runtime)
+    width = recall.REFERENCE["reference_cpus"]
+    available = sorted(os.sched_getaffinity(0))
+    cpus = available[slot * width:(slot + 1) * width] if len(available) >= (slot + 1) * width else available[:width]
+    worker = recall._Worker(source, arm.vault, arm.state, cpus, profile, generate_only=generate_only, **runtime)
     try:
         return worker.environment
     finally:
@@ -730,14 +740,21 @@ def prepare_notes(arms: dict[str, Arm], base_src: Path, base_python: Path, *, no
         # without one, and a later `init_vault` writes one only for an empty vault.
         head.init_state()
         base.init_state()
-        head_inputs = seed_reference_notes(head, ROOT, None, recall, recall_profile)
+        # The head's code writes the corpus and the base arm gets the same bytes. Seeding is most of the
+        # preparation and each arm's is independent, so the two arms seed at once on their own CPUs.
+        seed_reference_notes(head, ROOT, None, recall, recall_profile, generate_only=True)
         rels = json.loads((head.vault / "reference-corpus.json").read_text())
         copy_notes(rels, head.vault, base.vault)
-        base_inputs = seed_reference_notes(base, base_src, base_python, recall, recall_profile)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            head_seed = pool.submit(seed_reference_notes, head, ROOT, None, recall, recall_profile, slot=0)
+            base_seed = pool.submit(seed_reference_notes, base, base_src, base_python, recall, recall_profile,
+                                    slot=1)
+            head_inputs, base_inputs = head_seed.result(), base_seed.result()
         if any(head_inputs[key] != base_inputs[key] for key in ("corpus", "encoder_digest", "encoder_identity")):
             raise MeasurementRefused("paired-reference-inputs-differ", phase="reference-preparation")
-        head.init_vault(overlay=True)
-        base.init_vault(overlay=True)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for overlaid in [pool.submit(arm.init_vault, overlay=True) for arm in (head, base)]:
+                overlaid.result()
         return rels
     head.init_vault()
     recall_profile["pages"] = notes_pages

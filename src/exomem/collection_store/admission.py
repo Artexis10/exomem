@@ -368,6 +368,10 @@ def _resolve(session, *, force=False):
         return {"status": "admitted"}
     if not force and previous is not None and previous.token == token and not previous.due(session.root):
         return previous.status()
+    refused = runtime._refused
+    if not force and refused is not None and refused.token == token and not refused.due(session.root):
+        # The same marker, replica and token would fail settlement the same way; refuse without resettling.
+        raise refused.error()
     if not session.verify_custody():
         return _custody_lost(session, token).status()
     with ExitStack() as stack:
@@ -380,7 +384,7 @@ def _resolve(session, *, force=False):
                 routed.token = token
                 if previous is not None and previous.code == routed.code:
                     routed.since = previous.since
-                runtime._takeover = routed
+                runtime._takeover, runtime._refused = routed, None
             return routed.status()
         raw, marker, fence, staged = routed
         with manager.writer_authority_guard(vault_root=session.root):
@@ -412,8 +416,17 @@ def _resolve(session, *, force=False):
             # nosemgrep: ep-word-membership -- takeover.decide returns these action tokens.
             if action in {"admit", "adopt", "continue"} or (
                     action == takeover.DIVERGED and local is not None and not diverged):
-                with manager.consistency_guard(session.root, operation="collection_store_takeover"):
-                    action, reason = _settle(session, runtime, token, facts, staged, action, reason, check)
+                try:
+                    with manager.consistency_guard(session.root, operation="collection_store_takeover"):
+                        action, reason = _settle(session, runtime, token, facts, staged, action, reason, check)
+                except CollectionStoreError as error:
+                    # BUSY is retried on next use, as Pending does; any other refusal waits until it is due.
+                    if error.code != takeover.BUSY:
+                        with manager._report_lock:
+                            # A racing resolve may have admitted this token meanwhile; never shadow it.
+                            if runtime._admitted_token != token:
+                                runtime._refused = takeover.Refused(token, error.code, error.reason, signature, raw)
+                    raise
             if action == "admitted":
                 return {"status": "admitted"}
             state = takeover.Pending(token, action, reason, None if recorded is None else recorded.commit_seq,
@@ -424,7 +437,7 @@ def _resolve(session, *, force=False):
                 # A racing resolve may have admitted this token meanwhile; never shadow it.
                 if runtime._admitted_token == token:
                     return {"status": "admitted"}
-                runtime._takeover = state
+                runtime._takeover, runtime._refused = state, None
             return state.status()
 
 
@@ -1019,7 +1032,7 @@ def _custody_lost(session, token):
                              takeover.replica_signature(session.root))
     if previous is not None and previous.code == state.code:
         state.since = previous.since
-    runtime._takeover = state
+    runtime._takeover, runtime._refused = state, None
     return state
 
 

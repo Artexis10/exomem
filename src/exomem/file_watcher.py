@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import freshness, index_sync, media_processing, mode, semantic_writes
+from . import freshness, index_sync, media_processing, mode, semantic_writes, state_paths
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -194,7 +194,10 @@ def _canon_root(vault_root: Path) -> str:
 def _rel_posix(vault_root: Path, path: Path) -> str | None:
     """Vault-relative POSIX path, tolerant of already-deleted files."""
     try:
-        return path.resolve().relative_to(vault_root.resolve()).as_posix()
+        # The vault root is configuration, so a scope may reuse it; the path resolves live.
+        return path.resolve().relative_to(
+            state_paths.resolved_vault_path(vault_root, expanduser=False)
+        ).as_posix()
     except (ValueError, OSError):
         try:
             return path.relative_to(vault_root).as_posix()
@@ -844,6 +847,37 @@ def register_self_write(
     if return_publication_result:
         return registered, corpus_published
     return registered
+
+
+def register_self_write_and_close(
+    vault_root: Path, paths: Iterable[Path], intents: Iterable[_PublicationIntent]
+) -> bool:
+    """Register a batch's self-writes, then close its publication intents.
+
+    Returns whether the corpus delta was published. A published delta finalizes
+    the intents, so a later event with the same bytes is the writer's own echo
+    and one with different bytes stays an outside edit. Otherwise every intent
+    aborts and its paths replay to the watchers. Best-effort: a failure aborts
+    the intents too. The synchronous fan-out and a batch under derived custody
+    both close their intents here, so readers see the published delta before
+    the reply in either route.
+    """
+    paths = list(paths)
+    intents = tuple(intents)
+    published = False
+    try:
+        registered, published = register_self_write(
+            vault_root, paths, return_publication_result=True
+        )
+        if published:
+            finalize_publication_intents(intents, succeeded=registered)
+        elif intents:
+            abort_publication_intents(intents, force_paths=paths)
+    except Exception:  # noqa: BLE001 — suppression is best-effort
+        if intents:
+            abort_publication_intents(intents, force_paths=paths)
+        log.debug("self-write suppression registration failed", exc_info=True)
+    return published
 
 
 def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:

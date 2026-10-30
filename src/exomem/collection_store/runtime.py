@@ -316,6 +316,8 @@ class CollectionStoreRuntime:
         # its unresolved outcome (sync pending or divergence) admits reads only.
         self._resolver = None
         self._takeover = None
+        # A settlement refusal for the current token, raised again until due (takeover.Refused).
+        self._refused = None
         # A producer re-derives custody for each publication, which writes into the vault.
         self._publication_custody = None
         # The producer session that bound this runtime, if any (the in-service owner route).
@@ -346,11 +348,11 @@ class CollectionStoreRuntime:
         """
         with self.manager._report_lock:
             self._identity = identity
-            self._takeover = None
+            self._takeover = self._refused = None
 
     def record_admission(self, token):
         self._admitted_token = token
-        self._takeover = None
+        self._takeover = self._refused = None
         self._handed_off = False
         if self._publisher is None:
             self._publisher = _Publisher(self)
