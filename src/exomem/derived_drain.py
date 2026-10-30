@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from . import call_ledger, call_spans, derived_receipts, mode, process_memory
+from . import call_ledger, call_spans, derived_receipts, mode, process_memory, state_paths
 from .derived_receipts import DerivedComponentStatus
 
 log = logging.getLogger(__name__)
@@ -567,24 +567,27 @@ class DerivedDrain:
                 current = time.time()
                 try:
                     limit = progress_limit(resource_limit=self.resource_limit)
-                    processed = drain_once(
-                        self.vault_root,
-                        dispatch=self.dispatch,
-                        observe_current_generation=self.observe_current_generation,
-                        visibility_publisher=self.visibility_publisher,
-                        retire_visibility=self.retire_visibility,
-                        limit=limit,
-                        now=current,
-                        owner=self._owner,
-                    )
-                    # Stranded batches keep the cadence too: recovery re-proves
-                    # them each pass, and one heals once the recall lanes hold
-                    # what moved under it.
-                    pending = (
-                        derived_receipts.due_component_count(self.vault_root, now=current)
-                        + derived_receipts.recoverable_batch_count(self.vault_root)
-                        + derived_receipts.stranded_batch_count(self.vault_root)
-                    )
+                    # One tick reuses placement and pins the connector ceiling it first reads; admission
+                    # carries that same boundary and egress re-reads it live. Executor threads get no memo.
+                    with state_paths.resolution_scope():
+                        processed = drain_once(
+                            self.vault_root,
+                            dispatch=self.dispatch,
+                            observe_current_generation=self.observe_current_generation,
+                            visibility_publisher=self.visibility_publisher,
+                            retire_visibility=self.retire_visibility,
+                            limit=limit,
+                            now=current,
+                            owner=self._owner,
+                        )
+                        # Stranded batches keep the cadence too: recovery re-proves
+                        # them each pass, and one heals once the recall lanes hold
+                        # what moved under it.
+                        pending = (
+                            derived_receipts.due_component_count(self.vault_root, now=current)
+                            + derived_receipts.recoverable_batch_count(self.vault_root)
+                            + derived_receipts.stranded_batch_count(self.vault_root)
+                        )
                 except Exception:  # noqa: BLE001 - one bad pass cannot kill ownership
                     processed = 0
                     pending = 1

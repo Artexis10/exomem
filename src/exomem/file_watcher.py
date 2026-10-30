@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import freshness, index_sync, media_processing, mode, semantic_writes
+from . import freshness, index_sync, media_processing, mode, semantic_writes, state_paths
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -194,7 +194,10 @@ def _canon_root(vault_root: Path) -> str:
 def _rel_posix(vault_root: Path, path: Path) -> str | None:
     """Vault-relative POSIX path, tolerant of already-deleted files."""
     try:
-        return path.resolve().relative_to(vault_root.resolve()).as_posix()
+        # The vault root is configuration, so a scope may reuse it; the path resolves live.
+        return path.resolve().relative_to(
+            state_paths.resolved_vault_path(vault_root, expanduser=False)
+        ).as_posix()
     except (ValueError, OSError):
         try:
             return path.relative_to(vault_root).as_posix()
