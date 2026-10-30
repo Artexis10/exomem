@@ -47,7 +47,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -76,6 +76,12 @@ MAX_MENTION_CHARS = 64
 MAX_CANDIDATE_IDENTITIES = 3
 MAX_CANDIDATE_LINKING_PAGES = 8
 MAX_DEPENDENCY_ROWS = 16
+
+#: The signal family a dismissal or an owner's quieting of the write-time
+#: `undeclared_referents` block names, and the most names one receipt lists
+#: (`write-time-identity-candidates` spec, "A write names its undeclared referents").
+REFERENTS_FAMILY = "undeclared_referents"
+MAX_UNDECLARED_REFERENTS = 3
 
 #: The one fixed sentence of guidance the `entity_candidate` block itself
 #: carries (`write-time-identity-candidates` spec, task 2.4; design D2's
@@ -311,27 +317,10 @@ def hints(
         links = tuple(getattr(page_state, "body_wikilinks", ()) or ())
         if not links:
             return {}
-        from . import entity_recurrence, semantic_contract
-
         registry = _registry_index(corpus, visible)
-        mentions: list[str] = []
-        seen: set[str] = set()
-        for raw_target, _line in links:
-            link = entity_recurrence.parse_link(raw_target)
-            if link is None or not 0 < len(link.name) <= MAX_MENTION_CHARS:
-                continue
-            identity = entity_recurrence.identity_key(link.name)
-            if not identity or identity in seen:
-                continue
-            seen.add(identity)
-            resolution = semantic_contract._resolve_reference_wikilink_from_context(
-                corpus, raw_target, visible
-            )
-            if resolution.status != "unresolved":
-                continue
-            if registry is not None and registry.resolves(identity):
-                continue
-            mentions.append(link.name)
+        mentions = [
+            link.name for _identity, link in _unpaged_links(links, corpus, visible, registry)
+        ]
         if not mentions:
             return {}
         return {"unpaged_mentions": mentions[:MAX_UNPAGED_MENTIONS]}
@@ -393,7 +382,7 @@ def entity_candidate(
         links = tuple(getattr(page_state, "body_wikilinks", ()) or ())
         if not links:
             return None
-        from . import entity_recurrence, epistemic_graph, semantic_contract
+        from . import epistemic_graph
         from .vault import writer_link_visibility
 
         # Decided over the writer's own view, exactly like `hints()`: a page
@@ -403,29 +392,16 @@ def entity_candidate(
         visible = writer_link_visibility(Path(vault_root))
         registry = _registry_index(corpus, visible)
         self_path = str(getattr(page_state, "path", "") or "")
-        previous_identities = _linked_identities(previous_page_state)
-        candidates: list[tuple[str, entity_recurrence.Wikilink]] = []
-        seen: set[str] = set()
-        for raw_target, _line in links:
-            link = entity_recurrence.parse_link(raw_target)
-            if link is None or not 0 < len(link.name) <= MAX_MENTION_CHARS:
-                continue
-            identity = entity_recurrence.identity_key(link.name)
-            if not identity or identity in seen:
-                continue
-            seen.add(identity)
-            if identity in previous_identities:
-                # Already linked before this write: no new transition, however
-                # the graph's own dependency row for this page reads right now.
-                continue
-            resolution = semantic_contract._resolve_reference_wikilink_from_context(
-                corpus, raw_target, visible
+        # A name already linked before this write is no new transition, however
+        # the graph's own dependency row for this page reads right now.
+        candidates = list(
+            _unpaged_links(
+                links, corpus, visible, registry,
+                previous=_linked_identities(previous_page_state),
             )
-            if resolution.status != "unresolved":
-                continue
-            if registry is not None and registry.resolves(identity):
-                continue
-            candidates.append((identity, link))
+        )
+        dismissed = _dismissed_referents(Path(vault_root), [name for name, _link in candidates])
+        candidates = [(name, link) for name, link in candidates if name not in dismissed]
         if not candidates:
             return None
 
@@ -480,6 +456,216 @@ def entity_candidate(
     except Exception:  # noqa: BLE001 -- a candidate never breaks a commit or a block
         log.debug("entity-candidate advisory failed (non-fatal)", exc_info=True)
         return None
+
+
+def _unpaged_links(
+    links: Any,
+    corpus: Any,
+    visible: Callable[[str], bool] | None,
+    registry: Any,
+    *,
+    previous: frozenset[str] = frozenset(),
+) -> Iterator[tuple[str, Any]]:
+    """The `(identity, link)` of each bare wikilink that names nothing the writer can see.
+
+    The one definition of an unpaged name that `hints()`, `entity_candidate()` and
+    `undeclared_referents()` share: parsed with `entity_recurrence`, resolved against
+    the preflight's corpus context in the writer's own view (a page the writer may not
+    see leaves the name unpaged), and absent from the active entity registry. `previous`
+    holds the identities the page already linked before this write; each is skipped.
+    """
+    from . import entity_recurrence, semantic_contract
+
+    seen: set[str] = set()
+    for raw_target, _line in links:
+        link = entity_recurrence.parse_link(raw_target)
+        if link is None or not 0 < len(link.name) <= MAX_MENTION_CHARS:
+            continue
+        identity = entity_recurrence.identity_key(link.name)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        if identity in previous:
+            continue
+        resolution = semantic_contract._resolve_reference_wikilink_from_context(
+            corpus, raw_target, visible
+        )
+        if resolution.status != "unresolved":
+            continue
+        if registry is not None and registry.resolves(identity):
+            continue
+        yield identity, link
+
+
+def referent_review(identity: str) -> tuple[str, str]:
+    """`(review id, fingerprint)` of one name, for the write-advisory dismissal door.
+
+    Both depend on the name alone. A dismissal therefore follows the name to every page
+    that links it, and no later edit or inbound link reopens it.
+    """
+    from . import review_state
+
+    target = f"{REFERENTS_FAMILY}:{identity}"
+    return (
+        review_state.item_id(target),
+        review_state.fingerprint(
+            target_ref=target, categories=[REFERENTS_FAMILY], reasons=[], related_refs=[]
+        ),
+    )
+
+
+def _dismissed_referents(root: Path, identities: list[str]) -> set[str]:
+    """Which of these names the agent dismissed. An unreadable store dismisses none."""
+    try:
+        from . import review_state
+
+        store = review_state.ReviewStateStore(root)
+        payload = store.load()
+        return {
+            identity
+            for identity in identities
+            if store.effective_state(*referent_review(identity), payload=payload)[0] == "dismissed"
+        }
+    except Exception:  # noqa: BLE001 -- a decision store that cannot be read re-offers, never breaks a write
+        log.debug("referent dismissals unreadable (non-fatal)", exc_info=True)
+        return set()
+
+
+def undeclared_referents(
+    vault_root: Path | None,
+    *,
+    page_state: Any = None,
+    corpus: Any = None,
+    previous_page_state: Any = None,
+    candidate: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The write-time `undeclared_referents` block this write may carry, or None.
+
+    (`write-time-identity-candidates` spec, "A write names its undeclared referents".)
+    Up to `MAX_UNDECLARED_REFERENTS` names this write newly links that name no page and no
+    active entity in the writer's own view: the 0 -> 1 step, where `entity_candidate`
+    is the 1 -> 2 step. It reads wikilink markup and the preflight's corpus context only,
+    so there is no vault walk and no model call, and it creates nothing.
+
+    `candidate` is this response's `entity_candidate` block; its names are omitted so
+    one name never gets two prompts. A dismissed or snoozed name is omitted, and a
+    quieted family or a `structural_suggestions` or `proactive_capture` disposition of
+    `off` withholds the block whole. Inside a batch scope the names are held for the
+    post-batch carrier (`batch_referents`), which lists a name that several pages link once.
+
+    Never raises: a fault here costs the caller a prompt, never the write.
+    """
+    if vault_root is None or page_state is None or corpus is None:
+        return None
+    try:
+        from . import entity_recurrence, envelope
+
+        active = envelope.active()
+        if active.get("structural_suggestions") == "off" or active.get("proactive_capture") == "off":
+            return None
+        links = tuple(getattr(page_state, "body_wikilinks", ()) or ())
+        if not links:
+            return None
+        from .vault import writer_link_visibility
+
+        root = Path(vault_root)
+        visible = writer_link_visibility(root)
+        registry = _registry_index(corpus, visible)
+        covered = {
+            entity_recurrence.identity_key(str(item.get("name") or ""))
+            for item in (candidate or {}).get("identities") or ()
+        }
+        found = [
+            (identity, link)
+            for identity, link in _unpaged_links(
+                links, corpus, visible, registry,
+                previous=_linked_identities(previous_page_state),
+            )
+            if identity not in covered
+        ]
+        if not found:
+            return None
+        origin = str(getattr(page_state, "path", "") or "")
+        entries = _referent_entries(root, found, origin)
+        if _batch_active(root):
+            from . import due_state
+
+            for identity, entry in entries:
+                due_state.note_batch_referent(
+                    root, identity, entry, limit=MAX_UNDECLARED_REFERENTS
+                )
+            return None
+        return _referent_block(root, [entry for _identity, entry in entries])
+    except Exception:  # noqa: BLE001 -- a referent prompt never breaks a commit or a block
+        log.debug("undeclared-referents advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def batch_referents(vault_root: Path) -> dict[str, Any] | None:
+    """The `undeclared_referents` block a finished batch carries, once, or None."""
+    try:
+        from . import due_state
+
+        return _referent_block(Path(vault_root), due_state.take_batch_referents(vault_root))
+    except Exception:  # noqa: BLE001 -- an advisory never breaks a committed batch
+        log.debug("undeclared-referents batch block failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _referent_entries(
+    root: Path, found: list[tuple[str, Any]], origin: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """`(identity, entry)` for each name still offered: not dismissed, not snoozed, family not quieted.
+
+    Unlike `_dismissed_referents` this fails closed on an unreadable store (the caller's
+    outer guard returns no block): the block asks the agent to act, and a store that
+    cannot be read cannot say the agent did not already decline.
+    """
+    from . import corpus_aware, review_state
+
+    store = review_state.ReviewStateStore(root)
+    payload = store.load()
+    if review_state.disposition_for(REFERENTS_FAMILY, payload=payload) != "normal":
+        return []
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for identity, link in found:
+        review_id, fingerprint = referent_review(identity)
+        # Only an open name is raised; a dismissed or snoozed one stays quiet.
+        if store.effective_state(review_id, fingerprint, payload=payload)[0] != "open":
+            continue
+        entries.append(
+            (
+                identity,
+                {
+                    "name": link.name,
+                    "origin": origin,
+                    "review": corpus_aware.write_advisory_ref(review_id),
+                    "fingerprint": fingerprint,
+                },
+            )
+        )
+        if len(entries) == MAX_UNDECLARED_REFERENTS:
+            break
+    return entries
+
+
+def _referent_block(root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The block for these entries, after stamping their first surfacing.
+
+    The stamp is what lets a dismissal through the write-advisory door name the family.
+    """
+    if not entries:
+        return None
+    from . import corpus_aware, review_state
+
+    stamps = [
+        (corpus_aware.parse_write_advisory_ref(entry["review"]), entry["fingerprint"], REFERENTS_FAMILY)
+        for entry in entries
+    ]
+    review_state.record_surfaced(
+        root, stamps, surface="write", known=review_state.ReviewStateStore(root).load()
+    )
+    return {"names": entries[:MAX_UNDECLARED_REFERENTS]}
 
 
 def _linked_identities(page_state: Any) -> frozenset[str]:

@@ -2829,10 +2829,34 @@ _BATCH_PATHS: ContextVar[dict[str, set[str]] | None] = ContextVar(
 )
 
 
+# The names this batch's pages newly link with no page behind them, keyed by vault and then by
+# name identity (`capture_sweep.undeclared_referents`). Fresh per outermost scope like
+# `_BATCH_PATHS`, so a name two pages of one batch link is held once.
+_BATCH_REFERENTS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+    "exomem_due_state_batch_referents", default=None,
+)
+
+
 def _track_batch_path(vault_root: Path, path: str) -> None:
     tracked = _BATCH_PATHS.get()
     if tracked is not None:
         tracked.setdefault(str(vault_root), set()).add(path)
+
+
+def note_batch_referent(vault_root: Path, identity: str, entry: dict[str, Any], *, limit: int) -> None:
+    """Hold the first `limit` distinct names a batch's pages link, for the post-batch carrier."""
+    held = _BATCH_REFERENTS.get()
+    if held is None:
+        return
+    names = held.setdefault(str(vault_root), {})
+    if identity not in names and len(names) < limit:
+        names[identity] = entry
+
+
+def take_batch_referents(vault_root: Path) -> list[dict[str, Any]]:
+    """The names a finished batch's pages linked, once; the batch holds none afterwards."""
+    held = _BATCH_REFERENTS.get()
+    return list(held.pop(str(vault_root), {}).values()) if held is not None else []
 
 
 @contextmanager
@@ -2852,6 +2876,7 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     """
     if not _IN_BATCH.get():
         _BATCH_PATHS.set({})
+        _BATCH_REFERENTS.set({})
     depth = _IN_BATCH.set((*_IN_BATCH.get(), str(vault_root or "")))
     try:
         yield
@@ -4317,3 +4342,4 @@ def reset_emission_state() -> None:
         _EMISSION.clear()
         _UNPERSISTED.clear()
     _BATCH_PATHS.set(None)
+    _BATCH_REFERENTS.set(None)

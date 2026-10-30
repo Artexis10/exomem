@@ -619,7 +619,7 @@ _REMAINING = {
         _row("inbound-links", "read_connections", ("target", "path")),
         _row("resolve-entity", "read_connections", ("name", "entity_type", "entity_family", "limit"), ("name",)),
         _row("resolve-relation", "read_connections", ("path", "target", "query", "requested_relation", "limit", "continuation")),
-        _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations"), ("name",)),
+        _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations", "ref"), ("name",)),
         _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("ref", "expected_hash", "expected_fingerprint", "why")),
     ), True),
     "observe_memory": ("operation", (

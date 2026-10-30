@@ -237,12 +237,14 @@ def registered_families() -> frozenset[str]:
 
     The triageable attention categories — the default union plus the registered
     opt-in epistemic queues, which is exactly what a due-state count can hand a
-    reference out for — plus the write-advisory kinds the write path emits and
-    the dreamer's upkeep families (delivery dispositions only).
+    reference out for — plus the write-advisory kinds the write path emits, the
+    write-time `undeclared_referents` family, and the dreamer's upkeep families
+    (delivery dispositions only).
     Assembled from the owning modules rather than restated, so a queue that is
     added or retired cannot leave a stale name here.
     """
     from . import attention as attention_module
+    from . import capture_sweep as capture_sweep_module
     from . import corpus_aware as corpus_aware_module
     from . import dreamer_families
     from . import promotions as promotions_module
@@ -253,6 +255,7 @@ def registered_families() -> frozenset[str]:
         {
             *attention_module._TRIAGEABLE_CATEGORIES,
             *corpus_aware_module._WRITE_ADVISORY_KINDS,
+            capture_sweep_module.REFERENTS_FAMILY,
             *working_set_learning_module._ADVISORY_KINDS,
             *REVIEW_FAMILIES.values(),
             *dreamer_families.family_names(),

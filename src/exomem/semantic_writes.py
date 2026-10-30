@@ -1007,6 +1007,10 @@ class CreationCommit:
     # (`write-time-identity-candidates`), not a fact about the page's scope, the
     # vault's backlog, or the episode.
     entity_candidate: dict[str, Any] | None = None
+    # Advisory only, and a FIFTH kind: names this write's own links newly reach that no
+    # page or entity answers to (`undeclared_referents`), the 0 -> 1 step before
+    # `entity_candidate`'s 1 -> 2.
+    undeclared_referents: dict[str, Any] | None = None
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, str] | None = None
@@ -1034,6 +1038,8 @@ class CreationCommit:
             value["capture_sweep"] = self.capture_sweep
         if self.entity_candidate is not None:
             value["entity_candidate"] = self.entity_candidate
+        if self.undeclared_referents is not None:
+            value["undeclared_referents"] = self.undeclared_referents
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.vocabulary_resolution is not None:
@@ -1134,6 +1140,8 @@ class ExistingCommit:
     # THIS write's own link just brought to the two-page gate
     # (`write-time-identity-candidates`).
     entity_candidate: dict[str, Any] | None = None
+    # A FIFTH kind, as in `CreationResult`: the names this write newly links with no page behind them.
+    undeclared_referents: dict[str, Any] | None = None
     relation_advisory_context: dict[str, str] | None = None
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
@@ -1162,6 +1170,8 @@ class ExistingCommit:
             value["capture_sweep"] = self.capture_sweep
         if self.entity_candidate is not None:
             value["entity_candidate"] = self.entity_candidate
+        if self.undeclared_referents is not None:
+            value["undeclared_referents"] = self.undeclared_referents
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.after_hash is not None:
@@ -2906,6 +2916,46 @@ def _entity_candidate_block(
         return None
 
 
+@call_spans.timed("post_commit.undeclared_referents")
+def _undeclared_referents_block(
+    vault_root: Path,
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None,
+    *,
+    previous_state: Any = None,
+    candidate: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The `undeclared_referents` advisory this write may carry.
+
+    Shares `_entity_candidate_block`'s placement, cost profile and fail-open guard: it reads
+    the page state and corpus the preflight built and the review-state file, never the vault.
+    `previous_state` is the page's pre-write state (the predecessor's, for a successor page)
+    or `None`; `candidate` is the `entity_candidate` block of the same response, whose names
+    this block omits.
+
+    A fault here costs the caller a prompt, never the write.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.undeclared_referents(
+            vault_root,
+            page_state=state,
+            corpus=corpus,
+            previous_page_state=previous_state,
+            candidate=candidate,
+        )
+    except Exception:  # noqa: BLE001 — a referent prompt never breaks a commit
+        log.debug("undeclared-referents advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _predecessor_state(corpus: Any, predecessor_path: str | None) -> Any:
+    """The predecessor page's state in the preflight corpus, or None when there is no predecessor."""
+    pages = getattr(corpus, "pages", None)
+    return pages.get(predecessor_path) if predecessor_path and pages else None
+
+
 def _page_reference(state: Any) -> str | None:
     """The canonical `exomem://memory/<id>` reference for a committed page state.
 
@@ -2970,6 +3020,13 @@ def commit_existing(
         preflight.after_corpus,
         previous_state=preflight.before,
     )
+    referents = _undeclared_referents_block(
+        vault_root,
+        preflight.after,
+        preflight.after_corpus,
+        previous_state=preflight.before,
+        candidate=candidate,
+    )
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.after.relation_registry_hash,
@@ -2981,6 +3038,7 @@ def commit_existing(
         due_state=due,
         capture_sweep=sweep,
         entity_candidate=candidate,
+        undeclared_referents=referents,
         relation_advisory_context=context,
     )
 
@@ -4682,6 +4740,14 @@ def commit_creation(
     )
     sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
     candidate = _entity_candidate_block(vault_root, preflight.semantic_state, preflight.corpus)
+    # A successor page links what its predecessor linked without newly naming it.
+    referents = _undeclared_referents_block(
+        vault_root,
+        preflight.semantic_state,
+        preflight.corpus,
+        previous_state=_predecessor_state(preflight.corpus, predecessor_path),
+        candidate=candidate,
+    )
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.semantic_state.relation_registry_hash,
@@ -4693,6 +4759,7 @@ def commit_creation(
         due_state=due,
         capture_sweep=sweep,
         entity_candidate=candidate,
+        undeclared_referents=referents,
         relation_advisory_context=context,
         vocabulary_resolution=(
             preflight.vocabulary_binding.as_dict()
