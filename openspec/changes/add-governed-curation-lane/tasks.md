@@ -57,6 +57,12 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 admission and pac
 - [x] 8.3 Add hookless bootstrap/custom-instruction carrier assertions without hardcoding an English-only workflow or weakening explicit-request availability when structural suggestions are off.
 - [x] 8.4 Pass scaffold privacy/leak checks and verify no Planning/Records/OpenSpec workflow automation was added.
 
+## 10. Intra-plan dependencies and late approval
+
+- [ ] 10.1 Prepare each proposed and compensation step with the pages the plan's earlier steps create, and refuse a step bound to a path an earlier step writes (`CURATION_STEP_CONFLICT`).
+- [ ] 10.2 Mint an edit step's transition at execution and refuse, before any write, a planned page that differs from the sealed postcondition apart from the reviewed `updated` instant.
+- [ ] 10.3 Prove both end to end: a two-page split linked by path and by title applies; a foreign link target still refuses; an edit approved days later applies; an edit whose render changed refuses unchanged; a conflicting plan is refused at proposal.
+
 ## 9. Completion and OpenSpec closure
 
 - [x] 9.1 Run the affected curation, semantic writer, file governance, command-surface, mutation-terminal, Hosted, workflow-skill, and artifact-freshness suites with explicit scope. Evidence: tests/test_curation_*.py, semantic writer, file governance, command-surface, mutation-terminal, hosted, workflow-skill and artifact-freshness suites green on the delivered tip.
