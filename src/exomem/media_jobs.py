@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import held_fs, media_brakes, reserved_paths
+from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .vault import parse_frontmatter
 
@@ -101,6 +102,10 @@ _SELF_RETURNING_SQL = ",".join(f"'{reason}'" for reason in sorted({*_WAITING_REA
 OVER_BUDGET_ERROR = "ExceedsProcessingBudget: the file exceeds this deployment's processing budget"
 OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget"
 WAIT_ACTION = "wait for media processing"
+#: Both ways out of a multilingual request that the configured speech engine cannot run.
+MULTILINGUAL_UNSUPPORTED_ACTION = (
+    "give one language code or use the faster-whisper engine, then reprocess the file again"
+)
 #: A stop that moved the engine forward leaves the job pending and spends none of its stops.
 _UNCOUNTED_STOP = "state = 'pending', blocked_reason = NULL, last_error = NULL, blocked_context = NULL"
 
@@ -143,6 +148,17 @@ def _validated_result_payload(kind: str, payload: object) -> dict[str, object] |
         if text is None or engine is None or not engine:
             return None
         result: dict[str, object] = {"text": text, "engine": engine}
+        asr = payload.get("asr")
+        if asr is not None:
+            try:
+                result["asr"] = AsrFacts.from_payload(asr).as_payload()
+            except ValueError:
+                return None
+        replaces = payload.get("replaces")
+        if replaces is not None:
+            if not _is_sha256(replaces):
+                return None
+            result["replaces"] = replaces
         verification = payload.get("speaker_verification")
         if verification is not None:
             verified = _bounded_text(verification, 128)
@@ -430,6 +446,12 @@ class MediaJob:
     last_error: str | None = None
     blocked_reason: str | None = None
     blocked_context: str | None = None
+    # An explicit request to extract again over a completed transcript. `language` is the
+    # speech language the requester asked for and `language_mode` is `single` or `multilingual`;
+    # all three belong to the extraction stage.
+    reprocess: bool = False
+    language: str | None = None
+    language_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -647,6 +669,8 @@ class MediaJobStore:
                 self._migrate_refusal_size(conn)
                 self._migrate_claim_revision(conn)
                 self._migrate_blocked_reasons(conn)
+                self._migrate_reprocess(conn)
+                self._migrate_language_mode(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS media_job_results (
@@ -775,6 +799,20 @@ class MediaJobStore:
                 "WHERE state = 'blocked' AND last_error LIKE 'ExtractionUnavailable:%'",
                 (ENGINE_UNAVAILABLE,),
             )
+
+    @staticmethod
+    def _migrate_reprocess(conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "reprocess" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN reprocess INTEGER NOT NULL DEFAULT 0")
+        if "language" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN language TEXT")
+
+    @staticmethod
+    def _migrate_language_mode(conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "language_mode" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN language_mode TEXT")
 
     @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
@@ -972,7 +1010,9 @@ class MediaJobStore:
         """Retire the OCR stage of an artifact already completed in Markdown.
 
         A queued CLIP or re-embed stage stays queued. A running claim, or a row
-        whose result waits for the parent, is left to that result.
+        whose result waits for the parent, is left to that result. A reprocess
+        request is no leftover: the transcript is complete because it is the one
+        to replace, so only its own run ends it.
         """
         key = self._key(self._relative(binary_path), media_type)
         conn = self._connect()
@@ -980,10 +1020,77 @@ class MediaJobStore:
             with conn:
                 return _drop_ocr_stage(
                     conn,
-                    "do_ocr = 1 AND job_key = ? AND state != 'running' AND NOT EXISTS "
-                    "(SELECT 1 FROM media_job_results WHERE job_id = jobs.id)",
+                    "do_ocr = 1 AND reprocess = 0 AND job_key = ? AND state != 'running' "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results WHERE job_id = jobs.id)",
                     (key,),
                 )
+        finally:
+            conn.close()
+
+    def request_extraction(
+        self, job: MediaJob, language: str | None, language_mode: str | None, *, reprocess: bool
+    ) -> int | None:
+        """Queue a speech extraction that carries the language or mode a caller declared.
+
+        Returns the id of the row that now carries the request, or None when the row refuses it.
+
+        With `reprocess`, the transcript is already complete: the row carries the request, so
+        the worker may extract over the completed text for this run only. Without it, the
+        transcript is not complete yet and the row only gains the declaration. A failed or
+        blocked row of the same file starts again from pending. A claimed row, or one whose
+        result waits for the parent, is already deciding the transcript, so it refuses and
+        the caller asks again later.
+        """
+        key = self._key(self._relative(job.binary_path), job.media_type)
+        now = time.time()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id, state, (SELECT 1 FROM media_job_results WHERE job_id = jobs.id) "
+                "AS has_result FROM jobs WHERE job_key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None and (row["state"] == RUNNING or row["has_result"]):
+                conn.rollback()
+                return None
+            if row is None:
+                row_id = conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_key, binary_rel, sidecar_rel, media_type, do_ocr, state, attempts,
+                        ocr_generation, reprocess, language, language_mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        key,
+                        self._relative(job.binary_path),
+                        self._relative(job.sidecar_path),
+                        job.media_type,
+                        int(reprocess),
+                        language,
+                        language_mode,
+                        now,
+                        now,
+                    ),
+                ).lastrowid
+            else:
+                row_id = row["id"]
+                conn.execute(
+                    """
+                    UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
+                        state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
+                        blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
+                        memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (int(reprocess), language, language_mode, now, row_id),
+                )
+            conn.commit()
+            return row_id
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1056,6 +1163,7 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
+                        reprocess = 0, language = NULL, language_mode = NULL,
                         state = 'pending', updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
                     """,
@@ -1469,7 +1577,8 @@ class MediaJobStore:
             with conn:
                 return _drop_ocr_stage(
                     conn,
-                    "id = ? AND state = 'blocked' AND blocked_reason IS ? AND claim_revision = ?",
+                    "id = ? AND reprocess = 0 AND state = 'blocked' AND blocked_reason IS ? "
+                    "AND claim_revision = ?",
                     (job.id, job.blocked_reason, job.claim_revision),
                 ) == 1
         finally:
@@ -1672,11 +1781,19 @@ class MediaJobStore:
                     changed = conn.execute(
                         """
                         UPDATE jobs SET do_ocr = ?, state = 'pending', last_error = NULL,
+                            reprocess = CASE WHEN ? THEN reprocess ELSE 0 END,
+                            language = CASE WHEN ? THEN language ELSE NULL END,
+                            language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
                             updated_at = ? WHERE id = ? AND state IN (""" + state_placeholders + """)
                             AND claim_revision = ?
                         """,
                         (
                             remaining_ocr,
+                            # A published extraction consumes a reprocess request; only a
+                            # result that leaves the stage queued leaves the request with it.
+                            int(bool(remaining_ocr) and result.kind != "extraction"),
+                            int(bool(remaining_ocr) and result.kind != "extraction"),
+                            int(bool(remaining_ocr) and result.kind != "extraction"),
                             time.time(),
                             result.job_id,
                             *allowed_states,
@@ -1993,6 +2110,9 @@ class MediaJobStore:
                 "SELECT * FROM jobs WHERE state IN ('blocked', 'failed') "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id) "
+                # A reprocess is an explicit request over a completed transcript, which retry
+                # leaves alone, so its row would hold a place in every pass and never leave.
+                "AND reprocess = 0 "
                 "ORDER BY id"
             )
             eligible: list[MediaJob] = []
@@ -2194,6 +2314,9 @@ class MediaJobStore:
             last_error=row["last_error"],
             blocked_reason=row["blocked_reason"] if "blocked_reason" in row.keys() else None,
             blocked_context=row["blocked_context"] if "blocked_context" in row.keys() else None,
+            reprocess=bool(row["reprocess"]) if "reprocess" in row.keys() else False,
+            language=row["language"] if "language" in row.keys() else None,
+            language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
         )
 
     def _row_to_result(self, row: Any) -> MediaJobResult | None:
@@ -2310,6 +2433,7 @@ def _read_status_rows(
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     # A retained store from before the column existed has no typed reasons.
     reason = "blocked_reason" if "blocked_reason" in columns else "NULL AS blocked_reason"
+    reprocess = "reprocess" if "reprocess" in columns else "0 AS reprocess"
     rows = conn.execute(
         f"SELECT state, count(*) AS n, {reason} FROM jobs{selector} GROUP BY state, blocked_reason",
         parameters
@@ -2326,8 +2450,8 @@ def _read_status_rows(
         parameters
     ).fetchall()
     jobs = conn.execute(
-        f"SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error, {reason} "
-        f"FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
+        f"SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error, {reason}, "
+        f"{reprocess} FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
         (*parameters, STATUS_JOB_LIMIT),
     ).fetchall()
     reconciliation_required_count = sum(
@@ -2598,7 +2722,32 @@ def _status_job(row: Any) -> dict[str, Any]:
         }
     if reason == OVER_BUDGET:
         actions[BLOCKED] = OVER_BUDGET_ACTION
-    if state == FAILED and error and "sidecar content changed" in error:
+    # A stopped reprocess leaves the completed transcript as it was, and a retry would
+    # find that transcript complete, so only a new request runs it again.
+    reprocess_stopped = (
+        state in {BLOCKED, FAILED}
+        and "reprocess" in row.keys()
+        and bool(row["reprocess"])
+        and not _returns_by_itself(state, reason)
+    )
+    reprocess_failed = reprocess_stopped and state == FAILED
+    if reprocess_stopped and state == BLOCKED:
+        actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
+    multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
+    unsupported_language = multilingual_unsupported or (
+        state == FAILED and (error or "").startswith("UnsupportedLanguage:")
+    )
+    if multilingual_unsupported:
+        actions[FAILED] = MULTILINGUAL_UNSUPPORTED_ACTION
+    elif unsupported_language:
+        actions[FAILED] = (
+            "choose a language the speech model supports and "
+            + ("reprocess the file again" if reprocess_failed else "process the file again with reprocess")
+            + ", or correct EXOMEM_ASR_LANGUAGE"
+        )
+    elif reprocess_failed:
+        actions[FAILED] = "the transcript was not replaced; reprocess the file again to replace it"
+    elif state == FAILED and error and "sidecar content changed" in error:
         actions[FAILED] = "review the sidecar changes, then retry media processing"
     elif state == FAILED and error and error.startswith("stale extraction:"):
         actions[FAILED] = "retry media processing"
@@ -2610,7 +2759,12 @@ def _status_job(row: Any) -> dict[str, Any]:
         "state": state,
         "attempts": int(row["attempts"]),
         "error": error,
-        "retryable": state in {BLOCKED, FAILED} and reason != OVER_BUDGET,
+        "retryable": (
+            state in {BLOCKED, FAILED}
+            and reason != OVER_BUDGET
+            and not unsupported_language
+            and not reprocess_stopped
+        ),
         "next_action": actions[state],
     }
     failure = _classify_batch_write_failure(error)

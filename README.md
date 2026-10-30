@@ -511,6 +511,7 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_SEMANTIC_SEGMENTS` | Set to enable timed transcripts + semantic segment retrieval for audio/video (default off). |
 | `EXOMEM_WHISPER_MODEL` | faster-whisper model size for ASR, such as `base` or `small`. |
 | `EXOMEM_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
+| `EXOMEM_ASR_LANGUAGE` | Language code to force for speech transcripts, such as `et`. Unset means the engine detects the language on speech. A `reprocess` request with a `language` takes precedence. A code the speech model does not publish fails the job. |
 | `EXOMEM_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 | `EXOMEM_CLAIM_LEVEL` | `1` enables the claim-level subsystem (default off). |

@@ -2731,6 +2731,15 @@ def _check_unprocessed_sources(
         # record, so a finding per conversation would only be noise.
         if page.frontmatter.get("source_type") == source_taxonomy.EPISODE_KIND:
             continue
+        # A superseded Source (such as the page that keeps a replaced extraction) was
+        # replaced by a live page, so it never waits for compilation of its own.
+        if (
+            status_basis.classify(
+                page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter
+            ).lifecycle_class
+            == "superseded"
+        ):
+            continue
         coverage = source_coverage.evaluate(
             vault_root,
             page,

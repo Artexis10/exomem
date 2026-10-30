@@ -3020,6 +3020,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "process": False,
             "status": True,
             "retry": False,
+            "reprocess": False,
         },
         ("observe_memory", "operation"): {
             "add": False,

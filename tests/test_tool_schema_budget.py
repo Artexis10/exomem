@@ -29,7 +29,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The separate bootstrap core budget stays unchanged.
 # Remote curation writes add six repair_memory variants, so the budget rises 1,800 B and remote clients
 # keep the curation workflow that local clients have.
-TOTAL_BUDGET = 162_000
+# The change_media reprocess kind with its language hint adds 200 B, so a wrong-language transcript
+# can be redone without losing the old text.
+# The multilingual flag on change_media process and reprocess adds 170 B, so a recording that mixes
+# languages is read in each of them.
+TOTAL_BUDGET = 162_400
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -42,7 +46,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
-    "change_media": 1200,
+    "change_media": 1600,
     "change_observations": 6200,
     "change_plans": 3350,
     "change_records": 5550,

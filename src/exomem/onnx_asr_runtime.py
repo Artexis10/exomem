@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from . import media_models, runtime_resources
+from .asr_facts import AsrFacts
 from .embedding_backend import ModelFilesUnavailable
 
 
@@ -45,6 +46,15 @@ def audio_chunks(path: Path, sample_rate: int, chunk_samples: int) -> Iterator[n
             fifo.write(decoded)
         while fifo.samples:
             yield fifo.read(min(fifo.samples, chunk_samples)).to_ndarray()[0]
+
+
+def decode_audio(path: Path, sample_rate: int) -> np.ndarray:
+    """The whole recording as mono float32, through the same resampler as the chunked reader.
+
+    Samples keep their decoded float values, so loud passages are not clipped to full scale.
+    """
+    chunks = list(audio_chunks(path, sample_rate, sample_rate * 30))
+    return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
 
 
 #: The progress record's own format; the engine label decides whether a record still applies.
@@ -336,6 +346,9 @@ class OnnxWhisperBackend:
         self._timestamp_begin = int(generation["no_timestamps_token_id"]) + 1
         self._max_initial_timestamp = int(generation["max_initial_timestamp_index"])
         self._languages = {int(token_id): token for token, token_id in generation["lang_to_id"].items()}
+        # The model publishes tokens like "<|xx|>"; a caller names a language by its "xx" code.
+        self._language_ids = {token.removeprefix("<|").removesuffix("|>"): int(token_id)
+                              for token, token_id in generation["lang_to_id"].items()}
         protocol = {self._start_token, int(generation["prev_sot_token_id"]), *map(int, generation["task_to_id"].values())}
         self._suppressed = np.asarray(sorted({*map(int, generation["suppress_tokens"]), *protocol}), dtype=np.int64)
         self._begin_suppressed = np.asarray(generation["begin_suppress_tokens"], dtype=np.int64)
@@ -355,19 +368,42 @@ class OnnxWhisperBackend:
 
         return step
 
-    def _detect_language(self, encoding) -> int:
-        """Choose this recording's language token from the model's own language tokens."""
+    def _detect_language(self, encoding) -> tuple[int, float]:
+        """Choose this recording's language token from the model's own language tokens.
+
+        The probability is a softmax over those tokens alone, so it reads as confidence among languages.
+        """
         logits, _ = self._step(encoding)([self._start_token], None)
         candidates = np.fromiter(self._languages, dtype=np.int64)
-        return int(candidates[np.argmax(logits[candidates])])
+        scores = logits[candidates].astype(np.float64)
+        probabilities = np.exp(scores - np.max(scores))
+        probabilities /= probabilities.sum()
+        best = int(np.argmax(probabilities))
+        return int(candidates[best]), float(probabilities[best])
+
+    def _language_id(self, code: str) -> int:
+        """The token for a language code the model publishes; any other code is refused, never replaced."""
+        if code not in self._language_ids:
+            from .extract import UnsupportedLanguage
+
+            raise UnsupportedLanguage(code, sorted(self._language_ids))
+        return self._language_ids[code]
+
+    def _language_code(self, token: int) -> str:
+        return self._languages[token].removeprefix("<|").removesuffix("|>")
 
     def _text(self, tokens: list[int]) -> str:
         return self._model.asr._decode_tokens(np.asarray(tokens, dtype=np.int64)).text
 
-    def _recognize(self, waveform: np.ndarray, language: int | None, seed: int) -> tuple[int, tuple[int, ...]]:
+    def _recognize(
+        self, waveform: np.ndarray, language: int | None, seed: int
+    ) -> tuple[int, tuple[int, ...], float | None]:
+        """Decode one window; the probability is set only when this call detected the language."""
         whisper = self._model.asr
         encoding = whisper._encode(waveform[None], np.array([len(waveform)], dtype=np.int64))
-        language = language or self._detect_language(encoding)
+        probability = None
+        if language is None:
+            language, probability = self._detect_language(encoding)
         policy = self.spec["decoding"]
         rng = np.random.default_rng(seed)
 
@@ -379,10 +415,25 @@ class OnnxWhisperBackend:
                 detokenize=self._text, temperature=temperature, rng=rng,
             )
 
-        return language, decode_with_fallback(decode, policy).tokens
+        return language, decode_with_fallback(decode, policy).tokens, probability
 
-    def transcribe(self, path: Path, *, vault_root: Path | None = None) -> tuple[Iterator[Segment], str]:
-        """Transcribe by seeking through the audio; with a vault, a stopped run resumes at its last seek."""
+    def transcribe(
+        self,
+        path: Path,
+        *,
+        vault_root: Path | None = None,
+        language: str | None = None,
+        multilingual: bool = False,
+        report: AsrFacts | None = None,
+    ) -> tuple[Iterator[Segment], str]:
+        """Transcribe by seeking through the audio; with a vault, a stopped run resumes at its last seek.
+
+        A `language` code replaces detection for the whole file. `report` receives what the engine decided.
+        """
+        if multilingual:  # one language serves the whole file here, so the mode cannot be honoured
+            from .extract import MultilingualUnsupported
+
+            raise MultilingualUnsupported("onnx-asr")
         label = (
             f"onnx-asr:{self.spec['model']}:{self.spec['artifact']['digest'][:16]}"
             f":decoding-{self.spec['decoding']['revision']}"
@@ -391,6 +442,7 @@ class OnnxWhisperBackend:
         def segments() -> Iterator[Segment]:
             with runtime_resources.model_execution():
                 self._load()
+                requested = self._language_id(language) if language else None
                 rate = self.spec["sample_rate"]
                 chunk_samples = int(rate * self.spec["chunk_seconds"])
                 rel = binary_rel(vault_root, path) if vault_root is not None else None
@@ -402,11 +454,14 @@ class OnnxWhisperBackend:
                     or record.get("input_sha256") != identity
                     or record.get("engine") != label
                     or record.get("chunk_samples") != chunk_samples
+                    or record.get("language_requested") != language
                 ):
                     record = None
                 done = [Segment(**segment) for segment in record["segments"]] if record else []
                 seek = int(record["next_offset"]) if record else 0
-                language = record["language"] if record else None
+                # The token chosen for the file: the caller's, else the first spoken window's detection.
+                chosen = requested if requested is not None else (record["language"] if record else None)
+                probability = record.get("language_probability") if record and requested is None else None
                 yield from done
                 samples = _SeekBuffer(audio_chunks(path, rate, chunk_samples))
                 while True:
@@ -427,7 +482,8 @@ class OnnxWhisperBackend:
                     # VAD skips non-speech but leaves spoken windows unchanged.
                     if next(detected, None) is not None:
                         # Like the local engine, one language serves the whole file.
-                        language, tokens = self._recognize(window, language, seed=seek)
+                        chosen, tokens, detected_probability = self._recognize(window, chosen, seed=seek)
+                        probability = detected_probability if detected_probability is not None else probability
                         plan = split_window(
                             tokens, timestamp_begin=self._timestamp_begin, window_samples=length, rate=rate,
                         )
@@ -444,10 +500,15 @@ class OnnxWhisperBackend:
                     if progress is not None:
                         _write_progress(vault_root, progress, {
                             "format": PROGRESS_FORMAT, "input_sha256": identity, "engine": label,
-                            "chunk_samples": chunk_samples,
-                            "language": language, "next_offset": seek,
+                            "chunk_samples": chunk_samples, "language_requested": language,
+                            "language": chosen, "language_probability": probability, "next_offset": seek,
                             "segments": [segment.__dict__ for segment in done],
                         })
+                if report is not None:
+                    report.language = self._language_code(chosen) if chosen is not None else None
+                    report.language_probability = probability if requested is None else None
+                    report.duration_seconds = seek / rate
+                    report.policy = f"decoding-{self.spec['decoding']['revision']}"
                 if progress is not None:
                     progress.unlink(missing_ok=True)
 

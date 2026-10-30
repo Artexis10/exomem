@@ -33,7 +33,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from filelock import ReadWriteLock, Timeout
 
@@ -6044,9 +6044,14 @@ class LeaseManager:
                     )
                 )
 
-        narrow_media_commit = command.name == "process_media" and kwargs.get(
-            "operation", "process"
-        ) in {"process", "retry"}
+        from .commands import ProcessMediaOperation
+
+        media_operation = kwargs.get("operation", "process")
+        narrow_media_commit = (
+            command.name == "process_media"
+            and media_operation in get_args(ProcessMediaOperation)
+            and media_operation != "status"
+        )
         # `manage_memory_file` is the Tier-2 escape hatch's single consolidated
         # command; only its `create`/`append` operations narrow. Their leaves
         # are self-guarding on EVERY routing: governed Markdown goes through

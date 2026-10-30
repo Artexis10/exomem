@@ -31,6 +31,7 @@ from . import (
     recall_policy,
     reserved_paths,
 )
+from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .vault import (
@@ -126,6 +127,16 @@ class ReconcileResult:
     sidecar_path: Path
     job_id: int | None
     requeued: int = 0
+    attached: bool = False  # the job row carries the request that reconcile_media was given
+
+
+@dataclass(frozen=True)
+class ExtractionRequest:
+    """The language or mode a caller declared, and whether it replaces a completed transcript."""
+
+    language: str | None
+    mode: str | None
+    reprocess: bool
 
 
 @dataclass(frozen=True)
@@ -232,6 +243,7 @@ def reconcile_media(
     explicit: bool = True,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     defer_fanout_to_terminal: bool = False,
+    request: ExtractionRequest | None = None,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -246,6 +258,9 @@ def reconcile_media(
     mutation's terminal is persisted. Opt-in because it changes when a caller's
     own follow-up reads see the refreshed index; the preservation lanes, whose
     receipt is what the client is waiting for, are the callers that need it.
+
+    A `request` goes into the job row when this call creates or re-queues it, in the same
+    store transaction, so the worker never claims the job without it.
     """
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -295,7 +310,8 @@ def reconcile_media(
         if explicit and stored.state == "evicted":
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
-                                       commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal)
+                                       commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
+                                       request=request)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
@@ -305,10 +321,19 @@ def reconcile_media(
                 return ReconcileResult(media_type, "completed", stored.sidecar_path, None)
             store = media_jobs.MediaJobStore(vault)
             job = store.get_by_binary(binary)
-            if job is None and media_engines.stage_enabled(media_type):
-                job_id = store.enqueue(media_jobs.MediaJob(binary, stored.sidecar_path, media_type))
+            attached = False
+            if (job is None or request is not None) and media_engines.stage_enabled(media_type):
+                job_id, attached = _enqueue(
+                    store, media_jobs.MediaJob(binary, stored.sidecar_path, media_type), request
+                )
                 job = store.get(job_id)
-            return ReconcileResult(media_type, job.state if job else "pending", stored.sidecar_path, job.id if job else None)
+            return ReconcileResult(
+                media_type,
+                job.state if job else "pending",
+                stored.sidecar_path,
+                job.id if job else None,
+                attached=attached,
+            )
     try:
         retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
     except reserved_paths.ReservedPathLeafError as error:
@@ -507,6 +532,7 @@ def reconcile_media(
             _verify_binary_identity(binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
+            attached = False
             requested_clip = media_type in {"image", "video"} and not os.environ.get(
                 "EXOMEM_DISABLE_CLIP"
             )
@@ -517,15 +543,17 @@ def reconcile_media(
             needs_clip = requested_clip and (durable_job is None or not durable_job.do_clip)
             do_ocr = extraction_on and (original != pending or needs_ocr)
             do_clip = requested_clip if original != pending else needs_clip
-            if do_ocr or do_clip:
-                job_id = store.enqueue(
+            if do_ocr or do_clip or (request is not None and extraction_on):
+                job_id, attached = _enqueue(
+                    store,
                     media_jobs.MediaJob(
                         binary_path=binary,
                         sidecar_path=sidecar,
                         media_type=media_type,
                         do_ocr=do_ocr,
                         do_clip=do_clip,
-                    )
+                    ),
+                    request,
                 )
                 durable_job = store.get(job_id)
             job_id = durable_job.id if durable_job is not None else None
@@ -536,7 +564,7 @@ def reconcile_media(
                 if durable_job is None or not store.mark(
                     durable_job, media_jobs.BLOCKED, reason
                 ):
-                    result = ReconcileResult(media_type, state, sidecar, job_id)
+                    result = ReconcileResult(media_type, state, sidecar, job_id, attached=attached)
                 else:
                     current_sidecar = _read_sidecar_text(vault, sidecar)
                     if current_sidecar is None:
@@ -563,7 +591,7 @@ def reconcile_media(
                             )
                         )
                     state = media_jobs.BLOCKED
-            result = ReconcileResult(media_type, state, sidecar, job_id)
+            result = ReconcileResult(media_type, state, sidecar, job_id, attached=attached)
 
     assert result is not None
     if originals.binding_for(vault) is not None:
@@ -1168,6 +1196,159 @@ def retry_all_media(
     return requeued
 
 
+def _enqueue(
+    store: media_jobs.MediaJobStore, job: media_jobs.MediaJob, request: ExtractionRequest | None
+) -> tuple[int, bool]:
+    """Queue the job: `(row id, whether the row carries the request)`.
+
+    A declared request goes in with the row, so no worker claim can precede it. A row that
+    refuses the request raises, so an attached request is never reported as refused.
+    """
+    if request is None:
+        return store.enqueue(job), False
+    row_id = store.request_extraction(job, request.language, request.mode, reprocess=request.reprocess)
+    if row_id is None:
+        raise MediaProcessingError(
+            "MEDIA_BUSY", "the file is being processed now; ask again when that run ends"
+        )
+    if job.do_clip:  # the request row carries the extraction stage only
+        store.enqueue(replace(job, do_ocr=False))
+    return row_id, True
+
+
+#: The shape of a language code, not a list of languages: whether the speech model supports a
+#: code is decided by the model's own published set, in the job.
+_LANGUAGE_CODE_RE = re.compile(r"[a-z]{2,16}")
+
+
+def declared_language(language: str | None, multilingual: bool) -> tuple[str | None, str | None]:
+    """The speech language or mode a request declares, as the job stores it: `(code, mode)`.
+
+    A request gives one language code or the multilingual mode, never both. It declares
+    nothing when both are empty, and the mode is then None.
+    """
+    from . import extract
+
+    hint = extract.language_code(language)
+    if hint is not None and multilingual:
+        raise MediaProcessingError(
+            "LANGUAGE_MODE_CONFLICT",
+            "give either one language code or the multilingual mode, not both",
+        )
+    if hint is not None and _LANGUAGE_CODE_RE.fullmatch(hint) is None:
+        raise MediaProcessingError(
+            "INVALID_LANGUAGE", "language must be a short alphabetic code, as the speech model names it"
+        )
+    if multilingual:
+        return None, LANGUAGE_MODE_MULTILINGUAL
+    return (hint, LANGUAGE_MODE_SINGLE) if hint is not None else (None, None)
+
+
+def reprocess_media(
+    vault_root: Path,
+    binary_path: str | Path,
+    *,
+    language: str | None = None,
+    multilingual: bool = False,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    """Queue one explicit second extraction of a media file, optionally with a language or mode.
+
+    Only this call extracts over a completed transcript. The job keeps the old text
+    on a page next to the sidecar when the new text is ready, and leaves the sidecar
+    as it is when the new extraction fails. A file that is being processed right now
+    is refused, so the caller asks again when that run ends.
+    """
+    return _queue_extraction(
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True
+    )
+
+
+def process_declared_media(
+    vault_root: Path,
+    binary_path: str | Path,
+    *,
+    language: str | None = None,
+    multilingual: bool = False,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    """Process a media file whose transcript is not complete yet, with the language or mode declared.
+
+    A complete transcript is refused: it keeps its text until `reprocess_media` replaces it,
+    and a declaration that was ignored would read as one that was applied.
+    """
+    return _queue_extraction(
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=False
+    )
+
+
+def _queue_extraction(
+    vault_root: Path,
+    binary_path: str | Path,
+    language: str | None,
+    multilingual: bool,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None,
+    *,
+    reprocess: bool,
+) -> ReconcileResult:
+    vault = Path(vault_root).resolve()
+    binary = Path(binary_path)
+    if not binary.is_absolute():
+        binary = vault / binary
+    binary = Path(os.path.abspath(binary))
+    hint, mode = declared_language(language, multilingual)
+    media_type = classify_media(binary)
+    if mode is not None and media_engines.engine_for(media_type) != media_engines.SPEECH:
+        raise MediaProcessingError(
+            "LANGUAGE_NOT_APPLICABLE", "a language or mode applies to speech media (audio and video) only"
+        )
+    if media_type is not None and not media_engines.stage_enabled(media_type):
+        raise MediaProcessingError(
+            "MEDIA_ENGINE_DISABLED",
+            f"extraction of {media_type} files is switched off in this deployment",
+        )
+    unavailable = _runtime_unavailable(vault)
+    if unavailable is not None:  # retry_media queues nothing in this state either
+        raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
+    request = ExtractionRequest(hint, mode, reprocess)
+    result = reconcile_media(vault, binary, commit_guard=commit_guard, request=request)
+    if result is None:  # an explicit request is never skipped; this narrows the type
+        raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
+    if not reprocess and result.state == "completed":
+        raise MediaProcessingError(
+            "TRANSCRIPT_COMPLETE",
+            "the transcript is already complete; reprocess replaces it with the declared language",
+        )
+    if result.attached:  # reconcile_media wrote the request into the job row as it queued the job
+        return replace(result, requeued=1)
+    # Only a completed transcript reaches here: reprocess replaces it, and reconcile queued nothing.
+    store = media_jobs.MediaJobStore(vault)
+    boundary = commit_guard() if commit_guard is not None else nullcontext()
+    with boundary:
+        job_id = store.request_extraction(
+            media_jobs.MediaJob(
+                binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type
+            ),
+            hint,
+            mode,
+            reprocess=reprocess,
+        )
+        job = store.get(job_id) if job_id is not None else None
+    if job_id is None:
+        raise MediaProcessingError(
+            "MEDIA_BUSY",
+            "the file is being processed now; ask again when that run ends",
+        )
+    return ReconcileResult(
+        result.media_type,
+        job.state if job is not None else media_jobs.PENDING,
+        result.sidecar_path,
+        job_id,
+        requeued=1,
+        attached=True,
+    )
+
+
 def _retire_completed_ocr(
     vault: Path, binary: Path, sidecar: Path, media_type: str
 ) -> None:
@@ -1569,30 +1750,34 @@ def mark_processing_unavailable(
                     if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
                         continue
                     content, guard = read_guarded_text(vault, job.sidecar_path)
-                    blocked = preserve.render_sidecar_processing_failure(
-                        content,
-                        state=media_jobs.BLOCKED,
-                        attempts=current_job.attempts,
-                        error=reason,
-                        retryable=True,
-                        next_action=next_action,
-                    )
-                    written_result = preserve.commit_media_sidecar_writes(
-                        vault,
-                        (
-                            PlannedWrite(
-                                path=job.sidecar_path,
-                                content=blocked,
-                                expected_hash=content_hash(content),
-                                guard=guard,
+                    # A pending reprocess sits over a completed transcript. Marking that sidecar
+                    # blocked would make the next reconcile treat the old text as unfinished, so
+                    # only the job carries the state.
+                    if not has_completed_transcript(content, media_type=job.media_type):
+                        blocked = preserve.render_sidecar_processing_failure(
+                            content,
+                            state=media_jobs.BLOCKED,
+                            attempts=current_job.attempts,
+                            error=reason,
+                            retryable=True,
+                            next_action=next_action,
+                        )
+                        written_result = preserve.commit_media_sidecar_writes(
+                            vault,
+                            (
+                                PlannedWrite(
+                                    path=job.sidecar_path,
+                                    content=blocked,
+                                    expected_hash=content_hash(content),
+                                    guard=guard,
+                                ),
                             ),
-                        ),
-                        post_commit_fanout=commit_guard is None,
-                        publication_intents_out=publication_intents,
-                        batch_writer=batch_atomic_write,
-                    )
-                    assert isinstance(written_result, list)
-                    written = written_result
+                            post_commit_fanout=commit_guard is None,
+                            publication_intents_out=publication_intents,
+                            batch_writer=batch_atomic_write,
+                        )
+                        assert isinstance(written_result, list)
+                        written = written_result
                 if store.mark(current_job, media_jobs.BLOCKED, reason):
                     changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup

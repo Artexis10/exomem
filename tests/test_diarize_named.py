@@ -16,6 +16,12 @@ from exomem import extract, vault, voice_embed, voice_profiles
 from exomem.speaker_attribution import Profile
 
 
+@pytest.fixture(autouse=True)
+def decoded_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tests name audio files that do not exist; the decoder returns canned samples."""
+    monkeypatch.setattr(extract, "_decode_audio_float32", lambda _path: [0.0])
+
+
 class _FakeSeg:
     def __init__(self, text: str, start: float, end: float) -> None:
         self.text = text
@@ -27,7 +33,7 @@ class _FakeWhisper:
     def __init__(self, segs: list) -> None:
         self._segs = segs
 
-    def transcribe(self, path):  # faster-whisper returns (segments_generator, info)
+    def transcribe(self, audio, **options):  # faster-whisper returns (segments_generator, info)
         return iter(self._segs), None
 
 

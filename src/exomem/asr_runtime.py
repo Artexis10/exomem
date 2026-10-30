@@ -193,6 +193,18 @@ def is_compute_runtime_failure(error: BaseException | str) -> bool:
     return _COMPUTE_RUNTIME_ERROR_RE.search(message) is not None
 
 
+def is_cuda_out_of_memory(error: BaseException) -> bool:
+    """A failed CUDA allocation inside CTranslate2.
+
+    CTranslate2 raises a plain RuntimeError for it and has no type of its own, so its documented
+    message ("CUDA failed with error out of memory"; cuBLAS "CUBLAS_STATUS_ALLOC_FAILED") is the signal.
+    """
+    message = str(error)
+    return isinstance(error, RuntimeError) and (
+        "out of memory" in message.lower() or "CUBLAS_STATUS_ALLOC_FAILED" in message
+    )
+
+
 def as_compute_runtime_error(error: BaseException) -> ASRComputeRuntimeError | None:
     if not is_compute_runtime_failure(error):
         return None
