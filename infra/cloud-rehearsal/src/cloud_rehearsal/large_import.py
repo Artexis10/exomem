@@ -43,6 +43,7 @@ MAX_POOL_GIB = 95
 SAMPLE_SECONDS = 10
 DRAIN_POLLS, DRAIN_SECONDS, DRAIN_TIMEOUT = 3, 15, 900
 INDEX_LAPS = {"notes": 1, "media": 3}
+GATEWAY_REQUIRED = "CLOUD_GATEWAY_REQUIRED"  # the cell's documented refusal of a control-plane tool
 TRANSIENT_ATTEMPTS = 8
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
@@ -280,7 +281,9 @@ class Agent:
         self.retries: list[str] = []
         self.seconds: dict[str, list[float]] = {}
 
-    async def call(self, name: str, arguments: dict[str, Any], *, kind: str = "") -> tuple[dict, float]:
+    async def call(self, name: str, arguments: dict[str, Any], *, kind: str = "",
+                   tolerated: frozenset[str] = frozenset()) -> tuple[dict, float]:
+        """One tool call; an error code in `tolerated` comes back as `{"error_code": ...}` instead of failing."""
         label = f"{name}.{kind}" if kind else name
         last = "no attempt"
         for attempt in range(TRANSIENT_ATTEMPTS):
@@ -296,6 +299,8 @@ class Agent:
                 self.retries.append(f"{label}: MUTATION_WARMING")
                 await asyncio.sleep(max(0.1, (result.structured.get("error") or {}).get("retry_after_ms", 500) / 1000))
                 continue
+            if result.error_code in tolerated:
+                return {"error_code": result.error_code}, result.seconds
             if result.is_error or result.error_code:
                 raise StepFailure(f"{label} failed: {result.error_code or result.text()[:500]}")
             self.seconds.setdefault(label, []).append(result.seconds)
@@ -508,7 +513,13 @@ async def prove_stage(ctx: Context, agent: Agent, folder: Folder, row: Mapping[s
     folder.proof = receipt["proof"]
     states: set[str] = set()
     for _ in range(4):
-        body, seconds = await agent.call("observe_transfer", {"action": "status", "import_id": folder.import_id})
+        # The chart serves observe_transfer from the gateway only when cloudGateway.transferTools is on, and it
+        # is off by default; the CLI already waited for `done`, so a cell's documented refusal is reported, not fatal.
+        body, seconds = await agent.call("observe_transfer", {"action": "status", "import_id": folder.import_id},
+                                         tolerated=frozenset({GATEWAY_REQUIRED}))
+        if body.get("error_code") == GATEWAY_REQUIRED:
+            folder.report["observe_transfer"] = {"seconds": seconds, "served": False, "error_code": GATEWAY_REQUIRED}
+            return problems
         states = reported_states(body)
         folder.report["observe_transfer"] = {"seconds": seconds, "states_reported": sorted(states),
                                              "reply_head": json.dumps(body, sort_keys=True)[:1200]}
@@ -670,8 +681,14 @@ async def discard(ctx: Context, agent: Agent, plan: LargeImportPlan, folder: Fol
     leftover = fixture.check_stage(folder.entries, {path: (size, digest) for path, (size, digest) in listing.items()})
     folder.report["stage_left_files"] = len(listing)
     body, seconds = await agent.call("transfer_memory", {"action": "import_discard", "import_id": folder.import_id,
-                                                         "confirm": True})
+                                                         "confirm": True}, tolerated=frozenset({GATEWAY_REQUIRED}))
     folder.report["discard_call"] = {"seconds": seconds, "reply_head": json.dumps(body, sort_keys=True)[:600]}
+    if body.get("error_code") == GATEWAY_REQUIRED:
+        # Without the gateway's transfer tools, make the one write Substrate's discard route makes
+        # (cloud-imports.ts: requested_state = 'discard_requested'); cellctl then runs the real cleanup Job.
+        await ctx.execute("UPDATE exomem_cloud_imports SET requested_state = 'discard_requested' "
+                          "WHERE cell_id = $1 AND import_id = $2::uuid", ctx.a.cell_id, folder.import_id)
+        folder.report["discard_call"]["route"] = "substrate discard write; the gateway does not serve transfer_memory"
     row = await wait_import_state(ctx, folder.import_id, "discarded", min(900, max(60, plan.remaining())))
     await ctx.wait_cell(ctx.a.cell_id, lambda cell: cell.get("ready") and cell.get("observed_state") == "running"
                         and cell.get("hold_kind") is None, timeout=900, description="the cell to resume after the discard")
