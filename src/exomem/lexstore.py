@@ -2760,9 +2760,10 @@ class _AdmittedStatisticsEntry:
 
 
 #: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes for the term and 1 for its
-#: count (2 or 4 on a page where a word recurs over 255 or 65,535 times), so about 30 MiB, which holds about
-#: 8,700 pages of 400 distinct words. A corpus past it keeps no base, and its next build counts every page.
-_ADMITTED_BASE_TERMS_MAX = 3_500_000
+#: count (2 or 4 on a page where a word recurs over 255 or 65,535 times), so about 35 MiB, which holds about
+#: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
+#: no base, and its next build counts every page.
+_ADMITTED_BASE_TERMS_MAX = 4_000_000
 
 
 class _PageTerms(NamedTuple):
@@ -4498,8 +4499,10 @@ class LexicalStore:
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         self._filtered_term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         # (scope, catalogue generation, admitted-set digest) -> that admitted
-        # corpus's Okapi figures. A miss can reuse the math after a complete
-        # SQL input check. Each entry holds one vocabulary-sized mapping.
+        # corpus's Okapi figures. A miss can reuse the math when every admitted
+        # page's identity (content hash, path, KB folder, catalogue identity) is
+        # unchanged. Each entry holds one vocabulary-sized mapping and the page
+        # terms it was counted from.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
         # scope -> the pages the latest admitted corpus of that scope was built from;
         # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
