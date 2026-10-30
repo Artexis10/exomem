@@ -7557,6 +7557,14 @@ def find_inbound_wikilinks(
     return _select_inbound_wikilinks(snapshot, target_rel_path, visible)
 
 
+def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them."""
+    data = _inbound_index(vault_root)
+    with _INBOUND_INDEX_LOCK:
+        snapshots = {target: _snapshot_inbound(data, target) for target in targets}
+    return {target: _select_inbound_wikilinks(snapshot, target, None) for target, snapshot in snapshots.items()}
+
+
 def cached_inbound_wikilinks(
     vault_root: Path,
     target_rel_path: str,
