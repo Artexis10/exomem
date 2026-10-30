@@ -1,0 +1,17 @@
+## 1. Semantic writer
+
+- [x] 1.1 Commit structural creations as one batch with per-note closure, back-references and contract verdicts (`test_a_chunk_of_notes_commits_with_one_bullet_and_one_log_entry_per_note`).
+- [x] 1.2 Refuse a batch that plans one file twice and fall back per note (`test_two_notes_that_plan_one_file_give_the_outcomes_of_creating_them_one_by_one`).
+- [x] 1.3 Roll the batch back when installation fails (`test_a_failure_while_the_batch_installs_leaves_no_note_and_each_is_then_made_once`).
+
+## 2. Vocabulary gate
+
+- [x] 2.1 Validate a tuple of sealed manifests and name each derived write once (`test_a_tuple_of_manifests_names_every_derived_write_once`).
+- [x] 2.2 Refuse a claim that two manifests share (`test_two_manifests_claiming_one_path_are_refused`).
+- [x] 2.3 Refuse a claimed write whose bytes differ from its claim (`test_a_manifest_in_a_tuple_refuses_a_write_whose_bytes_differ_from_its_claim`).
+
+## 3. Adoption
+
+- [x] 3.1 Add `adopt.create_draft_notes` with one outcome per note and a per-note fallback.
+- [x] 3.2 Give a note whose target another writer took `TARGET_OCCUPIED` and commit the others (`test_a_target_taken_by_another_writer_refuses_that_note_and_commits_the_others`).
+- [ ] 3.3 Call `adopt.create_draft_notes` from `adoption_run` (a later change; that file belongs to another change).
