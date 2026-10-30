@@ -35,4 +35,7 @@
   - The prior text was kept as a linked `.prior-1` page.
   - The prior page had 236 timed lines, of which 34 were repeats, and 2907 words. The new page has 156 timed lines with no repeats and 2574 words. The same Estonian content sits in longer segments.
   - Word accuracy has no listened reference, so it is unverified in both versions.
-- [ ] 5.2 Record the new tool-surface digest as pending in the connector contract, and ask the operator to refresh the ChatGPT plugin so that ChatGPT can send `reprocess`.
+- [x] 5.2 Record the new tool-surface digest as pending in the connector contract, and ask the operator to refresh the ChatGPT plugin so that ChatGPT can send `reprocess`.
+  - The pending digest b92de8ca… is in the connector contract, and the installed service reports the same digest at `/health/ready`.
+  - On 30 Oct 2026 the operator refreshed the plugin's tools in ChatGPT. A fresh conversation then ran `bootstrap` and `search_memory` and read a note.
+  - Promoting the digest to registered stays open: the contract keeps it pending until the separate records-reader acceptance.
