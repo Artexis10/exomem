@@ -53,7 +53,7 @@ NOTE_FIELDS = frozenset({"title", "type", "folder", "topics", "projects", "body"
 CAPTURE_FIELDS = frozenset({"turns"})
 FRESH_FIELDS = frozenset({"question"})
 #: f34's preregistered aggregate digest of the held-out set: the SHA-256 of the
-#: custody manifest that lists its 80 case files in name order.
+#: custody manifest that lists its 40 case files and 40 key files in name order.
 HELD_OUT_MANIFEST_SHA256 = "2feb75c61589b5dacad5b2ef96a557118663141e4e690fc7912fedadfe97ae01"
 
 

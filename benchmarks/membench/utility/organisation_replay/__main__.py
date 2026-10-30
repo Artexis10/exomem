@@ -9,7 +9,8 @@ the seed builder and the readback then all load the arm's own package.
 3. ``check`` reports each way a run file departs from ``SCHEMA.md``.
 
 Exit codes are switch evaluation's: 0 done, 2 refused or aborted, 75 paused on
-a quota. Rerun the same ``run`` command to resume a paused or aborted situation.
+a quota. Rerun the same ``run`` command to resume: it skips each finished
+situation and resumes a paused or aborted one.
 """
 
 from __future__ import annotations

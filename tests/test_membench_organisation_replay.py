@@ -11,6 +11,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -26,10 +28,12 @@ from membench.utility.organisation_replay.situation import SituationRefused, loa
 from membench.utility.switch_eval.arms import arm_specs
 from membench.utility.switch_eval.session import (
     API_KEY_VARIABLES,
+    SERVER_START,
     AttemptResult,
     RunPaused,
     classify,
 )
+from membench.utility.switch_eval.tap import process_start_ticks
 
 TOY = {
     "id": "x01",
@@ -432,13 +436,18 @@ def test_a_candidate_that_changes_a_shipped_hook_still_pairs_with_the_baseline()
     assert runner.arm_parity(binding("1" * 64)) == runner.arm_parity(binding("2" * 64))
 
 
-def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkeypatch):
-    # Failure caught: a quota pause recorded as a struck situation, or a rerun that
-    # rebuilds the seed under a finished capture session and aborts on its inputs.
+class Crash(BaseException):
+    """The runner process dying: nothing in the runner catches it."""
+
+
+def stub_runner(tmp_path, monkeypatch, execute, readback=None):
+    """One toy situation on stubs: a seed that writes a page, an install that marks a
+    hook restart pending, ``execute(inputs, attempt_dir, slot)`` as the client and
+    ``readback()`` as the end-state readback. Returns a rerunnable ``run()``."""
+
     for name in API_KEY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
     seed_builds = []
-    attempts = []
 
     def build_seed(config, situation, slot, spec, run_dir, faults):
         seed_builds.append(slot)
@@ -452,6 +461,7 @@ def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkey
     def session_files(slot, spec, files_dir, *, hooked):
         files_dir.mkdir(parents=True, exist_ok=True)
         (files_dir / "mcp.json").write_text("{}", encoding="utf-8")
+        (slot.hook_home / "restart-pending").write_text("pending", encoding="utf-8")
         return {"mcp.json": files_dir / "mcp.json"}, frozenset()
 
     class Executor:
@@ -459,21 +469,14 @@ def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkey
             pass
 
         def execute_prepared(self, inputs, attempt_dir, slot):
-            attempts.append(inputs.tree)
-            if inputs.tree == "capture":
-                (slot.vault / "captured.md").write_text("capture write", encoding="utf-8")
-                return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "noted"}])
-            # The fresh session starts on the capture session's end state.
-            assert (slot.vault / "captured.md").exists()
-            if attempts.count("fresh") == 1:
-                return AttemptResult(outcome="quota", resets_at="later")
-            return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "recalled"}])
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            return execute(inputs, attempt_dir, slot)
 
     monkeypatch.setattr(runner, "_build_seed", build_seed)
     monkeypatch.setattr(runner, "session_files", session_files)
     monkeypatch.setattr(runner, "files_digests", lambda paths, slot: {})
     monkeypatch.setattr(runner, "ClaudeSessionExecutor", Executor)
-    monkeypatch.setattr(runner, "_child", lambda *args: {"read": {}})
+    monkeypatch.setattr(runner, "_child", lambda *args: (readback or (lambda: {"read": {}}))())
     situation = load_situation(write_situation(tmp_path, "x01.yaml", TOY))
     config = RunConfig(
         out=tmp_path / "out", arm="arm-x", profile="neutral-lexical", model="m",
@@ -486,14 +489,141 @@ def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkey
         "shapes": {"hookless": {"tools": [], "wired_hooks": [], "surface": {}}},
     }
 
+    def run():
+        path = runner.run_situation(config, binding, situation)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    run.seed_builds = seed_builds
+    return run
+
+
+def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkeypatch):
+    # Failure caught: a quota pause recorded as a struck situation, or a rerun that
+    # rebuilds the seed under a finished capture session and aborts on its inputs.
+    attempts = []
+
+    def execute(inputs, attempt_dir, slot):
+        attempts.append(inputs.tree)
+        if inputs.tree == "capture":
+            (slot.vault / "captured.md").write_text("capture write", encoding="utf-8")
+            return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "noted"}])
+        # The fresh session starts on the capture session's end state.
+        assert (slot.vault / "captured.md").exists()
+        if attempts.count("fresh") == 1:
+            return AttemptResult(outcome="quota", resets_at="later")
+        return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "recalled"}])
+
+    run = stub_runner(tmp_path, monkeypatch, execute)
+
     with pytest.raises(RunPaused):
-        runner.run_situation(config, binding, situation)
+        run()
     assert not (tmp_path / "out" / "x01" / "arm-x" / "run.json").exists()
 
-    run = json.loads(runner.run_situation(config, binding, situation).read_text(encoding="utf-8"))
+    result = run()
 
-    assert run["status"] == "ok"
+    assert result["status"] == "ok"
     assert attempts == ["capture", "fresh", "fresh"]
-    assert len(seed_builds) == 1
-    assert [(f["session"], f["kind"]) for f in run["faults"]] == [("fresh", "quota")]
-    assert [s["final_answer"] for s in run["sessions"]] == ["noted", "recalled"]
+    assert len(run.seed_builds) == 1
+    assert [(f["session"], f["kind"]) for f in result["faults"]] == [("fresh", "quota")]
+    assert [s["final_answer"] for s in result["sessions"]] == ["noted", "recalled"]
+
+
+def test_a_rerun_skips_a_finished_situation_instead_of_refusing_the_whole_run(
+    tmp_path, monkeypatch
+):
+    # Failure caught: a multi-situation rerun stopping at the first finished situation,
+    # so it never reaches the paused one after it.
+    attempts = []
+
+    def execute(inputs, attempt_dir, slot):
+        attempts.append(inputs.tree)
+        return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "fine"}])
+
+    run = stub_runner(tmp_path, monkeypatch, execute)
+    first = run()
+
+    assert run() == first
+    assert attempts == ["capture", "fresh"]
+
+
+def test_a_runner_killed_mid_attempt_ends_its_server_and_keeps_that_attempt(tmp_path, monkeypatch):
+    # Failure caught: a resumed attempt overwriting the killed draw's transcript and
+    # not counting it, or a server the dead runner left writing into the restored slot.
+    server = subprocess.Popen(["sleep", "60"])  # noqa: S607 - a stand-in orphan server
+    attempts = []
+
+    def execute(inputs, attempt_dir, slot):
+        attempts.append((inputs.tree, attempt_dir.name))
+        if len(attempts) == 1:
+            (attempt_dir / "transcript.jsonl").write_text("the killed draw", encoding="utf-8")
+            started = {"event": "server_started", "pid": server.pid}
+            started["start_ticks"] = process_start_ticks(server.pid)
+            (slot.runtime / "tap.jsonl").write_text(json.dumps(started) + "\n", encoding="utf-8")
+            raise Crash
+        return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "fine"}])
+
+    run = stub_runner(tmp_path, monkeypatch, execute)
+    try:
+        with pytest.raises(Crash):
+            run()
+        result = run()
+        killed = server.wait(timeout=5)
+    finally:
+        server.kill()
+
+    capture = tmp_path / "out" / "x01" / "arm-x" / "sessions" / "capture"
+    assert killed == -signal.SIGKILL
+    assert (capture / "attempt-1" / "transcript.jsonl").read_text() == "the killed draw"
+    assert (capture / "attempt-1" / "runtime" / "tap.jsonl").exists()
+    assert attempts[1:] == [("capture", "attempt-2"), ("fresh", "attempt-1")]
+    assert [(f["session"], f["attempt"], f["kind"]) for f in result["faults"]] == [
+        ("capture", 1, "harness_fault")
+    ]
+    assert result["status"] == "ok"
+
+
+def test_a_resume_after_capture_shows_the_fresh_session_the_hook_state_capture_left(
+    tmp_path, monkeypatch
+):
+    # Failure caught: a resume reinstalling the hooks, so the fresh session meets a
+    # restart-pending marker that an uninterrupted run's fresh session never sees.
+    seen = []
+    readbacks = []
+
+    def execute(inputs, attempt_dir, slot):
+        marker = slot.hook_home / "restart-pending"
+        if inputs.tree == "capture":
+            marker.write_text("consumed", encoding="utf-8")
+        else:
+            seen.append(marker.read_text(encoding="utf-8"))
+        return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "fine"}])
+
+    def readback():
+        readbacks.append(1)
+        if len(readbacks) == 1:
+            raise Crash
+        return {"read": {}}
+
+    run = stub_runner(tmp_path, monkeypatch, execute, readback)
+    with pytest.raises(Crash):
+        run()
+
+    assert run()["status"] == "ok"
+    assert seen == ["consumed"]
+
+
+def test_a_start_fault_past_its_retries_strikes_the_situation(tmp_path, monkeypatch):
+    # Failure caught: a server that never starts on this situation's seed aborting
+    # every rerun, with no way to close the situation.
+    def execute(inputs, attempt_dir, slot):
+        return AttemptResult(outcome="harness_fault", kind=SERVER_START, detail="no handshake")
+
+    run = stub_runner(tmp_path, monkeypatch, execute)
+    result = run()
+
+    assert result["status"] == "struck"
+    assert [(f["session"], f["attempt"]) for f in result["faults"]] == [
+        ("capture", 1),
+        ("capture", 2),
+        ("capture", 3),
+    ]
