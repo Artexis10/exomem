@@ -1163,7 +1163,7 @@ def lexical_selection_scope(
     from . import lexstore
 
     if (
-        recall_checkpoint is None or not freshness.event_indexes_enabled()
+        recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
         or lexstore.backend() == "python"
     ):
         yield
