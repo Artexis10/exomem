@@ -31,10 +31,6 @@ on:
   # A manual run also replays the live K3s suite (live-k3s below).
   workflow_dispatch:
   workflow_call:
-    inputs:
-      full:
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -47,7 +43,7 @@ jobs:
   checks:
     name: cellctl tests, pinned ruff and platform chart
     # Base-controlled release validation permits only version changes; full CI proves the base.
-    if: &not-release-pr ${{ inputs.full || (github.head_ref != 'release-please--branches--main' && (github.event_name != 'pull_request' || github.event.pull_request.draft)) }}
+    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -150,7 +146,6 @@ jobs:
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
-          FULL_CI: ${{ inputs.full }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           # Every file whose change can alter what the live suite proves:
@@ -163,10 +158,6 @@ jobs:
           # non-ASCII characters, hence the optional leading quote.
           LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|infra/cellctl/tests/test_export_storage\.py$|infra/cellctl/src/cellctl/exports\.py$|src/exomem/cloud_(import[^/]*|export)\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$)'
         run: |
-          if test "$FULL_CI" = true; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           case "$EVENT" in
             # Reusable workflows retain the full-CI caller's scheduled event.
             workflow_dispatch|schedule) run=true ;;
