@@ -82,6 +82,7 @@ from typing import Any, Generic, Literal, TypeVar
 from . import call_spans, foreground_priority, request_budget, reserved_paths, state_paths
 from .find_types import RankingPage
 from .kbdir import kb_dirname
+from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
 
 log = logging.getLogger(__name__)
@@ -939,6 +940,74 @@ class RepairCause(enum.StrEnum):
 
     WATCHER_BATCH_STALE = "watcher_batch_stale"
     WATCHER_HANDOFF_FAILED = "watcher_handoff_failed"
+    # The worker's own re-arms, so a chain of whole-corpus passes names its link.
+    PASS_DECLINED = "pass_declined"
+    PUBLISH_UNPROMOTED = "publish_unpromoted"
+    REOBSERVED_DURING_PASS = "reobserved_during_pass"
+    PASS_FAILED = "pass_failed"
+    TARGETED_ESCALATED = "targeted_escalated"
+    TARGETED_UNPROMOTED = "targeted_unpromoted"
+    TARGETED_YIELDED = "targeted_yielded"
+    STRANDED_SCOPE = "stranded_scope"
+
+
+class RepairStage(enum.StrEnum):
+    """The step of a repair pass that produced its result, as a closed log token.
+
+    A full pass moves through these in order: `build` (walk and materialize),
+    `materialize_replay`, `census` (the independent source walk and its
+    comparison), `census_replay`, `barrier_replay`, then `publish`. `catchup`
+    is the off-barrier replay after a capped barrier suffix overflowed.
+    `targeted` covers a deferred-path retry or a lag-only catch-up.
+    """
+
+    BUILD = "build"
+    MATERIALIZE_REPLAY = "materialize_replay"
+    CENSUS = "census"
+    CENSUS_REPLAY = "census_replay"
+    BARRIER_REPLAY = "barrier_replay"
+    CATCHUP = "catchup"
+    PUBLISH = "publish"
+    TARGETED = "targeted"
+
+
+def _log_repair_started(kind: str, paths: int, causes: set[RepairCause]) -> None:
+    """Name one repair pass's kind and causes in a hosted-safe structured event."""
+    log_event(
+        log,
+        logging.INFO,
+        "lexical_repair_started",
+        fields={
+            "kind": kind,
+            "paths": paths,
+            "causes": ",".join(sorted(causes)) or "unattributed",
+        },
+    )
+
+
+def _log_repair_finished(
+    kind: str,
+    result: str | None,
+    stage: RepairStage,
+    started: float,
+    *,
+    excused: int = 0,
+    promoted: bool | None = None,
+) -> None:
+    """Name one repair pass's result and the stage that produced it.
+
+    Every field is a closed token or a count, so a hosted cell keeps the line.
+    """
+    fields: dict[str, object] = {
+        "kind": kind,
+        "result": result or "error",
+        "stage": str(stage),
+        "duration_s": round(max(0.0, time.monotonic() - started), 3),
+        "excused": excused,
+    }
+    if promoted is not None:
+        fields["promoted"] = promoted
+    log_event(log, logging.INFO, "lexical_repair_finished", fields=fields)
 
 
 #: Why each pending request was made, until the worker names them in its pass line.
@@ -2042,15 +2111,16 @@ def _schedule_runtime_catalog_repair(
     *,
     deferred_paths: list[Path] | None = None,
     lag_only: bool = False,
+    cause: RepairCause | None = None,
 ) -> None:
     """Order admission revocation before the repair that may restore it."""
     _mark_runtime_retrieval_unavailable_if_current(vault_root)
     if deferred_paths is not None:
-        _schedule_repair(vault_root, deferred_paths=deferred_paths)
+        _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
     elif lag_only:
-        _schedule_repair(vault_root, lag_only=True)
+        _schedule_repair(vault_root, lag_only=True, cause=cause)
     else:
-        _schedule_repair(vault_root)
+        _schedule_repair(vault_root, cause=cause)
 
 
 def request_repair(
@@ -2175,12 +2245,16 @@ def clear_stores() -> None:
         )
 
 
-def _request_full_rebuild(key: Path, *, lag_only: bool = False) -> None:
+def _request_full_rebuild(
+    key: Path, *, lag_only: bool = False, cause: RepairCause | None = None
+) -> None:
     """Record a pending full request; the caller holds `_REPAIRS_LOCK`.
 
     A pending request stays lag-only only while every request folded into it
     was lag-only, so one request with any other cause restores the rebuild.
     """
+    if cause is not None:
+        _REPAIR_CAUSES.setdefault(key, set()).add(cause)
     if not lag_only:
         _LAG_ONLY_REBUILDS.discard(key)
     elif key not in _FULL_REBUILD_REQUESTED:
@@ -2217,7 +2291,7 @@ def _yield_targeted_repair(
         error,
     )
     if lag_only:
-        _request_full_rebuild(key, lag_only=True)
+        _request_full_rebuild(key, lag_only=True, cause=RepairCause.TARGETED_YIELDED)
     if paths:
         _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
     _REPAIRS_IN_FLIGHT.discard(key)
@@ -2358,6 +2432,10 @@ def _schedule_repair(
         full_passes = 0
         paths: list[Path] = []
         outcome: str | None = None
+        # The pass whose finish event is still owed, and when it started.
+        pass_kind: str | None = None
+        pass_started = time.monotonic()
+        store = None
         try:
             store = get_store(vault_root)
             while True:
@@ -2421,14 +2499,28 @@ def _schedule_repair(
                 if rebuild and lag_only:
                     with _REPAIRS_LOCK:
                         _set_repair_progress(key, "targeted")
+                    catch_up_started = time.monotonic()
+                    _log_repair_started("catch_up", len(paths), causes)
                     try:
                         caught_up = _caught_up_without_rebuild(vault_root, store)
                     except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
                         if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
                             raise
+                        _log_repair_finished(
+                            "catch_up",
+                            "source_changed" if isinstance(error, _SourceMoved) else "error",
+                            RepairStage.TARGETED,
+                            catch_up_started,
+                        )
                         with _REPAIRS_LOCK:
                             _yield_targeted_repair(key, paths, error, lag_only=True)
                         return
+                    _log_repair_finished(
+                        "catch_up",
+                        "targeted" if caught_up else "declined",
+                        RepairStage.TARGETED,
+                        catch_up_started,
+                    )
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
                         # next iteration consumes it with its own cause.
@@ -2436,13 +2528,9 @@ def _schedule_repair(
                         outcome = "targeted"
                         if not paths:
                             continue
-                log.info(
-                    "lexical repair pass starting scope=%s paths=%d causes=%s",
-                    "full" if rebuild else "targeted",
-                    len(paths),
-                    ",".join(sorted(causes)) or "unattributed",
-                )
-                targeted_started = time.monotonic()
+                pass_kind = "full" if rebuild else "targeted"
+                _log_repair_started(pass_kind, len(paths), causes)
+                targeted_started = pass_started = time.monotonic()
                 try:
                     # One pass reuses placement for its pages; it starts no task.
                     with state_paths.resolution_scope():
@@ -2450,9 +2538,21 @@ def _schedule_repair(
                 except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
                     if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
                         raise
+                    _log_repair_finished(
+                        pass_kind,
+                        "source_changed" if isinstance(error, _SourceMoved) else "error",
+                        RepairStage.TARGETED,
+                        pass_started,
+                    )
+                    pass_kind = None
                     with _REPAIRS_LOCK:
                         _yield_targeted_repair(key, paths, error, lag_only=lag_only)
                     return
+                if full_pass and not rebuild:
+                    _log_repair_finished(
+                        pass_kind, "escalated", RepairStage.TARGETED, pass_started
+                    )
+                    pass_kind = None
                 if paths and not rebuild:
                     # The deferral above logs "retrying these paths" and, until
                     # now, nothing ever said what became of them. A deferral
@@ -2472,7 +2572,7 @@ def _schedule_repair(
                             # A targeted retry after this worker's full pass just
                             # proved that another full repair is necessary. Keep
                             # both claims for the next bounded flight.
-                            _request_full_rebuild(key)
+                            _request_full_rebuild(key, cause=RepairCause.TARGETED_ESCALATED)
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                             _FULL_REBUILD_REOBSERVED.pop(key, None)
@@ -2492,6 +2592,10 @@ def _schedule_repair(
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _FULL_REBUILDS_IN_FLIGHT.add(key)
                         _set_repair_progress(key, "building")
+                    if pass_kind is None:
+                        pass_kind = "full"
+                        _log_repair_started(pass_kind, len(paths), causes)
+                        pass_started = time.monotonic()
                     with state_paths.resolution_scope():  # as above: one pass, no task
                         repaired = store.rebuild_atomic()
                     # Telemetry is observational, never part of the scheduler's
@@ -2530,6 +2634,17 @@ def _schedule_repair(
                         if offline_proof is not None:
                             promotion_proof.update(offline_proof)
                             promoted = True
+                _log_repair_finished(
+                    pass_kind,
+                    outcome,
+                    getattr(store, "_last_rebuild_stage", RepairStage.BUILD)
+                    if full_pass
+                    else RepairStage.TARGETED,
+                    pass_started,
+                    excused=getattr(store, "_last_census_excused", 0) if full_pass else 0,
+                    promoted=promoted,
+                )
+                pass_kind = None
                 if full_pass:
                     with _REPAIRS_LOCK:
                         # Keep the pass active through readiness promotion. A
@@ -2559,11 +2674,16 @@ def _schedule_repair(
                             # proof succeed. Preserve a declined pass across the
                             # bounded idle boundary even when nobody happened to
                             # re-observe staleness while it was running.
-                            _request_full_rebuild(key)
+                            _request_full_rebuild(
+                                key,
+                                cause=RepairCause.PUBLISH_UNPROMOTED
+                                if repaired
+                                else RepairCause.PASS_DECLINED,
+                            )
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
-                            _request_full_rebuild(key)
+                            _request_full_rebuild(key, cause=RepairCause.REOBSERVED_DURING_PASS)
                         if repaired and key in _FULL_REBUILD_REQUESTED:
                             # Another proof can win admission during promotion.
                             # Re-prove this publication before rebuilding it.
@@ -2576,23 +2696,34 @@ def _schedule_repair(
                     # request, but re-prove before rebuilding: another proof
                     # may already have won the readiness admission update.
                     with _REPAIRS_LOCK:
-                        _request_full_rebuild(key, lag_only=True)
+                        _request_full_rebuild(
+                            key, lag_only=True, cause=RepairCause.TARGETED_UNPROMOTED
+                        )
                         _PUBLISHED_HANDOFF_PENDING.add(key)
                 rebuild = False
                 full_pass = False
                 paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
             log.warning("lexical background repair skipped (%s)", e)
+            if pass_kind is not None:
+                _log_repair_finished(
+                    pass_kind,
+                    "error",
+                    getattr(store, "_last_rebuild_stage", RepairStage.BUILD)
+                    if full_pass
+                    else RepairStage.TARGETED,
+                    pass_started,
+                )
             with _REPAIRS_LOCK:
                 # Put back what this pass consumed and could not finish. Repair
                 # stays best-effort; the runtime recovery owner or a later
                 # caller can retry the preserved claim in a fresh flight.
                 if rebuild:
-                    _request_full_rebuild(key)
+                    _request_full_rebuild(key, cause=RepairCause.PASS_FAILED)
                 if paths:
                     _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                 if _FULL_REBUILD_REOBSERVED.get(key):
-                    _request_full_rebuild(key)
+                    _request_full_rebuild(key, cause=RepairCause.REOBSERVED_DURING_PASS)
                 _FULL_REBUILD_REOBSERVED.pop(key, None)
                 _PUBLISHED_HANDOFF_PENDING.discard(key)
                 _FULL_REBUILDS_IN_FLIGHT.discard(key)
@@ -4456,6 +4587,10 @@ class LexicalStore:
         self._stranded_scopes: set[str] = set()
         self._failed = False  # runtime-retired for this process
         self._last_rebuild_result: str | None = None
+        # The step that produced `_last_rebuild_result`, and how many paths the
+        # pass's source census excused because its own replay re-proved them.
+        self._last_rebuild_stage = RepairStage.BUILD
+        self._last_census_excused = 0
         # Per-path build signatures of a detached catalogue this process
         # adopted, awaiting the one heal that reconciles it (single use).
         self._adopted_rows: dict[str, tuple] | None = None
@@ -6945,7 +7080,7 @@ class LexicalStore:
                 break
         if not still_stranded:
             return False
-        _schedule_runtime_catalog_repair(self.vault_root)
+        _schedule_runtime_catalog_repair(self.vault_root, cause=RepairCause.STRANDED_SCOPE)
         return True
 
     def _prepare_reconcile_source_proof(
@@ -7188,6 +7323,8 @@ class LexicalStore:
         freshness_module.note_custody_rebuild(_CORPUS_CUSTODY_SEAM)
         freshness_module.note_custody_rebuild(_CATALOGUE_CUSTODY_SEAM)
         self._last_rebuild_result = None
+        self._last_rebuild_stage = RepairStage.BUILD
+        self._last_census_excused = 0
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
         try:
@@ -7303,6 +7440,7 @@ class LexicalStore:
         # of the earlier target capture. Replay that retained suffix now, before
         # the independent source proof, so ordinary watcher traffic cannot force
         # a whole-vault retry merely by arriving during a long build.
+        self._last_rebuild_stage = RepairStage.MATERIALIZE_REPLAY
         rebased_targets = self._rebase_detached_catalog(
             temp_path,
             scope_targets,
@@ -7321,6 +7459,7 @@ class LexicalStore:
             # where another process edits the shared corpus without this process
             # observing a watcher event. This is background-only: no request path
             # pays for the walk.
+            self._last_rebuild_stage = RepairStage.CENSUS
             if catalog_semantic_identity(self.vault_root) != start_identity:
                 self._last_rebuild_result = "identity_changed"
                 return False
@@ -7336,12 +7475,14 @@ class LexicalStore:
             if any(final_triples[scope] != target[3] for scope, target in scope_targets.items()):
                 # Replay an observed suffix before discarding the completed build;
                 # the same independent census must still prove its exact target.
+                self._last_rebuild_stage = RepairStage.CENSUS_REPLAY
                 rebased = self._rebase_detached_catalog(
                     temp_path, scope_targets, start_identity, max_paths=None,
                 )
                 if rebased is None:
                     return False
                 scope_targets = rebased
+                self._last_rebuild_stage = RepairStage.CENSUS
             for scope, final_triple in final_triples.items():
                 if final_triple != scope_targets[scope][3]:
                     log.info(
@@ -7362,6 +7503,7 @@ class LexicalStore:
         while True:
             _mark_active_repair_phase(self.vault_root, "publishing")
             needs_off_barrier_catchup = False
+            self._last_rebuild_stage = RepairStage.BARRIER_REPLAY
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_PUBLISH):
                 # Close the final watcher race under the publication barrier. This
                 # is bounded to the foreground delta cap, so the barrier never
@@ -7381,6 +7523,7 @@ class LexicalStore:
                     if not needs_off_barrier_catchup:
                         return False
                 else:
+                    self._last_rebuild_stage = RepairStage.PUBLISH
                     scope_targets = rebased_targets
                     temp_targets = {
                         scope: target[2] for scope, target in scope_targets.items()
@@ -7412,6 +7555,7 @@ class LexicalStore:
             # blocking writers. Rebase it without the barrier, then repeat the
             # independent source proof before another short final suffix.
             catchup_attempts += 1
+            self._last_rebuild_stage = RepairStage.CATCHUP
             rebased_targets = self._rebase_detached_catalog(
                 temp_path,
                 scope_targets,
