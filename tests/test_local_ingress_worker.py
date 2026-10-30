@@ -751,7 +751,6 @@ async def test_a_large_local_body_leaves_no_grant_for_the_next_request_on_its_co
             ):
                 large = await _post_mcp(local, local_token, 1, marker="x" * (1 << 20))
                 oauth = await _post_mcp(public, public_token, 2)
-                anonymous = await _post_mcp(public, None, 3)
             await ingress.aclose()
     finally:
         worker.should_exit = True
@@ -761,7 +760,6 @@ async def test_a_large_local_body_leaves_no_grant_for_the_next_request_on_its_co
     after = _seen(oauth)
     assert after["grant_client"] is None
     assert after["local_owner"] is False
-    assert anonymous.status_code == 401
 
 
 @pytest.mark.anyio

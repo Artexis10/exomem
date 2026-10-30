@@ -1333,8 +1333,8 @@ def run(
         # to turn a remote endpoint into unauthenticated local MCP.
         # Every request starts from an empty context: uvicorn otherwise runs a
         # request in whatever context the connection's reader last kept, which
-        # can be an earlier request's (CPython issue 140947). No lifespan here
-        # sets a context variable that requests read.
+        # can be an earlier request's (CPython issue 140947). No Exomem lifespan
+        # sets a context variable, and FastMCP sets its own again per request.
         uvicorn_config: dict[str, object] = {"reset_contextvars": True}
         if worker_socket is not None:
             uvicorn_config["uds"] = str(worker_socket)
