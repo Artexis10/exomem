@@ -47,7 +47,7 @@ The system SHALL decide an original's state through one function, from the prese
 
 ### Requirement: Eviction frees volume space only from confirmed, idle originals
 
-When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The cell SHALL check the target after each offload and each media job, and on a timer. The eviction target SHALL be lower than the online-growth trigger. An original SHALL be eligible only when it is cached and has no running media job, pin, hydration or download. It SHALL also be unread by any owner, or last read by an owner at least the configured minimum idle age ago, as the cell's own record shows. Only an owner's playback, download or viewing SHALL count as a read; offload, extraction, hydration for processing and export packing SHALL NOT. A pending media job that no worker has claimed SHALL NOT keep an original on the volume. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
+When volume use passes the configured eviction target, the cell SHALL evict cached originals, largest first and longest idle on ties, until use falls below the target minus the configured margin. The cell SHALL check the target after each offload and each media job, and on a timer. The eviction target SHALL be lower than the online-growth trigger. An original SHALL be eligible only when it is cached and nothing keeps it on the volume. A media job that a worker has claimed SHALL keep its original until the job completes, fails or is blocked, also while a timeout slice, a memory brake or an engine wait returns it to the queue as pending. A pin, a hydration or a download SHALL keep its original. A pending media job that no worker has claimed, a failed job and a blocked job SHALL NOT keep an original. An eligible original SHALL also be unread by any owner, or last read by an owner at least the configured minimum idle age ago, as the cell's own record shows. Only an owner's playback, download or viewing SHALL count as a read; offload, extraction, hydration for processing and export packing SHALL NOT. Before it evicts an original, or reuses a version for an offload, the cell SHALL confirm with a head request that the pinned version exists with the recorded size. A reference to an absent version SHALL count as no reference: a present original returns to `local` and is offloaded again, and an absent one is `missing` and is reported so.
 
 #### Scenario: A media-heavy cell fills up
 
@@ -57,14 +57,24 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 #### Scenario: An original is still being processed
 
-- **WHEN** an original has a running media job, a held pin or an active download
+- **WHEN** an original has a claimed media job, a held pin or an active download
 - **THEN** eviction skips it
 
 #### Scenario: A recording waits for transcription
 
-- **WHEN** an imported recording that no owner has read has a pending transcription job that no worker has claimed, and volume use is above the target
+- **WHEN** a filed recording that no owner has read has a pending transcription job that no worker has claimed, and volume use is above the target
 - **THEN** eviction removes the recording from the volume
 - **AND** the worker hydrates it when it claims the job, and that hydration records no read
+
+#### Scenario: A long transcription keeps its recording between slices
+
+- **WHEN** a claimed transcription job returns to the queue at the end of a timeout slice, and volume use is above the target
+- **THEN** eviction skips its recording until the job ends
+
+#### Scenario: A failed job does not pin
+
+- **WHEN** a recording that no owner has read has only a failed media job, and volume use is above the target
+- **THEN** eviction treats the recording as eligible and removes it in size order
 
 #### Scenario: An owner-read recording stays
 
@@ -85,6 +95,21 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 - **WHEN** an original's upload has not been confirmed
 - **THEN** the original is not evicted, whatever the volume use
+
+### Requirement: A media job defers when its original cannot be hydrated
+
+When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration that fails for a transport error or for lack of hydration capacity SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
+
+#### Scenario: The edge is down when a job is claimed
+
+- **WHEN** a worker claims a transcription job for an evicted recording and the media edge is unreachable
+- **THEN** the job returns to the queue with its attempt count unchanged
+- **AND** a later claim hydrates the recording and continues from the recorded speech progress
+
+#### Scenario: Hydration capacity is in use
+
+- **WHEN** a worker claims a job for an evicted original while other hydrations hold the whole hydration capacity
+- **THEN** the job returns to the queue with its attempt count unchanged, and no failure is recorded
 
 ### Requirement: Offload work precedes extraction
 
@@ -124,85 +149,6 @@ The cell SHALL hydrate an evicted original by fetching the version its reference
 
 - **WHEN** a hydrated file's SHA-256 differs from the sidecar
 - **THEN** the request fails with `MEDIA_ORIGINAL_UNVERIFIED`, the temporary file is removed and nothing appears at the original's path
-
-### Requirement: Staged import members are stored before they are filed
-
-On a cell selected for the media store, the runtime SHALL store each store-bound member of an `adopt` import stage by the steps of an offload, protection record included. The runtime SHALL remove the staged file only after it confirms the stored version's size and digest and records a stage reference to that version in the media job ledger.
-
-A member is store-bound when its import receipt entry lists it, its staged file matches the listed size and SHA-256, it is not text, and its size is at most the store's per-object bound. Every other member is resident and stays on the volume.
-
-#### Scenario: A window of recordings leaves the volume
-
-- **WHEN** a window of twenty recordings and five notes lands and the runtime starts
-- **THEN** each recording is stored, has a stage reference and is removed from the volume
-- **AND** the five notes stay on the volume
-
-#### Scenario: The edge is unreachable
-
-- **WHEN** the media edge is unreachable when the runtime starts after a window
-- **THEN** every member stays on the volume and no stage reference is written
-- **AND** the stage offload jobs stay queued and retryable
-
-#### Scenario: A staged file changed
-
-- **WHEN** a staged file's size or SHA-256 differs from its import receipt entry
-- **THEN** the file stays on the volume and nothing is stored for it
-
-#### Scenario: A crash before the reference write loses nothing
-
-- **WHEN** the runtime stops after an upload is confirmed and before the stage reference is durable
-- **THEN** the staged file is still on the volume
-- **AND** the next start stores it again and reuses the confirmed version
-
-#### Scenario: A duplicate member uploads nothing
-
-- **WHEN** a staged member has the same SHA-256 as a version that a live sidecar references
-- **THEN** stage offload reuses that version and uploads no byte
-
-### Requirement: One function decides where a staged member is
-
-Every consumer of an import stage SHALL decide a member's state, local, stored or missing, through one function that reads the member's import receipt entry, its stage reference and its staged file.
-
-#### Scenario: A stored member is not missing
-
-- **WHEN** a scan meets a listed member whose file left the volume after its stage reference was recorded
-- **THEN** the member's state is stored, and the scan reports no failure for it
-
-#### Scenario: A listed member has vanished
-
-- **WHEN** a listed member has neither a staged file nor a stage reference
-- **THEN** the member's state is missing, and the scan reports it as missing
-
-### Requirement: A stage reference ends with its import
-
-At each start, the runtime SHALL release every stage reference whose member no import receipt lists, which includes every member of a discarded import.
-
-#### Scenario: Discard releases the references
-
-- **WHEN** an owner discards an import with three stored members that adoption has not filed, and the runtime starts again
-- **THEN** the runtime releases the three stage references
-- **AND** only the retention requirement's rules can destroy their versions
-
-### Requirement: Adoption files a stored staged member by reference
-
-Adoption SHALL file a stored staged member by writing a Source whose stored-object reference names the stage version, writing no bytes, and releasing the stage reference only after the Source's sidecar is synced.
-
-#### Scenario: A large video files without a volume write
-
-- **WHEN** adoption applies a stored 6 GiB staged video
-- **THEN** the Source's original is `evicted` and the volume gains no byte for it
-- **AND** `exomem cloud download` returns bytes whose SHA-256 equals the import receipt entry's
-- **AND** the run counts the item as filed by reference, not as consumed
-
-#### Scenario: A stop between the sidecar and the release
-
-- **WHEN** the process stops after the Source's sidecar is synced and before the stage reference is released
-- **THEN** the next apply reports the item as already applied and releases the reference
-
-#### Scenario: A local member files by copy
-
-- **WHEN** a staged member is still on the volume because the store was unreachable
-- **THEN** adoption files it by copy and writes no stage reference
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
@@ -292,7 +238,7 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions.
 
-Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list three kinds of name: every version that the captured sidecars reference, trash included; every version that a captured stage reference names; and every object name that a captured protection record names. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
+Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
 
 Only cellctl's key-management authority SHALL destroy versions. It SHALL destroy them only within a backup hold, after that hold's backup and prune succeed, and only a version that meets all of these:
 - it appears in a listing of the cell's media prefix that cellctl completed before it took the capture of the newest retained snapshot;
@@ -321,12 +267,6 @@ No age or time cutoff SHALL decide destruction. cellctl SHALL delete the manifes
 - **WHEN** any retained snapshot of a cell lacks a readable manifest
 - **THEN** cellctl destroys no version of that cell
 
-#### Scenario: A stored window is not filed when a snapshot is taken
-
-- **WHEN** a snapshot captures a stage reference for a stored member that adoption has not filed, and the owner then discards the import
-- **THEN** the snapshot's manifest names the version
-- **AND** cellctl destroys the version only after that snapshot is pruned
-
 ### Requirement: Owners retrieve originals only with their own authority
 
 The gateway SHALL serve a download route for originals that works only with the owner's signed-in session. The route SHALL forward to the cell, which SHALL hydrate an evicted original if needed and stream it with byte-range support. A tool result MAY carry this route's link, because the link grants nothing without the session. A tool result SHALL NOT carry a bearer link, a presigned URL or ciphertext metadata. `exomem cloud download` SHALL fetch an original over OAuth, stream it to a temporary file, verify size and SHA-256 against the record, and rename it into place only after both match; any failure SHALL delete the partial file.
@@ -348,16 +288,17 @@ The gateway SHALL serve a download route for originals that works only with the 
 
 ### Requirement: The media allowance is checked before bytes arrive
 
-Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. The cell SHALL meter media storage from the versions its sidecars and stage references name, counting each version once. Versions kept only for retained backups SHALL NOT count against the allowance. cellctl SHALL meter each prefix's physical bytes from the bucket listing for the operator. An upload whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. The Cloud control plane SHALL refuse an import at creation only when the declared store bytes of its whole series exceed the whole allowance. The cell SHALL decide the remainder when it stores each staged member. An original or staged member that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media. Status SHALL report two separately named figures. Vault storage counts the volume's use without cached copies of stored originals, against the volume size. Media storage counts each stored original once, against the allowance. A figure that cannot be read SHALL be reported as unknown, never as zero.
+Each cell SHALL have a media allowance, separate from its volume size, set as a configured value in the one limits source. The cell SHALL meter media storage from the versions its sidecars reference, counting each version once. Versions kept only for retained backups SHALL NOT count against the allowance. cellctl SHALL meter each prefix's physical bytes from the bucket listing for the operator. An upload or import whose declared media bytes exceed the remaining allowance SHALL be refused before any byte is accepted, with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown. An original that the allowance cannot cover SHALL stay local, and status SHALL report it. The volume size cap SHALL NOT limit stored media. Status SHALL report two separately named figures: vault storage, which counts the volume's use without cached copies of stored originals, against the volume size; and media storage, which counts each stored original once, against the allowance. A figure that cannot be read SHALL be reported as unknown, never as zero.
 
 The owner allowance SHALL count original plaintext bytes, including versions referenced by sidecars in trash until trash is emptied.
 Multiple live or trash references to one version SHALL count once.
 The operator's physical meter SHALL count provider ciphertext bytes separately.
 
-The owner meter SHALL require complete canonical reference custody, including Trash and stage references, and SHALL report unknown when that custody is incomplete.
+The owner meter SHALL require complete canonical reference custody, including Trash, and SHALL report unknown when that custody is incomplete.
 It SHALL exclude registry-owned private state without reusing recall exclusions.
 A malformed potential companion or conflicting binding SHALL NOT prove that no referenced version exists.
-Offload, stage offload included, SHALL check the allowance before encryption or provider upload, and SHALL recheck its proposed reference union before publication.
+Offload SHALL check the allowance before encryption or provider upload, and SHALL recheck its proposed reference union before publication.
+A batch of offloads SHALL take one owner census and SHALL charge each version that it newly references to that census, instead of one census per member.
 A quota failure or unknown meter SHALL leave the original local with retryable demand.
 
 #### Scenario: A complete meter meets incomplete custody
@@ -390,6 +331,12 @@ A quota failure or unknown meter SHALL leave the original local with retryable d
 - **WHEN** an owner starts an upload whose declared size exceeds the remaining media allowance
 - **THEN** the upload is refused with `MEDIA_ALLOWANCE_EXCEEDED` and the configured allowance before any byte is sent
 
+#### Scenario: A batch of offloads takes one census
+
+- **WHEN** the worker offloads a batch of 500 filed originals
+- **THEN** it reads the owner's references once for the batch
+- **AND** each member's admission and publication check use that census with the versions that the batch has already published
+
 #### Scenario: Offload meets a full allowance
 
 - **WHEN** an original's offload would exceed the remaining allowance
@@ -404,49 +351,6 @@ A quota failure or unknown meter SHALL leave the original local with retryable d
 
 - **WHEN** the cell cannot read its sidecar references, or its volume use, during a status call
 - **THEN** the affected figure is reported as unknown, not as zero
-
-#### Scenario: Stage references count toward the allowance
-
-- **WHEN** stage references name 30 GB of versions that no sidecar references, and sidecars reference 60 GB of other versions
-- **THEN** the owner meter reports 90 GB against the media allowance
-- **AND** a version that both a stage reference and a sidecar name counts once
-
-#### Scenario: A series is larger than the whole allowance
-
-- **WHEN** an import's series declares 150 GB of store bytes and the media allowance is 100 GB
-- **THEN** the Cloud control plane refuses the import at creation with `MEDIA_ALLOWANCE_EXCEEDED` and the allowance shown
-- **AND** no byte is sent
-
-#### Scenario: A series within the whole allowance is admitted
-
-- **WHEN** an import's series declares 80 GB of store bytes, the allowance is 100 GB, and the control plane's last usage reading is 40 GB
-- **THEN** the control plane admits the import at creation
-- **AND** the cell decides the remainder with its live meter when it stores each staged member
-
-#### Scenario: A staged member exceeds the remaining allowance
-
-- **WHEN** a staged member's size exceeds the remaining media allowance
-- **THEN** the member stays on the volume and status names the allowance as the reason
-- **AND** stage offload sends no byte for it
-
-### Requirement: cellctl publishes the media limits that the cell enforces
-
-cellctl SHALL publish the media allowance and the per-object bound of each cell that is selected for the media store. It SHALL take them from the configuration that it renders into the cell's store policy, and write them only when they differ from the published values.
-
-#### Scenario: A selected cell publishes its limits
-
-- **WHEN** cellctl reads a cell that is selected for the media store
-- **THEN** it publishes an allowance and a per-object bound equal to the values in that cell's rendered store policy
-
-#### Scenario: A cell that is not served publishes nothing
-
-- **WHEN** cellctl reads a cell that is not selected, or that only retains a disabled store
-- **THEN** it publishes NULL for that cell's media limits
-
-#### Scenario: Nothing changed
-
-- **WHEN** the computed media limits equal the published ones
-- **THEN** cellctl writes nothing
 
 ### Requirement: Deleting originals and cells removes their stored objects
 
@@ -508,3 +412,9 @@ The media store SHALL be off unless a cell is on the canary list or the fleet sw
 
 - **WHEN** the store is turned off for a cell that has evicted originals
 - **THEN** the cell hydrates every evicted original back, keeps its edge egress until none remain, and then loses that egress
+
+#### Scenario: Stored media exceed the volume
+
+- **WHEN** the store is turned off for a cell whose evicted originals do not fit its volume within its size cap
+- **THEN** the cell keeps its edge egress and its hydration path, and every evicted original stays readable
+- **AND** the cell reports the shortfall in bytes

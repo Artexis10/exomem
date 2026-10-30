@@ -105,7 +105,12 @@ Hydration classifies only backend open and read errors as transport failures; lo
 An import larger than the volume needs room while it runs. Two rules change, and the text above stays as the first design.
 
 - **M3, when eviction runs.** Eviction runs after each offload and each media job when use is above the target, and on a timer. It no longer waits for the worker's start-up scan. It takes candidates from an indexed query on the cache table, which gains a size column. It does not read every sidecar.
-- **M4, what counts as use.** Idle time counts owner reads only: playback, download and viewing. Offload, extraction, hydration for processing and export packing record no read. An original that no owner has read is eligible whatever the minimum idle age. A pending job that no worker has claimed no longer keeps an original on the volume. A running job, a pin or a download still does. The worker hydrates an evicted original when it claims the job.
+- **M4, what counts as use.** Idle time counts owner reads only: playback, download and viewing. Offload, extraction, hydration for processing and export packing record no read. An original that no owner has read is eligible whatever the minimum idle age. Filing by rename (D8) puts each filed original on the volume with pending jobs, so the job rule changes too:
+  - A pending job that no worker has claimed does not keep its original on the volume.
+  - A job that a worker has claimed keeps its original until the job completes, fails or is blocked. This holds across the timeout slices, memory brakes and engine waits that return a claimed job to the queue as pending. Without it, a long recording would be evicted and hydrated again for each slice.
+  - A failed or blocked job does not keep its original.
+  - A pin, a hydration or a download still keeps it.
+- **Hydration failure defers the job.** Today a hydration error inside a media job fails the job, and the pending-work scan never queues a failed job again. Under M4 the worker hydrates an evicted original when it claims the job. A transport failure or a lack of hydration capacity therefore defers the job. The deferral consumes no attempt and keeps the job's speech progress. A verification mismatch still fails the job.
 - **Scope (pending operator confirmation).** Both rules apply to every original, not only to imported ones. Eviction still starts only above the target. A captured recording that the owner has not played can leave the volume before its transcript exists, and the worker then hydrates it once. A rule for imported originals only would keep captures unchanged. It needs an origin flag on each cache record.
 
 ### D4. Encryption in the cell
@@ -270,20 +275,26 @@ The job ledger is the job architecture. A Postgres-backed task queue such as Pro
 
 **Amendment, 2026-10-30 (task 5.4): data paths for an import larger than the volume.**
 
-The shape in D12 is pending operator confirmation. It adds windows, a stage reference and filing by reference, and it changes one rule above.
+The shape in D12 is pending operator confirmation. It adds windows and filing by rename. It changes one rule above: M4 in D3 replaces the rule that eviction never selects an original with pending work.
 
-- **Arrival in windows.** A sender splits a folder larger than the cell's window budget into ordinary `adopt` imports, called windows. Each window has its own import ID, recipient and checkpoint. C5, cellctl and the import Job do not change.
-- **Landing.** The import Job has public egress, so it never holds the media key. Stage offload therefore runs in the runtime, after the Job and its hold end. For each store-bound member that is present and has no stage reference, the runtime does these steps:
-  1. It checks the staged file against its receipt entry (size and SHA-256).
-  2. It reuses a live version of the same digest. Otherwise it commits a protection record with a full sync, encrypts, uploads through the edge and confirms with a head request.
-  3. It writes the stage reference with a full sync, then retires the protection record.
-  4. It removes the staged file under a held handle, with an identity check.
+- **Arrival in windows.** A sender splits a folder larger than the cell's window budget into ordinary `adopt` imports, called windows. Each window has its own import ID, recipient and checkpoint. C5 and cellctl do not change. The import Job changes in one way: it records each member's identity in the stage manifest, beside the path, size and SHA-256. The identity is the staged file's device, inode, size, `mtime_ns` and `ctime_ns`, read after the Job sets the modification time.
+- **Filing by rename.** The stage and the Knowledge Base are on one filesystem. Adoption files an artifact member through a new Source-writer primitive that renames the staged file into place. The primitive takes these steps:
+  1. Compare the staged file's identity with the manifest identity. On a match, use the manifest SHA-256 as the Source's `binary_sha256` and read no byte.
+  2. On a mismatch, for example after a backup restore, hash the file once between two stat checks. Continue only when the digest equals the manifest SHA-256 and the two stats agree. Otherwise the member changed, and it goes to the residual.
+  3. Rename the staged file to the Source's binary path, and sync both directories.
+  4. Commit the Source page, which is the binary's sidecar.
+  5. Queue the artifact's offload job.
 
-  Text, members above the object bound and members that changed stay on the volume. A store outage leaves them there with a retryable job.
-- **Stage reference.** A stage reference holds the import ID, member path, version, size and SHA-256. It lives in the media job ledger beside the protection records. Backups already capture that ledger, and each write costs one row. D2 rejects references in cell-local state, because losing that state would make every evicted original look deleted. That reason does not carry over. A stage reference lasts only until filing, and the person still holds the original, because both importers copy. If the state is lost, the unfiled stored members of that stage become unavailable and the person imports them again. After filing, the sidecar holds the reference, as D2 says. The discard Job holds no media key and does not touch the ledger. The runtime releases a stage reference at its next start, once no import receipt lists the member.
-- **Filing by reference.** Adoption files a stored member without reading it. The Source gets `evidence_file`, `binary_sha256`, `binary_size` and a stored-object reference to the stage version, so the original starts `evicted`. Adoption releases the stage reference after the sidecar is synced, which is the order of D9. A member that is still on the volume files by copy.
-- **Processing.** Extraction of a member filed by reference queues without reading the original. The worker hydrates it when it claims the job. The rule above that eviction never selects an original with pending work gives way to M4 in D3.
-- **Retention.** Reference manifests list the versions that captured stage references name (D9).
+  A rename that fails with a cross-device error falls back to the streamed copy of `scale-agent-led-imports`.
+- **Crash states.** The writer leaves one of two states after a stop:
+  - *Renamed, Source page not committed.* The binary is at its Knowledge Base path, and its staged path is empty. Replay compares the binary's device, inode, size and `mtime_ns` with the manifest identity. The rename changed the change time, so replay does not compare it. On a match, replay commits the Source page with the manifest SHA-256. Otherwise replay renames the file back to its staged path, and the member files again from step 1.
+  - *Source page committed.* The member is filed. Replay settles it as already applied by comparing the Source page's `binary_sha256` with the manifest, without reading bytes. It queues the offload job if none exists.
+
+  The batch writer's rollback removes each destination that a failed batch created. For a renamed binary, that destination is the only copy. So the primitive reverses a rename by renaming the file back to its staged path, never by removing it.
+- **Ceiling.** The adoption ceiling of `scale-agent-led-imports` bounds copies only, because a rename reads no byte. The re-hash in step 2 reads every byte, so it keeps the ceiling (see Open questions).
+- **Text.** Text members file by the copy and consume path of `scale-agent-led-imports`.
+- **After filing.** A filed original leaves the volume through write-through (D1) and eviction (D3). This shape adds no stage reference and no stage offload, and it keeps D2 unchanged.
+- **Processing.** Extraction of a filed original queues as today. M4 in D3 lets eviction take the original before a worker claims the job, and the worker hydrates it at the claim.
 
 ### D9. Deletion
 
@@ -375,62 +386,87 @@ S2 import admission is unchanged by this change. A later streaming-import slice 
 
 **Amendment, 2026-10-30 (task 5.4): the allowance and the S2 split.**
 
-This amendment replaces the two bullets above. For one window, `declared` is its bytes, S its store-bound bytes and L its largest store-bound member. Σ is the store-bound bytes of the whole series.
+Under filing by rename (D12), each window is an ordinary import within the limits that cellctl already publishes. The split above needs no new C5 field for windows. This amendment says what remains of it.
 
-- **Allowance.** A stage reference counts toward the allowance, with the sidecar references. Each version counts once. The cell checks the allowance before it encrypts a staged member. A member that the allowance cannot cover stays on the volume, and status names the reason.
-- **Volume admission.** Substrate refuses `IMPORT_STORAGE_LIMIT` when 2 × (declared − S) + S + L + reserve is above the cell's cap. A claim grows toward current use + 2 × (declared − S) + reserve. Store-bound bytes never grow a claim, because the sender sizes each window from the cell's free space.
-- **Store admission (pending operator confirmation).** Substrate refuses `MEDIA_ALLOWANCE_EXCEEDED` only when Σ is above the whole allowance. The usage reading that Substrate holds can be stale, so its check is a necessary check only. The cell decides the remainder with its live meter. The sender reads that remainder before its first upload, and stage offload refuses beyond it.
-- **Published limits.** cellctl writes `media_limits`, which holds `allowance_bytes` and `max_object_bytes`, for a cell selected for the store. It writes NULL for any other cell, a cell that only retains a disabled store included. The values come from the configuration that cellctl renders into the cell's store policy, so the published number is the enforced number.
-- **Older senders and cells.** An import without the new fields, or a cell without `media_limits`, keeps today's formula. A cell with `media_limits` and no `import_limits` gets the store check only.
+- **One census per batch.** Offload today runs the full reference census up to three times per member. Each run holds the mutation boundary through the consistency guard. A series of thousands of members makes that quadratic. Offload therefore takes one census per batch. It passes that census to each member's admission through the existing `usage` parameter, and it adds each newly referenced version's size as it publishes. Offload publication is the only path that adds a referenced version while the runtime serves, because a restore runs under a hold. Other writers between two members can only keep or lower the count. This reasoning is an assumption that task 5.4.9 tests (open question).
+- **Terminal stops.** "Media usage unknown" and "allowance exhausted" stop the sender. It reports the stop and does not wait, because neither clears without the owner or the operator. The cell keeps its behaviour above: the original stays local with retryable demand.
+- **Store admission.** The bullet above, total declared media bytes against the remaining allowance, moves to the sender. Before each window, the sender compares the series' remaining offloadable bytes with the remaining allowance that the cell reports. Complete ingress admission for single uploads stays part of task 4.5.
+- **Volume admission.** The open Substrate change `admit-cloud-imports-against-published-limits` applies one `space_factor`, 2, to every import kind. It grows a claim when used + `space_factor` × declared + `reserve_bytes` exceeds the current size. The sender keeps each window within that size (D12), so admission grows nothing. Factor 2 is larger than a rename needs, which only makes windows on attachable cells smaller.
+- **What remains of the split.** A per-kind space factor is the only part left. Under rename an artifact member needs its bytes once, but a text member still needs two copies. One factor for all `adopt` imports cannot tell them apart, so a factor of 1 would under-reserve text. The rehearsal decides whether a finer factor is worth a C5 field. Slice 1 adds no C5 field and publishes no media limits.
+- **Older cells.** A cell that reports no window budget follows the older-cell rule of D12.
 
-**Dependency on Substrate.** The Substrate change `admit-cloud-imports-against-published-limits` carries the Substrate side. It adds these optional, immutable C5 create fields, all or none: `declared_store_bytes` (S), `declared_largest_store_bytes` (L) and `series_store_bytes` (Σ). They satisfy 0 ≤ L ≤ S ≤ `declared_bytes` and S ≤ Σ. It also adds the `media_limits` column with its migration and grants, the formula and the refusal. This change fixes the contract only. Each production step needs the operator: the Substrate migration and deploy, the cellctl and chart rollout, the cell image rollout, and the store canary. A reimport of customer data needs the operator as well.
+**Dependency on Substrate.** Slice 1 needs no Substrate change. When the imports route returns the published `import_limits`, the sender reads them. Otherwise admission keeps its legacy rule, which grows no claim. Home windows need a Substrate change of their own (D12). Each production step needs the operator: the cellctl and chart rollout, the cell image rollout, and the store canary. A reimport of customer data needs the operator as well.
 
 ### D11. Rollout and sequencing
 
 1. Ship core behind the store being disabled. Tasks 3.x prove the states and eviction against a filesystem-backed store.
 2. Ship the bucket, edge, keys and policies with the edge off.
 3. Enable one canary cell. Back-fill: upload and verify every bound original, then evict to target.
-4. Enable the fleet switch only after export can deliver every selected cell's media (task 5.5). Until then, only the canary may store more media than its export can stage.
+4. Enable the fleet switch only after export can deliver every selected cell's media (task 5.5). Until then, only the canary may store more media than its export can stage. Imports larger than the volume also stay on the canary until then (D12, choice 4).
 
 Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change. Phase 7 does for any media-heavy cell. Either this change's rollout finishes first, or a media-light cell migrates first.
 
 ### D12. An import larger than the volume arrives in windows
 
-Added 2026-10-30 for task 5.4. It builds on `scale-agent-led-imports`, which supplies the stage manifests, consume-on-filing, paging, collection identity and the space stop.
+Added 2026-10-30 for task 5.4 and revised the same day to file by rename. It builds on `scale-agent-led-imports`, which supplies the stage manifests, consume-on-filing, paging, collection identity and the space stop.
 
 Today an import fails at the first member that does not fit, after the whole upload, and the Job deletes its staging tree. Nothing lands.
 
-**Decision (pending operator confirmation).** A sender splits the folder into windows. The runtime stores the store-bound members of each landed window in the media store. Adoption files them by reference (D8). Text stays on the volume and files by copy.
+**Choice 1, the shape: file by rename (pending operator confirmation; recommended).** A sender splits the folder into windows. The agent files each window, and adoption renames each artifact member into the Knowledge Base (D8). Write-through and eviction then move the filed originals off the volume, and the sender sends the next window. Text members file by copy.
 
-- **Window budget.** The budget is free space, less the reserve, the temporary-space bound (`max_temporary_bytes`), the unfiled staged resident bytes and the largest local store-bound staged member. A window is sized so that 2 × its resident bytes + its store-bound bytes + its largest store-bound member does not exceed the budget. The cell reports the budget in `adoption_studio status`. It reports unknown, never 0, when an input cannot be read.
-- **Store-bound rule.** A member is store-bound when it is not text and its size is at most the store's per-object bound. Text means a suffix in the importer's text set and a size within the inline text limit. Every other member is resident. One module holds the rule. The CLI, stage offload and the adoption inventory import it. The cell reports the rule's inputs, so Home keeps no copy.
-- **Order.** Windows go store-bound first, resident last, in path order. This keeps the artifacts-before-text order of `scale-agent-led-imports` across windows.
-- **Pacing.** A sender creates the next window only when the budget covers it, so a prepare hold never interrupts a drain. A window that the Job refuses for space is planned again from the current budget. Landed windows are never sent again.
-- **Senders in slice 1 (pending operator confirmation).** Both the Cloud CLI and the Home page send windows, so an agent without a shell, such as claude.ai or ChatGPT, gets the same capability. The filing flow stays in MCP tools for every agent: `adoption_studio` from `start` to `finish`, then `import_discard`. Only the sending needs the CLI or Home.
-- **Holds (pending operator confirmation).** Each window needs at least two holds, prepare and import. Each hold restarts the cell. Slice 1 accepts this cost.
-- **Rehearsal.** The rehearsal runs on a local-storage cell, where S2 admission is inactive. Its store is a B2 sandbox bucket.
+The cost: the volume drains only as fast as the agent files. The sender waits for filing between windows, so the person's machine stays online until filing catches up.
+
+- **Window budget.** The cell computes the budget from the growth threshold's headroom: growth threshold × volume size − used. The growth threshold is cellctl's online-growth trigger, 80%. The cell then subtracts these amounts:
+  - the import Job's free-space reserve;
+  - the hydration capacity, `max_temporary_bytes`, which holds a hydration's ciphertext and plaintext;
+  - the placed hydrated copies, `max_hydrations` × the largest offloadable file;
+  - one offload's ciphertext temporary file, up to the object bound, which offload writes on the volume;
+  - the text bytes that landed windows have not filed yet, because each needs a second copy.
+
+  A window fits when 2 × its text bytes + its artifact bytes is at most the budget; a rename adds no copy. The cell reports the budget in `adoption_studio status`. It reports unknown with a reason, never 0, when an input cannot be read.
+- **Why the growth threshold.** Eviction starts only above the eviction target. A budget that stopped at the target would never push use above it. Eviction would then never run, and the series would stall after a few windows. cellctl therefore renders the eviction target below the growth threshold. The band between them, plus the margin, sets the steady window size. Use never passes the growth threshold, so a local cell never grows at backup.
+- **Admission.** On a cell that publishes `import_limits`, the sender also keeps used + `space_factor` × the window's bytes + `reserve_bytes` within the cell's current size. Admission then grows no claim (D10).
+- **Classification rule (choice 3).** An artifact member is offloadable when its `age` ciphertext size is within the store's object bound and its hydration fits the hydration capacity. Hydration needs plaintext + ciphertext at most `max_temporary_bytes`. Text follows the importer's text rule. One module holds the rule, and the CLI and the adoption inventory import it. The cell reports the rule's inputs and the effective largest offloadable file in status, so a sender keeps no copy of the rule.
+- **Resident members.** An artifact member above the largest offloadable file still files by rename, but stays on the volume. Text stays on the volume too, and its staged copy stays until discard. The sender counts both as resident. Before the first upload, the sender refuses a series when 2 × its text bytes + its resident artifact bytes exceed the resident room that the cell reports. The refusal lists the resident files. Resident room is the budget with every evictable cached original counted as free.
+- **Order.** Windows carry offloadable artifacts first, resident artifacts next and text last, each in path order. This keeps the artifacts-before-text order of `scale-agent-led-imports` across windows, so a note's links meet filed attachments.
+- **Pacing.** The sender creates the next window only when the budget covers it, so a prepare hold never interrupts filing. A window that the Job refuses for space is planned again from the current budget. On resume, the sender checks the cell's import receipts before it skips a window that its checkpoint calls landed. A window whose receipt is gone, for example after a cell restore, is sent again.
+- **Waiting and stopping.** The sender waits and reports when the budget is unknown. It also waits when the next window does not fit, while the cell still has unfiled windows, pending offloads or evictable bytes. It stops and reports in these cases:
+  - "media usage unknown" or "allowance exhausted" (D10);
+  - the next window does not fit, and the cell has nothing left to file, offload or evict. The stop lists the files of that window.
+- **Older cells.** A cell that reports no budget at all is an older cell, or a cell without the store. The sender then refuses when the declared bytes exceed the cell's known size, which is `max_storage_gib` when `import_limits` is published. Otherwise it sends one import, as today, and the Job's free-space check decides.
+- **Links across windows.** The sender records the series' full path list. Each window carries that list as one reserved hidden file at its stage root, which the Job stages like any member. Adoption reads the list and passes it as `whole_scan`, so a bare name resolves against the whole series. Adoption never files the reserved file.
+- **Keep the source.** The CLI reports done when the last window lands, before filing ends. Tool text and the CLI therefore tell the person to keep the source folder until the residual is empty. Status names the residual.
+- **Holds.** Each window takes three holds: prepare, import and discard. Each hold restarts the cell, runs the start-up scans and stops any filing and offload in flight. The agent may defer the discards to the end of the series, which leaves two holds per window while it runs. A deferred discard keeps the window's text staged, and the budget counts it through used.
+- **Rehearsal.** The rehearsal runs on a local-storage cell, where admission publishes no limits. Its store is a B2 sandbox bucket. Pull request 2216 lands first. It keeps a proven runtime ready while its recall catalogue lags, so the cell stays ready during a large apply.
+
+**Choice 2, senders in slice 1 (pending operator confirmation; recommended): the CLI only.** Exomem specifies only the cell's contract, in `adoption_studio status`. It holds the budget, the inputs of the classification rule, the resident room and the remaining allowance. MCP tools drive start, status, filing and discard for every agent. An agent without a shell gives the person the CLI command. Home windows need a Substrate change of their own, so this change states no Home behaviour.
+
+**Choice 3, the largest single file (pending operator confirmation; recommended): 1 GiB now.** The default object bound is 1 GiB, so the largest offloadable file is 1 GiB less the `age` overhead, about 256 KiB. Its hydration then needs a hydration capacity of about 2 GiB. A larger file files by rename and stays resident. Streaming hydration is a follow-up that raises the limit, because hydration then no longer holds the whole ciphertext and plaintext on the volume at once.
+
+**Choice 4, test cells only until task 5.5 (pending operator confirmation; recommended).** Imports larger than the volume are canary-only until task 5.5 lands, and until trash, move, delete and export work without hydrating whole trees. Today each of these hydrates every original of the tree it touches. One-way door: a cell that holds more stored media than its volume cannot turn its store off without losing read access. The drain cannot hydrate everything back. A retained store also renders no keys today, so it cannot hydrate at all.
 
 Options considered:
 
 | Option | Holds | Agent between windows | Large media | Verdict |
 |---|---|---|---|---|
-| A: windows, files copied | 2 per window | required | blocked by the 200 MiB ceiling | rejected |
-| B: windows, store-backed stage, filing by reference | 2 per window | no | stored, never copied | recommended |
+| F: windows, filing by rename | 3 per window, 2 with deferred discards | required: the sender waits for filing | renamed, never copied; offloaded up to the largest offloadable file | recommended |
+| B: windows, store-backed stage, filing by reference | 3 per window | not required: the upload finishes before filing | stored before filing, never copied | alternative when the upload must finish before filing |
+| A: windows, files copied | 3 per window | required | copied; members above the 200 MiB ceiling stay in the residual | rejected: each window needs twice its bytes, and F files the same members with no copy |
 | R: the runtime streams one archive from the media bucket through the edge | about 0 | no | stored, never copied | follow-up if holds hurt |
 | P: per-file gateway upload (tus) | 0 | no | caps of 100 MiB and 2 GiB | rejected for now; depends on the paused gateway work (task 5.3) |
 | One archive unpacked in parts | n | not applicable | not applicable | rejected: a resume decrypts the prefix again, and the client holds the whole ciphertext |
 
-R needs a new C5 transport, media-bucket multipart in cellctl, a D9 import object and a runtime unpacker.
+B needs a stage reference in cell-local state, an exception to D2, stage offload, filing by reference, a retention-manifest change and a drain rule for stored staged members. R needs a new C5 transport, media-bucket multipart in cellctl, a D9 import object and a runtime unpacker.
 
 The recommendation changes in three cases:
-- The rehearsal measures hold downtime above about 5 minutes per window, or more than about 20 windows for typical sizes. Move to R and keep the stage and filing paths of D8.
-- Backup retention cannot list stage references. Use A, with the writer fix.
+- The rehearsal measures hold downtime above about 5 minutes per window, or more than about 20 windows for typical sizes. Move to R and keep filing by rename.
+- The rehearsal shows the sender waiting on filing for longer than the upload itself takes. Move to B.
 - The CLI cannot call cell tools through the gateway. The agent then mediates each window: it reads the budget and passes it to the CLI.
 
 Delivery slices:
-1. **Slice 1.** Exomem: the shared predicate, M1 to M4, stage offload and references, filing by reference, budget status, CLI windows and tool text. Substrate: the Home sender. The local-storage rehearsal proves it.
-2. **Slice 2.** The S2 split (D10), before the Substrate admission change deploys to store-selected attachable cells.
-3. **Slice 3.** One key per series to pipeline uploads, and R if the rehearsal shows that holds hurt.
+1. **Slice 1.** Exomem: the member identity, filing by rename, the classification rule, M1 to M4, one census per batch, budget status, CLI windows and tool text. The local-storage rehearsal proves it.
+2. **Slice 2.** Home windows in Substrate, and a per-kind space factor if the rehearsal shows that factor 2 makes windows on attachable cells too small.
+3. **Slice 3.** Streaming hydration, one key per series to pipeline uploads, and R if the rehearsal shows that holds hurt.
 
 ## Comparison
 
@@ -465,8 +501,10 @@ Delivery slices:
 - **Sidecar edits.** An edit could drop or alter the reference. Mitigations: the descriptor key is governed, and a version stays in the store while any retained snapshot references it.
 - **Compromised edge.** It holds a bucket-wide credential, so it can bypass its own active-set check. It sees every cell's ciphertext and object names, can write new versions under any prefix (a revoked cell's included), and can deny service or run up storage. It cannot decrypt, destroy versions or change a version that a reference pins. A captured *cell* credential is narrower: the edge refuses it once revoked. Mitigations: the edge holds no media key, version destruction stays with cellctl, and cellctl's metering alerts on unexpected bytes.
 - **Hydration storms.** An export or a CLIP model change can hydrate many originals. Concurrency and temporary space are bounded (D3).
-- **Holds per window (D12).** Each window restarts the cell at least twice. A large import therefore costs the owner several short outages. The rehearsal measures the downtime, and R is the follow-up.
-- **Stage references are cell-local state (D8).** Losing the state folder loses the references of unfiled stored members. The person still holds the originals, and the import is repeated.
+- **Holds per window (D12).** Each window takes three holds, or two with deferred discards, and each hold restarts the cell. A large import therefore costs the owner several short outages. The rehearsal measures the downtime of all three holds, and R is the follow-up.
+- **The source is the second copy (D12).** Until filing ends, the person's source folder is the only other copy of an unfiled member. The CLI reports done when the last window lands, not when filing ends. Tool text and the CLI tell the person to keep the source until the residual is empty, and status names the residual.
+- **A small window band (D12).** Take a 20 GiB volume with 1 GiB files. The reserve, the hydration capacity, one placed copy and one offload temporary then take about 4.3 GiB of the band. Windows are then a few GiB, and a large series needs many windows and holds. The rehearsal records the window count.
+- **The one-way door (D12).** A cell that stores more media than its volume cannot turn its store off without losing read access. Imports larger than the volume therefore stay on the canary until task 5.5.
 - **Eviction of unread originals (D3).** M4 lets a recording leave the volume before its transcript exists. The worker hydrates it once when it claims the job.
 
 ## Open questions
@@ -481,5 +519,9 @@ Each question below names what settles it.
 - **The archive member pool.** It stores content-addressed members in the vault. Whether it is in scope is settled by its byte share.
 - **Chatbot-native file delivery.** Settled per client, once its support is confirmed and the transfer it needs is known.
 - **Key rotation, video transcoding for playback, and paid block prices.** Each is decided when its first need appears.
-- **Windows (D12).** Four facts are unmeasured. Rehearsal 5.4.12 settles three of them: the hold count and restart time per window, and the derived-state size and start-up scan cost at the final Source count. It also settles whether a note links to an attachment that an earlier window stored. The first CLI test against a real cell settles whether the CLI's OAuth client may call cell tools through the gateway.
-- **Turning the store off while staged members are stored.** The drain rule above hydrates evicted originals. A stored staged member has no sidecar yet. Whether the drain restores it to its stage, or blocks until the stage is discarded, is decided before task 5.4.4 lands.
+- **Windows (D12).** Rehearsal 5.4.12 measures the hold count and restart time per window, the window count, the filing rate and the census time per batch. It also measures the derived-state size and start-up scan cost at the final Source count. It also settles whether a note links to an attachment that an earlier window carried. The first CLI test against a real cell settles whether the CLI's OAuth client may call cell tools through the gateway.
+- **The eviction band for import cells (D12).** The band between the eviction target and the growth threshold must cover the fixed budget terms and still leave a useful window. The target, margin and hydration capacity for a canary that imports are set before task 5.4.12, and canary data settles them later.
+- **Re-hash above the ceiling (D8).** A member whose identity no longer matches is hashed once, and that read keeps the adoption ceiling. After a backup restore during a series, a large member therefore goes to the residual and is imported again. Whether the re-hash should run in the background instead is settled by how often a restore meets an unfiled series.
+- **Replay without the change time (D8).** Replay of a renamed but uncommitted member trusts device, inode, size and `mtime_ns`. A write that keeps all four between the stop and the replay would go unnoticed. Whether replay should hash the file instead is decided in task 5.4.5, with the file watcher's and media scans' handling of an unbound binary in that state.
+- **One census per batch (D10).** The batch census assumes that offload publication is the only path that adds a referenced version while the runtime serves. Task 5.4.9 checks every writer that can bind a version before the batch census replaces the per-member census.
+- **Substrate's usage reading (D10).** Admission sizes growth from its own usage reading, which can lag the cell's. A reading above the cell's live use can still grow an attachable cell for a window that the sender sized correctly. Settled by the first windowed import on an attachable cell, or by a C5 option that refuses instead of growing.
