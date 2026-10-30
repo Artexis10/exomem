@@ -20,6 +20,7 @@ from . import (
     relation_registry,
     semantic_language_registry,
     semantic_units,
+    state_paths,
 )
 from . import find as find_module
 from .audit import AuditFinding
@@ -229,7 +230,9 @@ def is_managed_governed_path(vault_root: Path, path: Path | str) -> bool:
     candidate = Path(path)
     absolute = candidate if candidate.is_absolute() else root / candidate
     try:
-        absolute.resolve().relative_to(kb_root(root).resolve())
+        # The subtree root is configuration, so a scope may reuse it; the candidate resolves live.
+        governed = state_paths.resolved_vault_path(kb_root(root), expanduser=False)
+        absolute.resolve().relative_to(governed)
     except (OSError, ValueError):
         return False
     return True

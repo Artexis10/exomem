@@ -1283,6 +1283,11 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
 
     profile = startup["profile"]
     words, _digest = reference_source(profile, BENCHMARK)
+    if startup.get("generate_only"):
+        # A paired runner writes the corpus once with one release's code and copies it to the other arm.
+        with principal.library_scope():
+            (vault_root / "reference-corpus.json").write_text(json.dumps(gen_reference_vault(vault_root, profile, words)))
+        return {}
     lexical_only = startup.get("calibration") == "sql"
     artifact = identity = index = None
     if not lexical_only:
@@ -1449,7 +1454,8 @@ class _Worker:
 
     def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict,
                  *, python: Path | str | None = None, runtime_prefix: Path | None = None,
-                 runtime_policy: str = "parent-benchmark", calibration: str | None = None):
+                 runtime_policy: str = "parent-benchmark", calibration: str | None = None,
+                 generate_only: bool = False):
         import subprocess
 
         startup = {"profile": profile, "runtime_lock_digest": _runtime_lock_digest(source, phase="worker-startup"),
@@ -1467,6 +1473,8 @@ class _Worker:
         if calibration == "sql":
             startup["calibration"] = calibration
             environment["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+        if generate_only:
+            startup["generate_only"] = True
         try:
             self.process = subprocess.Popen(
                 [str(python if python is not None else sys.executable), "-u", str(Path(__file__).resolve()), "--worker-source", str(source),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -12,14 +13,14 @@ import re
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NotRequired
 
 from typing_extensions import TypedDict
 
-from . import record_formats, record_governance, vault, writer_lease
+from . import record_formats, record_governance, state_paths, vault, writer_lease
 from . import structured_collections as collections
 from .collection_profiles import profile_for
 
@@ -280,7 +281,7 @@ def append_record(
                 "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
             )
     warnings: list[str] = []
-    with writer_lease.active_manager().mutation_guard(root, operation="record_append"):
+    with _write_boundary(root, "record_append"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
         if resumed is None:
@@ -1245,7 +1246,7 @@ def bulk_upsert_records(
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("bulk_upsert")
     batch_id = uuid.uuid4().hex[:12]
     total = len(rows)
-    with writer_lease.active_manager().mutation_guard(root, operation="record_bulk_upsert"):
+    with _write_boundary(root, "record_bulk_upsert"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
@@ -1777,7 +1778,7 @@ def update_record(
         )
     _refuse_excluded_authored_names(overrides)
     warnings: list[str] = []
-    with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
+    with _write_boundary(root, "record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
         if resumed is None:
@@ -4035,6 +4036,20 @@ def _safe_audit_path(value: Any) -> bool:
         and "\0" not in value
         and all(part not in {"", ".", ".."} for part in parts)
     )
+
+
+@contextlib.contextmanager
+def _write_boundary(root: Path, operation: str) -> Iterator[None]:
+    """Hold the mutation boundary, then open a resolution scope for the guarded write.
+
+    The scope opens after any boundary wait, so the write reads the ceiling it finds then;
+    nothing inside starts a task.
+    """
+    with (
+        writer_lease.active_manager().mutation_guard(root, operation=operation),
+        state_paths.resolution_scope(),
+    ):
+        yield
 
 
 def _load_guarded_manifest(
