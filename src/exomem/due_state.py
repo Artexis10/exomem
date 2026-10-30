@@ -238,12 +238,6 @@ _UNPERSISTED_CAP = 8
 #: of one worker, so the registry cannot grow with the number of vaults served.
 _WARMING: set[str] = set()
 
-#: Write batches whose delta needed a wikilink resolver that only a walk of the vault
-#: could build, by vault. The key's presence means one worker is queued or running for
-#: that vault and drains the list, so a burst of writes shares one thread. Guarded by
-#: `_LOCK`; a key lives only as long as its worker.
-_DEFERRED_DELTAS: dict[str, list[PageWrite]] = {}
-
 #: The fallback session key for stdio and CLI, where the transport supplies no
 #: session identity. One key per process lifetime, which is exactly the scope of
 #: a stdio conversation.
@@ -1707,77 +1701,181 @@ def refresh_after_writes(vault_root: Path, writes: Iterable[PageWrite]) -> None:
 
 
 class _ResolverUnavailable(Exception):
-    """The delta needs the vault resolver and only a walk of the vault can supply it."""
+    """The Source half needs the vault resolver and only a walk of the vault can supply it."""
 
 
-def _defer_delta(
-    vault_root: Path, writes: list[PageWrite], *, today: dt.date | None
-) -> dict[str, Any] | None:
-    """Run a delta that needs a disk-built resolver off the calling thread.
+def _source_half(
+    vault_root: Path,
+    writes: list[PageWrite],
+    page_of: Mapping[str, Any],
+    *,
+    resolver: Callable[[], Any],
+) -> tuple[list[str], list[Any]]:
+    """The Sources these writes can change, and the `SOURCE_BACKLOG` findings of each.
 
-    The delta re-reads each page's current state and merges into the stored
-    projection under `_LOCK`, so running it later is safe: it records what the
-    pages are then, not what they were when the write committed.
-
-    Returns None, so the caller serves no advisory for this write. The sole
-    exception is the test seam, which runs the delta inline and returns its result.
+    This is the only part of a write's delta that needs the wikilink resolver: a
+    claim in `sources:` resolves to a path through it.
     """
-    if _sync_due_state_warm():
-        # As in `_schedule_reconcile`: the suite's disposable vaults cannot outlive a
-        # daemon worker, so it keeps deterministic carrier assertions by running inline.
-        return apply_write_deltas(vault_root, writes, today=today, allow_disk=True)
+    from . import note_types
+
+    type_basis = note_types.Basis(vault_root)
+    source_paths = sorted(
+        set().union(
+            *(
+                _cited_source_paths(
+                    vault_root, write, page_of[write.path], type_basis=type_basis,
+                    resolver=resolver,
+                )
+                for write in writes
+            )
+        )
+    )
+    return source_paths, _source_findings(vault_root, source_paths, resolver=resolver)
+
+
+def _backlog_rows(
+    categories: Mapping[str, Any],
+    source_paths: list[str],
+    source_entries: Mapping[str, list[dict[str, Any]]],
+    today: dt.date,
+) -> dict[str, Any]:
+    """The `SOURCE_BACKLOG` rows after these Sources take their recomputed entries.
+
+    Rows of the Sources a write's pages cite, not of the pages: a live note
+    compiles a Source, a draft or a retired note does not.
+    """
+    backlog = dict(categories.get(SOURCE_BACKLOG) or {})
+    for path in source_paths:
+        if path in source_entries:
+            backlog[path] = _bucket(source_entries[path], today)
+        else:
+            backlog.pop(path, None)
+    return backlog
+
+
+@dataclass(slots=True)
+class _DeferredSource:
+    """The writes queued for one vault's background Source half, and the day to bucket by."""
+
+    writes: list[PageWrite]
+    today: dt.date
+
+
+#: Source halves waiting for a worker, by vault. The key's presence means one worker is
+#: queued or running for that vault and drains this entry, so a burst of writes shares
+#: one resolver build. Guarded by `_LOCK`; a key lives only as long as its worker.
+_DEFERRED_SOURCE: dict[str, _DeferredSource] = {}
+
+
+@_owner_local
+def _apply_source_half(
+    vault_root: Path, writes: list[PageWrite], *, today: dt.date
+) -> None:
+    """Refresh the `SOURCE_BACKLOG` rows of `writes`, building the resolver from disk.
+
+    The resolver comes first and the pages are read after it, so the walk's duration
+    never ages the page state the rows are computed from. Only the Source rows are
+    merged, so nothing a later write stored for these pages is overwritten.
+    """
+    from . import find as find_module
+
+    snapshot = find_module.writer_resolver_snapshot(vault_root)
+    page_of = {
+        write.path: find_module._CACHE.get(vault_root / write.path, vault_root)
+        for write in writes
+    }
+    source_paths, findings = _source_half(
+        vault_root, writes, page_of, resolver=lambda: snapshot
+    )
+    source_entries = _entries_from_findings(vault_root, findings).get(SOURCE_BACKLOG) or {}
+    with _LOCK:
+        current = _load_shared(vault_root)
+        if current is None:
+            return
+        categories = dict(current.get("categories") or {})
+        categories[SOURCE_BACKLOG] = _backlog_rows(categories, source_paths, source_entries, today)
+        _save_unless_unchanged(vault_root, current, {**current, "categories": categories})
+
+
+def _defer_source_half(vault_root: Path, writes: list[PageWrite], *, today: dt.date) -> None:
+    """Hand a Source half that needs a disk-built resolver to a background worker.
+
+    The worker is not a daemon thread. Nothing retries a Source half that is lost
+    (`reconcile` rebuilds a missing projection, not a stale row), and a one-shot
+    process such as the command line would otherwise exit and kill the worker first.
+    """
     vault_root = Path(vault_root)
     key = str(vault_root)
     with _LOCK:
-        queued = key in _DEFERRED_DELTAS
-        _DEFERRED_DELTAS.setdefault(key, []).extend(writes)
-    if queued:
-        # The worker already queued or running for this vault takes these writes too.
-        return None
+        queued = _DEFERRED_SOURCE.get(key)
+        if queued is not None:
+            # The worker already queued or running for this vault takes these writes too.
+            queued.writes.extend(writes)
+            queued.today = today
+            return
+        _DEFERRED_SOURCE[key] = _DeferredSource(list(writes), today)
 
-    def _next_batch() -> list[PageWrite] | None:
+    def _next() -> _DeferredSource | None:
         with _LOCK:
-            batch = _DEFERRED_DELTAS.get(key)
-            if not batch:
+            queued = _DEFERRED_SOURCE.get(key)
+            if queued is None or not queued.writes:
                 # Emptied and removed in one step, so a write arriving now starts a worker.
-                _DEFERRED_DELTAS.pop(key, None)
+                _DEFERRED_SOURCE.pop(key, None)
                 return None
-            _DEFERRED_DELTAS[key] = []
-            return batch
+            taken = _DeferredSource(queued.writes, queued.today)
+            queued.writes = []
+            return taken
 
     def _run() -> None:
+        drained = False
         try:
             from .foreground_activity import background_scope
             from .governance.principal import library_scope
 
             # An owner-local worker: a request's principal does not cross into this thread.
-            # It takes no mutation boundary: the delta merges under `_LOCK` alone.
+            # It takes no mutation boundary: it merges its rows under `_LOCK` alone.
             with background_scope(vault_root), library_scope():
-                while (batch := _next_batch()) is not None:
+                while (batch := _next()) is not None:
                     try:
-                        apply_write_deltas(vault_root, batch, allow_disk=True)
+                        _apply_source_half(vault_root, batch.writes, today=batch.today)
                     except Exception:  # noqa: BLE001
-                        # Advisory, like `refresh_after_writes`: the next reconcile
-                        # repairs a batch that did not land.
+                        # Advisory: the next reconcile repairs a batch that did not land.
                         log.warning(
-                            "deferred due-state delta failed for %s", vault_root, exc_info=True
+                            "background Source backlog refresh failed for %s",
+                            vault_root,
+                            exc_info=True,
                         )
+            drained = True
         except Exception:  # noqa: BLE001
             log.warning(
-                "deferred due-state delta worker failed for %s", vault_root, exc_info=True
+                "background Source backlog worker failed for %s", vault_root, exc_info=True
             )
-            with _LOCK:
-                _DEFERRED_DELTAS.pop(key, None)
+        finally:
+            if not drained:
+                _drop_deferred_source(vault_root, key)
 
     try:
-        threading.Thread(target=_run, name="exomem-due-state-delta", daemon=True).start()
+        threading.Thread(target=_run, name="exomem-due-state-source-backlog").start()
     except RuntimeError:
-        with _LOCK:
-            _DEFERRED_DELTAS.pop(key, None)
         log.warning(
-            "could not start the deferred due-state delta for %s", vault_root, exc_info=True
+            "could not start the background Source backlog refresh for %s",
+            vault_root,
+            exc_info=True,
         )
-    return None
+        _drop_deferred_source(vault_root, key)
+
+
+def _drop_deferred_source(vault_root: Path, key: str) -> None:
+    """Forget a vault's queued Source halves when no worker will run them, and say so."""
+    with _LOCK:
+        dropped = _DEFERRED_SOURCE.pop(key, None)
+    if dropped is not None and dropped.writes:
+        log.warning(
+            "dropped %d queued write(s) of the Source backlog refresh for %s; "
+            "the next reconcile repairs the rows",
+            len(dropped.writes),
+            vault_root,
+        )
 
 
 @_owner_local
@@ -1786,7 +1884,6 @@ def apply_write_deltas(
     writes: Iterable[PageWrite],
     *,
     today: dt.date | None = None,
-    allow_disk: bool = False,
 ) -> dict[str, Any] | None:
     """Recompute the entries of a batch of written pages with one load and one save.
 
@@ -1795,15 +1892,15 @@ def apply_write_deltas(
     wikilink snapshot, one review-ref lookup and one save of the projection, so a
     bulk import pays for the projection once per batch rather than once per page.
 
-    The calling thread never walks the vault to build that snapshot: a walk costs
-    seconds on a large vault, and this runs inside the write's mutation boundary. When
-    the snapshot is not available from the warm cache or the corpus context, the batch
-    is handed to a background worker (`_defer_delta`) and this returns None; that worker
-    passes `allow_disk=True`.
+    The page-local half always runs here and the returned projection carries it. The
+    Source half, which resolves the pages' `sources:` claims, needs the wikilink
+    resolver. This thread never walks the vault to build one: a walk costs seconds on a
+    large vault, and this runs inside the write's mutation boundary. When neither the
+    warm cache nor the corpus context supplies one, only the Source half is handed to
+    a background worker (`_defer_source_half`) and its rows are refreshed later.
     """
     from . import audit as audit_module
     from . import find as find_module
-    from . import note_types
 
     today = today or dt.date.today()
     payload = _load_shared(vault_root)
@@ -1825,31 +1922,28 @@ def apply_write_deltas(
         page_of[write.path] = find_module._CACHE.get(vault_root / write.path, vault_root)
     pages = [page for page in page_of.values() if page is not None]
 
+    # The suite asks for background work inline, so there the walk may happen here.
+    allow_disk = _sync_due_state_warm()
+
     @functools.lru_cache(maxsize=1)
     def resolver() -> Any:
         # One snapshot for the whole delta, built on first use. Building it walks the
-        # vault, so the two steps below share it instead of each paying for one.
+        # vault, so the two steps of the Source half share it instead of each paying for one.
         snapshot = find_module.writer_resolver_snapshot(vault_root, allow_disk=allow_disk)
         if snapshot is None:
             raise _ResolverUnavailable
         return snapshot
 
-    type_basis = note_types.Basis(vault_root)
+    findings: list[Any] = []
+    source_paths: list[str] = []
+    source_deferred = False
     try:
-        source_paths = sorted(
-            set().union(
-                *(
-                    _cited_source_paths(
-                        vault_root, write, page_of[write.path], type_basis=type_basis,
-                        resolver=resolver,
-                    )
-                    for write in writes
-                )
-            )
+        source_paths, source_findings = _source_half(
+            vault_root, writes, page_of, resolver=resolver
         )
-        findings: list[Any] = _source_findings(vault_root, source_paths, resolver=resolver)
+        findings.extend(source_findings)
     except _ResolverUnavailable:
-        return _defer_delta(vault_root, writes, today=today)
+        source_deferred = True
     if pages:
         findings.extend(
             audit_module._check_prediction_window(vault_root, pages, today=_FAR_FUTURE)
@@ -1910,15 +2004,7 @@ def apply_write_deltas(
                 else:
                     pages_map.pop(rel, None)
             categories[category] = pages_map
-        # Rows of the Sources these pages cite, not of the pages: a live note
-        # compiles a Source, a draft or a retired note does not.
-        backlog = dict(categories.get(SOURCE_BACKLOG) or {})
-        for path in source_paths:
-            if path in source_entries:
-                backlog[path] = _bucket(source_entries[path], today)
-            else:
-                backlog.pop(path, None)
-        categories[SOURCE_BACKLOG] = backlog
+        categories[SOURCE_BACKLOG] = _backlog_rows(categories, source_paths, source_entries, today)
         updated = {
             "version": SCHEMA_VERSION,
             "computed_on": today.isoformat(),
@@ -1942,6 +2028,8 @@ def apply_write_deltas(
             **_carried_backfill_cursors(current),
         }
         _save_unless_unchanged(vault_root, current, updated)
+    if source_deferred:
+        _defer_source_half(vault_root, writes, today=today)
     return updated
 
 

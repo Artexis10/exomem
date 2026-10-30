@@ -65,12 +65,18 @@ def _compile(vault: Path, title: str, *, status: str, source: str) -> str:
     ).path
 
 
-def _write_live_note(vault: Path, source: str) -> str:
-    """A live note and the Source's citation edge to it, with no projection delta run."""
+def _write_prediction(vault: Path, source: str, *, verdict: str | None = None) -> str:
+    """An overdue prediction that cites `source`, and the Source's citation edge to it.
+
+    Written to disk with no projection delta run, as a writer leaves it just
+    before its post-commit delta.
+    """
     rel = "Knowledge Base/Notes/Insights/compiled-claim.md"
+    rows = ["- id: p1", "- check_by: 2026-01-01"] + ([f"- verdict: {verdict}"] if verdict else [])
     (vault / rel).write_text(
-        "---\ntype: insight\ntitle: Compiled claim\nstatus: active\n"
-        f'sources:\n  - "[[{source.removesuffix(".md")}]]"\n---\n\n# Compiled claim\n',
+        "---\ntype: insight\ntitle: Compiled claim\nstatus: active\ncreated: 2026-01-01\nupdated: 2026-01-01\n"
+        f'sources:\n  - "[[{source.removesuffix(".md")}]]"\n---\n\n'
+        "## Prediction\n\n" + "\n".join(rows) + "\n\nThe backlog clears within a week.\n",
         encoding="utf-8",
     )
     cited = vault / source
@@ -81,6 +87,10 @@ def _write_live_note(vault: Path, source: str) -> str:
         encoding="utf-8",
     )
     return rel
+
+
+def _due_predictions(vault: Path) -> int:
+    return _block(vault).get("categories", {}).get("prediction_window", 0)
 
 
 def _block(vault: Path) -> dict:
@@ -286,10 +296,16 @@ def resolver_builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return builders
 
 
-def _join_deferred_delta() -> None:
-    for worker in threading.enumerate():
-        if worker.name == "exomem-due-state-delta":
-            worker.join(timeout=60)
+SOURCE_WORKER = "exomem-due-state-source-backlog"
+
+
+def _source_worker() -> threading.Thread | None:
+    return next((worker for worker in threading.enumerate() if worker.name == SOURCE_WORKER), None)
+
+
+def _join_source_worker() -> None:
+    if (worker := _source_worker()) is not None:
+        worker.join(timeout=60)
 
 
 def test_a_write_delta_never_builds_the_vault_resolver_from_disk_on_the_calling_thread(
@@ -299,19 +315,21 @@ def test_a_write_delta_never_builds_the_vault_resolver_from_disk_on_the_calling_
 ) -> None:
     monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
     vault, sources = imported
-    note = _write_live_note(vault, sources[0])
+    page = _write_prediction(vault, sources[0])
     # Neither cheap route can answer: no resolver is cached, and an out-of-band
     # event fences the vault, so the corpus context declines too.
     find_module.clear_cache()
     epoch = freshness.mark_external_pending(vault)
     try:
-        due_state_module.apply_write_delta(vault, note)
-        _join_deferred_delta()
+        advisory = due_state_module.block_for_write(vault, page)
+        _join_source_worker()
     finally:
         freshness.clear_external_pending(vault, through=epoch)
 
     assert threading.get_ident() not in resolver_builds
-    assert resolver_builds, "the deferred delta never walked the vault"
+    assert resolver_builds, "the deferred Source half never walked the vault"
+    # The write's own advisory arrives with the response; only the Source rows wait.
+    assert advisory is not None and advisory["categories"]["prediction_window"] == 1
     assert _outstanding_sources(vault) == 2
 
 
@@ -322,12 +340,58 @@ def test_a_write_delta_with_a_warm_resolver_applies_inline(
 ) -> None:
     monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
     vault, sources = imported
-    note = _write_live_note(vault, sources[0])
+    page = _write_prediction(vault, sources[0])
     find_module.shared_resolver(vault)
     resolver_builds.clear()
 
-    updated = due_state_module.apply_write_delta(vault, note)
+    updated = due_state_module.apply_write_delta(vault, page)
 
     assert updated is not None
     assert _outstanding_sources(vault) == 2
     assert resolver_builds == []
+    assert _source_worker() is None
+
+
+def test_a_deferred_source_half_does_not_overwrite_a_later_write_of_the_same_page(
+    imported: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
+    vault, sources = imported
+    walking, resume = threading.Event(), threading.Event()
+    build = WikilinkResolver._build
+
+    def gated(self: WikilinkResolver) -> None:
+        if threading.current_thread().name == SOURCE_WORKER:
+            walking.set()
+            resume.wait(timeout=60)
+        build(self)
+
+    monkeypatch.setattr(WikilinkResolver, "_build", gated)
+    page = _write_prediction(vault, sources[0])
+    find_module.clear_cache()
+    epoch = freshness.mark_external_pending(vault)
+    try:
+        # The first write defers its Source half to a worker that stops mid-walk.
+        due_state_module.apply_write_delta(vault, page)
+        assert walking.wait(timeout=30)
+        assert _due_predictions(vault) == 1
+        worker = _source_worker()
+        # A daemon worker dies with a one-shot process (the command line) before it lands.
+        assert worker is not None and not worker.daemon
+
+        # A second write resolves the prediction while the worker is still walking.
+        _write_prediction(vault, sources[0], verdict="confirmed")
+        find_module.shared_resolver(vault)
+        due_state_module.apply_write_delta(vault, page)
+        assert _due_predictions(vault) == 0
+        resume.set()
+        _join_source_worker()
+    finally:
+        resume.set()
+        freshness.clear_external_pending(vault, through=epoch)
+
+    # The stored rows, not the served block: a serve re-checks rows against the page.
+    stored = due_state_module.load(vault)["categories"]
+    assert stored["prediction_window"] == _RECOMPUTE(vault)["categories"]["prediction_window"] == {}
+    assert _outstanding_sources(vault) == _recomputed_sources(vault) == 2
