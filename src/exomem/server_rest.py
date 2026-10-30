@@ -187,6 +187,10 @@ _OPENAPI_ERROR_SCHEMA = {
         # DERIVED from the single source of truth, never transcribed.
         "site": {"type": "string", "enum": list(_retrieval_warming_sites())},
         "waited_ms": {"type": "integer", "minimum": 0},
+        # Why a write's server-side wait on a busy mutation boundary ended in
+        # MUTATION_BUSY, and how many busy attempts it absorbed before that.
+        "cause": {"type": "string"},
+        "absorbed_attempts": {"type": "integer", "minimum": 0},
         "unresolved_sources": {
             "type": "array",
             "items": {"type": "string", "maxLength": 256},

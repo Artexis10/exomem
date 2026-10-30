@@ -242,11 +242,11 @@ refreshes that run inside a commit SHALL NOT cost a filesystem `stat` per page.
 - **THEN** the inventory is built while the mutation boundary is free
 - **AND** the write commits without building it under the boundary
 
-### Requirement: Idempotent Capture Writes Absorb Ordinary Boundary Contention
+### Requirement: Keyed Writes Absorb Ordinary Boundary Contention
 
-An idempotent capture write (`observe_memory`, `remember`, `episode_memory`,
-and `record_memory` with `action="append"`) that finds the mutation boundary
-busy SHALL be waited out on the server rather than refused, for a bounded
+A keyed write (any write that carries an explicit or implicit idempotency key)
+that finds the mutation boundary busy SHALL be waited out on the server rather
+than refused, whichever command it is, for a bounded
 time (default 40 s, `EXOMEM_CAPTURE_WAIT_SECONDS`, and never past the caller's
 own request budget: the wait MUST end early enough that the last attempt,
 the delivery reserve and one guard acquire timeout still fit inside it).
@@ -257,7 +257,7 @@ MAY wait at once (the waiter cap; four at the default eight); a capture past
 that cap is refused at once with `cause: capture_waiters_full`. The retry MUST run
 under the same idempotency identity, so the write commits exactly once, and
 MUST NOT re-run any attempt that observed a commit. A client MUST NOT receive
-`MUTATION_BUSY` for a capture write whose holder is still inside its allowance,
+`MUTATION_BUSY` for a keyed write whose holder is still inside its allowance,
 whose wait has not run out, and that arrived within the waiter cap; absorption
 holds up to the cap and no further.
 
@@ -266,8 +266,9 @@ ran out, or a capture past the waiter cap. It SHALL keep `MUTATION_BUSY` with `c
 `cause` (`holder_overdue`, `capture_wait_exhausted` or
 `capture_waiters_full`), the time waited, and a
 remediation that says the write did not commit and may be retried with the same
-idempotency key. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the previous
-immediate refusal.
+idempotency key. The REST `Error` schema SHALL declare every field such a refusal
+carries. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the previous immediate
+refusal.
 
 #### Scenario: Concurrent captures during a held boundary all commit once
 
@@ -276,6 +277,13 @@ immediate refusal.
 - **AND** the holder releases within its allowance
 - **THEN** every write commits exactly once
 - **AND** no `MUTATION_BUSY` reaches any caller
+
+#### Scenario: A guarded Records update meets a busy boundary
+
+- **WHEN** a keyed `record_memory` update meets a boundary held by a holder
+  inside its allowance
+- **THEN** the update waits, commits once after the holder releases
+- **AND** no `MUTATION_BUSY` reaches the caller
 
 #### Scenario: An overdue holder is refused at once with a cause
 

@@ -392,6 +392,8 @@ def test_structured_busy_error_matches_openapi_and_preserves_public_identity(
         monkeypatch,
         EXOMEM_REST_API_KEY="sekret",
         EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+        # The leaf stays busy, so the server-side wait runs out; keep it short.
+        EXOMEM_CAPTURE_WAIT_SECONDS="0.2",
     )
     request_id = "11111111-1111-4111-8111-111111111111"
     response = client.post(
@@ -454,6 +456,8 @@ def test_busy_holder_telemetry_matches_nested_openapi_schema(
         monkeypatch,
         EXOMEM_REST_API_KEY="sekret",
         EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+        # The leaf stays busy, so the server-side wait runs out; keep it short.
+        EXOMEM_CAPTURE_WAIT_SECONDS="0.2",
     )
     response = client.post(
         "/api/manage_memory_file",

@@ -33,7 +33,7 @@ def _run(manager, run, *, budget: float | None = None):
         token = request_budget.set_current(request_budget.RequestBudget(seconds=budget))
     try:
         return manager._run_absorbing_capture_contention(
-            command, {}, run, key="k", commit_state={"observed": False}, request_id="r"
+            command, run, key="k", commit_state={"observed": False}, request_id="r"
         )
     finally:
         if token is not None:
@@ -179,7 +179,7 @@ def test_nested_ineligible_capture_cannot_borrow_preparation_admission(
         if ineligible == "disabled":
             monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
         return manager._run_absorbing_capture_contention(
-            SimpleNamespace(name="episode_memory"), {},
+            SimpleNamespace(name="episode_memory"),
             lambda: writer_lease._active_capture_preparation_retry(),
             key=None if ineligible == "unkeyed" else "nested",
             commit_state={"observed": False}, request_id="nested",

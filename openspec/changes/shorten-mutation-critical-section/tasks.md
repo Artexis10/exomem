@@ -246,6 +246,10 @@ authority and can be rolled back independently.
       Verify bounded admission and allowance exhaustion write nothing and permit same-identity recovery.
       Verify structured retryability through the command facade and run affected checks.
       Evidence: PR #1901: `test_reference_preparation_survives_two_real_intervening_commits`, `test_three_reference_captures_survive_concurrent_preparation_invalidation` and `test_unproved_episode_references_return_a_bounded_retryable_failure_without_a_write` in `tests/test_episode_memory_command.py`.
+- [x] 10.6 Widen absorption from the capture commands to every keyed write:
+      a guarded `record_memory` update meeting a held boundary waits and commits
+      once (`test_a_guarded_record_update_waits_out_the_boundary`). Declare the
+      refusal's `cause` and `absorbed_attempts` in the REST `Error` schema.
 
 ## 11. Graph receipt identity after authority release
 

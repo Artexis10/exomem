@@ -4323,15 +4323,14 @@ def _is_receipt_vault_root(root: Path) -> bool:
     return (root / kb_dirname()).is_dir()
 
 
-# Idempotent capture writes: a busy boundary is the server's problem to wait
-# out, not the client's to retry. `record_memory` joins only for `append`; its
-# other actions are curated edits a caller may want refused promptly.
-_CAPTURE_ABSORBED_COMMANDS = frozenset({"observe_memory", "remember", "episode_memory"})
+# Every keyed write: a busy boundary is the server's problem to wait out, not
+# the client's to retry. A client cannot act on ordinary contention; the
+# contention_absorbed and contention_refused events keep it visible to operators.
 _CAPTURE_WAIT_SECONDS = 40.0
 _CAPTURE_WAIT_CEILING_SECONDS = 600.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
 _CAPTURE_WAITERS_FULL_REMEDIATION = (
-    "The write did not commit. Other captures are already waiting on the boundary and "
+    "The write did not commit. Other writes are already waiting on the boundary and "
     "the server keeps workers free for reads: retry with the same idempotency key "
     "after retry_after_ms."
 )
@@ -4346,12 +4345,11 @@ _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
 )
 
 
-def _capture_write_absorbs_contention(command_name: str, kwargs: Mapping[str, Any]) -> bool:
-    if os.environ.get("EXOMEM_CAPTURE_CONTENTION_ABSORB", "1").strip().lower() in {"0", "false"}:
-        return False
-    if command_name in _CAPTURE_ABSORBED_COMMANDS:
-        return True
-    return command_name == "record_memory" and kwargs.get("action") == "append"
+def _writes_absorb_contention() -> bool:
+    return os.environ.get("EXOMEM_CAPTURE_CONTENTION_ABSORB", "1").strip().lower() not in {
+        "0",
+        "false",
+    }
 
 
 # A waiting capture parks one of the process's sync workers (anyio's limiter,
@@ -6231,7 +6229,6 @@ class LeaseManager:
 
             result = self._run_absorbing_capture_contention(
                 command,
-                kwargs,
                 run_idempotent,
                 key=key,
                 commit_state=commit_state,
@@ -6400,14 +6397,13 @@ class LeaseManager:
     def _run_absorbing_capture_contention(
         self,
         command: Any,
-        kwargs: Mapping[str, Any],
         run: Callable[[], Any],
         *,
         key: str | None,
         commit_state: Mapping[str, bool],
         request_id: str,
     ) -> Any:
-        """Run one keyed capture write, waiting out an ordinary busy boundary.
+        """Run one keyed write, waiting out an ordinary busy boundary.
 
         Ordinary contention (a holder still inside its allowance) never reaches
         the client: the same keyed write is attempted again, in arrival order,
@@ -6418,7 +6414,7 @@ class LeaseManager:
         key commits exactly once; anything that observed a commit is never
         re-run.
         """
-        if key is None or not _capture_write_absorbs_contention(command.name, kwargs):
+        if key is None or not _writes_absorb_contention():
             # An ineligible nested invocation must not borrow its parent's
             # allowance or admission callback.
             token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(None)
@@ -6431,6 +6427,9 @@ class LeaseManager:
         queue = self._capture_queue
         ticket = None
         absorbed = 0
+        # The last busy refusal this write absorbed: a wait that runs out in line
+        # still names the holder that kept it waiting.
+        last_busy: OpError | None = None
         holds_slot = False
 
         def wait_turn() -> bool:
@@ -6465,7 +6464,11 @@ class LeaseManager:
         def refuse(error: OpError, cause: str, remediation: str) -> OpError:
             # The one place a busy from this loop becomes client-visible.
             mutation_lock.record_client_visible_busy()
-            error.details.update(cause=cause, waited_ms=waited_ms(), absorbed_attempts=absorbed)
+            # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
+            error.details.pop("wait_ms", None)
+            error.details.update(
+                cause=cause, waited_ms=round(waited_ms()), absorbed_attempts=absorbed
+            )
             error.remediation = remediation
             _log_mutation_event(
                 "contention_refused",
@@ -6491,7 +6494,7 @@ class LeaseManager:
             while True:
                 if ticket is not None and not wait_turn():
                     raise refuse(
-                        uncounted_busy(),
+                        last_busy or uncounted_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
@@ -6532,6 +6535,7 @@ class LeaseManager:
                             ) from None
                         holds_slot = True
                     absorbed += 1
+                    last_busy = error
                     if ticket is None:
                         ticket = queue.enter_line()
                     time.sleep(min(_CAPTURE_RETRY_FLOOR_SECONDS, remaining))
