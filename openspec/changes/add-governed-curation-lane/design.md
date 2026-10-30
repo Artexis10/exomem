@@ -338,6 +338,34 @@ receipt, correct next-step selection, and byte-identical plan identity at every
 cut. A changed plan id/fingerprint, altered target, or substituted stable
 identity must refuse, not recover optimistically.
 
+### 11. Steps depend on their own plan, not on when approval comes
+
+Proposal prepares every step before any step runs, and approval often comes
+days later. Two leaf guards then refused runs the plan itself made valid:
+
+- A later step that links to a page an earlier step creates renders that link
+  as written while the page is absent, and in the writer's resolved form once
+  it exists. Its sealed draft hash could never match, so the run stopped
+  part-way.
+- An edit's transition token pins the reviewed `updated` instant, and the
+  writer refuses one older than a day.
+
+Proposal therefore prepares step `k` with a private resolver seam
+(`find.planned_pages`) that registers the pages steps `0..k-1` create, with the
+titles their leaves register. Only creations are projected; relocation steps
+are refused before any step runs. A later step bound to a path an earlier step
+writes is refused at proposal (`CURATION_STEP_CONFLICT`), because it would
+always stop part-way. A foreign change still alters the render, and the leaf
+still refuses it.
+
+At execution an edit step re-runs its leaf's validation for a fresh
+transition. Exactness moves to the witness batch, which already sees the
+leaf's planned bytes before anything is written: the planned page, with
+`updated` put back to the reviewed instant by the edit writer's own helper,
+must hash to the sealed postcondition. The edit therefore records its real
+commit instant and still writes exactly the approved change. Creates keep
+their reviewed render instant, because it can decide the destination path.
+
 ## Risks / Trade-offs
 
 - **[Risk] Plan files duplicate pre-change content for compensation.** → Keep

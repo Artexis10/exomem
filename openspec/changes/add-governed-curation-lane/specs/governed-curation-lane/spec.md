@@ -110,6 +110,60 @@ approved forward or compensation plan.
   plan whose approval is stored
 - **THEN** the request is refused and neither plan advances
 
+### Requirement: A plan's later steps may depend on its own earlier steps
+
+Proposal SHALL prepare each step against the vault as the plan's earlier steps
+leave it: a link in a later step to a page an earlier step creates SHALL be
+rendered as it will be once that page exists, so the sealed draft matches at
+execution. Only the plan's own earlier steps SHALL be projected. A page that
+another writer creates, edits or removes after proposal SHALL still make the
+affected step refuse through its canonical leaf. Proposal SHALL refuse with
+`CURATION_STEP_CONFLICT` a plan in which a later step is bound to a path that
+an earlier step of the same plan writes, because that step could never run as
+sealed.
+
+#### Scenario: Split note links its second page to its first
+
+- **WHEN** an approved plan creates a page and a later step creates a page
+  whose content links to it by path or by title
+- **THEN** every step applies in order and the later page holds the link in the
+  form the writer renders for an existing page
+
+#### Scenario: Another writer creates the link target after proposal
+
+- **WHEN** a sealed step links to a page that did not exist at proposal and
+  that no earlier step of its plan creates, and another writer creates it
+- **THEN** that step refuses through its leaf and writes nothing
+
+#### Scenario: Two steps bind the same page
+
+- **WHEN** a later step is bound to the content hash or absence of a path that
+  an earlier step of the same plan writes
+- **THEN** proposal refuses with `CURATION_STEP_CONFLICT` and stores no plan
+
+### Requirement: An approved edit applies whenever approval comes
+
+The executor SHALL mint an edit step's transition when the step runs, so the
+edited page carries the commit instant in `updated`. Before any byte is
+written, the executor SHALL compare the leaf's planned page, with `updated`
+set back to the reviewed instant, against the sealed postcondition, and SHALL
+refuse with `CURATION_BINDING_STALE` when they differ. The reviewed transition's
+age SHALL NOT refuse an approved edit.
+
+#### Scenario: Edit approved days after proposal
+
+- **WHEN** an edit step is approved and applied more than a day after proposal
+  and its target and link targets are unchanged
+- **THEN** the edit applies the reviewed change and the page's `updated` is the
+  commit instant
+
+#### Scenario: Edit renders differently at approval
+
+- **WHEN** another writer changes what an approved edit step renders, such as
+  creating the target of one of its links
+- **THEN** the step refuses with `CURATION_BINDING_STALE`, the page is
+  unchanged, and the run records the refusal as not retryable
+
 ### Requirement: Every committed step has exact reconstructible commit evidence
 
 Before invoking a governed leaf, the executor SHALL persist a prepared step with
