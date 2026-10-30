@@ -57,6 +57,7 @@ the public-suite lanes.
 
 | f32 | utility_action_episode | operational | none | utility_action_state_valid · utility_no_prohibited_effects (seeded helpful-history, self-contained and stale-distractor action episodes) |
 | f33 | referent_capture_replay | operational | none | referent_entity_typed · referent_key_edge_present · referent_used_in_fresh_session · twin_left_no_referent (six positives from the owner's list, each with a twin that names the same referent as often but as a passing or one-off thing; one fresh owner-anchored session per positive) |
+| f34 | organisation_autonomy_replay | operational | none | key-scored outcome per §7 sequence 8; no §2 assertion (40 held-out situations: relation, referent and durability twin, placement and vocabulary freshness; each a capture session and a fresh-recall session) |
 
 ## 2. Assertion registry (deterministic; unknown name = fixture load error)
 
@@ -410,3 +411,152 @@ adversarial comparison at acceptable marginal cost.
   **No other change.** This amendment adds no operation kind, no catastrophic assertion and no budget constant. The twin's assertion composes the existing absence meta-predicate. The projector gains the opt-in entity-graph projection (0.6.0 → 0.7.0), and the receipt schema gains the optional `fixture_sha256` field. The content that earlier families read does not change, but their snapshot bytes do (`typed_relations: []`, projector 0.7.0).
 
   The owner is asked to acknowledge this amendment on the day it lands. Until the receipt is acknowledged, f33 MUST NOT support a comparative run, score, or claim, and every comparative result of the change, including the gate of its task 5.2, reads as pending.
+
+- 2026-10-30 — **Organisation autonomy amendment, sequence 8.** Add f34 `organisation_autonomy_replay` to §1. Reason: the owner approved the autonomous organisation plan on 2026-10-26, and its decision 8 replaces the acceptance test of `promote-referents-without-nudges`. That change's PR B changes authoring behaviour: specific relations, referent promotion, placement and vocabulary freshness. This family decides whether PR B merges. It supersedes f33 for that acceptance only; f33 stays filed, sealed and unrun.
+
+  **Authorship and custody.** An independent case-authoring evaluator lane wrote the source truth, situations and keys on 2026-10-30, before PR B is built. All of it is invented and product-shaped. No personal record, private incident, other benchmark case set, f33 material or system output was a source. Implementation lanes never read the files. The files stay in evaluator custody outside the repository, and this entry freezes them by SHA-256. A measurement lane, never an implementation lane, runs every arm and checks every file against these digests before its first session.
+
+  **Situations.** The held-out set has 40 independent situations, each with its own source truth, seed vault and names:
+  - 16 relation situations: 10 where a specific relation fits, and 6 where a generic edge or no edge is correct;
+  - 12 referent situations: 6 positives and 6 durability twins;
+  - 6 placement situations;
+  - 6 vocabulary-freshness situations, where a later session meets an entry that an earlier agent session promoted.
+
+  Each situation has one client shape, fixed before generation. Each shape gets 8 relation, 6 referent, 3 placement and 3 freshness situations, so 20 run hooked and 20 hookless. The hookless shape is a proxy for hookless clients, never a result for another client. Each durability twin copies the turn and mention structure of one positive, but shares no source truth with it. Every user turn and question passes the f28 store-bearing gate. A separate pool of 20 development situations serves the development rounds. It shares no source truth, name, referent or seed with the held-out set, and the decision never uses it.
+
+  **Sampling unit.** The unit is the situation. Situations share one author, the common product base, the actor model and the client version; nothing sampled upstream is reused across situations. The interval treats situations as independent paired units.
+
+  **Arms.** Both arms run the same base revision, bound before generation:
+  - baseline: `main` with organisation PR A, the source-quality repair released in 0.147.0 (#2136) and the common tool catalogue (#2139);
+  - candidate: the same base plus the complete PR B batch, and nothing else.
+
+  Before generation, the measurement lane binds the exact revisions, wheel digests, interpreter, loaded source identity, served tool-list and instruction digests, contract version, engagement, authority, prominence, client version and model for each arm. A product label does not prove which code executed. Prominence is the shipped default for each client shape.
+
+  **Runs.** Each arm runs every situation once: a capture session with the situation's turns, then a fresh-recall session on the vault it left, with one question. That is 160 actor sessions, with no repeat draws. The actor is `claude -p` with the default Opus model on the Claude subscription. A model-free script builds each seed through the arm's own product doors. A freshness seed saves its promoted entry through the governed registry door under a separate prior agent session. The fresh session follows the shipped default maps workflow through the public tool names that discovery returns. The run file keeps the full transcript of both sessions, including map, profile and page pulls, every call with its result, the final answer and the end state. An empty legacy activation field is never a failure and never forces an anchor fallback. A guard of 30 calls per user turn applies equally to both arms; its refusals are reported.
+
+  **Measures.** An arm succeeds in a situation when three things hold: the category's state outcome, an answer that states the key fact, and no false precision. The state outcomes are:
+  - specific relation: an edge between the key's pair whose meaning the source supports;
+  - generic or no edge: none is required;
+  - referent positive: an entity for the referent whose type is not one the key rules out;
+  - durability twin: none is required;
+  - placement: a page from the capture session in the expected home, or outside every unrelated home when no home applies;
+  - freshness: the referent's type or the pair's edge uses the promoted entry.
+
+  False precision is a typed claim from the capture session that the source does not support, over the referents and pairs the key names. Examples are an unsupported or reversed specific edge, a ruled-out type, an entity for a twin's one-off referent, and a page in an unrelated home. Generic edges and reference edges (`links_to`, `mentions`, `about_entity`, `cites`) are never false precision. The keys accept every equivalent grounded outcome. They prescribe no tool order, note count or wording. An answer passes when an accepted value appears in it at token boundaries after normalization. The run also reports, per arm and as paired differences:
+  - omissions by reason code;
+  - generic edges with and without a recorded edge-review reason, and exactly duplicated reasons after normalization;
+  - abandoned writes: refused or failed writes that no later write in the session completes;
+  - Exomem calls per session, and the bytes re-sent after a refusal;
+  - the fresh session's map, profile and page pulls.
+
+  **Judging.** Scoring is deterministic wherever it can be. A blind judge sees only residual cases: the state outcome holds and the session received the fact, but the answer lacks every accepted value. The judge decides whether the answer states the key fact in other words. Each item shows the same reference view for both arms: an opaque id, the question, the key fact, the accepted values and the answer. The judge runs on the Codex subscription, another family than the actor, in at most two lanes without the arm key. When Codex has no room, a fresh Opus lane judges, and the report names it as same-family. A judge never overturns a deterministic pass or fail.
+
+  **Statistics.** Each scored situation gives one row: baseline and candidate success, and baseline and candidate false precision. The success table counts a (both succeed), b (only the candidate succeeds), c (only the baseline succeeds) and d (both fail), with n = a + b + c + d. The primary result is the paired difference (b - c)/n with its 95% interval by Newcombe's method 10. This is the hybrid score interval for paired proportions without continuity correction (Statistics in Medicine 1998;17:2635-2650):
+  1. Set p1 = (a + b)/n for the candidate and p2 = (a + c)/n for the baseline.
+  2. Compute the 95% Wilson score interval (l1, u1) for p1 and (l2, u2) for p2, with z = 1.959964.
+  3. Set phi = (ad - bc)/sqrt((a + b)(c + d)(a + c)(b + d)), or 0 when that product is 0.
+  4. Set L = (p1 - p2) - sqrt((p1 - l1)^2 - 2 phi (p1 - l1)(u2 - p2) + (u2 - p2)^2).
+  5. Set U = (p1 - p2) + sqrt((u1 - p1)^2 - 2 phi (u1 - p1)(p2 - l2) + (p2 - l2)^2).
+
+  The grouped sign-flip interval of the switch-evaluation statistics module is a different method, and this family does not use it. Per client shape and per category, the report gives the same table and interval as description only.
+
+  **Decision.** PR B merges only when both rules hold:
+  - the lower bound L is above 0;
+  - the candidate has false precision in at most 1 more situation than the baseline.
+
+  An interval that contains 0 establishes no gain. PR B then does not merge, the per-situation tables go to the owner for a ruling, and the batch is not expanded after the result.
+
+  **Faults.** The run reuses the maintained switch-evaluation fault classification. A harness fault is retried with the same inputs at most twice; a retry is not a repeat. When either arm's session still faults, the situation leaves both arms and the report lists it. More than two struck situations void the run, and a rerun needs a new amendment. A product failure after readiness is scored as a failed situation. A digest mismatch stops the run before its first session.
+
+  **Spend and holds.** The decision run uses 160 actor sessions; at most 80 development sessions precede it. Residual judging uses the Codex subscription. No API or credit spend is authorized. The decision run waits for:
+  - PR A's release and the bound base revision;
+  - the common tool catalogue served by both arms;
+  - an isolated write-capable product binding on the maintained Compiler capture route, agreed with its owner (that route exposes four read tools today);
+  - the owner's acknowledgment of this receipt;
+  - the session manager's actor allocation and judge room.
+
+  **Frozen inputs.** The protocol file `protocol.yaml` has SHA-256 `dea081ca7f25bee772a852fe4cf241adce5745a74aaafd2fac4c2e37dce050e1`. The held-out case files `h01.yaml` to `h40.yaml` and key files `k01.yaml` to `k40.yaml` have these digests:
+  - `h01.yaml`: `c43d230752c360b1adba5bcf5cdb190557677b31924ae475b01829c50ba575e2`
+  - `h02.yaml`: `0d9ab047827199eadb0da2e207a17f433c553e58c61bbb2dbf2ea47020d63737`
+  - `h03.yaml`: `bbe723f86753f72e6e118bbdbcc6dd78fe2ac971cc52c533c0a63f0c60442915`
+  - `h04.yaml`: `dac44134fc2bc9df053ad32edf67d1982b8e48a6635ff15c5c624427d05b9201`
+  - `h05.yaml`: `79c2df188ecad3484a35be17a361b59c6440cd0a3964984f70a487c73678cdfb`
+  - `h06.yaml`: `9b44b69e4e77a5df4fdecdc8b856b1c644e0fc73dfb3afc59934cb64528781d0`
+  - `h07.yaml`: `127de988163ad2e9bd7c3bfc9258bc7ee1a8f74f6e03a94aa9e4663c05c433cd`
+  - `h08.yaml`: `6900f8fc23a593b0a5721c1d28299ce2f74b0786bbe795067a047569e642a03d`
+  - `h09.yaml`: `8f5ccc84f45380eeffac1e079533a0d3acfbe430fc5c0e6b2e7ed53e9591e86f`
+  - `h10.yaml`: `fae88edc3c58818ccbd7b57c6bbdcd49956d92f9671d1d8e9ca8bbda28fd9019`
+  - `h11.yaml`: `54562a4b1f9aae3e21d5b45e82df56e7334751d7064ecf21769a5dd551c59fa3`
+  - `h12.yaml`: `e3f2eb4331743e07b6327985bc4d8ad044885264a0fa64cb236c214725ae0311`
+  - `h13.yaml`: `ff1b78c720a984eec388b99af67556d0e08b9f1521c34696bc2163cb7858a579`
+  - `h14.yaml`: `9b8d0ae65f57bcf72ba8322f2abe97213c4079c83d964ec0fc25da31d31c9758`
+  - `h15.yaml`: `74fc50e22ed14a5847896d83c67fc8037d6c4fbb04287f8d3feaebc9147e82a2`
+  - `h16.yaml`: `da00d7e5faa988add481809e62d3190441c9d8d0b1ca09b2c70ef9fafbf1b250`
+  - `h17.yaml`: `c47c2155abb7409c9a768cf98992fbf0c615bb2c2cde3c5edcd1cdb86e93086d`
+  - `h18.yaml`: `4270433b6433d28ba2e77cb5974ef5d9fa3f169cdbf1b2446620e2f3e8f9eaf5`
+  - `h19.yaml`: `c13814f6d4c47344a8828d4a11222aef80d317528ce3dd56aed32e20eef2a71a`
+  - `h20.yaml`: `32558877c66ea5fb65e4af0c5642786ec8821a820186b797a3d8edb2889a945c`
+  - `h21.yaml`: `f4032b9d147f0c977f6594e99d8a8a081999093e9ba225b74c2faec19f02f57f`
+  - `h22.yaml`: `026af3f7700004f3de850432a793bd13fdc982b1c373a4bd6f760fd366b0e3af`
+  - `h23.yaml`: `6fe50dd478fb528b010903271336bc9bd9a1c880f6467285c9d62b85859edc7a`
+  - `h24.yaml`: `b0887a4352594a8bc186d417daff8857be11409ab254860692a0019eb2789729`
+  - `h25.yaml`: `a6df9766e64d8aca199d7c416a07cd0ab340e0797f0ea9d0428a69eef9537a21`
+  - `h26.yaml`: `ee58674ddc7185c09f2e14b17451c59a24a45a7030c026d254931c1b6edabf84`
+  - `h27.yaml`: `3e5dc03cdc00e7bb985cc576c43c5aca76a393320c11a28314363113a9313b58`
+  - `h28.yaml`: `025df219018903bafa48e5defa64a94ffff9816e164d9dd384ac1778566ac974`
+  - `h29.yaml`: `2abd16d0b0dafe06f3f2b5011eb52de7f5436dd20a624941c92dabbc09cbd765`
+  - `h30.yaml`: `a8a60957a35874f8647b7ad7ee3a0482c605b5d94436a18a2d55f622d6f289f3`
+  - `h31.yaml`: `825788032af53075adef9ba4422ebc3727a1617f188405c1bc4b9535ef36d6aa`
+  - `h32.yaml`: `92824d8ed6c11102701c25e3c5b593bed8870f7a15ebb2dd2a72cbc95556a34e`
+  - `h33.yaml`: `3b7e09eef83ec1c13edb91d6f284140e8482dddb27cffb6338dbd780821f1fe0`
+  - `h34.yaml`: `ecca38b358035791c907cdbb45613125ae8cc7959481c8f077b96c293c88ecbd`
+  - `h35.yaml`: `442783c3845411ab80c053034dcb07a39743a557c2023f4d44385ea50cc81263`
+  - `h36.yaml`: `be8e7ed6d7a4fcb7f3967ececd047794330628b29519ab4cf0f2a24fdb8a9d63`
+  - `h37.yaml`: `a5fc5b0ea432200cdbd111e93251aecbc9de82ca718bfc71ad9eee255e9d3caa`
+  - `h38.yaml`: `5eeb1ff163e1208ecd04b0cf79a3f153b39787e57c0fcd39a0d1e1426436de3f`
+  - `h39.yaml`: `a54bfeac56f3abe246e8868b65e7571c28dc6d9415556b2249f5a66a23fdcc87`
+  - `h40.yaml`: `67b8610f6a1cb7407ae0fe6bd55445c540a6237c18d2f5fb926e0e196fe9ead7`
+  - `k01.yaml`: `5a7ff8fdce31c4f29c2970620d5d22c7df4035284023b794c51948c813986e4b`
+  - `k02.yaml`: `95502f62a6268bb42dfaccb892b0ad0e3060ac704ff79f8289d2373aa8f8b73c`
+  - `k03.yaml`: `048f35cc96e2c652e9e8d703c118a06724c2ec32f69b6eb9a14dd01c40ef7e2d`
+  - `k04.yaml`: `0029876178914c3eab1ade3f44dc4835bfa234edb09779ca5aba61023e68c045`
+  - `k05.yaml`: `58c8fe089aab2c7b716015814995b52ce0796e02f7200f76253d9df95f8425f9`
+  - `k06.yaml`: `67049f765bec89447d0e00ed0507f0749d675bbebe99ca8fb5586e426df88505`
+  - `k07.yaml`: `0055d2811c7a40e6d1cff25607d826eeb126193dd6d6db7670930c1c8c22f201`
+  - `k08.yaml`: `9691285c8a608d8e5bc0aee97ae8641463496f86cdffaf34b06329fc11734c99`
+  - `k09.yaml`: `6bbe0e91b4c688f22060f15f0f77fd78976bbefacb8c01c8a00a7cea0d422183`
+  - `k10.yaml`: `31f397bbc3316fd0a1f6f6beae4db3fdebf49144ed6409e22c04d483ad3825ba`
+  - `k11.yaml`: `fb1917a2ded76135442e1b83f8bbfc093d8a80c0a126e790a85942c6742779d6`
+  - `k12.yaml`: `8b7d5639ffe0692d4720f327f0a9a2612b79fa4043af4871a2059d4e2d0ab0d8`
+  - `k13.yaml`: `bc036ab7ca65ff61dc408a5e2ae61dc83d2e787cbf84ba9995e23ed06cc9232d`
+  - `k14.yaml`: `2eb839a242291941c6afdf2735c7bff618b30d2317fadb551982ee4e5b9fae80`
+  - `k15.yaml`: `b13c696a5451bff35a4e72e6e77f44d50dc4e1ae6864cbaeb58bcc2099715966`
+  - `k16.yaml`: `a1523737cb450a957b3680786bc67101a61a5ff69d6355f117ec830eb0a42453`
+  - `k17.yaml`: `7fa4c2b8d69b4a01b9768806c671ba37a130e443a49eea5ff5235f742c506836`
+  - `k18.yaml`: `3bc4e922cc8c743df2999a30236acc7b8fa84e5589f7fbbedd5a82c367f14411`
+  - `k19.yaml`: `82fc93d733dce620525bfdbe3a6cdc17513ccf273cd55bff5c7f90cc2cf274d1`
+  - `k20.yaml`: `f03e506c45ebbf98c0095a4d2ac99d3eb4ccf0bb398c3413da9173f10fd864a6`
+  - `k21.yaml`: `beed1f675f4197073e2d05b67ac4ed32354ab2cad9d02f37c8ecdde1b3ab6b83`
+  - `k22.yaml`: `0b80bc8a54cd70af0d3491cf09e98ebda2f09db7f86097240ce2dce95ebdb062`
+  - `k23.yaml`: `c5793400cdd6f094af24ded8e6dc811d66f05efcbd807d4672d6a74a2a2f69ca`
+  - `k24.yaml`: `6e7ed11758907f3a5e757bb33c4192a14970e35526e8d225e3373efbe4085eb2`
+  - `k25.yaml`: `d38e8f0b6c9327818e40390ec8f1dfab9d951958b23b1babe38f611cc92e9e70`
+  - `k26.yaml`: `7c831ccbfa21a0b50c43e5e3eb7d1f20b7b13aaca45f24b85a98fd2b1877b1ee`
+  - `k27.yaml`: `9472e10fa267b953970347fced88c2fcd815a9a95273240e36064e12ef39705a`
+  - `k28.yaml`: `a479aaf9879c1aad89ac2eddb1860bf6910bdfb6d55b7bb722ad03449080620a`
+  - `k29.yaml`: `0b0709860ed3190f7757ea87d639bfbf96f666ac75e7a9b0c48536ce4f33a8d4`
+  - `k30.yaml`: `048980ac6f5ebfd0dd8e7bfcd799139f470446c70ac927c7c4321a9324463978`
+  - `k31.yaml`: `15274c8cffdd078c8cbc3dec3cfddb67a5164f23874089b94c2186cb7c575d3f`
+  - `k32.yaml`: `7cbdad5bd2001b8bc404e3d77250385e19229e64a6f01770736bf1b1bb07f60f`
+  - `k33.yaml`: `eebd42dda955c6a9825b2b74ab00b0499745cef57729a3b6f4b752c2c8d0618c`
+  - `k34.yaml`: `525d362fa1aa31a5eba25b4249ce209120ba8073b6f9cef632c44b7d219ba2de`
+  - `k35.yaml`: `56d2f77a3445e964443be2975aa8daa700c218b55f3e50c4e94c1816f0a76cdf`
+  - `k36.yaml`: `17411d38e3938678a6622ec43a7dbca0c5e6c87dd07f72e737c6b3ba9f1d45f8`
+  - `k37.yaml`: `481c829492e88f9f34b90e4766907ba7dfb8d8bb451be74d471310e860ca5141`
+  - `k38.yaml`: `d3e758114dedfb89fb480e1481c22fe2676834f4d30f8d4e3c9b222845f90505`
+  - `k39.yaml`: `2df681fea732bfe7b10a52875572d8ce8aa8eda9bfd213346af2a25f07d8d096`
+  - `k40.yaml`: `ed84387669b8e2a82fd771664dd72aa29426b9d3fee983f301e1e7d112b2f6ea`
+
+  The aggregate digest is `2feb75c61589b5dacad5b2ef96a557118663141e4e690fc7912fedadfe97ae01`: the SHA-256 of a text with one line per file above, in name order, each line being the digest, two spaces, the file name and a newline.
+
+  **No other change.** This amendment adds no §2 assertion, operation kind, catastrophic assertion or budget constant. The measurement lane scores f34 against the frozen keys under this entry's rules. The owner is asked to acknowledge this amendment before the decision run. Until the receipt is acknowledged, f34 MUST NOT support a comparative run, score or claim, and PR B's acceptance reads as open.
