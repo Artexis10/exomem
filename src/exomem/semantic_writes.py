@@ -4276,6 +4276,37 @@ def commit_recovery(
     )
 
 
+def _structural_result(
+    contracts: tuple[memory_schema.LoadedMemoryContract, ...],
+    candidate: semantic_contract.SemanticPageState,
+    *,
+    operation: str,
+    before_corpus: semantic_contract.SemanticCorpusContext,
+    after_corpus: semantic_contract.SemanticCorpusContext,
+) -> semantic_contract.SemanticContractResult:
+    """Judge one new page against the corpus that will hold it."""
+    language = (candidate.definitions.snapshots["categories"].typed if candidate.definitions is not None
+                else semantic_language_registry.core_registry())
+    resolved = memory_schema.resolve_contracts(
+        contracts,
+        projects=candidate.projects,
+        page_type=candidate.page_type,
+        language_registry=language,
+    )
+    return semantic_contract.evaluate(
+        before=None,
+        after=candidate,
+        operation=operation,
+        mode="precommit",
+        before_contracts=resolved,
+        after_contracts=resolved,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        include_relation_disposition=semantic_contract.requires_semantic_unit(candidate),
+        language_registry=language,
+    )
+
+
 def _evaluate_structural(
     root: Path,
     *,
@@ -4324,26 +4355,13 @@ def _evaluate_structural(
             source,
             status_basis=status_basis,
         )
-    language = (candidate.definitions.snapshots["categories"].typed if candidate.definitions is not None
-                else semantic_language_registry.core_registry())
-    resolved = memory_schema.resolve_contracts(
-        contracts,
-        projects=candidate.projects,
-        page_type=candidate.page_type,
-        language_registry=language,
-    )
     return (
-        semantic_contract.evaluate(
-            before=None,
-            after=candidate,
+        _structural_result(
+            contracts,
+            candidate,
             operation=operation,
-            mode="precommit",
-            before_contracts=resolved,
-            after_contracts=resolved,
             before_corpus=before,
             after_corpus=before.with_candidate(candidate),
-            include_relation_disposition=semantic_contract.requires_semantic_unit(candidate),
-            language_registry=language,
         ),
         candidate,
         before_census,
@@ -4663,6 +4681,24 @@ def commit_creation(
         predecessor_content_hash=predecessor_content_hash,
         status_basis=status_basis,
     )
+    return _creation_post_commit(
+        vault_root,
+        preflight,
+        committed,
+        predecessor_path=predecessor_path,
+        promotion_origin=promotion_origin,
+    )
+
+
+def _creation_post_commit(
+    vault_root: Path,
+    preflight: CreationPreflight,
+    committed: CreationCommit,
+    *,
+    predecessor_path: str | None = None,
+    promotion_origin: Mapping[str, Any] | None = None,
+) -> CreationCommit:
+    """Record one committed creation's promotion and attach its advisory feedback."""
     if predecessor_path is None:
         # A successor page is a new version of an entity, not a new entity.
         promotions.record_page_write(
@@ -4702,12 +4738,367 @@ def commit_creation(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class BatchCreation:
+    """One creation of `commit_creations`, with the auxiliaries that only it plans."""
+
+    preflight: CreationPreflight
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedCreation:
+    preflight: CreationPreflight
+    closure_plan: source_closure.SourceClosurePlan
+    auxiliaries: tuple[vault.PlannedWrite, ...]
+    derived: tuple[tuple[str, vault.PlannedWrite], ...]
+
+
+def commit_creations(
+    vault_root: Path,
+    *,
+    creations: Sequence[BatchCreation],
+    shared_writes: Sequence[vault.PlannedWrite] = (),
+    operation: str,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> tuple[CreationCommit, ...]:
+    """Commit structural creations as one canonical batch, one result per creation.
+
+    Each creation keeps its own draft token, source closure, back-references and contract
+    verdict. The verdicts are judged against the corpus that holds every creation, so two
+    creations that conflict refuse the batch. `shared_writes` are the auxiliaries that all
+    creations share, such as the index and the log, planned once for the whole batch.
+
+    Only structural creations commit together. A creation that needs a relation review,
+    binds a vocabulary decision or retained origin inputs, or replaces a predecessor
+    commits alone. Every refusal raises before the first write, so the caller may commit
+    each creation alone instead.
+    """
+    root = Path(vault_root)
+    if not creations:
+        raise SemanticWriteError("INVALID_AUXILIARY_WRITE", "a creation batch needs a creation")
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
+    planned: list[_PlannedCreation] = []
+    for creation in creations:
+        preflight = creation.preflight
+        # The two non-structural shapes need their own review or binding; a retained origin
+        # input has a per-creation revalidation that this batch does not combine.
+        if (
+            preflight.applicability == "full"
+            or preflight.vocabulary_binding is not None
+            or preflight.origin_inputs is not None
+        ):
+            raise SemanticWriteError(
+                "INVALID_AUXILIARY_WRITE", "this creation cannot commit in a batch"
+            )
+        _refuse_blocked_creation(preflight)
+        planned.append(_plan_creation(root, preflight, creation.auxiliary_writes, ()))
+    claimed: set[Path] = set()
+    for write in (
+        *shared_writes,
+        *(write for item in planned for write in item.auxiliaries),
+        *(root / item.preflight.destination for item in planned),
+    ):
+        path = Path(os.path.abspath(getattr(write, "path", write)))
+        if path in claimed:
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE", "creations of one batch plan the same file"
+            )
+        claimed.add(path)
+    with call_spans.span("commit.embedding_prewarm"):
+        _prewarm_embeddings()
+    from .writer_lease import active_manager, active_mutation_request_id
+
+    with active_manager().mutation_guard(
+        root,
+        request_id=active_mutation_request_id(),
+        operation=f"semantic_creation_{operation}_commit",
+        holder_kind="command",
+    ):
+        _enforce_closures(root, planned)
+        committed = _commit_structural(
+            root,
+            planned,
+            shared_writes=tuple(shared_writes),
+            operation=operation,
+            status_basis=status_basis,
+        )
+    return tuple(
+        _creation_post_commit(root, item.preflight, commit)
+        for item, commit in zip(planned, committed, strict=True)
+    )
+
+
+def _refuse_blocked_creation(preflight: CreationPreflight) -> None:
+    non_review_blockers = tuple(
+        finding
+        for finding in preflight.contract_result.blocking_findings
+        if finding.resolved_rule != ("relations", "*", "disposition")
+    )
+    if non_review_blockers or (
+        preflight.applicability != "full" and preflight.contract_result.should_block
+    ):
+        raise SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason(preflight.contract_result),
+            preflight.contract_result.blocking_findings,
+        )
+
+
+def _plan_creation(
+    root: Path,
+    preflight: CreationPreflight,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite],
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...],
+) -> _PlannedCreation:
+    """Join one creation's auxiliaries to its cited Sources' back-references."""
+    try:
+        # Fixed phase labels, timing only, for each step before the guard.
+        with call_spans.span("commit.source_closure"):
+            closure_plan = (
+                preflight.source_closure_plan
+                or source_closure.prepare_source_closure(
+                    root,
+                    preflight.source,
+                    destination=preflight.destination,
+                )
+            )
+        auxiliaries = source_closure.merge_backref_writes(
+            auxiliary_writes,
+            closure_plan.backref_writes,
+        )
+        _validate_derived_auxiliaries(auxiliary_writes, derived_auxiliary_writes)
+        derived = (
+            *derived_auxiliary_writes,
+            *(("source-backref", write) for write in closure_plan.backref_writes),
+        )
+    except source_closure.SourceClosureViolation as error:
+        raise SemanticWriteError(
+            error.code,
+            error.reason,
+            details=error.details,
+        ) from error
+    return _PlannedCreation(preflight, closure_plan, auxiliaries, derived)
+
+
+def _enforce_closures(root: Path, planned: Sequence[_PlannedCreation]) -> None:
+    """Re-resolve every creation's cited Sources under the mutation guard."""
+    for item in planned:
+        try:
+            source_closure.enforce_source_closure(
+                root,
+                item.preflight.source,
+                destination=item.preflight.destination,
+                prepared=item.closure_plan,
+            )
+        except source_closure.SourceClosureViolation as error:
+            raise SemanticWriteError(
+                error.code,
+                error.reason,
+                details=error.details,
+            ) from error
+
+
+def _structural_verdicts(
+    root: Path,
+    planned: Sequence[_PlannedCreation],
+    *,
+    operation: str,
+    status_basis: lifecycle_statuses.Basis,
+) -> tuple[
+    list[semantic_contract.SemanticContractResult],
+    semantic_contract.SemanticCorpusContext | None,
+    dict[str, semantic_contract.SemanticPageState],
+]:
+    """Admit the verdicts the preflights reached, or judge the creations again.
+
+    Returns each creation's verdict, the corpus before the batch, and the page state of
+    each creation. A preflight verdict is admitted only while its validity stamp is current.
+    """
+    from .writer_lease import read_commit_generation
+
+    generation = read_commit_generation(root)
+    current = [
+        semantic_contract.validity_stamp_current(
+            root, item.preflight.census_token, commit_generation=generation
+        )
+        for item in planned
+    ]
+    if len(planned) == 1:
+        preflight = planned[0].preflight
+        if current[0]:
+            relation_review._record_prevalidated_commit_outcome("reused")
+            return (
+                [preflight.contract_result],
+                preflight.corpus,
+                {preflight.destination: preflight.semantic_state},
+            )
+        # On mismatch (or an uncensusable tree) re-run the structural evaluation, so a
+        # concurrently-changed config or registry cannot admit a stale pre-boundary verdict.
+        relation_review._record_prevalidated_commit_outcome("revalidated")
+        result, state, _fresh_census, corpus, _source = _evaluate_structural(
+            root,
+            destination=preflight.destination,
+            source=preflight.source,
+            operation=operation,
+            status_basis=status_basis,
+        )
+        if result.should_block:
+            raise SemanticWriteError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                _blocking_reason(result),
+                result.blocking_findings,
+            )
+        return [result], corpus, {preflight.destination: state}
+    corpora = [item.preflight.corpus for item in planned]
+    if not all(current) or any(corpus is None for corpus in corpora):
+        raise SemanticWriteError(
+            "STALE_SEMANTIC_WRITE", "the vault changed after these drafts were validated"
+        )
+    for _ in planned:
+        relation_review._record_prevalidated_commit_outcome("reused")
+    base = corpora[0]
+    states = {item.preflight.destination: item.preflight.semantic_state for item in planned}
+    combined = _corpus_with_recovery_states(root, base, list(states.values()), registry=base.registry)
+    contracts = memory_schema.load_saved_contracts(root)
+    results = [
+        _structural_result(
+            contracts, state, operation=operation, before_corpus=base, after_corpus=combined
+        )
+        for state in states.values()
+    ]
+    for result in results:
+        if result.should_block:
+            raise SemanticWriteError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                _blocking_reason(result),
+                result.blocking_findings,
+            )
+    return results, base, states
+
+
+def _commit_structural(
+    root: Path,
+    planned: Sequence[_PlannedCreation],
+    *,
+    shared_writes: tuple[vault.PlannedWrite, ...] = (),
+    operation: str,
+    status_basis: lifecycle_statuses.Basis,
+    vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
+) -> tuple[CreationCommit, ...]:
+    """Write structural creations in one canonical batch, under the caller's mutation guard.
+
+    Structural and non-semantic creations honour the validity stamp inside the boundary
+    (see `_structural_verdicts`). One creation and many share this implementation.
+    """
+    from .governance import catalog_publication
+
+    results, catalog_corpus, catalog_states = _structural_verdicts(
+        root, planned, operation=operation, status_basis=status_basis
+    )
+    writes = [*shared_writes, *(write for item in planned for write in item.auxiliaries)]
+    primary_writes = [
+        vault.PlannedWrite(
+            root / item.preflight.destination,
+            item.preflight.source,
+            create_only=True,
+            guard=vault.PathGuard.capture(
+                root,
+                item.preflight.destination,
+                leaf_policy="absent",
+            ),
+        )
+        for item in planned
+    ]
+    writes.extend(primary_writes)
+    try:
+        catalog_target = _prepare_creation_catalog_publication(
+            root,
+            before_corpus=catalog_corpus,
+            semantic_states=catalog_states,
+            writes=writes,
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
+    origin_guards = tuple(
+        guard
+        for item in planned
+        for guard in _origin_commit_guards(root, item.preflight.origin_inputs, writes)
+    )
+    bound_origins = [
+        item.preflight.origin_inputs for item in planned if item.preflight.origin_inputs is not None
+    ]
+    token = semantic_index.set_parent_states(
+        {
+            destination: semantic_index.from_semantic_page_state(state)
+            for destination, state in catalog_states.items()
+        }
+    )
+    try:
+        from . import vocabulary_auxiliaries
+
+        manifests = tuple(
+            vocabulary_auxiliaries.seal(root, primary=primary, derived=item.derived)
+            for item, primary in zip(planned, primary_writes, strict=True)
+        )
+        written = vault.batch_atomic_write(
+            writes,
+            vault_root=root,
+            required_guards=(
+                *vocabulary_guards,
+                *origin_guards,
+                *(guard for item in planned for guard in item.closure_plan.required_guards),
+            ),
+            _vocabulary_auxiliaries=manifests[0] if len(manifests) == 1 else manifests,
+            _validate_prepared_bindings=(
+                lambda: [_validate_origin_inputs(root, bound) for bound in bound_origins]
+            ) if bound_origins else None,
+        )
+    except vault.PathGuardError as error:
+        if error.code == "PATH_VARIANT_EXISTS":
+            raise SemanticWriteError(error.code, error.reason) from error
+        _recheck_origin_guards(root, origin_guards)
+        if vocabulary_guards:
+            raise SemanticWriteError(
+                "STALE_VOCABULARY_BINDING",
+                "domain vocabulary changed during commit; validate a fresh draft",
+            ) from error
+        raise SemanticWriteError(
+            "STALE_SEMANTIC_WRITE",
+            "a concurrent write updated a shared auxiliary during commit; retry the operation",
+        ) from error
+    finally:
+        semantic_index.reset_parent_states(token)
+    try:
+        catalog_publication.publish_markdown_batch(catalog_target)
+    except catalog_publication.CatalogPublicationError as error:
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            str(error),
+        ) from error
+    shared = {Path(os.path.abspath(write.path)) for write in shared_writes}
+    commits = []
+    for item, result in zip(planned, results, strict=True):
+        # A creation reports the files it and the batch's shared writes replaced.
+        own = shared | {Path(os.path.abspath(write.path)) for write in item.auxiliaries}
+        own.add(Path(os.path.abspath(root / item.preflight.destination)))
+        paths = tuple(
+            path.relative_to(root).as_posix()
+            for path in written
+            if Path(os.path.abspath(path)) in own
+        )
+        commits.append(CreationCommit(item.preflight.applicability, True, paths, result, None))
+    return tuple(commits)
+
+
 def _prepare_creation_catalog_publication(
     vault_root: Path,
     *,
-    destination: str,
     before_corpus: semantic_contract.SemanticCorpusContext | None,
-    semantic_state: semantic_contract.SemanticPageState,
+    semantic_states: Mapping[str, semantic_contract.SemanticPageState],
     writes: Sequence[vault.PlannedWrite],
 ):  # noqa: ANN202 - private bridge returns the governance publication token
     """Prepare a creation successor from the retained semantic snapshot."""
@@ -4725,7 +5116,7 @@ def _prepare_creation_catalog_publication(
             vault_root,
             before_corpus=before_corpus,
             writes=planned_writes,
-            semantic_states={destination: semantic_state},
+            semantic_states=semantic_states,
         )
 
     return _prepare_markdown_catalog_publication(
@@ -4765,45 +5156,11 @@ def _commit_creation(
 ) -> CreationCommit:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
-    non_review_blockers = tuple(
-        finding
-        for finding in preflight.contract_result.blocking_findings
-        if finding.resolved_rule != ("relations", "*", "disposition")
-    )
-    if non_review_blockers or (
-        preflight.applicability != "full" and preflight.contract_result.should_block
-    ):
-        raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED",
-            _blocking_reason(preflight.contract_result),
-            preflight.contract_result.blocking_findings,
-        )
-    try:
-        # Fixed phase labels, timing only, for each step before the guard.
-        with call_spans.span("commit.source_closure"):
-            closure_plan = (
-                preflight.source_closure_plan
-                or source_closure.prepare_source_closure(
-                    root,
-                    preflight.source,
-                    destination=preflight.destination,
-                )
-            )
-        auxiliaries = source_closure.merge_backref_writes(
-            auxiliary_writes,
-            closure_plan.backref_writes,
-        )
-        _validate_derived_auxiliaries(auxiliary_writes, derived_auxiliary_writes)
-        derived_auxiliaries = (
-            *derived_auxiliary_writes,
-            *(("source-backref", write) for write in closure_plan.backref_writes),
-        )
-    except source_closure.SourceClosureViolation as error:
-        raise SemanticWriteError(
-            error.code,
-            error.reason,
-            details=error.details,
-        ) from error
+    _refuse_blocked_creation(preflight)
+    planned = _plan_creation(root, preflight, auxiliary_writes, derived_auxiliary_writes)
+    closure_plan = planned.closure_plan
+    auxiliaries = planned.auxiliaries
+    derived_auxiliaries = planned.derived
     prepared: relation_review._PreparedCreationDraft | None = None
     if preflight.applicability == "full":
         assert preflight.draft_id is not None
@@ -4859,19 +5216,7 @@ def _commit_creation(
             )
         else:
             vocabulary_guards = ()
-        try:
-            source_closure.enforce_source_closure(
-                root,
-                preflight.source,
-                destination=preflight.destination,
-                prepared=closure_plan,
-            )
-        except source_closure.SourceClosureViolation as error:
-            raise SemanticWriteError(
-                error.code,
-                error.reason,
-                details=error.details,
-            ) from error
+        _enforce_closures(root, (planned,))
         if prepared is not None:
             from .governance import catalog_publication
 
@@ -4887,9 +5232,8 @@ def _commit_creation(
                 with call_spans.span("commit.catalog_prepare"):
                     catalog_target = _prepare_creation_catalog_publication(
                         root,
-                        destination=preflight.destination,
                         before_corpus=prepared.preliminary.before_corpus,
-                        semantic_state=prepared.preliminary.candidate,
+                        semantic_states={preflight.destination: prepared.preliminary.candidate},
                         writes=catalog_writes,
                     )
             except catalog_publication.CatalogPublicationError as error:
@@ -4931,112 +5275,11 @@ def _commit_creation(
             return CreationCommit(
                 "full", True, committed.written_paths, committed.contract_result, committed
             )
-        # Structural / non-semantic creations honour the validity stamp too:
-        # check it inside the boundary (commit-generation + sidecar census,
-        # no corpus walk); on mismatch (or an uncensusable tree) re-run the
-        # structural evaluation so a concurrently-changed config or registry
-        # cannot admit a stale pre-boundary verdict.
-        from .writer_lease import read_commit_generation
-
-        contract_result = preflight.contract_result
-        catalog_corpus = preflight.corpus
-        catalog_state = preflight.semantic_state
-        if not semantic_contract.validity_stamp_current(
+        (committed,) = _commit_structural(
             root,
-            preflight.census_token,
-            commit_generation=read_commit_generation(root),
-        ):
-            relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, catalog_state, _fresh_census, catalog_corpus, _source = (
-                _evaluate_structural(
-                    root,
-                    destination=preflight.destination,
-                    source=preflight.source,
-                    operation=operation,
-                    status_basis=status_basis,
-                )
-            )
-            if contract_result.should_block:
-                raise SemanticWriteError(
-                    "SEMANTIC_CONTRACT_BLOCKED",
-                    _blocking_reason(contract_result),
-                    contract_result.blocking_findings,
-                )
-        else:
-            relation_review._record_prevalidated_commit_outcome("reused")
-        from .governance import catalog_publication
-
-        writes = [*auxiliaries]
-        primary_write = vault.PlannedWrite(
-                root / preflight.destination,
-                preflight.source,
-                create_only=True,
-                guard=vault.PathGuard.capture(
-                    root,
-                    preflight.destination,
-                    leaf_policy="absent",
-                ),
-            )
-        writes.append(primary_write)
-        try:
-            catalog_target = _prepare_creation_catalog_publication(
-                root,
-                destination=preflight.destination,
-                before_corpus=catalog_corpus,
-                semantic_state=catalog_state,
-                writes=writes,
-            )
-        except catalog_publication.CatalogPublicationError as error:
-            raise SemanticWriteError(
-                "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
-                str(error),
-            ) from error
-        origin_guards = _origin_commit_guards(root, preflight.origin_inputs, writes)
-        token = semantic_index.set_parent_states(
-            {preflight.destination: semantic_index.from_semantic_page_state(catalog_state)}
+            (planned,),
+            operation=operation,
+            status_basis=status_basis,
+            vocabulary_guards=vocabulary_guards,
         )
-        try:
-            from . import vocabulary_auxiliaries
-
-            manifest = vocabulary_auxiliaries.seal(
-                root, primary=primary_write, derived=derived_auxiliaries
-            )
-            written = vault.batch_atomic_write(
-                writes,
-                vault_root=root,
-                required_guards=(*vocabulary_guards, *origin_guards, *closure_plan.required_guards),
-                _vocabulary_auxiliaries=manifest,
-                _validate_prepared_bindings=(
-                    lambda: _validate_origin_inputs(root, preflight.origin_inputs)
-                ) if preflight.origin_inputs is not None else None,
-            )
-        except vault.PathGuardError as error:
-            if error.code == "PATH_VARIANT_EXISTS":
-                raise SemanticWriteError(error.code, error.reason) from error
-            _recheck_origin_guards(root, origin_guards)
-            if vocabulary_guards:
-                raise SemanticWriteError(
-                    "STALE_VOCABULARY_BINDING",
-                    "domain vocabulary changed during commit; validate a fresh draft",
-                ) from error
-            raise SemanticWriteError(
-                "STALE_SEMANTIC_WRITE",
-                "a concurrent write updated a shared auxiliary during commit; retry the operation",
-            ) from error
-        finally:
-            semantic_index.reset_parent_states(token)
-        try:
-            catalog_publication.publish_markdown_batch(catalog_target)
-        except catalog_publication.CatalogPublicationError as error:
-            raise SemanticWriteError(
-                "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
-                str(error),
-            ) from error
-        paths = tuple(path.relative_to(root).as_posix() for path in written)
-        return CreationCommit(
-            preflight.applicability,
-            True,
-            paths,
-            contract_result,
-            None,
-        )
+        return committed
