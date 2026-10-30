@@ -4138,11 +4138,9 @@ def _custody_indexable(vault_root: Path, rel: str) -> bool:
     the same shape as an absent catalogue read as drift: a legitimate "no row
     is correct" state reported as a mismatch, failing both scopes closed.
 
-    It cannot fire from today's callers: `in_excluded_scan_dir` already filters
-    those paths out upstream of `batch.identity_paths`, and `audit_custody` has
-    no production caller. It goes live the day the audit is wired into
-    reconciliation, which design.md's Risks anticipate, so the predicate is
-    aligned now rather than left as a trap for that change.
+    Pending-recall retirement also asks it, through `owes_custody_row`, before
+    it accepts a missing row as proof. A pending batch can carry an `_archive`
+    page, so the reserved-directory branch fires there in production.
     """
     from . import recall_policy
     from .vault import in_excluded_scan_dir
@@ -4161,6 +4159,12 @@ def _custody_indexable(vault_root: Path, rel: str) -> bool:
         return bool(recall_policy.is_recall_candidate(vault_root, target))
     except Exception:  # noqa: BLE001 - an unclassifiable page is not proven absent
         return True
+
+
+def owes_custody_row(vault_root: Path, rel: str) -> bool:
+    """Whether this catalogue is supposed to hold a row for this path (see
+    `_custody_indexable`); the pending-recall overlay asks it before proving a lane."""
+    return _custody_indexable(Path(vault_root), rel)
 
 
 def _custody_file_digest(

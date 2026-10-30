@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `read_review/triage_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `read_connections/change_connections`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | Remote tools may audit or dry-run. Actual repair is host-operator work via `exomem maintain --fix` / `--reconcile` |
+| `maintain` | Check or repair vault health | Remote tools audit, dry-run, and run structured-file, tag-variant and curation writes. Other repairs are host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `read_schema/change_schema`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
@@ -63,10 +63,11 @@ blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
 
 ## Governed curation
 
-MCP and REST expose only curation `work-item`, `preview`, and `status` reads.
-Use the CLI `maintain_memory` command with `mode="curation"` for every curation
-write, including proposals and compensation proposals. Retain the grouped
-`curation_action` selector and the returned identifiers on that CLI route.
+MCP and REST expose curation `work-item`, `preview`, and `status` through
+`check_memory`, and proposals, apply, resume and compensation through
+`repair_memory`. The CLI `maintain_memory` command with `mode="curation"` runs
+the same actions. Retain the grouped `curation_action` selector and the returned
+identifiers on either route.
 
 Use `check_memory(operation={'kind': 'curation-work-item'})` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,

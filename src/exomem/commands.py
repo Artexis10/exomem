@@ -14231,13 +14231,15 @@ def product_commands_for(
     )
     if surface not in {"mcp", "rest"}:
         return selected
-    # Remote repair admission already allows only these two maintenance modes.
+    from .writer_lease import REMOTE_WRITE_MAINTENANCE_MODES
+
+    # Publish only the maintenance writes that remote admission accepts.
     return tuple(replace(command, renderings=tuple(
         replace(rendering, variants=tuple(variant for variant in rendering.variants
                                           if variant.effect == "read"
-                                          or variant.action in {"structured-files", "tag-variants"}))
+                                          or variant.action in REMOTE_WRITE_MAINTENANCE_MODES))
         for rendering in command.renderings
-        if any(variant.effect == "read" or variant.action in {"structured-files", "tag-variants"}
+        if any(variant.effect == "read" or variant.action in REMOTE_WRITE_MAINTENANCE_MODES
                for variant in rendering.variants)
     )) if command.name == "maintain_memory" else command for command in selected)
 
