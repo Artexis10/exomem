@@ -21,6 +21,10 @@ _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer ma
         "compiled-history",  # The semantic writer retains its exact prior Markdown.
     }
 )
+# Primary-bound roles are admitted through their one primary (`vault._validate_batch_write_access`).
+PRIMARY_BOUND_ROLES = frozenset(  # nosemgrep: ep-word-set -- Two of the sealed manifest's own code-owned roles.
+    {"lifecycle-review", "compiled-history"}
+)
 _SEAL = object()
 
 
@@ -132,12 +136,6 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> tuple[Any, ...]:
     return tuple(images)
 
 
-# Primary-bound roles are admitted through their one primary (`vault._validate_batch_write_access`).
-_PRIMARY_BOUND_ROLES = frozenset(  # nosemgrep: ep-word-set -- Two of the sealed manifest's own code-owned roles.
-    {"lifecycle-review", "compiled-history"}
-)
-
-
 def _validate_each(vault_root: Path, images: tuple[Any, ...], manifests: tuple[Any, ...]) -> dict[str, str]:
     """Validate sealed bindings of independent primaries, each against the complete images.
 
@@ -151,7 +149,7 @@ def _validate_each(vault_root: Path, images: tuple[Any, ...], manifests: tuple[A
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         primaries.add(manifest.primary_path)
         claimed = validate(vault_root, images, manifest)
-        if _PRIMARY_BOUND_ROLES.intersection(claimed.values()) or roles.keys() & claimed.keys():
+        if PRIMARY_BOUND_ROLES.intersection(claimed.values()) or roles.keys() & claimed.keys():
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         roles.update(claimed)
     if primaries & roles.keys():

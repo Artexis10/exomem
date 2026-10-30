@@ -6064,10 +6064,8 @@ def _validate_batch_write_access(
     roles = vocabulary_auxiliaries.validate(
         vault_root, vocabulary_auxiliaries.planned_images(vault_root, full_plan), auxiliary_manifest,
     )
-    # The sealed manifest schema fixes the two primary-bound auxiliary roles.
     primary_bound_paths = {
-        path for path, role in roles.items()
-        if role == "lifecycle-review" or role == "compiled-history"
+        path for path, role in roles.items() if role in vocabulary_auxiliaries.PRIMARY_BOUND_ROLES
     }
     primary_admission = None
     if primary_bound_paths:
