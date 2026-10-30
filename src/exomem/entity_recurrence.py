@@ -859,6 +859,7 @@ def frame_grammar(
         # body-field owns comma separation; ordinary clauses use comma as a stop.
         field=re.compile(rf"(?P<label>{field_pattern})\s*:\s*(?P<values>.+?)\s*[.;!?]?"),
         copula=(
+            # nosemgrep: ep-word-search -- the versioned identity-frames-v1 grammar fixes these tokens.
             re.compile(
                 rf"(?P<candidate>.+?)\s+(?P<copula>is|was|are|were)\s+"
                 rf"(?:(?:a|an|the)\s+)?(?P<cue>{cue_pattern})"
