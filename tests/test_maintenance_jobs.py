@@ -1,4 +1,4 @@
-"""A remote `backfill-ids` write runs as a governed maintenance job.
+"""A remote `backfill-ids` or `fix` write runs as a governed maintenance job.
 
 The workflow: the owner previews on `check_memory`, starts the previewed plan on
 `repair_memory` with the preview's `plan_id` and a reason, then reads the job on
@@ -11,7 +11,9 @@ mutation boundary) and a second process (a killed job owner) are staged.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -24,7 +26,7 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 
-from exomem import capabilities, commands, maintenance_jobs, writer_lease
+from exomem import capabilities, commands, embeddings, maintenance_jobs, writer_lease
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -392,3 +394,162 @@ def test_a_job_whose_process_died_reads_interrupted(server, vault, tmp_path) -> 
     assert gone["state"] == "interrupted"
     assert gone["error_code"] == "OWNER_GONE"
     assert _page_ids(vault) == before
+
+
+# ---------------------------------------------------------------- fix
+
+_NESTED_SIDECAR = """---
+type: source
+media_type: pdf
+evidence_file: Knowledge Base/Evidence/Case/report.pdf
+original_filename: report.pdf
+{provenance}extracted_by: pymupdf
+processing_state: completed
+---
+
+# Evidence: report.pdf
+
+## Extracted text
+
+The transcript body.
+
+## Preserved notes
+
+# Evidence: report.pdf
+
+## Extracted text
+
+The transcript body.
+"""
+_LINKER = (
+    "---\ntype: insight\nstatus: active\ncreated: 2026-05-28\nupdated: 2026-05-28\ntags: []\n---\n"
+    "# Linker\n\nSee [[Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n"
+)
+_FIXED_PAGES = ("Knowledge Base/Notes/Insights/linker.md", "Knowledge Base/Evidence/Case/report.pdf.md")
+
+
+def _seed_fixable(vault: Path) -> None:
+    """A page with a non-canonical wikilink, a nested media sidecar and a top index with a stale count."""
+    kb = vault / "Knowledge Base"
+    (kb / "Notes" / "Insights" / "linker.md").write_text(_LINKER, encoding="utf-8")
+    binary = kb / "Evidence" / "Case" / "report.pdf"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary bytes")
+    stat = binary.stat()
+    # The sidecar already records its binary, so the service's media start-up leaves it alone.
+    provenance = (
+        f"binary_sha256: {hashlib.sha256(b'binary bytes').hexdigest()}\nbinary_size: {stat.st_size}\n"
+        f"binary_mtime_ns: {stat.st_mtime_ns}\nbinary_ctime_ns: {stat.st_ctime_ns}\n"
+    )
+    (kb / "Evidence" / "Case" / "report.pdf.md").write_text(
+        _NESTED_SIDECAR.format(provenance=provenance), encoding="utf-8"
+    )
+    top = kb / "index.md"
+    top.write_text(
+        top.read_text(encoding="utf-8").replace("- Sources: 4 (articles: 2, books: 1, sessions: 1)", "- Sources: 0"),
+        encoding="utf-8",
+    )
+
+
+def _knowledge_base_bytes(vault: Path) -> dict[str, bytes]:
+    root = vault / "Knowledge Base"
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+async def _fix_preview(client, **arguments) -> dict:
+    return await _call(client, "check_memory", {"kind": "fix", **arguments})
+
+
+async def _fix_start(client, plan_id: str, **arguments) -> dict:
+    return await _call(
+        client,
+        "repair_memory",
+        {"kind": "fix", "dry_run": False, "plan_id": plan_id, "why": "repair drift", **arguments},
+    )
+
+
+def test_remote_fix_writes_what_the_local_command_writes_and_names_every_path(server, vault, tmp_path) -> None:
+    _seed_fixable(vault)
+    twin = tmp_path / "twin"
+    shutil.copytree(vault, twin)
+
+    async def scenario(client):
+        preview = await _fix_preview(client)
+        handle = await _fix_start(client, preview["plan_id"])
+        return preview, handle, await _until_terminal(client, handle["run_id"])
+
+    preview, handle, final = _session(server, scenario)
+    local = commands.op_audit_fix(twin)
+
+    assert {row["path"] for row in preview["fixed"]} >= set(_FIXED_PAGES)
+    assert handle["plan_id"] == preview["plan_id"] == local["plan_id"]
+    assert final["state"] == "completed"
+    assert _knowledge_base_bytes(vault) == _knowledge_base_bytes(twin)
+    chunks = final["receipt"]["chunks"]
+    assert {path for chunk in chunks for path in chunk.get("paths", []) if chunk.get("index_refresh") is None} == set(
+        _FIXED_PAGES
+    )
+    [refresh] = [chunk for chunk in chunks if chunk.get("index_refresh") == "committed"]
+    assert "Knowledge Base/index.md" in refresh["paths"]
+    assert "- Sources: 4 (articles: 2, books: 1, sessions: 1)" in (vault / "Knowledge Base" / "index.md").read_text(
+        encoding="utf-8"
+    )
+    assert final["committed"] == len(_FIXED_PAGES) + len(refresh["paths"])
+    assert chunks[-1]["summary"]["fixed"] == preview["summary"]["fixed"]
+
+
+def test_a_page_edited_after_the_fix_preview_stops_the_job_with_nothing_written(server, vault) -> None:
+    _seed_fixable(vault)
+
+    async def scenario(client):
+        preview = await _fix_preview(client)
+        linker = vault / _FIXED_PAGES[0]
+        linker.write_text(linker.read_text(encoding="utf-8") + "\nAn edit after the preview.\n", encoding="utf-8")
+        unchanged = _knowledge_base_bytes(vault)
+        handle = await _fix_start(client, preview["plan_id"])
+        return preview, unchanged, await _until_terminal(client, handle["run_id"])
+
+    preview, unchanged, final = _session(server, scenario)
+
+    assert final["state"] == "failed"
+    assert final["error_code"] == "STALE_MAINTENANCE_PLAN"
+    assert final["receipt"]["error"]["details"]["plan_id"] != preview["plan_id"]
+    assert final["committed"] == 0
+    assert final["receipt"]["chunks"] == []
+    assert _knowledge_base_bytes(vault) == unchanged
+
+
+def test_a_failed_embedding_rebuild_is_reported_in_the_receipt(server, vault, monkeypatch) -> None:
+    def encoder_down(*_args, **_kwargs):
+        raise RuntimeError("the encoder is down")
+
+    monkeypatch.setattr(embeddings, "embed_texts", encoder_down)
+
+    async def scenario(client):
+        preview = await _fix_preview(client, rebuild_embeddings=True)
+        handle = await _fix_start(client, preview["plan_id"], rebuild_embeddings=True)
+        return await _until_terminal(client, handle["run_id"])
+
+    final = _session(server, scenario)
+
+    assert final["state"] == "completed"
+    summary = final["receipt"]["chunks"][-1]["summary"]
+    assert "the encoder is down" in summary["embeddings_error"]
+    assert "embeddings_chunks" not in summary
+
+
+def test_the_wide_boundary_switch_makes_a_job_hold_the_boundary_for_its_run(server, vault, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_WIDE_MUTATION_BOUNDARY", "1")
+
+    async def scenario(client):
+        preview = await _preview(client)
+        with _boundary_held(vault):
+            refused = await _start(client, preview["plan_id"])
+        handle = await _start(client, preview["plan_id"])
+        return preview, refused, await _until_terminal(client, handle["run_id"])
+
+    preview, refused, final = _session(server, scenario)
+
+    assert refused["error"]["code"] == "MUTATION_BUSY"
+    assert final["state"] == "completed"
+    assert all(_page_ids(vault)[path] is not None for path in preview["would_update"])

@@ -4050,7 +4050,9 @@ _versions` describe the whole chain.
     )
 
 
-def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bool = False) -> dict:
+def op_audit_fix(
+    vault_root: Path, dry_run: bool = False, rebuild_embeddings: bool = False, plan_id: str | None = None
+) -> dict:
     """Run audit + auto-apply safe fixes; propose-only for risky categories.
 
     Closes the lint-finds-but-doesn't-fix loop. Safe categories get
@@ -4089,19 +4091,24 @@ def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bo
             (`.embeddings.sqlite` in the machine-local state root) after
             the fix sweep. Use on first run, after a machine swap, or when the
             sidecar has drifted from disk. Ignored when `dry_run=true`.
+        plan_id: Set only by a maintenance job: the `plan_id` of the reviewed
+            preview. The run plans again, writes nothing if the plan changed,
+            and otherwise commits in guarded chunks.
 
     Returns:
         {fixed: [{category, path, detail, action}, ...],
          proposed: [<audit findings>],
          files_rewritten: int,
          summary: {fixed: N, proposed: N, fixed_<category>: N,
-                   embeddings_chunks?: N},
-         dry_run: bool}
+                   embeddings_chunks?: N, embeddings_error?: str},
+         dry_run: bool,
+         plan_id: str, skipped_changed: [path, ...]}
     """
     report = audit_fix_module.audit_fix(
         vault_root,
         dry_run=dry_run,
         rebuild_embeddings=rebuild_embeddings,
+        plan_id=plan_id,
     )
     return report.as_dict()
 
@@ -9682,6 +9689,25 @@ def _adopted_paths(result: Any) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _require_job_plan_arguments(mode: str, dry_run: bool | None, plan_id: str | None, why: str | None) -> None:
+    """Refuse a `plan_id` or `why` outside a remote maintenance job's reviewed write.
+
+    A `plan_id` names the plan a job applies, so it comes with `why` and `dry_run=false`, and only
+    inside a job. The local command applies in one call without either.
+    """
+    from . import maintenance_jobs
+
+    if (plan_id is None) != (why is None) or (plan_id is not None and dry_run is not False):
+        raise ValueError(
+            f"INVALID_ARGUMENTS: {mode} applies a reviewed plan with dry_run=false, plan_id and why together"
+        )
+    if plan_id is not None and not maintenance_jobs.active():
+        raise ValueError(
+            "INVALID_ARGUMENTS: plan_id names the plan of a remote maintenance job; "
+            "the local command applies with dry_run=false alone"
+        )
+
+
 def _audit_fix_paths(result: Any) -> list[str]:
     """The pages a `fix` pass actually rewrote, in first-seen order.
 
@@ -10886,10 +10912,10 @@ def op_maintain_memory(
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    A remote backfill-ids write runs as a maintenance job: preview with dry_run=true,
+    A remote fix or backfill-ids write runs as a maintenance job: preview with dry_run=true,
     then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
     maintenance-job reads one job (run_id) or lists them; maintenance-job-cancel
-    (run_id, why) stops one. Remote fix/reconcile writes return MAINTENANCE_REQUIRES_CLI.
+    (run_id, why) stops one. Remote reconcile writes return MAINTENANCE_REQUIRES_CLI.
     Run those writes with exomem maintain on the host; remote dry_run=true works.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
@@ -11233,15 +11259,26 @@ def op_maintain_memory(
     from . import due_state as due_state_module
 
     if mode == "fix":
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
         # A fix pass rewrites every page it can repair, and reconcile rebuilds
         # the whole projection: both are batches, and neither should be able to
         # deliver one counters block per file it touched.
         with due_state_module.batch_scope(vault_root):
-            report = op_audit_fix(
-                vault_root,
-                dry_run=True if dry_run is None else dry_run,
-                rebuild_embeddings=rebuild_embeddings,
-            )
+            try:
+                report = op_audit_fix(
+                    vault_root,
+                    dry_run=True if dry_run is None else dry_run,
+                    rebuild_embeddings=rebuild_embeddings,
+                    plan_id=plan_id,
+                )
+            except BaseException:
+                # A stopped job keeps the chunks it committed, so the projection learns of them too.
+                # Best effort, as in the success path: it must not hide why the job stopped.
+                with suppress(Exception):
+                    _apply_batch_deltas(vault_root, maintenance_jobs_module.committed_paths())
+                raise
             # `fix` has no full recompute of its own — unlike `reconcile`, which
             # heals the whole projection — so without these deltas the block it
             # carries would describe the vault as it was BEFORE the pass that
@@ -11262,18 +11299,7 @@ def op_maintain_memory(
     if mode == "backfill-ids":
         from . import maintenance_jobs as maintenance_jobs_module
 
-        # A plan_id names a remote job's reviewed plan; the local command applies in one call without it.
-        if (plan_id is None) != (why is None) or (plan_id is not None and dry_run is not False):
-            raise ValueError(
-                "INVALID_ARGUMENTS: backfill-ids applies a reviewed plan with dry_run=false, "
-                "plan_id and why together"
-            )
-        if plan_id is not None and not maintenance_jobs_module.active():
-            raise ValueError(
-                "INVALID_ARGUMENTS: plan_id names the plan of a remote maintenance job; "
-                "the local command applies with dry_run=false alone"
-            )
-
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
         with due_state_module.batch_scope(vault_root):
             try:
                 report = memory_refs_module.backfill_ids(

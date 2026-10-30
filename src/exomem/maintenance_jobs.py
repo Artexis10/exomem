@@ -1,6 +1,6 @@
 """Governed maintenance jobs: a remote maintenance write that outlives its request.
 
-A remote ``backfill-ids`` write (later ``fix`` and ``reconcile``) is admitted by
+A remote ``backfill-ids`` or ``fix`` write (later ``reconcile``) is admitted by
 ``writer_lease.invoke_command`` with a ``plan_id`` and a ``why``. The request
 thread claims one job row, starts a daemon thread and returns a handle at once.
 The thread dispatches the real leaf through ``invoke_command`` as the starting
@@ -18,12 +18,13 @@ activation record it.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -55,7 +56,7 @@ OWNER_GONE_CODE = "OWNER_GONE"
 PLAN_BOUND_MODES = frozenset({"fix", "backfill-ids", "reconcile"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
 #: Plan-bound modes that have a job kind, each with the arguments its plan binds as flags.
 #: A mode joins here when its leaf is chunked and verifiable.
-JOB_FLAGS: dict[str, tuple[str, ...]] = {"backfill-ids": ()}  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+JOB_FLAGS: dict[str, tuple[str, ...]] = {"backfill-ids": (), "fix": ("rebuild_embeddings",)}  # nosemgrep: ep-word-set -- closed maintain_memory mode and argument literals
 JOB_MODES = frozenset(JOB_FLAGS)
 MODE_STATUS = "maintenance-job"
 MODE_CANCEL = "maintenance-job-cancel"
@@ -263,6 +264,20 @@ def require_plan(mode: str, kwargs: Mapping[str, Any]) -> None:
     )
 
 
+def plan_identity(mode: str, flags: Mapping[str, Any], entries: Iterable[Sequence[str]]) -> str:
+    """The `plan_id` of one plan: its mode, the flags that change its work, and its sorted entries.
+
+    A preview and a job's re-plan both compute it, so a `plan_id` names exactly the work the job would do.
+    An entry is the strings that say what the plan does to one page, for example its path and content hashes.
+    """
+    payload = json.dumps(
+        {"mode": mode, "flags": dict(flags), "pages": sorted(list(entry) for entry in entries)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def is_job_write(kwargs: Mapping[str, Any]) -> bool:
     """Whether these arguments run a job kind's committing leaf (the dispatch a job thread makes)."""
     return (
@@ -354,7 +369,11 @@ def job_list(vault_root: Path) -> dict[str, Any]:
 
 
 def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
-    """Ask a running job to stop at its next checkpoint; a terminal job is returned unchanged."""
+    """Ask a running job to stop at its next checkpoint; a terminal job is returned unchanged.
+
+    A replay of the same cancel within the dispatcher's implicit retry window (600 s) returns the
+    view stored with the first call, not a fresh read of the job.
+    """
     require_owner(vault_root)
     with _LIVE_LOCK:
         try:
@@ -755,3 +774,57 @@ def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> I
         if stoppable:
             raise_if_stopped()
         yield
+
+
+def commit_chunk(
+    vault_root: Path,
+    operation: str,
+    entries: Sequence[tuple[str, Path, str]],
+    rewrite: Callable[[str, str], str],
+    *,
+    extra: Callable[[list[str]], dict[str, Any]] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Rewrite one chunk of a plan's pages under one hold, record it, and return `(committed, skipped)`.
+
+    An entry is `(rel, path, content hash the plan was made from)`. Under the hold each page is read
+    again: one that cannot be read, or whose hash moved, is skipped and never overwritten.
+    `rewrite(rel, text)` gives a kept page's new text. A failed commit may have written some pages, so
+    the chunk is recorded as `outcome_unknown` and the failure re-raised. ``extra(committed)`` adds receipt fields.
+    """
+    from . import vault
+
+    writes: list[vault.PlannedWrite] = []
+    kept: list[str] = []
+    skipped: list[str] = []
+    failure: BaseException | None = None
+    with chunk_hold(vault_root, operation):
+        for rel, path, digest in entries:
+            try:
+                text, guard = vault.read_guarded_text(vault_root, path)
+            except (OSError, UnicodeDecodeError, vault.PathGuardError):
+                skipped.append(rel)
+                continue
+            if vault.content_hash(text) != digest:
+                skipped.append(rel)
+                continue
+            kept.append(rel)
+            writes.append(vault.PlannedWrite(path=path, content=rewrite(rel, text), guard=guard, expected_hash=digest))
+        if writes:
+            try:
+                vault.batch_atomic_write(writes, vault_root=vault_root)
+            except BaseException as error:  # noqa: BLE001 - recorded, then re-raised below
+                failure = error
+    if failure is not None:
+        record_chunk(
+            skipped_changed=len(skipped),
+            outcome_unknown=len(writes),
+            detail={"skipped_changed": skipped, "outcome_unknown": kept},
+        )
+        raise failure
+    record_chunk(
+        committed=len(kept),
+        skipped_changed=len(skipped),
+        committed_paths=kept,
+        detail={"paths": kept, "skipped_changed": skipped, **(extra(kept) if extra is not None else {})},
+    )
+    return kept, skipped

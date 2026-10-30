@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import hashlib
-import json
 import logging
 import sqlite3
 import threading
@@ -1334,12 +1332,9 @@ def _backfill_plan_id(pages: Iterable[tuple[str, str]]) -> str:
 
     Counts and minted IDs stay out of it, so the same pages give the same plan on every preview.
     """
-    payload = json.dumps(
-        {"mode": "backfill-ids", "flags": {}, "pages": sorted(pages)},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    from . import maintenance_jobs
+
+    return maintenance_jobs.plan_identity("backfill-ids", {}, pages)
 
 
 def _refuse_duplicates(identity_issues: list[dict[str, str]]) -> None:
@@ -1436,50 +1431,24 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
     assigned: dict[str, str] = {}
     changed: list[str] = []
     processed = 0
+
+    def add_id(rel: str, raw: str) -> str:
+        updated, identity = add_id_to_markdown(raw)
+        assigned[rel] = memory_ref(identity)
+        return updated
+
     try:
         for start in range(0, len(pending), BACKFILL_CHUNK_PAGES):
             maintenance_jobs.checkpoint("committing", done=processed, total=len(pending))
-            minted: dict[str, str] = {}
-            moved: list[str] = []
-            writes: list[vault_module.PlannedWrite] = []
-            failure: BaseException | None = None
-            with maintenance_jobs.chunk_hold(root, "backfill_ids_chunk"):
-                for rel, path, digest in pending[start : start + BACKFILL_CHUNK_PAGES]:
-                    try:
-                        raw, guard = vault_module.read_guarded_text(root, path)
-                    except (OSError, UnicodeDecodeError, vault_module.PathGuardError):
-                        moved.append(rel)
-                        continue
-                    if vault_module.content_hash(raw) != digest:
-                        moved.append(rel)
-                        continue
-                    updated, identity = add_id_to_markdown(raw)
-                    minted[rel] = memory_ref(identity)
-                    writes.append(
-                        vault_module.PlannedWrite(path=path, content=updated, guard=guard, expected_hash=digest)
-                    )
-                if writes:
-                    try:
-                        vault_module.batch_atomic_write(writes, vault_root=root)
-                    except BaseException as error:  # noqa: BLE001 - recorded, then re-raised below
-                        failure = error
-            if failure is not None:
-                # A failed commit may have written some of its pages: say so instead of "none".
-                maintenance_jobs.record_chunk(
-                    skipped_changed=len(moved),
-                    outcome_unknown=len(writes),
-                    detail={"skipped_changed": moved, "outcome_unknown": sorted(minted)},
-                )
-                raise failure
-            maintenance_jobs.record_chunk(
-                committed=len(writes),
-                skipped_changed=len(moved),
-                committed_paths=list(minted),
-                detail={"minted": minted, "skipped_changed": moved},
+            kept, moved = maintenance_jobs.commit_chunk(
+                root,
+                "backfill_ids_chunk",
+                pending[start : start + BACKFILL_CHUNK_PAGES],
+                add_id,
+                extra=lambda committed: {"minted": {rel: assigned[rel] for rel in committed}},
             )
-            assigned.update(minted)
             changed.extend(moved)
-            processed += len(writes) + len(moved)
+            processed += len(kept) + len(moved)
         maintenance_jobs.checkpoint("indexing", done=processed, total=len(pending))
     except BaseException:
         if assigned:

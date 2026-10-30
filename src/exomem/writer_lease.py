@@ -97,8 +97,8 @@ REMOTE_MAINTENANCE_MESSAGE = (
 
 
 REMOTE_MAINTENANCE_REMEDIATION = (
-    "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host. "
-    "Remote backfill-ids runs as a maintenance job: preview it with dry_run=true, "
+    "Run `exomem maintain --reconcile` on the host. "
+    "Remote fix and backfill-ids run as a maintenance job: preview one with dry_run=true, "
     "then repeat it with dry_run=false, the preview's plan_id and a why. "
     "Use audit or dry_run=true remotely."
 )
@@ -6201,10 +6201,13 @@ class LeaseManager:
         # cancel only flags one; neither touches the vault. The job's own dispatch
         # (`plan_id` and `dry_run=False`) holds the boundary per chunk in its leaf, so
         # a job can start, and be cancelled, while another writer holds the boundary.
-        # `EXOMEM_WIDE_MUTATION_BOUNDARY` does not widen it: a job under the wide
-        # boundary would hold it for the whole run.
-        narrow_maintenance_job = command.name == "maintain_memory" and (
-            kwargs.get("mode") == "maintenance-job-cancel" or maintenance_jobs.is_job_write(kwargs)
+        # `EXOMEM_WIDE_MUTATION_BOUNDARY` widens it like every other narrow row: the
+        # job thread then holds the wide boundary for its whole run (CLI parity), and
+        # its per-chunk holds nest in that hold because the boundary is re-entrant.
+        narrow_maintenance_job = (
+            command.name == "maintain_memory"
+            and (kwargs.get("mode") == "maintenance-job-cancel" or maintenance_jobs.is_job_write(kwargs))
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # A curation proposal prepares read-only, then seals; `seal_proposal` takes
         # the mutation boundary itself and re-checks every binding under it, so

@@ -1109,19 +1109,12 @@ def test_remote_write_maintenance_without_a_plan_and_reason_is_refused_before_ma
 
 
 @pytest.mark.parametrize("surface", ["mcp", "rest"])
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"mode": "reconcile", "plan_id": "plan", "why": "reason"},
-        {"mode": "fix", "dry_run": False, "plan_id": "plan", "why": "reason"},
-    ],
-)
 def test_remote_write_maintenance_without_a_job_kind_is_refused_before_manager_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     surface: str,
-    kwargs: dict[str, object],
 ) -> None:
+    kwargs = {"mode": "reconcile", "plan_id": "plan", "why": "reason"}
     command, descriptor = _remote_maintain(surface)
     monkeypatch.setattr(
         writer_lease,
