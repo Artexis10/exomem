@@ -45,6 +45,7 @@ from test_typed_history_generations import previous_release
 
 from exomem import __main__ as cli
 from exomem import (
+    capabilities,
     command_surface,
     commands,
     record_governance,
@@ -436,6 +437,29 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
             "COLLECTION_STORE_ACKNOWLEDGE_UNAVAILABLE")
     assert call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
                 plan_id=preview["plan_id"], why="nothing to adopt")["status"] == "in_sync"
+
+
+def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote_export_apply_does_not(service):
+    """Defect: a remote client cannot apply the reviewed adopt-local plan to the service it talks to
+    and is sent to the host, where the CLI refuses while the service runs; or a remote export apply
+    stops short of the host and reaches the offline-only route."""
+    root = service.root
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    def remote(**arguments):
+        with capabilities.active_surface(descriptor):
+            return call(root, "maintain_memory", **arguments)
+
+    _published(SimpleNamespace(meta=lambda: store_meta(root)))
+    preview = remote(mode="collections-store-adopt-local")
+    applied = remote(mode="collections-store-adopt-local", apply=True, plan_id=preview["plan_id"],
+                     why="adopt over the remote surface")
+
+    assert applied["status"] == "in_sync"
+    refused(lambda: remote(mode="collections-store-export", apply=True, plan_id="reviewed", why="export"),
+            "MAINTENANCE_REQUIRES_CLI")
 
 
 def test_records_summary_v1_gates_summary_create_import_and_query_until_released(

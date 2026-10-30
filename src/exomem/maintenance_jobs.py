@@ -52,12 +52,18 @@ MEMORY_PRESSURE_CODE = "MEMORY_PRESSURE"
 OWNER_GONE_CODE = "OWNER_GONE"
 
 # Closed maintain_memory mode literals: protocol names, not a vocabulary a vault defines.
-#: Write modes that a request-bound surface admits only with a reviewed plan.
-PLAN_BOUND_MODES = frozenset({"fix", "backfill-ids", "reconcile"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
-#: Plan-bound modes that have a job kind, each with the arguments its plan binds as flags.
-#: A mode joins here when its leaf is chunked and verifiable.
-JOB_FLAGS: dict[str, tuple[str, ...]] = {"backfill-ids": (), "fix": ("rebuild_embeddings",)}  # nosemgrep: ep-word-set -- closed maintain_memory mode and argument literals
+#: Job kinds, each with the arguments its plan binds as flags. A request-bound surface admits a write
+#: of one of these modes only as a job, and only with the plan_id of its preview and a why.
+JOB_FLAGS: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-set -- closed maintain_memory mode and argument literals
+    "backfill-ids": (),
+    "fix": ("rebuild_embeddings",),
+    "reconcile": ("rebuild_graph",),
+}
 JOB_MODES = frozenset(JOB_FLAGS)
+#: Job kinds whose leaf is not chunked. Their job dispatch keeps the wide mutation boundary for the whole run,
+#: as the CLI does, and a stop lands between phases. A reconcile phase writes derived state that other
+#: phases read, and the CLI's whole-run hold is the measured behaviour to keep; narrowing it is separate work.
+WHOLE_RUN_MODES = frozenset({"reconcile"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literal
 MODE_STATUS = "maintenance-job"
 MODE_CANCEL = "maintenance-job-cancel"
 
@@ -278,6 +284,22 @@ def plan_identity(mode: str, flags: Mapping[str, Any], entries: Iterable[Sequenc
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def require_current_plan(mode: str, planned: str, fresh: str, what: str) -> None:
+    """Refuse a job whose plan changed since the preview, before it writes anything.
+
+    `planned` is the `plan_id` the owner reviewed, `fresh` the one this run computed again, and
+    `what` names what the plan covers, for the owner reading the refusal.
+    """
+    if planned == fresh:
+        return
+    raise OpError(
+        "STALE_MAINTENANCE_PLAN",
+        f"{what} changed since the preview",
+        f"Preview {mode} again, then start the new plan_id.",
+        details={"status": "terminal", "committed": False, "plan_id": fresh},
+    )
+
+
 def is_job_write(kwargs: Mapping[str, Any]) -> bool:
     """Whether these arguments run a job kind's committing leaf (the dispatch a job thread makes)."""
     return (
@@ -285,6 +307,19 @@ def is_job_write(kwargs: Mapping[str, Any]) -> bool:
         and kwargs.get("plan_id") is not None
         and kwargs.get("dry_run") is False
     )
+
+
+def narrows_boundary(kwargs: Mapping[str, Any], surface: str | None) -> bool:
+    """Whether this maintain_memory call holds the narrow boundary in the writer manager.
+
+    A job start only claims a row and launches a thread, and a cancel only flags one; neither touches
+    the vault. A chunked job's own dispatch holds the boundary per chunk in its leaf. A whole-run job's
+    dispatch is the one that keeps the wide boundary.
+    """
+    mode = kwargs.get("mode")
+    if not is_job_write(kwargs):
+        return False
+    return not (surface == SURFACE and mode in WHOLE_RUN_MODES)
 
 
 # --------------------------------------------------------------------------- views
@@ -588,7 +623,8 @@ def _run(
             foreground_priority.bulk(stop=live.stop),
         ):
             _JOB.set(live)
-            result = writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
+            with _whole_run_hold(live, command.name, kwargs.get("mode")):
+                result = writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
         state, error_code, outcome = COMPLETED, None, {"result": result}
     except JobStop as stop:
         state, error_code, outcome = stop.state, stop.code, {}
@@ -601,6 +637,21 @@ def _run(
         state, error_code, outcome = FAILED, _error_code(error), {"error": _error_record(error)}
     finally:
         _finish(live, state, error_code, outcome)
+
+
+@contextmanager
+def _whole_run_hold(live: _Live, operation: str, mode: Any) -> Iterator[None]:
+    """Wait out a busy boundary before a whole-run job's dispatch, which then nests in this hold.
+
+    The manager's own wide guard gives up after seconds and would fail a job that only met another
+    writer's turn. Waiting here is bounded by ``BUSY_BUDGET_SECONDS`` and ends at once on a stop.
+    A chunked job needs none: it holds the boundary per chunk, through ``chunk_hold``.
+    """
+    if mode not in WHOLE_RUN_MODES:
+        yield
+        return
+    with chunk_hold(live.vault_root, operation):
+        yield
 
 
 def _error_code(error: BaseException) -> str:

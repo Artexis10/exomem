@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import unquote
 
-from . import call_spans, reserved_paths, state_paths
+from . import call_spans, foreground_priority, reserved_paths, state_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
@@ -1307,7 +1307,8 @@ def _pages_without_id(
     kb = Path(vault_root) / kb_dirname()
     if not kb.is_dir():
         return
-    for path in sorted(kb.rglob("*.md")):
+    # A backfill job plans over every page before it holds the boundary, so the walk yields to a foreground read.
+    for path in foreground_priority.yielding_in_bulk(sorted(kb.rglob("*.md"))):
         rel = _relative_markdown(vault_root, path)
         if rel is None:
             continue
@@ -1409,7 +1410,6 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
     overwritten. A stop between chunks keeps the chunks that committed.
     """
     from . import maintenance_jobs
-    from .cli_ops import OpError
 
     root = Path(vault_root)
     maintenance_jobs.checkpoint("planning")
@@ -1419,13 +1419,7 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
         for rel, path, raw, _ in _pages_without_id(root, skipped)
     ]
     fresh = _backfill_plan_id((rel, digest) for rel, _, digest in pending)
-    if fresh != plan_id:
-        raise OpError(
-            "STALE_MAINTENANCE_PLAN",
-            "the pages that lack an exomem_id changed since the preview",
-            "Preview backfill-ids again, then start the new plan_id.",
-            details={"status": "terminal", "committed": False, "plan_id": fresh},
-        )
+    maintenance_jobs.require_current_plan("backfill-ids", plan_id, fresh, "the pages that lack an exomem_id")
     identity_issues = scan_issues(root)
     _refuse_duplicates(identity_issues)
     assigned: dict[str, str] = {}

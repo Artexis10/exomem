@@ -1,4 +1,4 @@
-"""A remote `backfill-ids` or `fix` write runs as a governed maintenance job.
+"""A remote `backfill-ids`, `fix` or `reconcile` write runs as a governed maintenance job.
 
 The workflow: the owner previews on `check_memory`, starts the previewed plan on
 `repair_memory` with the preview's `plan_id` and a reason, then reads the job on
@@ -26,7 +26,14 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 
-from exomem import capabilities, commands, embeddings, maintenance_jobs, writer_lease
+from exomem import (
+    activation_manifest,
+    capabilities,
+    commands,
+    embeddings,
+    maintenance_jobs,
+    writer_lease,
+)
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -553,3 +560,144 @@ def test_the_wide_boundary_switch_makes_a_job_hold_the_boundary_for_its_run(serv
     assert refused["error"]["code"] == "MUTATION_BUSY"
     assert final["state"] == "completed"
     assert all(_page_ids(vault)[path] is not None for path in preview["would_update"])
+
+
+_ORPHAN_FRAMES = "Knowledge Base/Evidence/Case/gone.mp4.frames"
+_SECOND_ORPHAN_FRAMES = "Knowledge Base/Evidence/Case/also-gone.mp4.frames"
+_COUNT_ROW = "- Sources: 4 (articles: 2, books: 1, sessions: 1)"
+
+
+def _seed_reconcile(vault: Path) -> None:
+    """An index count row that drifted and a frames directory whose video is gone."""
+    top = vault / "Knowledge Base" / "index.md"
+    top.write_text(top.read_text(encoding="utf-8").replace(_COUNT_ROW, "- Sources: 0"), encoding="utf-8")
+    (vault / _ORPHAN_FRAMES).mkdir(parents=True)
+
+
+async def _reconcile_preview(client, **arguments) -> dict:
+    return await _call(client, "check_memory", {"kind": "reconcile", "dry_run": True, **arguments})
+
+
+async def _reconcile_start(client, plan_id: str, **arguments) -> dict:
+    return await _call(
+        client,
+        "repair_memory",
+        {"kind": "reconcile", "dry_run": False, "plan_id": plan_id, "why": "heal drift", **arguments},
+    )
+
+
+def test_remote_reconcile_heals_the_drift_and_removes_the_orphan_the_preview_named(server, vault) -> None:
+    _seed_reconcile(vault)
+
+    async def scenario(client):
+        preview = await _reconcile_preview(client)
+        after_preview = ((vault / _ORPHAN_FRAMES).is_dir(), (vault / "Knowledge Base" / "index.md").read_bytes())
+        handle = await _reconcile_start(client, preview["plan_id"])
+        return preview, after_preview, handle, await _until_terminal(client, handle["run_id"])
+
+    preview, (orphan_kept, index_before), handle, final = _session(server, scenario)
+
+    assert orphan_kept and b"- Sources: 0" in index_before
+    assert preview["frame_orphans_removed"] == 1
+    assert handle["plan_id"] == preview["plan_id"]
+    assert final["state"] == "completed"
+    assert not (vault / _ORPHAN_FRAMES).exists()
+    assert _COUNT_ROW in (vault / "Knowledge Base" / "index.md").read_text(encoding="utf-8")
+    summary = final["receipt"]["chunks"][-1]["summary"]
+    assert summary["plan_id"] == preview["plan_id"]
+    assert summary["frame_orphans_removed"] == 1
+    assert summary["indexes_updated"] == len(preview["indexes_updated"]) >= 1
+
+
+def test_an_orphan_that_appears_after_the_reconcile_preview_stops_the_job_with_nothing_written(
+    server, vault
+) -> None:
+    _seed_reconcile(vault)
+
+    async def scenario(client):
+        preview = await _reconcile_preview(client)
+        (vault / _SECOND_ORPHAN_FRAMES).mkdir()
+        unchanged = _knowledge_base_bytes(vault)
+        handle = await _reconcile_start(client, preview["plan_id"])
+        return preview, unchanged, await _until_terminal(client, handle["run_id"])
+
+    preview, unchanged, final = _session(server, scenario)
+
+    assert final["state"] == "failed"
+    assert final["error_code"] == "STALE_MAINTENANCE_PLAN"
+    assert final["receipt"]["error"]["details"]["plan_id"] != preview["plan_id"]
+    assert final["committed"] == 0
+    assert _knowledge_base_bytes(vault) == unchanged
+    assert (vault / _ORPHAN_FRAMES).is_dir() and (vault / _SECOND_ORPHAN_FRAMES).is_dir()
+    # Establishing the activation manifest is a write too: a refused plan leaves it unmade.
+    assert not activation_manifest.manifest_path(vault).exists()
+
+
+def test_a_page_body_edit_after_the_reconcile_preview_does_not_stale_the_plan(server, vault) -> None:
+    _seed_reconcile(vault)
+
+    async def scenario(client):
+        preview = await _reconcile_preview(client)
+        page = next(iter(sorted((vault / "Knowledge Base" / "Notes").rglob("*.md"))))
+        page.write_text(page.read_text(encoding="utf-8") + "\nAn edit after the preview.\n", encoding="utf-8")
+        handle = await _reconcile_start(client, preview["plan_id"])
+        return await _until_terminal(client, handle["run_id"])
+
+    final = _session(server, scenario)
+
+    assert final["state"] == "completed"
+    assert not (vault / _ORPHAN_FRAMES).exists()
+
+
+def test_a_reconcile_job_waits_for_a_busy_boundary_instead_of_failing(server, vault, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.2")
+    writer_lease.reset_managers_for_tests()
+    _seed_reconcile(vault)
+
+    async def scenario(client):
+        preview = await _reconcile_preview(client)
+        with _boundary_held(vault):
+            handle = await _reconcile_start(client, preview["plan_id"])
+            # Several of the manager's own waits pass while the other writer holds the boundary.
+            await asyncio.sleep(1.0)
+            waiting = await _status(client, handle["run_id"])
+        return waiting, await _until_terminal(client, handle["run_id"])
+
+    waiting, final = _session(server, scenario)
+
+    assert waiting["state"] == "running"
+    assert final["state"] == "completed"
+    assert not (vault / _ORPHAN_FRAMES).exists()
+
+
+def test_cancel_stays_narrow_under_the_wide_boundary_switch_while_a_job_holds_the_boundary(
+    server, vault, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_WIDE_MUTATION_BOUNDARY", "1")
+    real_checkpoint = maintenance_jobs.checkpoint
+    holding, proceed = threading.Event(), threading.Event()
+
+    def pausing_checkpoint(phase, *args, **kwargs):
+        # The job's dispatch holds the wide boundary here, before its first chunk.
+        if phase == "planning":
+            holding.set()
+            assert proceed.wait(_DEADLINE_SECONDS)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", pausing_checkpoint)
+
+    async def scenario(client):
+        preview = await _preview(client)
+        handle = await _start(client, preview["plan_id"])
+        assert await asyncio.to_thread(holding.wait, _DEADLINE_SECONDS)
+        cancelled = await _cancel(client, handle["run_id"])
+        proceed.set()
+        return cancelled, await _until_terminal(client, handle["run_id"])
+
+    try:
+        cancelled, final = _session(server, scenario)
+    finally:
+        proceed.set()
+
+    assert cancelled.get("error") is None
+    assert final["state"] == "cancelled"

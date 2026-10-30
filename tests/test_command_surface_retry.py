@@ -1108,13 +1108,16 @@ def test_remote_write_maintenance_without_a_plan_and_reason_is_refused_before_ma
     assert raised.value.remediation is not None
 
 
+_EXPORT_APPLY = {"mode": "collections-store-export", "apply": True, "plan_id": "plan", "why": "reason"}
+
+
 @pytest.mark.parametrize("surface", ["mcp", "rest"])
-def test_remote_write_maintenance_without_a_job_kind_is_refused_before_manager_dispatch(
+def test_remote_export_apply_is_refused_before_manager_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     surface: str,
 ) -> None:
-    kwargs = {"mode": "reconcile", "plan_id": "plan", "why": "reason"}
+    kwargs = _EXPORT_APPLY
     command, descriptor = _remote_maintain(surface)
     monkeypatch.setattr(
         writer_lease,
@@ -1128,7 +1131,86 @@ def test_remote_write_maintenance_without_a_job_kind_is_refused_before_manager_d
     assert raised.value.code == "MAINTENANCE_REQUIRES_CLI"
     assert raised.value.details == {"status": "terminal", "committed": False}
     assert raised.value.remediation is not None
-    assert "exomem maintain" in raised.value.remediation
+    # Export is the one write that has no remote form: the text names it and says nothing of the job kinds.
+    assert "exomem collections export" in raised.value.remediation
+    assert "stop the service" in raised.value.remediation.lower()
+    assert "reconcile" not in raised.value.remediation
+
+
+def _legacy_alias(name: str):
+    from exomem.commands import COMMANDS
+
+    return next(item for item in COMMANDS if item.name == name)
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
+@pytest.mark.parametrize(
+    ("alias", "kwargs"),
+    [
+        ("reconcile", {}),
+        ("reconcile", {"dry_run": False}),
+        ("audit_fix", {}),
+        ("audit_fix", {"dry_run": False, "rebuild_embeddings": True}),
+    ],
+)
+def test_remote_write_through_a_legacy_maintenance_alias_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    alias: str,
+    kwargs: dict[str, object],
+) -> None:
+    _command, descriptor = _remote_maintain(surface)
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("a remote legacy alias write reached manager dispatch"),
+    )
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(_legacy_alias(alias), tmp_path, **kwargs)
+
+    assert raised.value.code == "MAINTENANCE_PLAN_REQUIRED"
+    assert raised.value.details == {"status": "terminal", "committed": False}
+    # The refusal names the job route, in the spelling of the surface that was called.
+    assert "plan_id" in raised.value.remediation
+    assert capabilities.active_tools_text("maintain_memory") in raised.value.remediation
+
+
+@pytest.mark.parametrize(
+    ("surface", "alias", "kwargs"),
+    [
+        ("mcp", "reconcile", {"dry_run": True}),
+        ("rest", "audit_fix", {"dry_run": True}),
+        ("mcp", "audit", {}),
+        ("cli", "reconcile", {}),
+        ("cli", "audit_fix", {"dry_run": False}),
+    ],
+)
+def test_legacy_maintenance_aliases_keep_their_dry_runs_and_their_local_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    alias: str,
+    kwargs: dict[str, object],
+) -> None:
+    calls: list[str] = []
+
+    class RecordingManager:
+        def invoke(self, dispatched, _injected, _call_kwargs, **_options):  # noqa: ANN001, ANN003
+            calls.append(dispatched.name)
+            return {"admitted": True}
+
+    monkeypatch.setattr(writer_lease, "get_manager", RecordingManager)
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface=surface, profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    with capabilities.active_surface(descriptor):
+        result = writer_lease.invoke_command(_legacy_alias(alias), tmp_path, **kwargs)
+
+    assert result == {"admitted": True}
+    assert calls == [alias]
 
 
 def test_remote_unknown_maintenance_selector_preserves_coverage_refusal(
@@ -1189,13 +1271,13 @@ def test_mcp_write_maintenance_returns_terminal_operator_refusal(
         lambda: pytest.fail("MCP write maintenance reached manager dispatch"),
     )
 
-    result = bound(mode="reconcile", plan_id="plan", why="reason")
+    result = bound(**_EXPORT_APPLY)
 
     assert result["success"] is False
     assert result["error"]["code"] == "MAINTENANCE_REQUIRES_CLI"
     assert result["error"]["status"] == "terminal"
     assert result["error"]["committed"] is False
-    assert "exomem maintain --reconcile" in result["error"]["remediation"]
+    assert "exomem collections export" in result["error"]["remediation"]
 
 
 @pytest.mark.parametrize(

@@ -4113,7 +4113,9 @@ def op_audit_fix(
     return report.as_dict()
 
 
-def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False) -> dict:
+def op_reconcile(
+    vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False, plan_id: str | None = None
+) -> dict:
     """Heal vault drift from out-of-band edits in one pass.
 
     The writers keep the embedding sidecar, index.md count rows, and log.md
@@ -4142,9 +4144,13 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
             Default false.
         rebuild_graph: For reconcile only, quarantine unavailable derived graph
             lineage and rebuild it from canonical Markdown. Default false.
+        plan_id: Set only by a maintenance job: the `plan_id` of the reviewed
+            preview. The run reads what it would remove or quarantine again
+            before its first write, and writes nothing if that changed.
 
     Returns:
-        {indexes_updated: [<index path>, ...],
+        {plan_id: str (a preview and a job; the identity of what a run removes or quarantines),
+         indexes_updated: [<index path>, ...],
          embeddings_refreshed: int,
          embeddings_status: "current" | "refreshed" | "disabled",
          remaining_drift: [<audit findings>],
@@ -4167,7 +4173,9 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
         raise ValueError(
             "MUTATION_BOUNDARY_ACTIVE: rebuild_graph must run outside a direct mutation boundary"
         )
-    report = reconcile_module.reconcile(vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph)
+    report = reconcile_module.reconcile(
+        vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph, plan_id=plan_id
+    )
     result = report.as_dict()
     # The due-state projection is drift-prone in exactly the way this command
     # exists to heal: a page edited in Obsidian or on the filesystem never fires
@@ -4177,6 +4185,9 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
     # roughly thirty times a delta and scales with the corpus, which would make
     # write latency a function of vault size.
     if not dry_run:
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        maintenance_jobs_module.checkpoint("projections")
         try:
             from . import due_state as due_state_module
 
@@ -10912,11 +10923,11 @@ def op_maintain_memory(
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    A remote fix or backfill-ids write runs as a maintenance job: preview with dry_run=true,
-    then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
+    A remote fix, backfill-ids or reconcile write runs as a maintenance job: preview with
+    dry_run=true, then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
     maintenance-job reads one job (run_id) or lists them; maintenance-job-cancel
-    (run_id, why) stops one. Remote reconcile writes return MAINTENANCE_REQUIRES_CLI.
-    Run those writes with exomem maintain on the host; remote dry_run=true works.
+    (run_id, why) stops one. A remote collections-store-export apply returns
+    MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -11286,14 +11297,17 @@ def op_maintain_memory(
             _apply_batch_deltas(vault_root, _audit_fix_paths(report))
         return _carrying_batch_advisories(vault_root, report)
     if mode == "reconcile":
+        reconcile_dry_run = False if dry_run is None else dry_run
+        _require_job_plan_arguments(mode, reconcile_dry_run, plan_id, why)
         with due_state_module.batch_scope(vault_root):
             # No batch deltas here on purpose: `op_reconcile` already runs
             # `due_state.reconcile`, a full recompute, which is a strictly
             # stronger settlement than a per-path delta (design D3, task 1.5).
             report = op_reconcile(
                 vault_root,
-                dry_run=False if dry_run is None else dry_run,
+                dry_run=reconcile_dry_run,
                 rebuild_graph=rebuild_graph,
+                plan_id=plan_id,
             )
         return _carrying_batch_advisories(vault_root, report)
     if mode == "backfill-ids":
@@ -13230,6 +13244,19 @@ def _resolved_invocation_selector(command: Command, kwargs: dict[str, Any], sele
     if parameter is None or parameter.default is inspect.Parameter.empty:
         return _MISSING_SELECTOR_DEFAULT
     return parameter.default
+
+
+def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Whether this call writes through a leaf that `maintain_memory` supersedes (its `routes`).
+
+    A request-bound surface serves such a write only as a `maintain_memory` job. A leaf call is a
+    dry run when its resolved `dry_run` is true, the leaf signature's default applying when the
+    caller omitted it. Any other call writes. The leaf's own `read_only` flag (`audit`) wins.
+    """
+    owner = next((item for item in PRODUCT_COMMANDS if item.name == "maintain_memory"), None)
+    if owner is None or command.name not in owner.routes or command.read_only:
+        return False
+    return _resolved_invocation_selector(command, kwargs, "dry_run") is not True
 
 
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:

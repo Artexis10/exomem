@@ -755,15 +755,7 @@ def audit_fix(
     rewrites = _plan_content(vault_root, report, today_iso)
     report.plan_id = _plan_id(rewrites, rebuild_embeddings)
     if reviewed:
-        if report.plan_id != plan_id:
-            from .cli_ops import OpError
-
-            raise OpError(
-                "STALE_MAINTENANCE_PLAN",
-                "the content rewrites of fix changed since the preview",
-                "Preview fix again, then start the new plan_id.",
-                details={"status": "terminal", "committed": False, "plan_id": report.plan_id},
-            )
+        maintenance_jobs.require_current_plan("fix", plan_id, report.plan_id, "the content rewrites of fix")
         _commit_in_chunks(vault_root, kb, rewrites, report)
     else:
         _apply_whole(vault_root, kb, rewrites, report)

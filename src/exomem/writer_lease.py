@@ -81,7 +81,9 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest"})
 # Maintenance modes whose writes remote surfaces admit. Each one is governed by
 # an exact reviewed plan or preview identity, so remote callers get the same
 # capability as the CLI. Closed set: the maintain_memory mode literal fixes it.
-REMOTE_WRITE_MAINTENANCE_MODES = frozenset({"structured-files", "tag-variants", "curation", "maintenance-job-cancel"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+REMOTE_WRITE_MAINTENANCE_MODES = frozenset({  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+    "structured-files", "tag-variants", "curation", "maintenance-job-cancel", "collections-store-adopt-local",
+})
 
 
 def remote_admitted_maintenance_modes() -> frozenset[str]:
@@ -96,11 +98,11 @@ REMOTE_MAINTENANCE_MESSAGE = (
 )
 
 
+# Only a mode with no remote form reaches this refusal, and today that is `collections-store-export`
+# apply, which runs on the host with the service stopped. A mode that joins it needs its own text.
 REMOTE_MAINTENANCE_REMEDIATION = (
-    "Run `exomem maintain --reconcile` on the host. "
-    "Remote fix and backfill-ids run as a maintenance job: preview one with dry_run=true, "
-    "then repeat it with dry_run=false, the preview's plan_id and a why. "
-    "Use audit or dry_run=true remotely."
+    "Stop the service on the host, then run `exomem collections export --plan-id ID --why REASON` there. "
+    "Preview the export remotely without apply."
 )
 
 # Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
@@ -6198,15 +6200,19 @@ class LeaseManager:
         from . import maintenance_jobs
 
         # A maintenance job's start only claims a row and launches a thread, and its
-        # cancel only flags one; neither touches the vault. The job's own dispatch
+        # cancel only flags one; neither touches the vault. A chunked job's own dispatch
         # (`plan_id` and `dry_run=False`) holds the boundary per chunk in its leaf, so
-        # a job can start, and be cancelled, while another writer holds the boundary.
-        # `EXOMEM_WIDE_MUTATION_BOUNDARY` widens it like every other narrow row: the
-        # job thread then holds the wide boundary for its whole run (CLI parity), and
-        # its per-chunk holds nest in that hold because the boundary is re-entrant.
+        # a job can start while another writer holds the boundary. A whole-run job's
+        # dispatch keeps the wide boundary (`maintenance_jobs.WHOLE_RUN_MODES`).
+        # `EXOMEM_WIDE_MUTATION_BOUNDARY` widens a job start like every other narrow row.
+        # It never widens a cancel: that must stay able to stop a job that holds the
+        # wide boundary, so it needs no switch to be safe.
+        narrow_maintenance_job_cancel = (
+            command.name == "maintain_memory" and kwargs.get("mode") == maintenance_jobs.MODE_CANCEL
+        )
         narrow_maintenance_job = (
             command.name == "maintain_memory"
-            and (kwargs.get("mode") == "maintenance-job-cancel" or maintenance_jobs.is_job_write(kwargs))
+            and maintenance_jobs.narrows_boundary(kwargs, getattr(capabilities_module.current_active_surface(), "surface", None))
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # A curation proposal prepares read-only, then seals; `seal_proposal` takes
@@ -6233,6 +6239,7 @@ class LeaseManager:
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_maintenance_job_cancel
             or narrow_maintenance_job
             or narrow_curation_proposal
             or narrow_episode_record
@@ -7933,7 +7940,11 @@ def invoke_command(
     mutation_request_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
-    from .commands import invocation_is_read_only, validate_process_media_operation
+    from .commands import (
+        invocation_is_read_only,
+        validate_process_media_operation,
+        writes_through_superseded_maintenance_leaf,
+    )
     from .reserved_paths import (
         _owner_authority_scope,
         mutation_remediation,
@@ -7993,13 +8004,14 @@ def invoke_command(
         from . import maintenance_jobs
 
         mode = kwargs.get("mode")
-        if mode in maintenance_jobs.PLAN_BOUND_MODES:
+        if mode in maintenance_jobs.JOB_MODES:
             # Before the writer manager and before any job row: a remote write has no
             # run without the plan the owner previewed and a reason.
             maintenance_jobs.require_plan(mode, kwargs)
-            if mode in maintenance_jobs.JOB_MODES:
-                maintenance_jobs.require_owner(injected[0])
-                job_start = True
+            maintenance_jobs.require_owner(injected[0])
+            job_start = True
+            # Reconcile writes by default, so a start may omit `dry_run`: the job's dispatch is explicit.
+            kwargs = {**kwargs, "dry_run": False}
         if not job_start and mode not in remote_admitted_maintenance_modes():
             raise OpError(
                 "MAINTENANCE_REQUIRES_CLI",
@@ -8007,6 +8019,23 @@ def invoke_command(
                 REMOTE_MAINTENANCE_REMEDIATION,
                 details={"status": "terminal", "committed": False},
             )
+
+    if (
+        not read_only
+        and selector_error is None
+        and active_surface is not None
+        and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
+        and writes_through_superseded_maintenance_leaf(command, kwargs)
+    ):
+        # The legacy leaf commands still write through the wide boundary with no plan. Refuse before
+        # the writer manager: a remote write is a `maintain_memory` job with a reviewed plan.
+        raise OpError(
+            "MAINTENANCE_PLAN_REQUIRED",
+            f"a remote {command.name} write runs as a maintenance job through maintain_memory",
+            f"Use {capabilities_module.active_tools_text('maintain_memory')}: preview with dry_run=true, "
+            "then repeat it with dry_run=false, the preview's plan_id and a why.",
+            details={"status": "terminal", "committed": False},
+        )
 
     if reserved_hit is not None:
         if read_only:
