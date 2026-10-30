@@ -390,9 +390,8 @@ def test_creation_catalog_bridge_builds_provider_from_retained_preflight(
     assert (
         semantic_writes._prepare_creation_catalog_publication(
             tmp_path,
-            destination=preflight.destination,
             before_corpus=preflight.corpus,
-            semantic_state=preflight.semantic_state,
+            semantic_states={preflight.destination: preflight.semantic_state},
             writes=writes,
         )
         == "prepared"
