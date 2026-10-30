@@ -5,9 +5,12 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
+from conversation_vault import seed as seed_conversation_vault
 from test_activate_context_maps import _activate
 from test_context_catalogue import INSIGHTS, _built, _seed, _write
 from test_context_views import OWNER, _cold, _second_vault
@@ -21,6 +24,7 @@ from exomem import (
     context_views,
     lexstore,
     working_set,
+    working_set_heat,
     working_set_resolve,
     working_set_runtime,
 )
@@ -34,6 +38,7 @@ SECRET = f"{KB}/Notes/Restricted/secret-cluster.md"
 SLED_TURN = "What are the Cargo Sled constraints?"
 IRRELEVANT_TURN = "What is a good way to spend a quiet afternoon?"
 NAMING_TURN = "What are the Cargo Sled constraints? Also the Cargo Sled winter hazards."
+POINTING_TURN = "what are the risks with that?"
 
 
 def _structured(vault: Path) -> None:
@@ -153,8 +158,19 @@ def full_compile_slices(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(working_set_runtime, "serve", lambda *args, **kwargs: serve(*args, **{**kwargs, "leads_only": False}))
 
 
+#: A thread the compile must read: it qualifies the long turn's lead, and it carries the pointing turn.
+SLED_THREAD = {"recent": [{"role": "user", "text": "Is the Cargo Sled still rated for winter?"}]}
+
+
+@pytest.mark.parametrize(
+    "cases",
+    [
+        pytest.param(((SLED_TURN, None), (LONG_TURN, None), (IRRELEVANT_TURN, None)), id="turn_alone"),
+        pytest.param(((LONG_TURN, SLED_THREAD), (POINTING_TURN, SLED_THREAD)), id="with_thread"),
+    ],
+)
 def test_the_leads_only_compile_gives_the_full_compiles_slice_on_the_lexical_twins(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cases: tuple,
 ) -> None:
     """The slice skips the resolved anchors' lanes, whose material it never serves. Every lead, match, evidence
     kind and state is still the one the full compile gives, for the owner and a restricted caller on both twins."""
@@ -169,19 +185,22 @@ def test_the_leads_only_compile_gives_the_full_compiles_slice_on_the_lexical_twi
     monkeypatch.setattr(working_set, "run_lanes", counted)
     for root in roots:
         for caller in (OWNER, _external()):
-            for turn in (SLED_TURN, LONG_TURN, IRRELEVANT_TURN):
+            for turn, conversation in cases:
                 _cold()
                 runs[:] = [0]
-                leads_only = _activate(root, caller, turn=turn)["turn_slice"]
+                leads_only = _activate(root, caller, turn=turn, conversation=conversation)["turn_slice"]
                 with monkeypatch.context() as scope:
                     full_compile_slices(scope)
                     _cold()
                     runs.append(0)
-                    full = _activate(root, caller, turn=turn)["turn_slice"]
-                assert leads_only == full, (root.name, turn)
+                    full = _activate(root, caller, turn=turn, conversation=conversation)["turn_slice"]
+                assert leads_only == full, (root.name, turn, conversation)
                 if turn == SLED_TURN:
                     # The control: the turn resolves an anchor, whose lanes only the full compile runs.
                     assert full["state"] == "ready" and runs[0] < runs[1], (root.name, runs, full)
+                if turn == POINTING_TURN:
+                    # The control: only the thread says what the turn points at, so the leads-only compile read it.
+                    assert [(item["ref"], item["evidence"]) for item in leads_only["items"]] == [(CARGO_SLED, ["conversation"])]
 
 
 def full_admitted_rankings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -592,3 +611,141 @@ def test_due_advice_rides_on_a_resolved_lead(vault: Path) -> None:
     }]
     # The control: a turn that reaches nothing raises nothing.
     assert "relevant_due_refs" not in _activate(vault, turn=IRRELEVANT_TURN)
+
+
+# --------------------------------------------------------------------------- #
+# The conversation
+# --------------------------------------------------------------------------- #
+
+OTTILIE = f"{KB}/Entities/People/Ottilie Marsh.md"
+GRANT_HUB = f"{KB}/Notes/Insights/tidewater-grant-hub.md"
+#: Reaches Ottilie Marsh by her alias, and the Tidewater Grant hub only by the rare word "grant".
+GRANT_TURN = "Ottilie asked about the grant"
+GRANT_ENTRY = {"recent": [{"role": "user", "text": "we finished the Tidewater Grant call"}]}
+#: The thread below names Ottilie Marsh, whom `POINTING_TURN` points back at.
+POINTING_THREAD = {"recent": [{"role": "user", "text": "How did Ottilie Marsh do in the spring?"}]}
+
+
+def _conversation_world(root: Path) -> None:
+    seed_conversation_vault(root)
+    _built(root).close()
+    lexstore.ensure_fresh(root)
+
+
+LEDGER = f"{KB}/Entities/Projects/Pelican Ledger.md"
+LEDGER_NOTES = f"{KB}/Notes/Insights/pelican-ledger-notes.md"
+#: An anchor and a titled page that a restricted caller may not see, both named by the thread below.
+WITHHELD_THREAD = {
+    "recent": [
+        {"role": "user", "text": "How did Ottilie Marsh do in the spring?"},
+        {"role": "user", "text": "we finished the Tidewater Grant call"},
+        {"role": "user", "text": "is the Pelican Ledger notes page up to date for the Pelican Ledger?"},
+    ],
+    "refs": [LEDGER, LEDGER_NOTES],
+}
+
+
+def _conversation_twins(vault: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """`vault` with the withheld ledger anchor and page, and its twin without them."""
+    twin = _second_vault(tmp_path)
+    for root, hidden in ((vault, True), (twin, False)):
+        seed_conversation_vault(root)
+        if hidden:
+            _write(root, LEDGER, "---\ntype: entity\nentity_type: project\nstatus: active\nupdated: 2026-09-01\n---\n\n# Pelican Ledger\n\n## Summary\n\nThe ledger of the survey boats.\n")
+            _write(root, LEDGER_NOTES, "---\ntype: insight\nstatus: active\nupdated: 2026-09-05\n---\n\n# Pelican Ledger notes\n\n## Summary\n\nWhat the boat ledger holds.\n")
+        _withhold(root, LEDGER, LEDGER_NOTES, ceiling=0)
+        _built(root).close()
+        lexstore.ensure_fresh(root)
+    return vault, twin
+
+
+def _leads(packet: dict) -> dict[str, dict]:
+    return {item["ref"]: item for item in packet["turn_slice"]["items"]}
+
+
+def test_the_conversation_promotes_a_lead_the_turn_reached_by_one_contact_kind(vault: Path) -> None:
+    """The earlier entry names the Tidewater Grant hub; the follow-up reaches it only by the word "grant"."""
+    _conversation_world(vault)
+    alone = _leads(_activate(vault, turn=GRANT_TURN))
+    assert alone[GRANT_HUB]["match"] == "partial" and "conversation" not in alone[GRANT_HUB]["evidence"]
+    with_thread = _leads(_activate(vault, turn=GRANT_TURN, conversation=GRANT_ENTRY))
+    assert with_thread[GRANT_HUB]["match"] == "resolved"
+    assert "conversation" in with_thread[GRANT_HUB]["evidence"]
+    assert alone[OTTILIE]["match"] == with_thread[OTTILIE]["match"] == "resolved"  # the control: the turn's own lead stays
+
+
+def test_an_anaphoric_follow_up_is_carried_from_the_newest_earlier_user_entry(vault: Path) -> None:
+    """The turn has no words of its own subject: only the thread says which page it points at."""
+    _conversation_world(vault)
+    alone = _activate(vault, turn=POINTING_TURN)
+    assert alone["turn_slice"]["state"] == "empty"
+    carried = _activate(vault, turn=POINTING_TURN, conversation=POINTING_THREAD)
+    (lead,) = carried["turn_slice"]["items"]
+    assert (lead["ref"], lead["match"], lead["evidence"]) == (OTTILIE, "partial", ["conversation"])
+    assert carried["map"] == alone["map"]  # the thread changes the slice alone
+
+
+@pytest.mark.parametrize("turn", [f"{GRANT_TURN} and the ledger", POINTING_TURN])
+def test_a_conversation_naming_withheld_pages_changes_no_byte_for_a_restricted_caller(
+    vault: Path, tmp_path: Path, turn: str,
+) -> None:
+    """The thread names a withheld anchor and a withheld titled page in its text and its refs. A restricted
+    caller's packet is its twin's, for a follow-up that the thread qualifies and for one that it carries."""
+    roots = _conversation_twins(vault, tmp_path)
+    owners, guests = [], []
+    for root in roots:
+        _cold()
+        owners.append(_activate(root, OWNER, turn=turn, conversation=WITHHELD_THREAD))  # fills the owner caches first
+        guests.append(_activate(root, _external(), turn=turn, conversation=WITHHELD_THREAD))
+    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert guests[0]["turn_slice"]["items"]  # the control: the guest does reach what it may see through the thread
+    assert owners[0]["turn_slice"] != owners[1]["turn_slice"]  # the control: the owner's slice does see the extra pages
+    assert LEDGER in json.dumps(owners[0]["turn_slice"])
+    assert "Pelican" not in json.dumps(guests[0])
+
+
+def _heat_store(vault: Path) -> list[str] | None:
+    """Every statement of the heat store, which holds the picks and the sessions' last threads; `None` before it exists."""
+    path = working_set_heat.sidecar_path(vault)
+    if not path.exists():
+        return None
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+        return list(conn.iterdump())
+
+
+def test_a_maps_request_with_a_conversation_a_token_and_a_session_writes_no_heat(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The slice compile gets the conversation and no attribution: not even a request that names a session and an
+    `anchor` makes it record a pick or a session thread, as the same request does in anchors mode."""
+    _structured(vault)
+    token = _activate(vault, turn=SLED_TURN)["continuity"]
+    keys = {"client": "claude", "session": "session-a", "workspace": "workspace-a"}
+    thread = {"recent": [{"role": "user", "text": "Is the Cargo Sled still rated for winter?"}]}
+    before = _heat_store(vault)
+    packet = _activate(vault, turn=SLED_TURN, continuity=token, anchor=CARGO_SLED, conversation=thread, **keys)
+    assert packet["generation"]["conversation"] == "applied" and packet["turn_slice"]["items"]
+    assert _heat_store(vault) == before
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+    _activate(vault, turn=SLED_TURN, anchor=CARGO_SLED, **keys)
+    assert _heat_store(vault) != before  # the control: the anchors packet records the pick and the session
+
+
+def test_a_slice_the_request_budget_stops_reports_no_conversation_read(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compile that the budget stops inside `serve` has not given the conversation a state to report."""
+    from exomem import request_budget
+
+    _conversation_world(vault)
+
+    def exhausted(*args, **kwargs):
+        request_budget.current().note_skipped("working_set.semantic")
+        raise working_set.BudgetExhausted("working_set.semantic")
+
+    monkeypatch.setattr(working_set, "compile_packet", exhausted)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        packet = _activate(vault, turn=GRANT_TURN, conversation=GRANT_ENTRY)
+    finally:
+        request_budget.reset_current(token)
+    assert packet["turn_slice"]["state"] == "skipped"
+    assert packet["generation"]["conversation"] == "absent"

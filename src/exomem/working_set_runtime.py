@@ -2913,3 +2913,16 @@ def unevaluated_continuity(continuity: str | None) -> str:
     be a lie and claiming `absent` would hide that the caller sent one.
     """
     return CONTINUITY_ABSENT if not str(continuity or "").strip() else CONTINUITY_STALE
+
+
+def maps_continuity_state(continuity: str | None) -> str:
+    """The state a served maps packet reports for the token it was given.
+
+    A token that carries a map generation is `applied`: activation compared that generation with the served
+    map's, and `map.unchanged` says whether they matched. Any other token (undecodable, or an anchors token
+    with no map generation) is `stale`, and no token is `absent`. The token carries no thread or refs to apply.
+    """
+    if not str(continuity or "").strip():
+        return CONTINUITY_ABSENT
+    held = decode_continuity(continuity)
+    return CONTINUITY_APPLIED if held is not None and "map_generation" in held else CONTINUITY_STALE

@@ -1350,11 +1350,14 @@ using maps`, and serves `maps`. The working-set kill switch disables both modes.
 ### The turn slice
 
 The `maps` packet carries a `turn_slice` block beside the map. The map is the same
-index on every turn. The slice lists the leads that the words of this turn
-reached: resolved and partial anchors, the senses of an ambiguous turn, pages
-that the turn names by title, related pages and the carried page. Each item names
-the match and the kinds of evidence behind it. The slice is not checked for
-relevance, so the client reads a ref before it relies on it.
+index on every turn. The slice lists the leads that the words of this turn and
+its `conversation` reached: resolved and partial anchors, the senses of an
+ambiguous turn, pages that the turn names by title, related pages and the carried
+page. Each item names the match and the kinds of evidence behind it. A lead that
+the conversation reached carries the evidence kind `conversation`. The slice is
+not checked for relevance, so the client reads a ref before it relies on it.
+The slice reads the `conversation` and the `trigger` of the request. It takes no
+`continuity` refs, no `anchor` and no session, and it writes nothing.
 
 The slice is on by default. The map compiles in a fixed share of the packet
 budget on every turn, so the map is the same on a turn that resolves nothing.
