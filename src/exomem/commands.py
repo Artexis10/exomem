@@ -10925,8 +10925,9 @@ def op_maintain_memory(
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
     A remote fix, backfill-ids or reconcile write runs as a maintenance job: preview with
     dry_run=true, then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
-    maintenance-job reads one job (run_id) or lists them; maintenance-job-cancel
-    (run_id, why) stops one. A remote collections-store-export apply returns
+    maintenance-job reads one job's state and receipt (run_id) or lists them;
+    maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
+    writes for its run. A remote collections-store-export apply returns
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.

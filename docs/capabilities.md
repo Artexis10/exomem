@@ -53,7 +53,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | change_schema | save, restore, infer-and-save, refresh, save-roles, save-conventions, save-relations, save-entity-types | schema_memory |
 | change_session_access | revoke, declare | govern_memory |
 | change_settings | set, clear | configure_memory |
-| check_memory | audit, collections-store, fix, backfill-ids, reconcile, structured-files, tag-variants, collections-store-adopt-local, collections-store-export, curation-work-item, curation-preview, curation-status | maintain_memory |
+| check_memory | audit, collections-store, fix, backfill-ids, reconcile, maintenance-job, structured-files, tag-variants, collections-store-adopt-local, collections-store-export, curation-work-item, curation-preview, curation-status | maintain_memory |
 | create_note | Direct inputs | remember |
 | edit_note | Direct inputs | edit_memory |
 | grant_session_access | grant | govern_memory |
@@ -74,7 +74,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | read_schema | inspect, preview, history, infer, validate, diff, validate-document, inventory, resolve, resolve-entity-type, propose-relation, census | schema_memory |
 | recall_context | Direct inputs | activate_context |
 | record_episode | record, prepare, disposition, resume | episode_memory |
-| repair_memory | structured-files, tag-variants, curation-propose, curation-apply, curation-resume, curation-propose-compensation, curation-apply-compensation, curation-revert | maintain_memory |
+| repair_memory | fix, backfill-ids, reconcile, maintenance-job-cancel, structured-files, tag-variants, collections-store-adopt-local, curation-propose, curation-apply, curation-resume, curation-propose-compensation, curation-apply-compensation, curation-revert | maintain_memory |
 | search_memory | Direct inputs | ask_memory |
 | supersede_note | Direct inputs | replace_memory |
 | transfer_artifact | Direct inputs | transfer_artifact |

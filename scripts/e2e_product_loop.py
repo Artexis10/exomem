@@ -402,21 +402,23 @@ def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
     return result
 
 
-def _remote_maintenance_refusal(result: Any) -> dict[str, Any]:
-    """Prove write maintenance was refused at the remote operator boundary."""
-    error = result.get("error") if isinstance(result, dict) else None
+def _remote_maintenance_job(handle: Any, job: Any, *, plan_id: str) -> dict[str, Any]:
+    """Prove a remote write started as a job from its preview and ended completed with a receipt."""
     if (
-        not isinstance(error, dict)
-        or result.get("success") is not False
-        or error.get("code") != "MAINTENANCE_REQUIRES_CLI"
-        or error.get("status") != "terminal"
-        or error.get("committed") is not False
+        not isinstance(handle, dict)
+        or not isinstance(handle.get("run_id"), str)
+        or handle.get("state") not in {"running", "completed"}
+        or handle.get("plan_id") != plan_id
     ):
-        raise RuntimeError(
-            "maintain_memory did not return the operator-only refusal: "
-            f"{result!r}"
-        )
-    return error
+        raise RuntimeError(f"maintain_memory did not start the reviewed job: {handle!r}")
+    if (
+        not isinstance(job, dict)
+        or job.get("run_id") != handle["run_id"]
+        or job.get("state") != "completed"
+        or not isinstance(job.get("receipt"), dict)
+    ):
+        raise RuntimeError(f"the maintenance job did not complete with a receipt: {job!r}")
+    return job
 
 
 def _operator_reconcile_data(stdout: str) -> dict[str, Any]:
@@ -547,6 +549,18 @@ async def _call_maintenance(
 #: graph which never converges fails the run instead of hanging it.
 _GRAPH_CONVERGENCE_SECONDS = 120.0
 _GRAPH_POLL_SECONDS = 0.5
+
+
+async def _await_maintenance_job(client, run_id: str, timeout: float) -> Any:
+    """Read the job until it leaves `running`, within the graph convergence window."""
+    deadline = time.monotonic() + _GRAPH_CONVERGENCE_SECONDS
+    while True:
+        job = await _call(client, "maintain_memory", {"mode": "maintenance-job", "run_id": run_id}, timeout)
+        if not isinstance(job, dict) or job.get("state") != "running":
+            return job
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"maintenance job {run_id} is still running after {_GRAPH_CONVERGENCE_SECONDS}s")
+        await asyncio.sleep(_GRAPH_POLL_SECONDS)
 
 
 def _server_side_graph_state() -> str:
@@ -1724,17 +1738,23 @@ async def _stdio_session(
                     {"mode": "reconcile", "dry_run": True},
                     timeout,
                 )
-                remote_reconcile = await _call(
+                plan_id = reconcile_preview["plan_id"]
+                job_handle = await _call_maintenance(
                     client,
                     "maintain_memory",
                     {
                         "mode": "reconcile",
                         "dry_run": False,
-                        "response_detail": "full",
+                        "plan_id": plan_id,
+                        "why": "product e2e: prove the remote job route",
                     },
                     timeout,
                 )
-                _remote_maintenance_refusal(remote_reconcile)
+                _remote_maintenance_job(
+                    job_handle,
+                    await _await_maintenance_job(client, job_handle["run_id"], timeout),
+                    plan_id=plan_id,
+                )
                 await _assert_relation_contexts(
                     client,
                     relation_ref=relation_memory["ref"],

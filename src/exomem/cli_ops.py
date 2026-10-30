@@ -37,8 +37,8 @@ INVALID_OPERATION_ARGUMENTS = "INVALID_OPERATION_ARGUMENTS"
 
 RELATION_REVIEW_STABLE_ID_REMEDIATION = (
     'For reviewed-none, preview maintain_memory(mode="backfill-ids"). '
-    "Resolve reported identity issues before confirmation for CLI backfill of "
-    "missing IDs, then re-read and validate."
+    "Resolve reported identity issues before confirmation, then backfill with its "
+    "plan_id and a why; re-read and validate."
 )
 
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a

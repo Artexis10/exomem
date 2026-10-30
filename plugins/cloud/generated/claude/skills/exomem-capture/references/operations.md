@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `read_review/triage_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `read_connections/change_connections`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | Remote tools audit, dry-run, and run structured-file, tag-variant and curation writes. Other repairs are host-operator work via `exomem maintain --fix` / `--reconcile` |
+| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids` or `reconcile` write runs as a job: preview, start with its `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `read_schema/change_schema`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
@@ -101,9 +101,9 @@ bounded current view; `create` explicitly creates a reviewed collection contract
 `append` adds a new event; `update` changes one item with current stale-write
 guards and a concise reason; `revise` changes a validated manifest under its
 current guards; and `rebaseline` explicitly records a valid direct-edit audit
-gap. Remote callers may preview generic derived-index repair with
-`check_memory(operation={'kind': 'reconcile', 'dry_run': true})`; actual repair remains the
-host-operator command `exomem maintain --reconcile`.
+gap. Remote callers preview generic derived-index repair with
+`check_memory(operation={'kind': 'reconcile', 'dry_run': true})` and run it as a
+maintenance job with the preview's `plan_id` and a `why` (see vault care).
 
 Route durable observed events or current state here without waiting for a magic
 verb. When exactly one compatible existing collection accepts a sufficiently
@@ -196,7 +196,8 @@ target when a client could expose its UUID; use a plain title-first citation.
 
 Do not manually create, copy, or modify IDs. Legacy pages remain untouched until
 `check_memory(operation={'kind': 'backfill-ids'})` is requested. That mode is a dry run by
-default and writes only with `dry_run=false`. Duplicate and malformed IDs are
+default. It writes only with `dry_run=false`; a remote client runs it as a maintenance job
+with the preview's `plan_id` and a `why`. Duplicate and malformed IDs are
 reported by audit and make canonical resolution fail rather than selecting an
 arbitrary page.
 
@@ -810,8 +811,10 @@ migration.
 1. Call `check_memory(operation={'kind': 'backfill-ids'})`; the default `dry_run=true`
    reports affected pages and identity problems without writing.
 2. Review the complete proposal and resolve duplicate or malformed IDs first.
-3. After explicit confirmation, repeat with `dry_run=false`. The batch is atomic
-   and preserves all existing valid IDs.
+3. After explicit confirmation, repeat with `dry_run=false`. A remote client sends the
+   preview's `plan_id` and a `why` with `repair_memory`, follows the returned `run_id` with
+   `maintenance-job`, and reads the minted IDs in the receipt. The write preserves all
+   existing valid IDs; a page that changed after the preview is skipped and reported.
 
 ### Writes performed
 Missing frontmatter IDs only, and only in explicit write mode.
