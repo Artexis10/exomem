@@ -410,6 +410,8 @@ def prewarm() -> asr_runtime.ASRComputeRuntimeError | None:
     except asr_runtime.ASRComputeRuntimeError as e:
         log.warning("ASR prewarm hit a compute runtime failure; worker will circuit-break: %s", e)
         return e
+    except asr_runtime.ASRGpuBusy as e:
+        log.info("ASR prewarm skipped (GPU busy); model will load on the first media job: %s", e)
     except ExtractionUnavailable as e:
         log.info("ASR prewarm skipped (engine unavailable): %s", e)
     except Exception:  # noqa: BLE001 — prewarm must never crash startup

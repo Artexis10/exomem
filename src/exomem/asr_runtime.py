@@ -14,11 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import mode as mode_module
+from . import resource_status
 
 ASR_DEVICE_ENV = "EXOMEM_ASR_DEVICE"
 ASR_COMPUTE_TYPE_ENV = "EXOMEM_ASR_COMPUTE_TYPE"
 CPU_DEFAULT_COMPUTE_TYPE = "int8"
 CUDA_DEFAULT_COMPUTE_TYPE = "float16"
+#: The free VRAM the large ASR model needs before CTranslate2 may load it.
+_MIN_FREE_VRAM_MIB = 2048
 _INT8_TYPES = frozenset({"int8", "int8_float16", "int8_float32", "int8_bfloat16"})
 COMPUTE_RUNTIME_MARKERS = (
     "cublas",
@@ -47,6 +50,16 @@ class ASRRuntimeRefusal(ASRComputeRuntimeError):
     """An explicitly requested or unsafe ASR runtime cannot be selected."""
 
 
+class ASRGpuBusy(RuntimeError):
+    """An explicitly requested GPU is healthy but has too little free VRAM right now.
+
+    Another process holds the memory, which is a passing state and not a broken
+    runtime. It deliberately is not an `ASRComputeRuntimeError`: that type blocks
+    the job until the operator repairs something, while the caller of this one
+    keeps the job pending and tries again later.
+    """
+
+
 @dataclass(frozen=True)
 class ASRProbe:
     cuda_available: bool
@@ -54,6 +67,8 @@ class ASRProbe:
     cpu_types: frozenset[str]
     compute_capability: tuple[int, int] | None
     reason: str | None = None
+    #: The device works but is short of free VRAM now; `cuda_available` is False meanwhile.
+    busy: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +137,8 @@ def select_asr_runtime(*, probe: ASRProbe | None = None) -> ASRSelection:
     cuda_admitted = probe.cuda_available and CUDA_DEFAULT_COMPUTE_TYPE in probe.cuda_types
     if requested_device == "cuda":
         if not probe.cuda_available:
+            if probe.busy:
+                raise ASRGpuBusy(probe.reason or "the GPU is busy")
             raise ASRRuntimeRefusal(probe.reason or "CUDA ASR is not admitted")
         selected = override or CUDA_DEFAULT_COMPUTE_TYPE
         if not _cuda_type_allowed(selected, probe):
@@ -158,31 +175,36 @@ def probe_asr_runtime() -> ASRProbe:
         cuda_types = frozenset(ctranslate2.get_supported_compute_types("cuda", 0))
     except Exception as exc:  # noqa: BLE001 - broken CT2 is a soft CPU posture unless explicit CUDA
         return ASRProbe(False, frozenset(), frozenset({CPU_DEFAULT_COMPUTE_TYPE}), None, str(exc))
-    capability, headroom_reason = _nvidia_headroom()
-    if headroom_reason is not None:
-        return ASRProbe(False, cuda_types, cpu_types, capability, headroom_reason)
+    try:
+        capability, free_mib = _nvidia_headroom()
+    except Exception as exc:  # noqa: BLE001 - nvidia-smi is an optional admission source
+        return ASRProbe(False, cuda_types, cpu_types, None, f"NVIDIA headroom probe failed: {exc}")
+    if free_mib < _MIN_FREE_VRAM_MIB:
+        reason = f"insufficient free GPU memory for ASR: {free_mib} MiB free, {_MIN_FREE_VRAM_MIB} MiB needed"
+        return ASRProbe(False, cuda_types, cpu_types, capability, reason, busy=True)
     return ASRProbe(True, cuda_types, cpu_types, capability)
 
 
-def _nvidia_headroom() -> tuple[tuple[int, int] | None, str | None]:
-    """Read NVIDIA state through nvidia-smi; it never creates a CUDA context."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=compute_cap,memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=True,
-        )
-        row = result.stdout.splitlines()[0].split(",")
-        major, minor = (int(part) for part in row[0].strip().split(".", 1))
-        if int(row[1].strip()) < 2048:
-            return (major, minor), "insufficient free GPU memory for ASR"
-        return (major, minor), None
-    except Exception as exc:  # noqa: BLE001 - nvidia-smi is an optional admission source
-        return None, f"NVIDIA headroom probe failed: {exc}"
+def _nvidia_headroom() -> tuple[tuple[int, int], int]:
+    """Read compute capability and free MiB through nvidia-smi; it never creates a CUDA context.
+
+    Raises when nvidia-smi is absent or cannot answer, which is a broken probe and not a busy GPU.
+    """
+    exe = resource_status.find_nvidia_smi()
+    if exe is None:
+        raise FileNotFoundError("nvidia-smi not found")
+    result = subprocess.run(
+        [exe, "--query-gpu=compute_cap,memory.free", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=5,
+        check=True,
+    )
+    row = result.stdout.splitlines()[0].split(",")
+    major, minor = (int(part) for part in row[0].strip().split(".", 1))
+    return (major, minor), int(row[1].strip())
 
 
 def is_compute_runtime_failure(error: BaseException | str) -> bool:

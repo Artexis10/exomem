@@ -243,7 +243,8 @@ def _min_free_vram_mb() -> int:
 _EXTRA_NVIDIA_SMI_PATHS = ("/usr/lib/wsl/lib/nvidia-smi",)
 
 
-def _find_nvidia_smi() -> str | None:
+def find_nvidia_smi() -> str | None:
+    """The one lookup of nvidia-smi, shared with `asr_runtime`: PATH, then the WSL driver location."""
     exe = shutil.which("nvidia-smi")
     if exe:
         return exe
@@ -251,7 +252,7 @@ def _find_nvidia_smi() -> str | None:
 
 
 def _probe_nvidia_smi() -> dict[str, Any]:
-    exe = _find_nvidia_smi()
+    exe = find_nvidia_smi()
     if not exe:
         return {"status": "unavailable", "reason": "nvidia-smi not found"}
     try:

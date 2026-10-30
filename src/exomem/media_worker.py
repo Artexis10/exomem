@@ -144,6 +144,9 @@ _AUTHORITY_UNAVAILABLE_EXIT_CODE = 79
 #: started under reserves (an interrupted job it recovered, say). It ran nothing and
 #: counted no stop; the supervisor gives the slot back and asks for the right size.
 _SLOT_TOO_SMALL_EXIT_CODE = 80
+#: The child found the GPU busy for the speech engine and left only speech work pending. The
+#: jobs are still pending: nothing is blocked, and the supervisor starts the next child later.
+_GPU_BUSY_EXIT_CODE = 81
 #: Relaunch delay after consecutive authority refusals: from the follower cadence,
 #: doubling to this ceiling, so a lease that frees up still starts work within it.
 _AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
@@ -156,6 +159,9 @@ _MEMORY_WAIT_SECONDS = 15.0
 _MEMORY_RECOVERY_SECONDS = 60.0
 _MEMORY_RECOVERY_MAX_SECONDS = 1800.0
 _TRANSIENT_RECHECK_SECONDS = 5.0
+#: How long the supervisor waits before it asks again whether a busy GPU has freed up. Each ask
+#: costs one child process, and another process holding the GPU can last for hours.
+_GPU_BUSY_RECHECK_SECONDS = 60.0
 _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: How long the supervisor sleeps between passes.  Deliberately unchanged: the
 #: cost being removed below is the store open, not the wakeup, and stretching
@@ -733,7 +739,7 @@ class MediaWorker:
                 retryable=False,
             )
             return self._publication_outcome(committed, FAILED, error)
-        except runtime_resources.ModelBusyError:
+        except (runtime_resources.ModelBusyError, asr_runtime.ASRGpuBusy):
             raise
         except MemoryError:
             raise  # a memory stop returns the job to pending; never an artifact failure
@@ -1760,6 +1766,9 @@ class MediaWorker:
                             "media child found no writer authority; retrying after %.1fs",
                             delay,
                         )
+                    elif returncode == _GPU_BUSY_EXIT_CODE:
+                        delay = _GPU_BUSY_RECHECK_SECONDS
+                        log.info("media child found the GPU busy; retrying after %.1fs", delay)
                     elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
                             _LOCK_UNAVAILABLE_RECHECK_SECONDS
@@ -2451,6 +2460,9 @@ def run_child(
     brakes = media_brakes.enabled()
     config = media_brakes.settings(cell=media_brakes.read_cell()) if brakes else None
     refusal: list[int] = []
+    #: Set once the speech engine found the GPU busy. This child then leaves speech work pending and
+    #: claims the rest, so one busy GPU neither blocks the jobs behind it nor stays on the books.
+    gpu_busy = False
 
     def budget_of(job: _Job) -> media_brakes.Budget:
         assert config is not None
@@ -2488,11 +2500,21 @@ def run_child(
                 # Check for eligible work once more before the idle exit.
                 and now - last_work < idle_seconds
             )
-            job = None if settled else store.claim_next(admit if brakes else None)
+            job = (
+                None
+                if settled
+                else store.claim_next(
+                    admit if brakes else None,
+                    skip_media_types=media_engines.SPEECH_KINDS if gpu_busy else (),
+                )
+            )
             if refusal:
                 log.info("media worker: admission refused the next job (exit %d); child exiting", refusal[0])
                 return refusal[0]
             if job is None:
+                if gpu_busy:
+                    log.info("media worker: only speech work is left and the GPU is busy; child exiting")
+                    return _GPU_BUSY_EXIT_CODE
                 if not settled:
                     idle_signature = _job_store_signature(store)
                     forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
@@ -2539,6 +2561,12 @@ def run_child(
                 store.defer(job)
                 log.info("media worker: deferred %s after model admission refusal", job.binary_path)
                 return _TRANSIENT_EXIT_CODE
+            except asr_runtime.ASRGpuBusy as exc:
+                assert job.id is not None
+                store.defer(job)
+                gpu_busy = True
+                log.info("media worker: deferred %s while the GPU is busy: %s", job.binary_path, exc)
+                continue  # it ran nothing, so no fresh child is needed before the next job
             except OpError as exc:
                 assert job.id is not None
                 if exc.code in _TRANSIENT_OPERATION_CODES:

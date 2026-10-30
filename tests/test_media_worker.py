@@ -3144,6 +3144,78 @@ def test_child_marks_explicit_cuda_refusal_blocked_with_runtime_remediation(
     assert "runtime" in status["next_action"]
 
 
+def _gpu_with_free_vram(monkeypatch: pytest.MonkeyPatch, free_mib: int) -> dict[str, int]:
+    """An explicit-CUDA install whose GPU has `free_mib` free; change `["free"]` to free or fill it.
+
+    The real probe and selection run; only CTranslate2 and nvidia-smi are faked. Fake extraction
+    selects the runtime like the engine does at model load, then returns a transcript.
+    """
+    import sys
+    import types
+
+    vram = {"free": free_mib}
+    fake_ctranslate2 = types.SimpleNamespace(
+        get_supported_compute_types=lambda device, index=0: {"float16"} if device == "cuda" else {"int8"},
+        get_cuda_device_count=lambda: 1,
+    )
+    monkeypatch.setitem(sys.modules, "ctranslate2", fake_ctranslate2)
+    monkeypatch.setattr(asr_runtime, "_nvidia_headroom", lambda: ((8, 9), vram["free"]))
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+    def transcribe(path, **_kwargs):
+        if extract.media_type_for(Path(path)) == "image":
+            return extract.ExtractResult(text="RECEIPT 42", media_type="image", engine="tesseract")
+        asr_runtime.select_asr_runtime()
+        return extract.ExtractResult(text="[0:00] spoken words", media_type="audio", engine="faster-whisper:test")
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    return vram
+
+
+def test_busy_gpu_defers_speech_jobs_and_a_later_attempt_runs_them(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vram = _gpu_with_free_vram(monkeypatch, free_mib=512)
+    results = [_preserve_media_stub(vault, filename=name) for name in ("first.m4a", "second.m4a")]
+    store = media_jobs.MediaJobStore(vault)
+    for result in results:
+        store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == media_worker._GPU_BUSY_EXIT_CODE
+
+    statuses = media_jobs.status(vault)["jobs"]
+    assert [(job["state"], job["attempts"], job["error"]) for job in statuses] == [(media_jobs.PENDING, 0, None)] * 2
+
+    vram["free"] = 8192
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert store.counts()[media_jobs.BLOCKED] == 0
+    assert store.counts()[media_jobs.PENDING] == 0
+    for result in results:
+        assert "spoken words" in (vault / result.sidecar_path).read_text(encoding="utf-8")
+
+
+def test_busy_gpu_does_not_hold_back_an_image_queued_behind_the_speech_job(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gpu_with_free_vram(monkeypatch, free_mib=512)
+    speech = _preserve_media_stub(vault, filename="waits-for-gpu.m4a")
+    image = preserve.preserve_bytes(vault, scope="Rental", category="photos", filename="receipt.png", data=b"\x89PNG fake")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / speech.path, sidecar_path=vault / speech.sidecar_path, media_type="audio"))
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / image.path, sidecar_path=vault / image.sidecar_path, media_type="image"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == media_worker._GPU_BUSY_EXIT_CODE
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert "RECEIPT 42" in (vault / image.sidecar_path).read_text(encoding="utf-8")
+    [waiting] = media_jobs.status(vault)["jobs"]
+    assert (waiting["state"], waiting["attempts"]) == (media_jobs.PENDING, 0)
+
+
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -534,18 +535,26 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     return int(deleted + kept)
 
 
-def _next_pending_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+def _next_pending_row(conn: sqlite3.Connection, skip_media_types: Collection[str] = ()) -> sqlite3.Row | None:
     """The job to claim next: the oldest fresh job, else the oldest resumed speech job.
 
     A resumed speech job has a progress row. It runs only when no fresh job waits, so a
     long recording that keeps advancing delays a new upload by at most one job timeout.
     Two indexed `LIMIT 1` queries keep the claim cheap on a long queue.
+
+    `skip_media_types` leaves out the extraction stage of those media types, so the caller can pass
+    over work whose engine cannot run now without holding back the jobs queued behind it.
     """
+    skip = ""
+    if skip_media_types:
+        skip = f" AND NOT (do_ocr = 1 AND media_type IN ({','.join('?' * len(skip_media_types))}))"
+    params = tuple(skip_media_types)
     return conn.execute(
         "SELECT * FROM jobs WHERE state = 'pending' AND NOT EXISTS "
-        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id) ORDER BY id LIMIT 1"
+        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)" + skip + " ORDER BY id LIMIT 1",
+        params,
     ).fetchone() or conn.execute(
-        "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
+        "SELECT * FROM jobs WHERE state = 'pending'" + skip + " ORDER BY id LIMIT 1", params
     ).fetchone()
 
 
@@ -1094,16 +1103,17 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def claim_next(self, admit: Any = None) -> MediaJob | None:
+    def claim_next(self, admit: Any = None, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
         """Claim the oldest pending job.
 
         `admit`, when given, sees that job before the claim and may refuse it, so a
         job the memory brakes do not admit stays pending and unclaimed.
+        `skip_media_types` passes over the extraction stage of those media types (see `_next_pending_row`).
         """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = _next_pending_row(conn)
+            row = _next_pending_row(conn, skip_media_types)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
