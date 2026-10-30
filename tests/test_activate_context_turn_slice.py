@@ -683,6 +683,22 @@ def test_an_anaphoric_follow_up_is_carried_from_the_newest_earlier_user_entry(va
     (lead,) = carried["turn_slice"]["items"]
     assert (lead["ref"], lead["match"], lead["evidence"]) == (OTTILIE, "partial", ["conversation"])
     assert carried["map"] == alone["map"]  # the thread changes the slice alone
+    assert lead["origin"] == "conversation"
+
+
+@pytest.mark.parametrize("trigger", ["user_turn", "task_refresh"])
+def test_a_lead_that_only_the_agents_focus_reached_says_so(vault: Path, trigger: str) -> None:
+    """The agent's focus is not the user's words: a lead it alone reached carries `origin: focus`, as an
+    anchors packet's anchor does, and a lead the turn's own words reached carries no origin."""
+    _conversation_world(vault)
+    turn = "thoughts on this?"
+    assert _activate(vault, turn=turn)["turn_slice"]["state"] == "empty"
+    focused = _activate(vault, turn=turn, conversation={"focus": "Ottilie Marsh"}, trigger=trigger)
+    (lead,) = focused["turn_slice"]["items"]
+    assert (lead["ref"], lead["origin"]) == (OTTILIE, "focus")
+    # The control: the user naming her gives a lead with no origin.
+    (own,) = _activate(vault, turn="thoughts on Ottilie Marsh?")["turn_slice"]["items"]
+    assert own["ref"] == OTTILIE and "origin" not in own
 
 
 @pytest.mark.parametrize("turn", [f"{GRANT_TURN} and the ledger", POINTING_TURN])

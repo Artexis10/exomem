@@ -91,7 +91,7 @@ packets to a restricted caller.
 
 The slice's fixed description becomes "What this turn and its conversation
 reached, with the evidence. Not checked for relevance; read a ref before relying
-on it." Each item's evidence still says which of the two reached it.
+on it." Each item's evidence says when the conversation qualified or carried it, and an item whose cue the user did not speak carries the compile's `origin` (`focus` or `conversation`), as an anchors packet's anchor does.
 
 ### D6. No new setting
 

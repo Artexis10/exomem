@@ -1243,7 +1243,7 @@ def activation_packet(
 
     `turn_leads` turns the turn slice on: it holds back `TURN_SLICE_SHARE` of the budget for the slice
     (so the map is the same on every turn), and it is called once, after the map is compiled, with the
-    map's caller view, for what the turn's words reached. A fault in it, or no room for a line, sets the
+    map's caller view, for what the turn and its conversation reached. A fault in it, or no room for a line, sets the
     slice's state and never changes the map.
 
     `known_generation` is the map generation the caller holds. When it equals the generation of the map this
@@ -1343,11 +1343,15 @@ def _activation_packet(
 
 @dataclass(frozen=True, slots=True)
 class Lead:
-    """One page, anchor or collection that the turn's words reached, as the guarded compile named it."""
+    """One page, anchor or collection that the turn or its conversation reached, as the guarded compile named it.
+
+    `origin` is where the compile found the cue: the turn's own words, the agent's focus, or the conversation.
+    """
 
     ref: str
     match: str
     evidence: tuple[str, ...]
+    origin: str = working_set_conversation.ORIGIN_TURN
 
 
 @dataclass(frozen=True, slots=True)
@@ -1413,7 +1417,7 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
     def add(item: Mapping[str, Any], match: str | None) -> None:
         ref = _lead_ref(item)
         if ref and match is not None and ref not in found:
-            found[ref] = Lead(ref, match, _lead_evidence(item))
+            found[ref] = Lead(ref, match, _lead_evidence(item), str(item.get("origin") or working_set_conversation.ORIGIN_TURN))
 
     for item in packet.get("anchors") or ():
         if isinstance(item, Mapping):
@@ -1535,6 +1539,9 @@ def _slice_rows(
         if row is not None and row.entry_id not in extras:
             rows.append(row)
             extras[row.entry_id] = {"match": lead.match, "evidence": list(lead.evidence)}
+            if lead.origin != working_set_conversation.ORIGIN_TURN:
+                # A cue the user did not speak says so, as an anchors packet's `origin` does.
+                extras[row.entry_id]["origin"] = lead.origin
     return tuple(rows), extras
 
 
