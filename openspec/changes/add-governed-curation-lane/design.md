@@ -352,9 +352,11 @@ days later. Two leaf guards then refused runs the plan itself made valid:
 
 Proposal therefore prepares step `k` with a private resolver seam
 (`find.planned_pages`) that registers the pages steps `0..k-1` create, with the
-titles their leaves register. Only link rendering is projected: the semantic
-checks still read the vault as it is, and an earlier supersession changes a
-page's status, which a resolver entry cannot carry. Proposal refuses
+titles their leaves register. Only the writer resolver is projected, which
+renders links and resolves source claims: the semantic checks still read the
+vault as it is, and an earlier supersession changes a page's status, which a
+resolver entry cannot carry. Other dependencies, such as a link by a title an
+earlier edit changes, still refuse through the leaf when the step runs. Proposal refuses
 (`CURATION_STEP_CONFLICT`) the plans that projection cannot make run: a later
 step bound to a path an earlier step writes, a link to a page an earlier step
 supersedes, and a relation disposition on a step that links to a page an

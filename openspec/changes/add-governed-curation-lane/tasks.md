@@ -57,15 +57,15 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 admission and pac
 - [x] 8.3 Add hookless bootstrap/custom-instruction carrier assertions without hardcoding an English-only workflow or weakening explicit-request availability when structural suggestions are off.
 - [x] 8.4 Pass scaffold privacy/leak checks and verify no Planning/Records/OpenSpec workflow automation was added.
 
-## 10. Intra-plan dependencies and late approval
-
-- [ ] 10.1 Render each proposed and compensation step's links to pages the plan's earlier steps create, and refuse with `CURATION_STEP_CONFLICT` a step bound to a path an earlier step writes, a link to a page an earlier step supersedes, and a relation disposition on a step that links to a page an earlier step creates.
-- [ ] 10.2 Mint an edit step's transition at execution, never from the plan, and refuse before any write a planned page that differs from the sealed postcondition apart from the reviewed `updated` instant.
-- [ ] 10.3 Prove both end to end: a two-page split linked by path and by title applies; a foreign link target still refuses; an edit approved days later applies through each edit writer and with a copied token; an edit whose render changed refuses with nothing written; each conflicting plan is refused at proposal.
-
 ## 9. Completion and OpenSpec closure
 
 - [x] 9.1 Run the affected curation, semantic writer, file governance, command-surface, mutation-terminal, Hosted, workflow-skill, and artifact-freshness suites with explicit scope. Evidence: tests/test_curation_*.py, semantic writer, file governance, command-surface, mutation-terminal, hosted, workflow-skill and artifact-freshness suites green on the delivered tip.
 - [x] 9.2 Run `ruff check`, the full lean pytest corpus, strict OpenSpec validation, lock/diff checks, privacy scan, and all release artifact freshness gates; record unrelated environmental failures separately from attributable failures. Evidence: ruff clean; full lean suite on the delivered tip; strict validate 182/182; lock/diff checks and privacy scan clean.
 - [x] 9.3 Exercise one multilingual forward plan, crash recovery, partial run, exact replay, and compensation end to end on both standalone and Hosted test harnesses. Evidence: standalone tests/test_curation_plan.py and tests/test_curation_execution.py (Finnish forward plans, terminal-receipt crash replay), tests/test_curation_compensation.py; Hosted tests/test_hosted_private_routes.py::test_v5_curation_* (isolation, one step per request, replay, process restart, fast-ack seam).
 - [ ] 9.4 After current client acceptance and all four changes' merge/review evidence are complete, participate in the owner-controlled sync/archive sequence: `add-governed-curation-lane`, then `complete-recurring-entity-lifecycle`, then `preserve-adopted-generated-artifacts`, then `capture-durable-personal-baselines`, with strict validation before and after every archive.
+
+## 10. Intra-plan dependencies and late approval
+
+- [x] 10.1 Render each proposed and compensation step's links to pages the plan's earlier steps create, and refuse with `CURATION_STEP_CONFLICT` a step bound to a path an earlier step writes, a link to a page an earlier step supersedes, and a relation disposition on a step that links to a page an earlier step creates. Evidence: `curation._prepare_manifest`, `find.planned_pages` (PR #2246).
+- [x] 10.2 Mint an edit step's transition at execution, never from the plan, and refuse before any write a planned page that differs from the sealed postcondition apart from the reviewed `updated` instant. Evidence: `curation._dispatch_step`, `curation._require_reviewed_edit`, `edit.reviewed_render` (PR #2246).
+- [x] 10.3 Prove both end to end: a two-page split linked by path and by title applies; a foreign link target still refuses; an edit approved days later applies through each edit writer and with a copied token; an edit whose render changed refuses with nothing written; each conflicting plan is refused at proposal. Evidence: tests/test_curation_plan_dependencies.py, 11 cases, with the existing curation suites green on the delivered tip (PR #2246).

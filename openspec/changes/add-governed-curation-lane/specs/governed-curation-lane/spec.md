@@ -136,13 +136,17 @@ the same plan creates as the writer renders a link to an existing page, so the
 sealed draft matches at execution. Only that rendering SHALL be projected;
 every other check SHALL read the vault as it is, and a page that another writer
 creates, edits or removes after proposal SHALL still make the affected step
-refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT` a
-plan that could not then run as sealed:
+refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT`
+these plans, which could not then run as sealed:
 
 - a later step bound to a path that an earlier step writes;
 - a step that links to a page an earlier step supersedes;
 - a step that gives a relation disposition while it links to a page an earlier
   step creates, because that link is its relation once the page exists.
+
+A later step's other dependencies on an earlier step's effects, such as a link
+by a title that an earlier edit changes, are not projected; such a step
+refuses through its leaf when it runs.
 
 #### Scenario: Split note links its second page to its first
 
