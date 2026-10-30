@@ -270,7 +270,7 @@ The cell SHALL hydrate an evicted original in one stream: it fetches the version
 #### Scenario: A hydration stops part-way
 
 - **WHEN** a hold stops the runtime while a 5 GiB hydration writes its temporary file, and the restarted runtime reuses the old process ID
-- **THEN** the next hydration's reservation clears the dead reservation and removes the temporary file
+- **THEN** the restarted runtime clears the dead reservation and removes the temporary file before it serves a hydration
 - **AND** the hydration capacity is free again
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
