@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from test_adoption_collection import TODAY, _import, _vault
 from test_adoption_own_notes import JOURNAL_RULE, _notes
 
 from exomem import adopt, adoption_run, note, semantic_writes, vault, vocabulary_auxiliaries
+from exomem.governance import artifact_census
 
 COLLECTION = "Coll"
 KB = "Knowledge Base"
@@ -164,6 +166,28 @@ def test_a_failure_after_the_batch_is_written_fails_only_its_own_note(
     assert outcomes[0].error is None and outcomes[2].error is None
     assert outcomes[0].created.path == notes[0].planned["note"]["target_path"]
     assert isinstance(outcomes[1].error, RuntimeError)
+    assert len(_notes(root)) == 3
+    assert sum(" note | Notes/Insights/" in line for line in _log_entries(root)) == 3
+
+
+def test_a_write_that_fails_after_its_commit_point_creates_no_note_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, notes, date_iso = _chunk(tmp_path)
+    first_page = os.path.abspath(root / notes[0].planned["note"]["target_path"])
+
+    def census_fails_once_the_pages_are_installed(vault_root, replaced):
+        if first_page in {os.path.abspath(path) for path in replaced}:
+            raise RuntimeError("injected failure after the commit point")
+
+    monkeypatch.setattr(artifact_census, "note_created", census_fails_once_the_pages_are_installed)
+
+    outcomes = adopt.create_draft_notes(root, notes, collection=COLLECTION, date_iso=date_iso)
+
+    # Creating the notes again would find each page taken: TARGET_OCCUPIED.
+    assert [str(outcome.error) for outcome in outcomes] == [
+        "injected failure after the commit point"
+    ] * 3
     assert len(_notes(root)) == 3
     assert sum(" note | Notes/Insights/" in line for line in _log_entries(root)) == 3
 

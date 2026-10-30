@@ -4793,8 +4793,9 @@ def commit_creations(
     Once the batch is on disk nothing raises, because committing a creation again would find
     its page taken. Each creation then gets its `CreationCommit`, or the exception that a step
     after the write raised for it. A failure that belongs to the whole batch, such as its
-    catalog publication or a write that kept workspace state, is every creation's outcome, as
-    it would be for each creation committed alone.
+    catalog publication, a write that kept workspace state or a write that failed after its
+    commit point, is every creation's outcome, as it would be for each creation committed
+    alone.
     """
     root = Path(vault_root)
     if not creations:
@@ -5066,6 +5067,16 @@ def _structural_verdicts(
     return _judge_batch(root, before, states, operation=operation), before, states
 
 
+def _holds_planned_bytes(write: vault.PlannedWrite) -> bool:
+    """Whether `write`'s file holds exactly the text this batch planned for it."""
+    try:
+        return isinstance(write.content, str) and (
+            Path(write.path).read_bytes() == write.content.encode("utf-8")
+        )
+    except OSError:
+        return False
+
+
 def _publish_creation_catalog(catalog_target: Any) -> None:
     """Advance the governance catalog after a creation's canonical bytes committed."""
     from .governance import catalog_publication
@@ -5095,8 +5106,8 @@ def _commit_structural(
     (see `_structural_verdicts`). One creation and many share this implementation.
 
     Every raise comes before the batch is on disk. A failure after the write is returned
-    beside the commits for the caller to report: a write that kept workspace state, which
-    leaves no commits, or the catalog publication.
+    beside the commits for the caller to report: a write that kept workspace state or that
+    failed after its commit point, which leave no commits, or the catalog publication.
     """
     from .governance import catalog_publication
 
@@ -5183,6 +5194,11 @@ def _commit_structural(
     except vault.BatchWriteError as error:
         # The write kept workspace state and may have kept pages, so it is no refusal.
         return (), error
+    except Exception as error:
+        if any(_holds_planned_bytes(write) for write in primary_writes):
+            # The write failed after its commit point, so the pages are on disk.
+            return (), error
+        raise
     finally:
         semantic_index.reset_parent_states(token)
     # A creation reports every written file but the other creations' own: its own files, the

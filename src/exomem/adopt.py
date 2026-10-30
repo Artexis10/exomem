@@ -622,8 +622,10 @@ def create_draft_notes(
     index and one log update, which is the per-note guarantees at a fraction of the cost.
     When the batch refuses before it writes, each of its notes is created alone, so every
     note gets the outcome `create_draft_note` gives it. Once the batch is on disk it is never
-    created again: every note is created, and a step that fails after the write fails only
-    the note it ran for, as it would when that note is created alone.
+    created again: every note is created, and a step that fails after the write fails the
+    notes it ran for, as it would when each note is created alone. One note's own step fails
+    that note; the write failing after its commit point fails every note, and the caller's
+    identity check then finds each note's page.
     """
     from . import note as note_module
 
