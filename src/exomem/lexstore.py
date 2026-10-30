@@ -70,14 +70,15 @@ import sys
 import threading
 import time
 import uuid
+from array import array
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, NamedTuple, TypeVar
 
 from . import call_spans, foreground_priority, request_budget, reserved_paths, state_paths
 from .find_types import RankingPage
@@ -2758,21 +2759,31 @@ class _AdmittedStatisticsEntry:
     postings: Any = None
 
 
-#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes each, so 32 MiB, which
-#: holds about 10,000 pages of 400 distinct words. A corpus past it keeps no base, and its next build counts
-#: every page.
-_ADMITTED_BASE_TERMS_MAX = 4_000_000
+#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes for the term and 1 for its
+#: count (2 or 4 on a page where a word recurs over 255 or 65,535 times), so about 30 MiB, which holds about
+#: 8,700 pages of 400 distinct words. A corpus past it keeps no base, and its next build counts every page.
+_ADMITTED_BASE_TERMS_MAX = 3_500_000
+
+
+class _PageTerms(NamedTuple):
+    """One page's entry in a base: a function of its stemmed text alone."""
+
+    digest: bytes
+    length: int
+    #: Distinct terms in first-seen order, and how often each occurs, as `Counter(stemmed.split())` counts.
+    terms: tuple[str, ...]
+    counts: Sequence[int]
 
 
 @dataclass(frozen=True, slots=True)
 class _AdmittedBase:
     """What an admitted corpus's statistics were built from, so the next build re-reads only the pages that differ.
 
-    `pages` maps a page to `(digest of its stemmed text, token count, unique terms in first-seen order)`.
-    A page's entry is a function of its stemmed text alone, so the base serves any later corpus.
+    `pages` maps a page to its `_PageTerms`. An entry is a function of its stemmed text alone, so the base
+    serves any later corpus.
     """
 
-    pages: Mapping[str, tuple[bytes, int, tuple[str, ...]]]
+    pages: Mapping[str, _PageTerms]
     frequency: Mapping[str, int]
 
 
@@ -2780,10 +2791,14 @@ def _text_digest(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
-def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...]]:
-    """One page's token count and unique terms, interned so the pages of a base share each term."""
+def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
+    """One page's token count, distinct terms and their counts; the terms are interned so the pages of a base share each."""
     words = stemmed.split()
-    return len(words), tuple(map(sys.intern, dict.fromkeys(words)))
+    counted = Counter(words)
+    most = max(counted.values(), default=0)
+    # The narrowest width that holds the page's largest count: most pages repeat no word 256 times.
+    width = "B" if most < 1 << 8 else "H" if most < 1 << 16 else "I"
+    return len(words), tuple(map(sys.intern, counted)), array(width, counted.values())
 
 
 def _admitted_corpus(
@@ -2798,37 +2813,41 @@ def _admitted_corpus(
     from . import bm25 as bm25_module
 
     held = base.pages if base is not None else {}
-    pages: dict[str, tuple[bytes, int, tuple[str, ...]]] = {}
+    pages: dict[str, _PageTerms] = {}
     for path, text in rows.items():
         kept = held.get(path)
-        if kept is not None and kept[0] == digests[path]:
+        if kept is not None and kept.digest == digests[path]:
             pages[path] = kept
         else:
-            length, terms = _page_terms(text)
-            pages[path] = (digests[path], length, terms)
+            length, terms, counts = _page_terms(text)
+            pages[path] = _PageTerms(digests[path], length, terms, counts)
             call_spans.measure(call_spans.PAGES_TOKENIZED)
     # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
     ordered = sorted(pages)
     if base is None:
         # Counting in that order leaves the counts in the order `of` gives.
-        frequency = dict(Counter(itertools.chain.from_iterable(pages[path][2] for path in ordered)))
+        frequency = dict(Counter(itertools.chain.from_iterable(pages[path].terms for path in ordered)))
     else:
         counts = Counter(base.frequency)
         counts.subtract(itertools.chain.from_iterable(
-            kept[2] for path, kept in held.items() if pages.get(path) is not kept
+            kept.terms for path, kept in held.items() if pages.get(path) is not kept
         ))
         counts.update(itertools.chain.from_iterable(
-            page[2] for path, page in pages.items() if held.get(path) is not page
+            page.terms for path, page in pages.items() if held.get(path) is not page
         ))
         # The base's order is stale: an edit can bring a word forward, a delete can end one.
-        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path][2] for path in ordered))
+        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path].terms for path in ordered))
         frequency = {term: counts[term] for term in first_seen}
     statistics = bm25_module.CorpusStatistics.from_counts(
-        len(pages), sum(page[1] for page in pages.values()), frequency
+        len(pages), sum(page.length for page in pages.values()), frequency
     )
-    postings = bm25_module.CorpusPostings({path: page[1] for path, page in pages.items()})
-    kept_terms = sum(len(page[2]) for page in pages.values())
+    kept_terms = sum(len(page.terms) for page in pages.values())
     retained = _AdmittedBase(pages, statistics.document_frequency) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
+    # The postings count a new word from the pages' terms only where the base keeps them: the same bound.
+    postings = bm25_module.CorpusPostings(
+        {path: page.length for path, page in pages.items()},
+        {path: (page.terms, page.counts) for path, page in pages.items()} if retained is not None else None,
+    )
     return statistics, postings, retained
 
 
@@ -8789,17 +8808,20 @@ class LexicalStore:
         held.update(postings.kept(words - held.keys()))
         missing = sorted(words - held.keys())
         if missing:
-            rows = conn.execute(
-                f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
-                "AND p.path IN (SELECT value FROM json_each(?))",
-                (
-                    " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
-                    json.dumps(sorted(admitted_paths), ensure_ascii=False),
-                ),
-            )
-            counted = postings.counted(
-                ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
-            )
+            if postings.keeps_page_terms:
+                counted = postings.counted_from_page_terms(missing, document_frequency)
+            else:
+                rows = conn.execute(
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
+                    "AND p.path IN (SELECT value FROM json_each(?))",
+                    (
+                        " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
+                        json.dumps(sorted(admitted_paths), ensure_ascii=False),
+                    ),
+                )
+                counted = postings.counted(
+                    ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
+                )
             if counted is None:
                 return None
             held.update(counted)

@@ -498,6 +498,23 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
     # A page the later corpus shares with the base is the base's entry, not read again.
     assert retained.pages["b.md"] is base.pages["b.md"]
     assert retained.pages["a.md"] is not base.pages["a.md"]
+    # The postings counted from the patched base hold each page's own counts, as a count of its text gives.
+    words = sorted({word for text in later.values() for word in text.split()})
+    counted = postings.counted_from_page_terms(words, statistics.document_frequency)
+    assert counted is not None
+    assert {word: dict(pages) for word, pages in counted.items()} == {
+        word: {path: text.split().count(word) for path, text in later.items() if word in text.split()}
+        for word in words
+    }
+
+
+@pytest.mark.parametrize("repeats", [256, 65_536])
+def test_a_page_term_count_survives_a_word_repeated_past_each_storage_width(repeats: int) -> None:
+    """A page's counts are kept in the narrowest width that holds them: a word repeated past a width's
+    limit must still read back whole, never wrapped or refused."""
+    length, terms, counts = lexstore._page_terms(" ".join(["alpha"] * repeats + ["beta"]))
+
+    assert (length, terms, list(counts)) == (repeats + 1, ("alpha", "beta"), [repeats, 1])
 
 
 def test_an_admitted_ranking_after_a_write_equals_the_ranking_of_a_fresh_process(
