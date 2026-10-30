@@ -113,6 +113,10 @@ _RECALL_PROJECTION_STALE_COMPONENT = "recall_projection"
 # or graph publications ride the existing `warming.components` envelope.
 _PENDING_VISIBILITY_COMPONENT = "pending_visibility"
 
+# Store-refusal disclosure. A request the collection store refused withholds its pages for the rest
+# of the command; the owner learns that under this name rather than finding them silently missing.
+_STORE_UNAVAILABLE_COMPONENT = "collection_store"
+
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""

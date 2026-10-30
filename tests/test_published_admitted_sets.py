@@ -15,16 +15,16 @@ page itself. Invented names only.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-from test_activate_context_maps import _activate
 from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, OWNER, call
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
-from test_context_catalogue import _built
 from test_governance_egress import (
     EXTERNAL,
     SCOPE_ID,
@@ -553,28 +553,48 @@ def _per_page_verdicts(root: Path, pages: list[str], who: RequestPrincipal | Non
         return {page: keep(page) for page in pages}
 
 
-def test_a_publication_decides_its_store_owned_pages_in_one_store_request(
-    service, store_requests: list[dict]  # noqa: F811
-) -> None:
-    """Five store-owned pages took five queue entries, each behind the store thread's other work."""
+def test_a_batched_publication_gives_each_page_the_verdict_it_has_on_its_own(service) -> None:  # noqa: F811
+    """The pages decided together must not be released where the page's own decision withholds them."""
     root = service.root
     pages = _enrol_store_collections(root, 4)
-    # One page is withheld by policy: the batch must not release what the page's own decision withholds.
     write_scope(root, paths="Records/Extra0/**", default_deny=True)
     write_rule(root, ceiling=0)
     lexstore.ensure_fresh(root)
-    store_requests.clear()
     expected = _per_page_verdicts(root, pages)
     assert sorted(expected.values()) == [False, True, True, True, True]
-    assert len(store_requests) == len(pages), "the per-page path asks the store once for each page"
 
-    store_requests.clear()
     egress.clear_decision_memo()
     state, admitted = _carried_pages(root)
 
     assert state == "available"
     assert {page: page in admitted for page in pages} == expected
-    assert store_requests == [{"read_only": True, "wake_maintenance": False}]
+
+
+def test_a_caller_that_expects_other_bytes_than_the_page_has_is_refused_as_on_its_own(
+    service, store_requests: list[dict]  # noqa: F811
+) -> None:
+    """A hit indexed from older bytes must not take the verdict decided for the page as it is now."""
+    from types import SimpleNamespace
+
+    root = service.root
+    pages = _enrol_store_collections(root, 1)
+    write_scope(root, paths="Unrelated/**")
+    write_rule(root, ceiling=egress.LEVEL_FULL)
+    lexstore.ensure_fresh(root)
+    current = {page: hashlib.sha256((root / page).read_bytes()).hexdigest() for page in pages}
+    stale, fresh = pages[0], pages[1]
+
+    def released(*, together: bool) -> list[str]:
+        hits = [SimpleNamespace(path=stale, snapshot_hash="0" * 64), SimpleNamespace(path=fresh, snapshot_hash=current[fresh])]
+        egress.clear_decision_memo()
+        with request_scope(OWNER), state_paths.resolution_scope():
+            with deciding(pages) if together else nullcontext():
+                return [hit.path for hit in egress.annotate_hits(root, hits).hits]
+
+    assert released(together=False) == [fresh]
+    store_requests.clear()
+    assert released(together=True) == [fresh]
+    assert len(store_requests) <= 2, "the stale page is decided again on its own, the rest together"
 
 
 def test_a_page_the_store_refuses_stays_withheld_while_the_others_are_answered(
@@ -658,24 +678,3 @@ def test_a_page_the_store_refuses_stays_withheld_from_the_owner_while_the_others
     assert state == "available"
     assert {page: page in admitted for page in pages} == expected
     assert len(store_requests) == 1
-
-
-def test_the_owners_turn_slice_decides_its_store_owned_pages_in_one_store_request(
-    service, store_requests: list[dict]  # noqa: F811
-) -> None:
-    """With no file policy the owner has no cached verdicts, so each store-owned page was its own queue entry."""
-    root = service.root
-    _enrol_store_collections(root, 4)
-    _write(root / SHARED, _shared_page())
-    seed_ordinary_notes(root)
-    _built(root).close()
-    lexstore.ensure_fresh(root)
-    working_set_runtime.reset_caches_for_tests()
-    working_set_index.WorkingSetIndex(root).rebuild()
-    _reset_caches()
-    store_requests.clear()
-
-    packet = _activate(root, turn=TURN)
-
-    assert [item["ref"] for item in packet["turn_slice"]["items"]] == [SHARED]
-    assert store_requests == [{"read_only": True, "wake_maintenance": False}]

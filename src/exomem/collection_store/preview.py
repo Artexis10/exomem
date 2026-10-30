@@ -7,16 +7,17 @@ Nothing else, and no environment flag, changes file-mode routing.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+import hashlib
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import cache, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import memory_refs, state_paths
+from .. import memory_refs, published_admission, state_paths
 from .. import structured_collections as collections
-from ..published_admission import pending_decisions
 from .connection import CollectionStoreError, WriterConnection
 
 if TYPE_CHECKING:
@@ -127,6 +128,16 @@ def store_notice(vault_root, authorize_path):
     return lambda path: owner or (path is not None and authorize_path(path))
 
 
+def pages_unavailable(vault_root):
+    """Whether the store refused a request of this command and this caller may be told its pages were withheld.
+
+    The refusal withholds the store's pages together; the owner is told rather than left to find them
+    missing. Anyone else hears nothing, so a withheld store's existence never leaks (`store_notice`).
+    """
+    decisions = published_admission.request_decisions()
+    return decisions is not None and decisions.refused() and store_notice(vault_root, lambda _path: False)(None)
+
+
 def require_file_collection(vault_root, selector, *, authorize_path, notice_path=None):
     """Refuse a file-mode mutation of a collection that the vault's marker routes to the store.
 
@@ -190,69 +201,133 @@ def selected_projection_writer(vault_root, path):
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
-_INDIVIDUALLY = object()
+@dataclass(frozen=True)
+class Batch:
+    """How a projection read shares one store request across the pages a command has named.
 
-
-def _answer_in_one_round_trip(pending, server, read, vault_root, path, kwargs):
-    """Answer one store-owned path of a publication, deciding its pending siblings in the same store call.
-
-    A publication that names its pages (`published_admission.deciding`) asks for the
-    same read of each one. The first such call runs it for every pending path that
-    routes to the same store, in one read-only, non-waking store request; each later
-    call takes its own path's answer, once. An answer is what that path's own call
-    would return or raise, so a refusal stays that page's refusal (`canonical_read`
-    maps it to `unavailable`). Answers are returned, never kept: they die with the
-    publication's scope. A call that asks anything else (another read, root or
-    arguments), and every call after a refused batch, goes `_INDIVIDUALLY`.
+    A read without this asks the store about one page at a time: it cannot say which of its
+    arguments belong to the page it was asked about. One that declares it is decided for every
+    page the command named, with arguments that do not depend on the page, in one request.
     """
-    from ..cli_ops import OpError
-    from .runtime import projection_route
 
-    if pending.call is None:
-        pending.call = (read, vault_root, kwargs)
-        siblings = [path]
-        for other in pending.paths:
-            if other == path:
-                continue
+    #: Keyword -> the command-wide value that stands for the keyword when a call leaves it None.
+    #: It is read once for the command, so every page is decided against the same set.
+    pinned: Mapping[str, Callable[[Path], Any]] = field(default_factory=dict)
+    #: The keyword that holds the content hash a call expects its page to have, which the read
+    #: answers None for when the page differs. The batch decides each page against its own hash;
+    #: a call whose expected hash differs from that one is decided again on its own.
+    expects_hash: str | None = None
+    #: A call that no other page may share: it records an effect, or carries a value of one page.
+    alone: Callable[[Mapping[str, Any]], bool] | None = None
+
+
+class _Decide:
+    """The work of one store request: each page asked, answered as its own call would be."""
+
+    def __init__(self, read, vault_root, calls, hash_keyword=None):
+        self.read, self.vault_root, self.calls, self.hash_keyword = read, vault_root, calls, hash_keyword
+        #: The pages this request decides, for the observability span (`StoreServer.call`).
+        self.pages = len(calls)
+
+    def __call__(self):
+        from ..cli_ops import OpError
+
+        answers = {}
+        for path, (args, kwargs) in self.calls.items():
+            live = _content_hash(self.vault_root, path) if self.hash_keyword is not None else None
+            if live is not None:
+                kwargs = {**kwargs, self.hash_keyword: live}
             try:
-                routed = projection_route(vault_root, other)
-            except (CollectionStoreError, OpError):
-                continue  # that page asks for itself and is refused there
-            if routed is server:
-                siblings.append(other)
+                answers[path] = ("value", self.read(self.vault_root, *args, **kwargs), live)
+            except (CollectionStoreError, OpError) as error:
+                answers[path] = ("refused", error, live)
+            except Exception as error:  # noqa: BLE001 - raised again at that page's own turn
+                answers[path] = ("raised", error, live)
+        return answers
 
-        def work():
-            answers = {}
-            for candidate in siblings:
-                try:
-                    answers[candidate] = ("value", read(vault_root, candidate, **kwargs))
-                except (CollectionStoreError, OpError) as error:
-                    answers[candidate] = ("refused", error)
-                except Exception as error:  # noqa: BLE001 - raised again at that page's own turn
-                    answers[candidate] = ("raised", error)
-            return answers
 
-        # A refusal of the whole request is this first page's refusal; the others then ask for themselves.
-        pending.answers = server.call(work, read_only=True, wake_maintenance=False)
-    elif pending.call[0] is not read or pending.call[1] != vault_root or pending.call[2] != kwargs:
-        return _INDIVIDUALLY
-    answer = pending.answers.pop(path, None)
-    if answer is None:
-        return _INDIVIDUALLY
-    kind, payload = answer
+def _content_hash(vault_root, path):
+    """The sha256 of the page's current bytes, or None where they cannot be read."""
+    try:
+        return hashlib.sha256((Path(vault_root) / path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _request(server, decisions, work):
+    """One request to the store thread. A request refused whole is held against the store for the command."""
+    from ..cli_ops import OpError
+
+    try:
+        return server.call(work, read_only=True, wake_maintenance=False)
+    except (CollectionStoreError, OpError) as error:
+        if decisions is not None:
+            decisions.refusals.setdefault(server, error)
+        raise
+
+
+def _replay(answer):
+    """What that page's own call would have returned or raised."""
+    kind, payload, _live = answer
     if kind != "value":
         raise payload
     return payload
 
 
-def canonical_read(function=None, *, projection=False, unavailable=None,
-                   receipt_boundary: str | None = None):
-    """Keep a structured consumer's canonical reads under one request snapshot."""
-    from ..cli_ops import OpError
+def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
+    """Decide one store-owned page, sharing the store request with the command's other named pages.
 
+    The store thread serves one request at a time, so the first decision of a shape decides every
+    named page of that shape on one trip, read-only and without waking maintenance. An answer is
+    what that page's own call returns or raises, so a page refused on its own stays that page's
+    refusal. A request refused whole is the refusal of every page that would have gone in it:
+    the command asks that store no more.
+    """
+    from ..cli_ops import OpError
+    from ..governance.principal import effective_principal
+    from .runtime import projection_route
+
+    decisions = published_admission.request_decisions()
+    if decisions is not None and server in decisions.refusals:
+        # One refusal object raised for every page: clear its traceback so it does not grow per page.
+        raise decisions.refusals[server].with_traceback(None)
+
+    def alone():
+        return _replay(_request(server, decisions, _Decide(read, vault_root, {path: (args, kwargs)}))[path])
+
+    if (decisions is None or batch is None or len(args) != 1 or path not in decisions.paths
+            or (batch.alone is not None and batch.alone(kwargs))):
+        return alone()
+    shared = dict(kwargs)
+    for keyword, pin in batch.pinned.items():
+        if shared.get(keyword) is None:
+            shared[keyword] = decisions.once(("pinned", keyword, vault_root), lambda pin=pin: pin(vault_root))
+    expected = shared.pop(batch.expects_hash, None) if batch.expects_hash is not None else None
+    # The ambient principal is an input of the answer wherever a call leaves its own out.
+    answers = decisions.answers((read, vault_root, effective_principal(), shared))
+    if path not in answers:
+        calls = {path: ((path,), shared)}
+        for other in decisions.pending():
+            if other == path or other in answers:
+                continue
+            try:
+                routed = decisions.once(("route", vault_root, other), lambda other=other: projection_route(vault_root, other))
+            except (CollectionStoreError, OpError):
+                continue  # that page asks for itself and is refused there
+            if routed is server:
+                calls[other] = ((other,), shared)
+        answers.update(_request(server, decisions, _Decide(read, vault_root, calls, batch.expects_hash)))
+    answer = answers[path]
+    # A caller that expected other bytes than the page has now is decided as it asked.
+    return alone() if expected is not None and expected != answer[2] else _replay(answer)
+
+
+def canonical_read(function=None, *, projection=False, unavailable=None,
+                   receipt_boundary: str | None = None, batch: Batch | None = None):
+    """Keep a structured consumer's canonical reads under one request snapshot."""
     if function is None:
         return lambda function: canonical_read(function, projection=projection, unavailable=unavailable,
-                                               receipt_boundary=receipt_boundary)
+                                               receipt_boundary=receipt_boundary, batch=batch)
 
     @wraps(function)
     def read(vault_root, *args, **kwargs):
@@ -260,6 +335,7 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
         if writer is None:
             if not projection:
                 return function(vault_root, *args, **kwargs)
+            from ..cli_ops import OpError
             from .runtime import projection_route
 
             # These consumers take a canonical path or page as their first argument; bulk callers decide each path below.
@@ -267,12 +343,7 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             path = value.get("path") if isinstance(value, Mapping) else value
             try:
                 if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
-                    if (pending := pending_decisions()) is not None and len(args) == 1 and args[0] is path \
-                            and path in pending.paths:
-                        answered = _answer_in_one_round_trip(pending, server, read, vault_root, path, kwargs)
-                        if answered is not _INDIVIDUALLY:
-                            return answered
-                    return server.call(lambda: read(vault_root, *args, **kwargs))
+                    return _decide_through_store(server, read, batch, vault_root, path, args, kwargs)
             except (CollectionStoreError, OpError):
                 if unavailable is None:
                     raise

@@ -7793,10 +7793,14 @@ def invoke_command(
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
+    from . import published_admission
     from .collection_store import ownership
 
+    # The command's store-owned pages are decided on one store request per decision shape, dropped
+    # with the command; a refused request withholds them together for the rest of it.
     with ownership.read_scope(injected[0]) as ownership_scope, \
-            disclosure_boundary(injected[0], command.name) as collector:
+            disclosure_boundary(injected[0], command.name) as collector, \
+            published_admission.deciding():
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
