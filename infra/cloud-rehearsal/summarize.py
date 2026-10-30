@@ -74,6 +74,12 @@ def large_import(report: dict) -> None:
     print(f"- verdict: **{run.get('verdict', 'none: the run did not finish')}** ({run.get('mode', 'unknown')} mode)")
     if sizing.get("note"):
         print(f"- data and volume: {sizing['note']}")
+    # A pass with the Cloud transfer tools refused (served: False, the Substrate route) did not exercise them.
+    print(f"- Cloud transfer tools enabled in the chart: {run.get('transfer_tools_enabled', 'not recorded')}")
+    for name, folder in run.get("folders", {}).items():
+        served = (folder.get("observe_transfer") or {}).get("served", "not recorded")
+        route = (folder.get("discard_call") or {}).get("route", "not recorded")
+        print(f"- {name}: observe_transfer.served: {served}; discard_call.route: {route}")
     for stage, record in report["stages"].items():
         if isinstance(record, dict) and record.get("status") == "failed":
             print(f"- **stage {stage} failed:** {(record.get('failure') or {}).get('message', '')[:600]}")
