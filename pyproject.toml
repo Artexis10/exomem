@@ -150,7 +150,7 @@ media-cpu = [
 # faster-whisper) bundles ffmpeg for audio/video decode. See README for sm_120.
 media = [
     "exomem[media-cpu]",
-    "faster-whisper>=1.0",
+    "faster-whisper>=1.1",  # 1.1.0 added BatchedInferencePipeline and the multilingual option
     # faster-whisper 1.2.1 decodes with av.open(metadata_errors=...), which PyAV 19
     # removed, so every transcription fails. When a faster-whisper release carries
     # its upstream fix (SYSTRAN/faster-whisper#1495), raise the faster-whisper floor

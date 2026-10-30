@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: d09f2f2991ef75fdf8711c9c356f88ee13b79dcd3bf3b3928900be6addceb2e6
+  skill_contract: 6440c83f69d3f442aeb8a7afbb8b4a0f73bf510edc03ed2379794b9101e25f32
   version: "0.1.0"
 ---
 
@@ -40,11 +40,18 @@ identity after an uncertain commit.
 
 ## Workflow
 1. Search with media-aware filters or artifact terms using `search_memory`.
-2. Use artifact-specific product tools: extracted text/OCR/transcripts, `read_media/change_media` status/retry, `read_media`, `preserve_artifacts` for file handles, fallback `transfer_artifact`, upload metadata, or preserved evidence paths.
+2. Use artifact-specific product tools: extracted text/OCR/transcripts, `read_media/change_media` status/retry/reprocess, `read_media`, `preserve_artifacts` for file handles, fallback `transfer_artifact`, upload metadata, or preserved evidence paths.
 3. Cite raw artifact paths and timestamps/pages/frames when available.
 4. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact` before analyzing them.
 5. Draft textual conclusions only when there is a durable finding, naming the preserved artifact in `sources:`.
 6. Reuse known meaningful connections; use `read_connections(operation={'kind': 'suggest-links'})` when candidates are still missing and review them. Then write with `create_note`, carrying the sources and accepted connections in the first write.
+7. For a set of recordings and documents to compile into notes, follow the multi-source steps of the source compilation pass in `references/writing.md`: inventory, timeline, reading by time range and page, attribution, verification, coverage ledger and final audit.
+
+## Declaring the language
+When the languages of a recording are unknown at ingest, ask the user once: "One language or several?" Say that several is slower, because the engine detects the language in every window. Declare the answer on the first processing with `change_media(operation={'kind': 'process', 'path': ..., 'language': <code>})`, or `'multilingual': true` for several. Do not ask per file when the languages are already known. If the file is already being processed, wait for the run to end, then use `reprocess` with the same field.
+
+## Faulty transcripts
+Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` on the user's request or on that evidence, or with `'multilingual': true` when the recording mixes languages. Without either, a reprocess reuses the language or mode already pinned on the sidecar, and detects one language when none is pinned. The old extraction stays on a linked prior page.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
@@ -59,7 +66,7 @@ Return matching artifacts, what was inspected, citations, and any compiled concl
 Raw media belongs in `Sources/` or `Evidence/`; textual notes should summarize conclusions and link back to artifacts.
 
 ## Mistakes to avoid
-Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not over-transcribe when a cited artifact path is the durable evidence.
+Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not paste whole transcripts into notes when a cited artifact path with timestamps or pages is the durable evidence; read the extracted text in full before concluding anything from it.
 
 <!-- exomem-semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95 -->
 ## Semantic authoring contract

@@ -121,15 +121,10 @@ def invoke_prepared(
     # Domain-invalid mixed selectors must reach their stable public error
     # before the lease/egress coverage classifier. This is input validation,
     # not a branch registration.
-    if cmd.name == "process_media" and kwargs.get("operation", "process") not in {
-        "process",
-        "status",
-        "retry",
-    }:
-        raise cli_ops.OpError(
-            "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, or retry",
-        )
+    if cmd.name == "process_media":
+        from .commands import validate_process_media_operation
+
+        validate_process_media_operation(kwargs.get("operation", "process"))
 
     root = resolve_vault_for(cmd.name, kwargs, vault_root)
     # Machine-local state placement admission (memoized per process+vault):
