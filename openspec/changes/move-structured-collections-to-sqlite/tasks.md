@@ -366,7 +366,7 @@ Deliver the canonical reader, history projection and SQLite acknowledgement boun
   PR #1859 retains the native SQL history path. CI `39163239152` passes that existing activity-log workflow for Records and Planning.
 - [x] P3.5 Documentation: `docs/records.md` (including the stale "exactly five actions") and the Planning docs cover the store, views, edit-back, history pages, backup and the unsupported two-writer setup. Scaffold guidance stays generic (`tests/test_scaffold_no_leak.py`).
   PR #1859 delivers the Records and Planning documentation in the same reviewed merge. CI `39163239152` passes scaffold privacy and package checks. P3.6 remains open; source completion selects no schema-13 installation, migration or view flags.
-- [ ] P3.6 **GA gate.** This turns store mode on for migrated vaults. It requires:
+- [x] P3.6 **GA gate.** This turns store mode on for migrated vaults. It requires:
   - P1a, P1b, P2 and P3 merged within the single-host GA scope; explicitly deferred multi-host acceptance is not a prerequisite;
   - `records-release-acceptance`: installed-wheel proof and disposable live MCP evidence for both built-ins in store mode;
   - current local and Cloud tool schemas keep their supported compatibility, and `minimum_records_reader_version` remains 2;
@@ -386,15 +386,10 @@ Deliver the canonical reader, history projection and SQLite acknowledgement boun
   - Records acceptance: the product E2E builds and installs the wheel in every run. Its S1 journey migrates the adopted copy's file Records and Planning collections with the installed `exomem collections migrate`. It then compares file-mode and store-mode answers, writes both built-ins in store mode and restarts, over stdio MCP sessions with a real lease coordinator. Main CI run `41069453400` at `655075f12` passed it. This gate changes no Records tool surface, so no connector promotion evidence is due.
   - Tool schemas: the grouped `record_memory` and `plan_memory` registrations of the published 0.139.0, 0.140.0 and 0.151.1 wheels have no removed top-level parameter, no newly required parameter and no removed enum value. One nested change: each `filters` item now declares `column` required and a closed `op` enum. 0.139.0 already refused those inputs at run time with `BAD_FILTER` and `BAD_OP`. PR #2082 later changed the discovery spellings and kept the grouped names callable. `minimum_records_reader_version` stays 2 (design §8).
   - Real-sized copy: on PR #1943's reviewed head `d4e790930`, a disposable copy of a real vault (19,596 files, 5.4 GB) held 34 file Records and Planning collections. The dry run passed 34 and blocked none, and the apply moved all 34. The MCP comparison of every Records and Planning query covered 34 collections, 514 rows and 77 pages and found no difference; it recorded 18 transient busy refusals.
-  - Earlier application: before activation, PR #1943 ran the published, archive-aware 0.132.5 (wheel SHA-256 `f1fa61a8108bbb6724b0d3587f7ebb9182b7f3a03ad9bc8b7f74a92394b4c6f5`) through the journey's compatible application rollback on an invented fixture, and it passed. 0.132.5 and 0.140.0 both use store schema 13. That proof does not cover rollback after newer derived receipts exist, or the current store schema 14; P3.7 carries that qualification.
+  - Earlier application: before activation, PR #1943 ran the published, archive-aware 0.132.5 (wheel SHA-256 `f1fa61a8108bbb6724b0d3587f7ebb9182b7f3a03ad9bc8b7f74a92394b4c6f5`) through the journey's compatible application rollback on an invented fixture, and it passed. 0.132.5 and 0.140.0 both use store schema 13. That proof does not cover rollback after newer derived receipts exist, or the current store schema 14; RQ1 carries that qualification.
   - P1b.3c and P1b.4a are checked (PR #1859).
 
   Not part of this gate: the real vault that migrated on 0.144.1 has no complete comparison of every public answer after its migration, because its row counts moved during the comparison.
-- [ ] P3.7 Qualify the rollback application for the current store schema in release evidence (design §10, "Reversal"). Follow-up to P3.6; not a GA prerequisite.
-  - The journey's `compatible_rollback` step never runs in CI: no workflow supplies `--compatible-python`.
-  - Install the earlier release from its published wheel, bound to the index's SHA-256 through a `file://` URL with a `#sha256=` fragment, so the journey's provenance check accepts it. A by-name index install records no `direct_url.json`, which the check refuses.
-  - The journey still requires the earlier application to declare no general migration. Every release from 0.140.0 on declares `collections-migrate-v1`, so post-GA rollback applications need that assertion changed with a reason.
-  - Ready pull requests run the full tier, so measure the step's cost against the product E2E budget before enabling it there.
 
 ## P4. Declared collection types
 
@@ -442,6 +437,14 @@ These tasks do not gate P3.6. Existing bounded CSV/JSON query output remains the
 - [ ] E1 Reuse the existing ZIP portability owner for complete readable collection bundles. Include descriptors, schemas, typed JSON and tabular CSV from the same consistent snapshot, alongside the canonical SQLite restore snapshot.
 - [ ] E2 Enable standard DEFLATE for compressible content and retain ZIP64. Stream rows in bounded batches without per-row Markdown or whole-collection buffering.
 - [ ] E3 Verify complete row counts and typed JSON values beyond query pagination. Verify portable extraction, integrity and restore through the existing archive workflow. Reuse dependency evidence for ZIP64; add only integration proof for an uncovered application guarantee.
+
+## Rollback qualification follow-up (after GA)
+
+- [ ] RQ1 Qualify the rollback application for the current store schema in release evidence (design §10, "Reversal"). Follow-up to P3.6; not a GA prerequisite.
+  - The journey's `compatible_rollback` step never runs in CI: no workflow supplies `--compatible-python`.
+  - Install the earlier release from its published wheel, bound to the index's SHA-256 through a `file://` URL with a `#sha256=` fragment, so the journey's provenance check accepts it. A by-name index install records no `direct_url.json`, which the check refuses.
+  - The journey still requires the earlier application to declare no general migration. Every release from 0.140.0 on declares `collections-migrate-v1`, so post-GA rollback applications need that assertion changed with a reason.
+  - Ready pull requests run the full tier, so measure the step's cost against the product E2E budget before enabling it there.
 
 ## P6. Legacy window close (two minor releases after GA, R7)
 
