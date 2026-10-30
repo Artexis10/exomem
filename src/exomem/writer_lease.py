@@ -195,6 +195,23 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
+# True only inside ``progress_check``: a check that precedes no SQL or filesystem effect.
+_PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+
+
+@contextmanager
+def progress_check() -> Iterator[None]:
+    """Run an authority check that precedes no SQL or filesystem effect.
+
+    Inside it, ``LeaseManager.validate_fencing_token`` trusts a fresh local grant instead of
+    reading coordinator status. Every check before an effect, and every store transaction,
+    runs outside it and asks the coordinator, so no effect lands after a lost lease.
+    """
+    reset = _PROGRESS_CHECK.set(True)
+    try:
+        yield
+    finally:
+        _PROGRESS_CHECK.reset(reset)
 
 _FAST_ACK_DEADLINE_SECONDS = 2.0
 
@@ -4804,6 +4821,19 @@ class LeaseManager:
         self._expires_at = expires_at
         self._granted_monotonic = time.monotonic()
 
+    def _grant_fresh(self) -> bool:
+        """With the lock held: whether the held grant will outlast the next renewal.
+
+        Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen it.
+        A failed renewal leaves the grant to age past this bound; a refused one clears the token.
+        """
+        return (
+            self._expires_at is not None
+            and self._granted_monotonic is not None
+            and time.monotonic() - self._granted_monotonic
+            < self.config.ttl_seconds - self._renew_interval_seconds()
+        )
+
     def _reusable_operation_grant(self) -> LeaseRecord | None:
         """With the lock held: the grant this operation's outer guard holds, or None when the guard must acquire.
 
@@ -4822,11 +4852,7 @@ class LeaseManager:
             or self._active_mutations <= 0
             # Only a real acquire derives the file-store marker from the acquisition record.
             or (self._serves_collection_store and self._collection_store is None)
-            or self._expires_at is None
-            or self._granted_monotonic is None
-            # Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen the reuse.
-            or time.monotonic() - self._granted_monotonic
-            >= self.config.ttl_seconds - self._renew_interval_seconds()
+            or not self._grant_fresh()
         ):
             return None
         self._record_lease_op("acquire", "reused")
@@ -6600,10 +6626,16 @@ class LeaseManager:
         return None
 
     def validate_fencing_token(self, fencing_token: int) -> None:
-        """Fail closed unless the command's token is still locally and remotely current."""
+        """Fail closed unless the command's token is still locally and remotely current.
+
+        A progress check (``progress_check``) trusts a fresh local grant: an effect that follows
+        it validates again here outside one, and a fence change revokes the token at the coordinator.
+        """
         with self._lock:
             if self._fencing_token != fencing_token:
                 self._raise_fenced(fencing_token)
+            if _PROGRESS_CHECK.get() and self._grant_fresh():
+                return
         assert self.client is not None
         record = self.client.status()
         with self._lock:

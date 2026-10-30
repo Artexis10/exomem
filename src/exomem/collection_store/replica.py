@@ -11,7 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -256,7 +256,7 @@ class _Publisher:
     @contextmanager
     def outside(self, *, allow_diverged=False):
         """Release exclusion for verification, then compare its complete observation."""
-        self.check(allow_diverged=allow_diverged)
+        self.check(allow_diverged=allow_diverged, effect=False)
         metadata = _metadata(self.writer)
         # Business commits and pending creates may advance while the copy is verified.
         fixed = {key: metadata.get(key) for key in (
@@ -271,7 +271,7 @@ class _Publisher:
         yield
         if self.steps is not None:
             self.enter_step()
-        self.check(allow_diverged=allow_diverged)
+        self.check(allow_diverged=allow_diverged, effect=False)
         current = _metadata(self.writer)
         if any(current.get(key) != value for key, value in fixed.items()):
             raise _Retry("publication metadata changed during verification")
@@ -282,7 +282,19 @@ class _Publisher:
                 if current.version() != witness.version or witness.file.version() != witness.version:
                     raise _Retry("publication file changed during verification")
 
-    def check(self, *, allow_diverged=False):
+    def check(self, *, allow_diverged=False, effect=True):
+        """Recheck authority, identity, epoch, intent and directories before going on.
+
+        A check that precedes no SQL or filesystem effect passes ``effect=False``: it may trust a
+        fresh local lease grant instead of asking the coordinator (A3). Every check before an
+        effect, and every store transaction, asks the coordinator, so no effect follows a lost lease.
+        """
+        from ..writer_lease import progress_check
+
+        with nullcontext() if effect else progress_check():
+            self._check(allow_diverged=allow_diverged)
+
+    def _check(self, *, allow_diverged=False):
         if allow_diverged:
             self.writer.require_write_authority(allow_diverged=True)
         else:
@@ -407,7 +419,7 @@ class _Publisher:
             raise _Diverged from error
 
     def bookkeeping(self, values):
-        self.check()
+        self.check(effect=False)  # the transaction and the check inside it ask the coordinator
         with self.writer.transaction() as conn:
             self.check()
             for key, value in values.items():
@@ -459,7 +471,7 @@ class _Publisher:
         self.record(leaf, None, parent=parent)
         for directory in (self.parent, self.workspace):
             if directory is not None:
-                self.check(allow_diverged=True)
+                self.check(allow_diverged=True, effect=False)
                 self.filesystem.flush_directory(directory).require()
 
     def file(self, leaf, *, required=False, parent=None, access="mutate"):
@@ -538,10 +550,11 @@ class _Publisher:
         self.record(leaf, None, parent=self.workspace)
 
     def flush(self):
-        self.check()
+        # Flushing makes earlier effects durable; it changes no name or byte.
+        self.check(effect=False)
         self.filesystem.flush_directory(self.parent).require()
         if self.workspace is not None:
-            self.check()
+            self.check(effect=False)
             self.filesystem.flush_directory(self.workspace).require()
 
     def rename(self, file, leaf, *, parent=None, capture=False):
@@ -636,7 +649,7 @@ class _Publisher:
                         if flushable.version() != witness.version:
                             raise _Retry("installed replica changed during flush")
                         witness.fsynced = True
-            self.check()
+            self.check(effect=False)
             self.filesystem.flush_directory(self.parent).require()
             with self.file(leaf, required=True) as current:
                 if (
@@ -872,7 +885,7 @@ class _Publisher:
 
         It copies at a published head too when the intent or lease epoch changed since that copy.
         """
-        self.check()
+        self.check(effect=False)
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
@@ -898,7 +911,7 @@ class _Publisher:
 
         Returns the recorded intent, or the outcome when nothing needs copying.
         """
-        self.check()
+        self.check(effect=False)
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
@@ -913,7 +926,7 @@ class _Publisher:
         copied head must still be in this store's chain, and the installed replica must
         still be the one this store last published (check-then-swap, A4).
         """
-        self.check()
+        self.check(effect=False)
         if self.pending_raw is None or json.loads(self.pending_raw) != pending:
             raise _Retry("publication intent changed")
         with self.bound():
@@ -963,7 +976,7 @@ class _Publisher:
 
     def begin(self):
         """Record a staging intent and create its empty private workspace."""
-        self.check()
+        self.check(effect=False)
         token = secrets.token_hex(16)
         pending = {
             "version": 2,
@@ -982,7 +995,7 @@ class _Publisher:
 
     def install(self, pending, artifact, finish_staging):
         """Verify a staged copy against this store and the intent, mark it ready and swap it in."""
-        self.check()
+        self.check(effect=False)
         copied = {key: getattr(artifact, key) for key in self.identity}
         if any(copied[key] != self.identity[key] for key in ("store_id", "instance_id")):
             raise _Retry("store identity changed")
@@ -1004,7 +1017,7 @@ class _Publisher:
         return self.resolve(pending, finish_staging=finish_staging, artifact=artifact)
 
     def _staging_cancelled(self):
-        self.check()
+        self.check(effect=False)
         return False
 
 
