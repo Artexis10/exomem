@@ -305,3 +305,22 @@ def test_a_link_to_a_page_an_earlier_step_supersedes_is_refused_at_proposal(vaul
         _propose(vault, supersede, citing)
 
     assert refused.value.code == "CURATION_STEP_CONFLICT"
+
+
+def test_a_relation_review_the_leaf_would_refuse_is_refused_at_proposal(vault: Path) -> None:
+    target = _seed_note(vault, "curation-target", "## Observations\n\n- [finding] Exists. ^target\n")
+    linked = _create_step(
+        "linked",
+        "curation-linked",
+        "## Observations\n\n- [finding] Cites the target. ^linked\n\n"
+        f"## Connections\n\n- [[{target.removesuffix('.md')}]]\n",
+    )
+    linked["args"].update(
+        relation_disposition="reviewed_none",
+        relation_review_reason="Claims no relation although it links one.",
+    )
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, linked)
+
+    assert refused.value.code == "RELATION_REVIEW_NOT_APPLICABLE"

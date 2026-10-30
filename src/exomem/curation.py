@@ -1272,6 +1272,19 @@ def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
     return _guarded_text(Path(vault_root), path, stale=True)
 
 
+def _require_applicable_review(review: Mapping[str, Any], validation: Mapping[str, Any]) -> None:
+    """Refuse a relation review the leaf would refuse at commit.
+
+    The review is held back from the leaf's validation, so the leaf cannot object
+    to it there; its validation still says whether the page needs one.
+    """
+    if review and not validation.get("reviewed_none_required"):
+        raise _error(
+            "RELATION_REVIEW_NOT_APPLICABLE",
+            "the page needs no reviewed-none relation review; drop relation_disposition",
+        )
+
+
 def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
     from . import (
@@ -1321,6 +1334,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     canonical_json({"vocabulary_preparation": preflight.evidence}),
                 )
             validation = preflight.as_dict()
+            _require_applicable_review(review, validation)
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"create destination {path!r} exists")
@@ -1411,6 +1425,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     "CURATION_VOCABULARY_PREPARATION_REQUIRED",
                     canonical_json({"vocabulary_preparation": preparation}),
                 )
+            _require_applicable_review(review, validation)
             prepared = {
                 "draft_id": validation["draft_id"],
                 "draft_hash": validation["draft_hash"],
