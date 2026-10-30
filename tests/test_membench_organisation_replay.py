@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 import yaml
+from epistemic.journeys.f27_replay import AgentEnvelope
+from membench.utility.organisation_replay import runner
 from membench.utility.organisation_replay.readback import edge_review_reasons
 from membench.utility.organisation_replay.runfile import call_records, check_run
 from membench.utility.organisation_replay.runner import RunConfig, bind, refuse_api_keys
@@ -21,7 +24,12 @@ from membench.utility.organisation_replay.scripted import retry_after
 from membench.utility.organisation_replay.seed import SeedBuild, check_seed, note_body
 from membench.utility.organisation_replay.situation import SituationRefused, load_situation
 from membench.utility.switch_eval.arms import arm_specs
-from membench.utility.switch_eval.session import classify
+from membench.utility.switch_eval.session import (
+    API_KEY_VARIABLES,
+    AttemptResult,
+    RunPaused,
+    classify,
+)
 
 TOY = {
     "id": "x01",
@@ -88,8 +96,11 @@ def test_a_case_file_that_carries_a_key_is_refused(tmp_path):
                 ],
             }
         },
+        {"seed": {**TOY["seed"], "edges": []}},
+        {"seed": {**TOY["seed"], "entities": [{**TOY["seed"]["entities"][0], "aliases": []}]}},
+        {"fresh_session": {"question": "Placeholder question?", "hint": "placeholder"}},
     ],
-    ids=["a top-level field", "a note field"],
+    ids=["a top-level field", "a note field", "a seed field", "an entity field", "a fresh field"],
 )
 def test_a_case_file_with_a_field_outside_the_schema_is_refused(tmp_path, extra):
     # Failure caught: the runner silently dropping a field the case relies on, such
@@ -112,6 +123,18 @@ def test_a_held_out_file_without_the_custody_manifest_is_refused_before_it_is_op
     # Failure caught: a held-out situation run without its digest check.
     with pytest.raises(SituationRefused, match="needs the custody manifest"):
         load_situation(tmp_path / "h01.yaml")
+
+
+def test_a_held_out_file_under_a_manifest_other_than_the_preregistered_one_is_refused(tmp_path):
+    # Failure caught: a held-out run on a partial or edited manifest that still lists the file.
+    path = write_situation(tmp_path, "h01.yaml", {**TOY, "id": "h01", "pool": "heldout"})
+    manifest = tmp_path / "manifest.sha256"
+    manifest.write_text(
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  h01.yaml\n", encoding="utf-8"
+    )
+
+    with pytest.raises(SituationRefused, match="not f34's preregistered held-out manifest"):
+        load_situation(path, manifest=manifest)
 
 
 def test_a_situation_whose_bytes_differ_from_the_manifest_is_refused(tmp_path):
@@ -395,3 +418,70 @@ def test_a_candidate_bound_at_the_base_revision_is_refused(tmp_path):
 
     with pytest.raises(SystemExit, match="candidate arm"):
         bind(config)
+
+
+def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkeypatch):
+    # Failure caught: a quota pause recorded as a struck situation, or a rerun that
+    # rebuilds the seed under a finished capture session and aborts on its inputs.
+    for name in API_KEY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    seed_builds = []
+    attempts = []
+
+    def build_seed(config, situation, slot, spec, run_dir, faults):
+        seed_builds.append(slot)
+        for path in (slot.vault, slot.state, slot.runtime, slot.cwd, slot.hook_home):
+            path.mkdir(parents=True)
+        # A real seed build writes new ids and times, so each build's bytes differ.
+        (slot.vault / "seed.md").write_text(f"seed build {len(seed_builds)}", encoding="utf-8")
+        facts = {"projection_digest": "p", "registries": {"overlay_digests": {}}}
+        return SeedBuild(), {**facts, "promotions": [], "pages": []}
+
+    def session_files(slot, spec, files_dir, *, hooked):
+        files_dir.mkdir(parents=True, exist_ok=True)
+        (files_dir / "mcp.json").write_text("{}", encoding="utf-8")
+        return {"mcp.json": files_dir / "mcp.json"}, frozenset()
+
+    class Executor:
+        def __init__(self, **_):
+            pass
+
+        def execute_prepared(self, inputs, attempt_dir, slot):
+            attempts.append(inputs.tree)
+            if inputs.tree == "capture":
+                (slot.vault / "captured.md").write_text("capture write", encoding="utf-8")
+                return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "noted"}])
+            # The fresh session starts on the capture session's end state.
+            assert (slot.vault / "captured.md").exists()
+            if attempts.count("fresh") == 1:
+                return AttemptResult(outcome="quota", resets_at="later")
+            return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "recalled"}])
+
+    monkeypatch.setattr(runner, "_build_seed", build_seed)
+    monkeypatch.setattr(runner, "session_files", session_files)
+    monkeypatch.setattr(runner, "files_digests", lambda paths, slot: {})
+    monkeypatch.setattr(runner, "ClaudeSessionExecutor", Executor)
+    monkeypatch.setattr(runner, "_child", lambda *args: {"read": {}})
+    situation = load_situation(write_situation(tmp_path, "x01.yaml", TOY))
+    config = RunConfig(
+        out=tmp_path / "out", arm="arm-x", profile="neutral-lexical", model="m",
+        client=AgentEnvelope(Path("claude"), "1.0.0 (Claude Code)"), launcher=(),
+        revision="a" * 40, base_revision="a" * 40, wheel=None,
+    )  # fmt: skip
+    binding = {
+        "binding_ref": "arm-x-aaaaaaaaaaaa",
+        "reason_capable": False,
+        "shapes": {"hookless": {"tools": [], "wired_hooks": [], "surface": {}}},
+    }
+
+    with pytest.raises(RunPaused):
+        runner.run_situation(config, binding, situation)
+    assert not (tmp_path / "out" / "x01" / "arm-x" / "run.json").exists()
+
+    run = json.loads(runner.run_situation(config, binding, situation).read_text(encoding="utf-8"))
+
+    assert run["status"] == "ok"
+    assert attempts == ["capture", "fresh", "fresh"]
+    assert len(seed_builds) == 1
+    assert [(f["session"], f["kind"]) for f in run["faults"]] == [("fresh", "quota")]
+    assert [s["final_answer"] for s in run["sessions"]] == ["noted", "recalled"]

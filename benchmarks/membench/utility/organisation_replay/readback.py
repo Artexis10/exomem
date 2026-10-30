@@ -25,7 +25,8 @@ PAGE_TREES = ("Notes", "Entities")
 #: The registries SCHEMA.md's ``registry_history`` covers, with the product's
 #: history file stem for each.
 HISTORY_STEMS = (("entity-types", "entity-types"), ("relations", "relation-registry"))
-#: A fixed projection stamp, so the projection digest names the content only.
+#: A fixed projection stamp. The projection still carries each build's own ids
+#: and times, so its digest identifies one seed build, not the seed content.
 _STAMP = "1970-01-01T00:00:00Z"
 
 
@@ -246,14 +247,17 @@ def _resolver(pages: list[dict]):
     return resolve
 
 
-def _within(stamp: object, since: dt.datetime, until: dt.datetime) -> bool:
+def _moment(stamp: object) -> dt.datetime | None:
     try:
         moment = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
     except ValueError:
-        return False
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=dt.UTC)
-    return since <= moment <= until
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
+
+
+def _within(stamp: object, since: dt.datetime, until: dt.datetime) -> bool:
+    moment = _moment(stamp)
+    return moment is not None and since <= moment <= until
 
 
 def facts(vault: Path) -> dict:
@@ -317,6 +321,10 @@ def end_state(
             "entries": entries,
             "files_read": log.get("files_read"),
             "files_unreadable": log.get("files_unreadable"),
+            # Entries the session window cannot place, left out of ``entries`` above.
+            "entries_unstamped": sum(
+                1 for e in log.get("entries", []) if _moment(e.get("date")) is None
+            ),
             "edge_review_reasons": edge_review_reasons(entries, reason_capable=reason_capable),
         },
         "promotions": _promotions(vault),
@@ -370,10 +378,17 @@ def binding_facts(vault: Path, *, surfaces: list[str]) -> dict:
             "contract": resolved.get("contract"),
             "owner_promotion_classes": envelope.promotion_classes(owner=True),
         }
+    role = "organisation-replay-binding"
+    try:
+        # An installed distribution names its revision in its own record; git run
+        # inside its install directory would name whatever checkout holds it.
+        identity = package_identity("installed", role=role)
+    except ValueError:
+        identity = package_identity("source", role=role)
     return {
         "interpreter": {"path": sys.executable, "version": sys.version},
         "loaded_source_path": str(Path(exomem.__file__).resolve()),
-        "package_identity": package_identity("source", role="organisation-replay-binding"),
+        "package_identity": identity,
         "product_version": exomem.__version__,
         "scaffold": dict((skill or {}).get("metadata") or {}),
         "authority_mode": VocabularyAuthority(vault).runtime_status().mode,

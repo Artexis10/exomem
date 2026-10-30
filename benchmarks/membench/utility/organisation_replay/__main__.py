@@ -7,6 +7,9 @@ the seed builder and the readback then all load the arm's own package.
 1. ``bind`` writes ``OUT/binding-ARM.json`` from a slot of its own.
 2. ``run`` runs each situation file through that binding.
 3. ``check`` reports each way a run file departs from ``SCHEMA.md``.
+
+Exit codes are switch evaluation's: 0 done, 2 refused or aborted, 75 paused on
+a quota. Rerun the same ``run`` command to resume a paused or aborted situation.
 """
 
 from __future__ import annotations
@@ -88,20 +91,42 @@ def cmd_bind(args) -> int:
     return 0
 
 
+def arm_parity(binding: dict) -> dict:
+    """What must be equal across the arms, or the comparison measures it too."""
+
+    client = binding["client"]
+    return {
+        "base_revision": binding["base_revision"],
+        "model": client["model"],
+        "client_version": client["version"],
+        "standin": client["standin"],
+        # A stand-in's launcher names its own arm's interpreter and checkout.
+        "launcher": None if client["standin"] else client["launcher"],
+        "profile": binding["profile"],
+        "hook_scripts_sha256": {
+            shape: facts.get("hook_scripts_sha256") for shape, facts in binding["shapes"].items()
+        },
+    }
+
+
 def cmd_run(args) -> int:
+    from membench.utility.switch_eval.__main__ import EXIT_PAUSED, EXIT_REFUSED
+    from membench.utility.switch_eval.session import RunAborted, RunPaused
+
     from .runner import run_situation
     from .situation import load_situation
 
     out = Path(args.out)
     binding = json.loads((out / f"binding-{args.arm}.json").read_text(encoding="utf-8"))
-    others = [json.loads(p.read_text(encoding="utf-8")) for p in out.glob("binding-*.json")]
-    bases = {record["base_revision"] for record in others}
-    if len(bases) != 1:
-        print(
-            f"refused: the bound arms have different base revisions: {sorted(bases)}",
-            file=sys.stderr,
-        )
-        return 2
+    parity = arm_parity(binding)
+    for path in sorted(out.glob("binding-*.json")):
+        other = arm_parity(json.loads(path.read_text(encoding="utf-8")))
+        if differ := sorted(name for name in parity if other[name] != parity[name]):
+            print(
+                f"refused: {path.name} differs from this arm's binding in {', '.join(differ)}",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
     client = binding["client"]
     if not client["standin"]:
         import subprocess
@@ -114,13 +139,20 @@ def cmd_run(args) -> int:
                 f"refused: the client is {version}, the binding pinned {client['version']}",
                 file=sys.stderr,
             )
-            return 2
+            return EXIT_REFUSED
     manifest = Path(args.manifest) if args.manifest else None
     # Every file is checked before the first session starts.
     situations = [load_situation(Path(path), manifest=manifest) for path in args.situation]
     config = _config(args, binding)
     for situation in situations:
-        path = run_situation(config, binding, situation)
+        try:
+            path = run_situation(config, binding, situation)
+        except RunPaused as pause:
+            print(f"paused: {situation.id}: {pause}; rerun to resume", file=sys.stderr)
+            return EXIT_PAUSED
+        except RunAborted as abort:
+            print(f"aborted: {situation.id}: {abort}; rerun to resume", file=sys.stderr)
+            return EXIT_REFUSED
         run = json.loads(path.read_text(encoding="utf-8"))
         print(f"{situation.id} {config.arm}: {run['status']} -> {path}")
     return 0

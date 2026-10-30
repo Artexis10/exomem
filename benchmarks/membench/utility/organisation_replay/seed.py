@@ -17,15 +17,13 @@ from pathlib import Path
 from membench.utility.switch_eval.arms import ArmSpec
 from membench.utility.switch_eval.state import Slot
 
+from .runfile import read_jsonl
 from .scripted import ScriptedSession
 from .situation import ESTABLISHED, PRIOR_AGENT, Situation
 
 SEED_WHY = "organisation replay seed"
 #: The relation direction SCHEMA.md gives a relation entry that states none.
 DEFAULT_DIRECTION = "directed"
-#: The due-state category that carries recent promotions: a product protocol
-#: token, the only rows the settle session has to deliver.
-PROMOTION_CATEGORY = "recent_promotions"
 #: Carrier calls the settle session may spend before the seed is a fault. The
 #: carrier delivers five rows a call; a seed's promotions number in the tens.
 SETTLE_CALL_LIMIT = 40
@@ -59,7 +57,11 @@ class SeedBuild:
     #: Each refused call that a scripted session resent: session, command,
     #: refusal code and the wait the product asked for.
     retries: list[dict] = field(default_factory=list)
+    #: Carrier calls the settle session made: the tap's ready-gate probes and its own calls.
     settle_calls: int = 0
+    #: What the settle session did, in order: the ready gate, then each carrier call
+    #: with the recent-promotion rows it delivered.
+    settle_log: list[dict] = field(default_factory=list)
     sessions: dict[str, str] = field(default_factory=dict)
 
 
@@ -320,6 +322,8 @@ async def seed_session(
 def _due_promotions(answer: object) -> int:
     """Recent-promotion rows the carrier delivered in one answer."""
 
+    from exomem.promotions import FAMILY
+
     containers = [answer]
     if isinstance(answer, dict) and isinstance(answer.get("result"), dict):
         containers.append(answer["result"])
@@ -327,7 +331,7 @@ def _due_promotions(answer: object) -> int:
     for container in containers:
         due = container.get("due_state") if isinstance(container, dict) else None
         for row in (due or {}).get("top") or []:
-            rows += row.get("category") == PROMOTION_CATEGORY
+            rows += row.get("category") == FAMILY
     return rows
 
 
@@ -336,10 +340,37 @@ async def settle_session(session: ScriptedSession, build: SeedBuild) -> None:
 
     for _ in range(SETTLE_CALL_LIMIT):
         answer = await session.call("ask_memory", {"query": "organisation replay settle"})
+        delivered = _due_promotions(answer)
         build.settle_calls += 1
-        if not _due_promotions(answer):
+        build.settle_log.append(
+            {"source": "call", "tool": "ask_memory", "promotions_delivered": delivered}
+        )
+        if not delivered:
             return
     raise SeedFault(f"recent promotions still due after {SETTLE_CALL_LIMIT} carrier calls")
+
+
+def _record_settle_gate(tap_log: Path, build: SeedBuild) -> None:
+    """Put the tap's ready-gate probes first in the settle log and count them.
+
+    The gate holds the session's first request and probes the carrier itself,
+    so its probes can deliver promotions before any settle call. The tap logs
+    how many probes it sent, not their answers, so their deliveries are unknown.
+    """
+
+    gate = next((e for e in read_jsonl(tap_log) if e.get("event") == "ready_finished"), {})
+    probes = gate.get("probes")
+    build.settle_calls += probes or 0
+    build.settle_log.insert(
+        0,
+        {
+            "source": "ready_gate",
+            "probes": probes,
+            "outcome": gate.get("outcome"),
+            "wait_seconds": gate.get("wait_seconds"),
+            "promotions_delivered": None,
+        },
+    )
 
 
 async def prior_session(session: ScriptedSession, situation: Situation, build: SeedBuild) -> None:
@@ -453,6 +484,7 @@ async def build_seed(
             await settle_session(session, build)
         finally:
             build.retries += [{"session": "settle", **r} for r in session.retries]
+    _record_settle_gate(session.tap_log, build)
     if situation.vocabulary(PRIOR_AGENT):
         async with ScriptedSession(slot, spec, env=env, log_dir=log_dir, name="prior") as session:
             build.sessions["prior"] = str(session.tap_log)

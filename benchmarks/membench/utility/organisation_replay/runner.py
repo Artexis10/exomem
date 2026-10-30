@@ -31,6 +31,7 @@ from membench.utility.switch_eval.session import (
     RunAborted,
     RunPaused,
     SessionInputs,
+    load_session,
     run_session,
     session_env,
 )
@@ -68,6 +69,15 @@ _CHECKOUT = Path(__file__).resolve().parents[4]
 #: Whether each arm's writer records edge-review reasons. The comparison fixes two
 #: roles, and only the candidate's writer records a reason for a kept generic edge.
 REASON_CAPABLE = {"baseline": False, "candidate": True}
+#: A situation's checkpoint until ``run.json`` is written; its run status is ``PAUSED``.
+PROGRESS_FILE = "progress.json"
+#: The run status of a checkpoint: not an outcome, so never in a ``run.json``.
+PAUSED = "paused"
+#: A measured session's readback window, kept beside its attempts.
+WINDOW_FILE = "window.json"
+#: The code files the shipped hook install deploys: Python hooks and their shell
+#: wrappers (the product's ``_hooks`` directory holds only these two kinds).
+HOOK_CODE_SUFFIXES = (".py", ".sh")
 
 
 @dataclass(frozen=True)
@@ -178,6 +188,23 @@ def session_files(
     return paths, shipped_hooks(slot, spec, paths["settings.json"])
 
 
+def hook_scripts_digest(slot: Slot) -> str:
+    """Digest of the hook code the shipped install deployed into the slot, by file name.
+
+    The hooks import their sibling helpers, so every deployed code file counts,
+    not only the scripts the settings name. A hook's own state files beside
+    them are data and are left out.
+    """
+
+    hook_dir = slot.hook_home / "hooks"
+    digest = hashlib.sha256()
+    for path in sorted(hook_dir.iterdir()):
+        if path.is_file() and path.suffix in HOOK_CODE_SUFFIXES:
+            text = path.read_bytes().replace(str(slot.root).encode(), _SLOT.encode())
+            digest.update(path.name.encode() + b"\0" + text + b"\0")
+    return digest.hexdigest()
+
+
 def files_digests(paths: Mapping[str, Path], slot: Slot) -> dict[str, str | None]:
     def digest(name: str) -> str | None:
         path = paths.get(name)
@@ -186,6 +213,7 @@ def files_digests(paths: Mapping[str, Path], slot: Slot) -> dict[str, str | None
     return {
         "mcp_config_sha256": digest("mcp.json"),
         "hook_settings_sha256": digest("settings.json"),
+        "hook_scripts_sha256": hook_scripts_digest(slot) if "settings.json" in paths else None,
     }
 
 
@@ -341,6 +369,14 @@ def bind(config: RunConfig) -> dict:
             **files_digests(paths, slot),
         }
     facts = _child(slot, probe, "binding", "--surface", ACTOR_SURFACE)
+    # The role follows the revision label, so the code that loaded must be that
+    # revision. A wheel installed from a file names no revision; its digest stands in.
+    loaded = facts["package_identity"].get("source_revision")
+    if loaded is not None and loaded != config.revision:
+        raise SystemExit(
+            f"refused: the arm's interpreter loads the package at {loaded}, not at the "
+            f"bound revision {config.revision}"
+        )
     record = {
         "binding_ref": f"{config.arm}-{config.revision[:12]}",
         "arm": config.arm,
@@ -433,9 +469,13 @@ def _build_seed(
 
 
 def _snapshot_slot(slot: Slot, to: Path) -> None:
-    if to.exists():
-        shutil.rmtree(to)
-    shutil.copytree(slot.root, to, symlinks=True)
+    # Copy beside the target and rename, so an interrupted copy never reads as a snapshot.
+    partial = to.with_name(f"{to.name}.partial")
+    for stale in (partial, to):
+        if stale.exists():
+            shutil.rmtree(stale)
+    shutil.copytree(slot.root, partial, symlinks=True)
+    partial.rename(to)
 
 
 def _restore_slot(slot: Slot, source: Path) -> None:
@@ -443,7 +483,37 @@ def _restore_slot(slot: Slot, source: Path) -> None:
     shutil.copytree(source, slot.root, symlinks=True)
 
 
-def _session(config, situation, role, turns, slot, spec, run_dir, executor, paths, windows):
+def _write_json(path: Path, value: object) -> Path:
+    """Write a whole file or nothing, so an interruption never leaves half a record."""
+
+    partial = path.with_name(f"{path.name}.partial")
+    partial.write_text(json.dumps(value, indent=1, sort_keys=True, default=str), encoding="utf-8")
+    partial.replace(path)
+    return path
+
+
+def _session(config, situation, role, turns, slot, spec, run_dir, executor, paths):
+    """Run one measured session to its final outcome, resuming an interrupted one.
+
+    The slot snapshot taken before the first attempt stays until the session
+    ends: every attempt, and every later invocation that resumes this session,
+    starts from it, so the inputs digest matches the attempts already logged.
+    """
+
+    session_dir = run_dir / "sessions" / role
+    pristine = run_dir / f"pre-{role}"
+    final = load_session(session_dir)
+    if final is not None:
+        # An earlier invocation finished this session; the slot holds its end state.
+        if pristine.exists():
+            shutil.rmtree(pristine)
+        return final, session_dir
+    if pristine.exists():
+        _restore_slot(slot, pristine)
+    else:
+        # Each session starts with an empty runtime: its own tap log, server stderr and turn file.
+        shutil.rmtree(slot.runtime)
+        slot.runtime.mkdir()
     planned = PlannedSession(
         session_id=f"{situation.id}--{config.arm}--{role}",
         case_id=situation.id,
@@ -464,22 +534,20 @@ def _session(config, situation, role, turns, slot, spec, run_dir, executor, path
         },
         state_digests={"vault": tree_digest(slot.vault)},
     )
-    # Each session starts with an empty runtime: its own tap log, server stderr and turn file.
-    shutil.rmtree(slot.runtime)
-    slot.runtime.mkdir()
-    pristine = run_dir / f"pre-{role}"
-    _snapshot_slot(slot, pristine)
+    if not pristine.exists():
+        _snapshot_slot(slot, pristine)
 
     def execute(inputs: SessionInputs, attempt_dir: Path):
         # A retry keeps its inputs: each attempt starts from the same slot.
         _restore_slot(slot, pristine)
-        windows[role] = [dt.datetime.now(dt.UTC), None]
+        started = dt.datetime.now(dt.UTC)
         try:
             return executor.execute_prepared(inputs, attempt_dir, slot)
         finally:
-            windows[role][1] = dt.datetime.now(dt.UTC)
+            # The readback window of the session's last attempt, kept on disk for a resume.
+            ended = dt.datetime.now(dt.UTC)
+            _write_json(session_dir / WINDOW_FILE, [started.isoformat(), ended.isoformat()])
 
-    session_dir = run_dir / "sessions" / role
     final = run_session(inputs, session_dir, execute)
     shutil.rmtree(pristine)
     return final, session_dir
@@ -493,62 +561,106 @@ def _session_faults(role: str, session_dir: Path) -> list[dict]:
     ]
 
 
+def _now() -> str:
+    return dt.datetime.now(dt.UTC).isoformat()
+
+
 def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> Path:
+    """Run one situation for one arm, or resume it from its checkpoint.
+
+    ``run.json`` is written once, when the situation reaches ``ok``,
+    ``actor_failure`` or ``struck``; only a harness fault past its retries
+    strikes it. Until then ``progress.json`` holds the run as ``paused`` with
+    the stage to resume: a quota pause, an abort or a crash leaves it, and the
+    next invocation continues from that stage on the preserved slot.
+    """
+
     refuse_api_keys(os.environ)
     run_dir = refuse_unsafe_out_dir(config.out) / situation.id / config.arm
     if not isinstance(binding.get("reason_capable"), bool):
         raise SystemExit(f"refused: binding {binding['binding_ref']} has no reason_capable; rebind")
     if (run_dir / "run.json").exists():
-        raise SystemExit(f"refused: {run_dir / 'run.json'} exists; a run directory is written once")
+        raise SystemExit(f"refused: {run_dir / 'run.json'} exists; a finished run is written once")
     run_dir.mkdir(parents=True, exist_ok=True)
     shape = binding["shapes"][situation.client_shape]
     spec = arm_spec(
         config, situation.client_shape, tuple(shape["tools"]), frozenset(shape["wired_hooks"])
     )
     slot = Slot(run_dir / "slot")
-    faults: list[dict] = []
-    run = {
-        "situation_id": situation.id,
-        "situation_sha256": situation.sha256,
-        "pool": situation.pool,
-        "category": situation.category,
-        "variant": situation.variant,
-        "arm": config.arm,
-        "client_shape": situation.client_shape,
-        "binding_ref": binding["binding_ref"],
-        "seed": {},
-        "sessions": [],
-        "end_state": {},
-        "faults": faults,
-        "status": "struck",
-    }
+    progress_path = run_dir / PROGRESS_FILE
+    if progress_path.exists():
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        run = progress["run"]
+        if (run["situation_sha256"], run["binding_ref"]) != (
+            situation.sha256,
+            binding["binding_ref"],
+        ):
+            raise SystemExit(
+                f"refused: {progress_path} was started from another situation file or binding"
+            )
+        run["interruptions"].append({"stage": progress["stage"], "event": "resumed", "at": _now()})
+    else:
+        # Only the model-free seed runs before the first checkpoint, so an
+        # interrupted seed is rebuilt from a clean slot.
+        leftovers = [run_dir / name for name in ("seed", "slot") if (run_dir / name).exists()]
+        for path in leftovers:
+            shutil.rmtree(path)
+        run = {
+            "situation_id": situation.id,
+            "situation_sha256": situation.sha256,
+            "pool": situation.pool,
+            "category": situation.category,
+            "variant": situation.variant,
+            "arm": config.arm,
+            "client_shape": situation.client_shape,
+            "binding_ref": binding["binding_ref"],
+            "seed": {},
+            "sessions": [],
+            "end_state": {},
+            "faults": [],
+            "interruptions": [{"stage": "seed", "event": "restarted", "at": _now()}]
+            if leftovers
+            else [],
+            "status": PAUSED,
+        }
+        progress = {"stage": "seed", "run": run}
+    faults = run["faults"]
 
-    def write() -> Path:
-        path = run_dir / "run.json"
-        path.write_text(json.dumps(run, indent=1, sort_keys=True, default=str), encoding="utf-8")
+    def checkpoint(stage: str) -> None:
+        progress["stage"] = stage
+        _write_json(progress_path, progress)
+
+    def finish(status: str) -> Path:
+        run["status"] = status
+        path = _write_json(run_dir / "run.json", run)
+        progress_path.unlink(missing_ok=True)
         return path
 
-    build, facts = _build_seed(config, situation, slot, spec, run_dir, faults)
-    if build is None:
-        slot.wipe()
-        return write()
-    run["seed"] = {
-        **seed_module.seed_snapshot(facts, tree_digest=tree_digest(slot.vault), check=[]),
-        "relation_keys": build.relation_keys,
-        "home_keys": build.home_keys,
-        "prior_entries": build.prior_entries,
-        "settle_calls": build.settle_calls,
-        "landed": {"entities": build.entities, "notes": build.notes},
-        "wraps": build.wraps,
-        "wrap_rule": seed_module.WRAP_RULE,
-        "retries": build.retries,
-    }
-    seed_pages = {page["path"]: page["content_sha256"] for page in facts["pages"]}
+    seed_file = run_dir / "seed-pages.json"
+    if progress["stage"] == "seed":
+        build, facts = _build_seed(config, situation, slot, spec, run_dir, faults)
+        if build is None:
+            slot.wipe()
+            return finish("struck")
+        run["seed"] = {
+            **seed_module.seed_snapshot(facts, tree_digest=tree_digest(slot.vault), check=[]),
+            "relation_keys": build.relation_keys,
+            "home_keys": build.home_keys,
+            "prior_entries": build.prior_entries,
+            "settle_calls": build.settle_calls,
+            "settle_log": build.settle_log,
+            "landed": {"entities": build.entities, "notes": build.notes},
+            "wraps": build.wraps,
+            "wrap_rule": seed_module.WRAP_RULE,
+            "retries": build.retries,
+        }
+        _write_json(seed_file, {page["path"]: page["content_sha256"] for page in facts["pages"]})
+        checkpoint("capture")
     paths, wired = session_files(
         slot, spec, run_dir / "session-inputs", hooked=situation.client_shape == "hooked"
     )
     digests = files_digests(paths, slot)
-    if digests != {k: shape[k] for k in digests} or wired != spec.wired_hooks:
+    if digests != {k: shape.get(k) for k in digests} or wired != spec.wired_hooks:
         raise SystemExit(
             f"refused: the session files moved since binding: {digests}, hooks {sorted(wired)}"
         )
@@ -560,75 +672,62 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
         surfaces={(config.arm, role): shape["surface"] for role in ("capture", "fresh")},
         launcher=config.launcher,
     )
-    windows: dict[str, list] = {}
-    role = "capture"
     try:
-        capture, capture_dir = _session(
-            config,
-            situation,
-            "capture",
-            situation.turns,
-            slot,
-            spec,
-            run_dir,
-            executor,
-            paths,
-            windows,
-        )
-        faults += _session_faults("capture", capture_dir)
-        run["sessions"].append(session_object("capture", capture, capture_dir, run_dir))
-        if capture["outcome"] == HARNESS_FAULT:
-            return write()
-        before = tree_digest(slot.vault)
-        since, until = windows["capture"]
-        seed_file = run_dir / "seed-pages.json"
-        seed_file.write_text(json.dumps(seed_pages), encoding="utf-8")
-        run["end_state"] = _child(
-            slot,
-            spec,
-            "end-state",
-            "--since",
-            since.isoformat(),
-            "--until",
-            until.isoformat(),
-            "--seed-pages",
-            str(seed_file),
-            *(["--reason-capable"] if binding["reason_capable"] else []),
-        )
-        run["end_state"]["read"]["vault_digest_before"] = before
-        run["end_state"]["read"]["vault_digest_after"] = tree_digest(slot.vault)
-        if run["end_state"]["read"]["vault_digest_after"] != before:
-            faults.append(_fault("readback", 1, HARNESS_FAULT, "the readback changed the vault"))
-            return write()
-        role = "fresh"
+        if progress["stage"] == "capture":
+            capture, capture_dir = _session(
+                config, situation, "capture", situation.turns, slot, spec, run_dir, executor, paths
+            )
+            faults += _session_faults("capture", capture_dir)
+            run["sessions"].append(session_object("capture", capture, capture_dir, run_dir))
+            if capture["outcome"] == HARNESS_FAULT:
+                return finish("struck")
+            before = tree_digest(slot.vault)
+            since, until = json.loads((capture_dir / WINDOW_FILE).read_text(encoding="utf-8"))
+            run["end_state"] = _child(
+                slot,
+                spec,
+                "end-state",
+                "--since",
+                since,
+                "--until",
+                until,
+                "--seed-pages",
+                str(seed_file),
+                *(["--reason-capable"] if binding["reason_capable"] else []),
+            )
+            run["end_state"]["read"]["vault_digest_before"] = before
+            run["end_state"]["read"]["vault_digest_after"] = tree_digest(slot.vault)
+            if run["end_state"]["read"]["vault_digest_after"] != before:
+                faults.append(
+                    _fault("readback", 1, HARNESS_FAULT, "the readback changed the vault")
+                )
+                return finish("struck")
+            checkpoint("fresh")
         fresh, fresh_dir = _session(
-            config,
-            situation,
-            "fresh",
-            (situation.question,),
-            slot,
-            spec,
-            run_dir,
-            executor,
-            paths,
-            windows,
+            config, situation, "fresh", (situation.question,), slot, spec, run_dir, executor, paths
         )
         faults += _session_faults("fresh", fresh_dir)
         run["sessions"].append(session_object("fresh", fresh, fresh_dir, run_dir))
     except (RunAborted, RunPaused) as stop:
-        attempts = _session_faults(role, run_dir / "sessions" / role)
-        faults += attempts
-        kind = ABORT if isinstance(stop, RunAborted) else QUOTA
-        faults.append(_fault(role, len(attempts) or 1, kind, str(stop)))
-        write()
+        # A pause or an abort is not the situation's outcome: the run stays resumable.
+        run["interruptions"].append(
+            {
+                "stage": progress["stage"],
+                "event": QUOTA if isinstance(stop, RunPaused) else ABORT,
+                "detail": str(stop),
+                "at": _now(),
+            }
+        )
+        checkpoint(progress["stage"])
         raise
     outcomes = [session["outcome"] for session in run["sessions"]]
-    run["status"] = (
+    status = (
         "struck"
         if HARNESS_FAULT in outcomes
         else "actor_failure"
         if ACTOR_FAILURE in outcomes
         else "ok"
     )
+    path = finish(status)
     slot.wipe()
-    return write()
+    return path

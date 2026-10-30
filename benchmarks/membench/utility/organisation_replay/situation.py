@@ -38,10 +38,23 @@ TOP_LEVEL_FIELDS = frozenset(
         "fresh_session",
     }
 )
-#: The note-entry fields of SCHEMA.md's table, and the advisory ``sources`` it
-#: allows. The seed builder would silently drop any other field, such as a
-#: supersession link, and build a different seed than the case describes.
+#: The nested field tables of SCHEMA.md. The seed builder would silently drop
+#: any other field, such as a supersession link, and build a different seed
+#: than the case describes; so would the sessions.
+SEED_FIELDS = frozenset({"vocabulary", "homes", "entities", "notes"})
+#: The vocabulary entry table, and the relation ``direction`` that the door table lets a seed state.
+VOCABULARY_FIELDS = frozenset(
+    {"registry", "key", "label", "guidance", "description", "parent", "seeded_as", "direction"}
+)
+HOME_FIELDS = frozenset({"folder", "topics", "projects"})
+ENTITY_FIELDS = frozenset({"ref", "title", "type", "body"})
+#: The note-entry table, and the advisory ``sources`` it allows.
 NOTE_FIELDS = frozenset({"title", "type", "folder", "topics", "projects", "body", "sources"})
+CAPTURE_FIELDS = frozenset({"turns"})
+FRESH_FIELDS = frozenset({"question"})
+#: f34's preregistered aggregate digest of the held-out set: the SHA-256 of the
+#: custody manifest that lists its 80 case files in name order.
+HELD_OUT_MANIFEST_SHA256 = "2feb75c61589b5dacad5b2ef96a557118663141e4e690fc7912fedadfe97ae01"
 
 
 class SituationRefused(ValueError):
@@ -84,12 +97,37 @@ def manifest_digests(manifest: Path) -> dict[str, str]:
     return digests
 
 
+def _refuse_held_out_without_custody(name: str, manifest: Path | None) -> None:
+    if manifest is None:
+        raise SituationRefused(f"{name} is held out and needs the custody manifest")
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    if digest != HELD_OUT_MANIFEST_SHA256:
+        raise SituationRefused(
+            f"{name} is held out, and the manifest {manifest.name} (sha256 {digest}) is not "
+            "f34's preregistered held-out manifest"
+        )
+
+
+def _refuse_extra(
+    name: str, where: str, value: object, fields: frozenset[str], label: str | None = None
+) -> None:
+    if not isinstance(value, dict):
+        raise SituationRefused(f"{name}: a {where} is not a mapping")
+    if extra := sorted(set(value) - fields):
+        named = f"{where} {value.get(label)!r}" if label else where
+        raise SituationRefused(f"{name}: {named} has fields outside SCHEMA.md: {extra}")
+
+
 def load_situation(path: Path, *, manifest: Path | None = None) -> Situation:
     path = Path(path)
-    if not _CASE_STEM.fullmatch(path.stem) or path.suffix != ".yaml":
-        raise SituationRefused(f"{path.name} is not a situation file name (hNN, dNN or xNN .yaml)")
-    if path.stem.startswith(HELD_OUT_PREFIX) and manifest is None:
-        raise SituationRefused(f"{path.name} is held out and needs the custody manifest")
+    # A case name that links to another file is judged by both names, so a link
+    # never opens a key file or runs a held-out file as a development one.
+    names = (path.name, path.resolve().name)
+    for name in names:
+        if not _CASE_STEM.fullmatch(Path(name).stem) or Path(name).suffix != ".yaml":
+            raise SituationRefused(f"{name} is not a situation file name (hNN, dNN or xNN .yaml)")
+    if any(name.startswith(HELD_OUT_PREFIX) for name in names):
+        _refuse_held_out_without_custody(path.name, manifest)
     raw = path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     if manifest is not None:
@@ -108,25 +146,32 @@ def load_situation(path: Path, *, manifest: Path | None = None) -> Situation:
         raise SituationRefused(f"{path.name}: top-level fields outside SCHEMA.md: {extra}")
     if data.get("id") != path.stem:
         raise SituationRefused(f"{path.name}: id {data.get('id')!r} does not equal the file stem")
-    if data.get("pool") == "heldout" and manifest is None:
-        raise SituationRefused(f"{path.name} is held out and needs the custody manifest")
+    if data.get("pool") == "heldout":
+        _refuse_held_out_without_custody(path.name, manifest)
     if data.get("client_shape") not in CLIENT_SHAPES:
         raise SituationRefused(f"{path.name}: client_shape {data.get('client_shape')!r}")
-    turns = (data.get("capture_session") or {}).get("turns") or []
-    question = (data.get("fresh_session") or {}).get("question")
+    capture = data.get("capture_session") or {}
+    fresh = data.get("fresh_session") or {}
+    _refuse_extra(path.name, "capture_session", capture, CAPTURE_FIELDS)
+    _refuse_extra(path.name, "fresh_session", fresh, FRESH_FIELDS)
+    turns = capture.get("turns") or []
+    question = fresh.get("question")
     if not turns or not all(isinstance(t, str) and t for t in turns):
         raise SituationRefused(f"{path.name}: capture_session.turns needs at least one text turn")
     if not isinstance(question, str) or not question:
         raise SituationRefused(f"{path.name}: fresh_session.question is missing")
     seed = data.get("seed") or {}
+    _refuse_extra(path.name, "seed", seed, SEED_FIELDS)
     for entry in seed.get("vocabulary") or []:
+        _refuse_extra(path.name, "vocabulary entry", entry, VOCABULARY_FIELDS, "key")
         if (entry.get("seeded_as") or ESTABLISHED) not in (ESTABLISHED, PRIOR_AGENT):
             raise SituationRefused(f"{path.name}: seeded_as {entry.get('seeded_as')!r}")
+    for home in seed.get("homes") or []:
+        _refuse_extra(path.name, "home", home, HOME_FIELDS, "folder")
+    for entity in seed.get("entities") or []:
+        _refuse_extra(path.name, "entity", entity, ENTITY_FIELDS, "ref")
     for note in seed.get("notes") or []:
-        if extra := sorted(set(note) - NOTE_FIELDS):
-            raise SituationRefused(
-                f"{path.name}: note {note.get('title')!r} has fields outside SCHEMA.md: {extra}"
-            )
+        _refuse_extra(path.name, "note", note, NOTE_FIELDS, "title")
     return Situation(
         id=path.stem,
         pool=str(data.get("pool")),
