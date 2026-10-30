@@ -2763,6 +2763,7 @@ def _admitted_corpus(
         else:
             length, terms = _page_terms(text)
             pages[path] = (digests[path], length, terms)
+            call_spans.measure(call_spans.PAGES_TOKENIZED)
     # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
     ordered = sorted(pages)
     if base is None:
@@ -8699,7 +8700,9 @@ class LexicalStore:
             admission = admission_of(context.visible)
             identity = admission.identity() if admission is not None else None
             if identity is None:
-                context.admitted_paths = {path for path in candidates if context.visible(path)}
+                # A collection store decides its pages on one thread: the pages it owns share one store request.
+                with deciding(candidates):
+                    context.admitted_paths = {path for path in candidates if context.visible(path)}
             else:
                 plan = self._published_plan(
                     (scope, identity), snapshot, col, tuple(candidates), frozenset(),

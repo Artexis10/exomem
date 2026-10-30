@@ -297,6 +297,7 @@ CARRY_SPAN_FIELDS = (
     call_spans.STEM_ROWS,
     call_spans.CANDIDATES,
     call_spans.STATS_REBUILT,
+    call_spans.PAGES_TOKENIZED,
 )
 LANE_SPAN_FIELDS = (
     call_spans.CATALOGUE_ROWS,

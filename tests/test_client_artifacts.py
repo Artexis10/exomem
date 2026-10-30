@@ -734,6 +734,78 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
     assert not list(tmp_path.glob("file-*.bin"))
 
 
+def test_a_busy_boundary_never_fetches_a_handle_twice_in_one_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client handle is good for one fetch; only the caller can supply another.
+
+    The server waits out a busy boundary by running the write again. Here the
+    busy arrives after the handles were fetched, so a server-side rerun would
+    fetch a spent handle and store that failure as the call's result.
+    """
+    from exomem import client_artifacts, mutation_lock, writer_lease
+    from exomem.cli_ops import OpError
+
+    (tmp_path / "Knowledge Base").mkdir()
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "5")
+    stage_calls: list[str] = []
+    guard_calls: list[str] = []
+
+    def stage(file, _budget, **_kwargs):
+        stage_calls.append(file["file_id"])
+        return _staged(tmp_path, file["file_id"], "photo.bin", b"photo bytes")
+
+    @contextmanager
+    def guard(*_args, **_kwargs):
+        guard_calls.append("guard")
+        if len(guard_calls) == 1:
+            raise mutation_lock._mutation_busy(None)
+        yield
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    monkeypatch.setattr(
+        client_artifacts,
+        "preserve_stream",
+        lambda _vault, **kwargs: type(
+            "Result",
+            (),
+            {
+                "as_dict": lambda self: {
+                    "path": f"Knowledge Base/Evidence/case/raw/{kwargs['filename']}",
+                    "size": 11,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "warnings": [],
+                }
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: type("Manager", (), {"mutation_guard": lambda self, *a, **k: guard(*a, **k)})(),
+    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    files = [{"download_url": "https://files.example/photo", "file_id": "photo"}]
+    command = _command("preserve_artifacts")
+
+    with pytest.raises(OpError) as busy:
+        writer_lease.invoke_command(
+            command, tmp_path, scope="case", category="raw", files=files, idempotency_key="photo"
+        )
+    assert busy.value.code == "MUTATION_BUSY"
+    assert busy.value.details["committed"] is False
+    assert stage_calls == ["photo"]
+
+    retried = writer_lease.invoke_command(
+        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="photo"
+    )
+    assert retried["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
+    assert stage_calls == ["photo", "photo"]
+
+
 def test_unexpected_commit_failure_removes_every_staged_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

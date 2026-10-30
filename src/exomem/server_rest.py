@@ -187,6 +187,19 @@ _OPENAPI_ERROR_SCHEMA = {
         # DERIVED from the single source of truth, never transcribed.
         "site": {"type": "string", "enum": list(_retrieval_warming_sites())},
         "waited_ms": {"type": "integer", "minimum": 0},
+        # One lock acquire's wait, on a MUTATION_BUSY the server did not wait out.
+        "wait_ms": {"type": "number", "minimum": 0},
+        # Why a write's server-side wait on a busy mutation boundary ended in
+        # MUTATION_BUSY, and how many busy attempts it absorbed before that.
+        "cause": {"type": "string"},
+        "absorbed_attempts": {"type": "integer", "minimum": 0},
+        # The process-local contention counters a MUTATION_BUSY carries
+        # (`mutation_lock._contention_view`).
+        "acquire_attempts": {"type": ["integer", "null"], "minimum": 0},
+        "busy_refusals": {"type": ["integer", "null"], "minimum": 0},
+        "busy_refusals_recent": {"type": ["integer", "null"], "minimum": 0},
+        "contention_scope": {"type": ["string", "null"]},
+        "last_holder": {"type": ["object", "null"]},
         "unresolved_sources": {
             "type": "array",
             "items": {"type": "string", "maxLength": 256},
