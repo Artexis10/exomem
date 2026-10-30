@@ -16,7 +16,7 @@ The rename SHALL NOT replace an existing file. When a file already exists at the
 
 #### Scenario: A file above the offloadable limit files and stays
 
-- **WHEN** adoption applies a 1.5 GiB staged video whose identity matches, and the object bound is 1 GiB
+- **WHEN** adoption applies a 6 GiB staged video whose identity matches, and the largest offloadable file is 5 GiB
 - **THEN** the video files by rename, gets no offload job, and stays on the volume as a resident original
 
 #### Scenario: The Knowledge Base path is taken

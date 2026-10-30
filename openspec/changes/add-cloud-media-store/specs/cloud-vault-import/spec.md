@@ -125,23 +125,31 @@ The CLI SHALL record each series' partition: every member's path, size and modif
 
 ### Requirement: The CLI and the cell classify members by one rule
 
-One module SHALL hold the rule that classifies a member as text, an offloadable artifact or a resident artifact. The CLI and the adoption inventory SHALL import it, and the cell SHALL report its inputs. An artifact SHALL be offloadable when two bounds hold. Its `age` ciphertext size is at most the store's object bound, and its plaintext size + ciphertext size is at most the hydration capacity. Every other artifact SHALL be resident.
+One module SHALL hold the rule that classifies a member as text, an offloadable artifact or a resident artifact. The CLI and the adoption inventory SHALL import it, and the cell SHALL report its inputs. An artifact SHALL be offloadable when three bounds hold. Its `age` ciphertext size is at most the store's object bound and at most the hydration capacity. Its plaintext size is at most the volume fraction × the volume size. The volume fraction is a store-policy value, 0.25 by default. Every other artifact SHALL be resident.
 
-#### Scenario: A video within both bounds
+#### Scenario: A video within the three bounds
 
-- **WHEN** the object bound is 1 GiB, the hydration capacity is 2.25 GiB, and a video is 900 MiB
+- **WHEN** the object bound is 5 GiB plus 2 MiB, and the hydration capacity is 5.25 GiB
+- **AND** the volume is 20 GiB, and a video is 4.5 GiB
 - **THEN** the video is offloadable
 
 #### Scenario: A file of exactly the object bound
 
-- **WHEN** the object bound is 1 GiB and a file is exactly 1 GiB
+- **WHEN** the object bound is 5 GiB plus 2 MiB, and a file is exactly that size
 - **THEN** its `age` ciphertext is larger than the bound, and the file is resident
 
 #### Scenario: A small hydration capacity lowers the limit
 
-- **WHEN** the object bound is 1 GiB, the hydration capacity is 1.5 GiB, and a video is 900 MiB
-- **THEN** the video is resident, because its hydration needs more than 1.5 GiB
-- **AND** the cell reports a largest offloadable file just under 768 MiB
+- **WHEN** the object bound is 5 GiB plus 2 MiB, and the hydration capacity is 3 GiB
+- **AND** the volume is 20 GiB, and a video is 4.5 GiB
+- **THEN** the video is resident, because its ciphertext needs more than 3 GiB
+- **AND** the cell reports a largest offloadable file just under 3 GiB
+
+#### Scenario: A small volume lowers the limit
+
+- **WHEN** the object bound is 5 GiB plus 2 MiB, and the hydration capacity is 5.25 GiB
+- **AND** the volume is 12 GiB, and a video is 4 GiB
+- **THEN** the video is resident, and the cell reports a largest offloadable file of 3 GiB
 
 #### Scenario: The CLI and the inventory agree
 
@@ -151,10 +159,10 @@ One module SHALL hold the rule that classifies a member as text, an offloadable 
 ### Requirement: The cell reports its window budget
 
 The Adoption Studio status SHALL report these figures. Each figure that the cell cannot read SHALL be unknown with a reason, never zero.
-- The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity, `max_hydrations` × the largest offloadable file, and one offload temporary file of up to the object bound.
+- The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity and `max_hydrations` × the largest offloadable file.
 - The reachable budget: the window budget once the agent files every landed window, pending offloads finish and eviction frees every eligible original. It SHALL leave out an original that an owner read within the minimum idle age.
 - The job-pinned bytes: the offloadable originals that claimed, unfinished media jobs keep on the volume, the copies that the worker hydrated for them included.
-- The inputs of the classification rule: the object bound, the hydration capacity and the inline text limit, and the largest offloadable file that they allow.
+- The inputs of the classification rule: the object bound, the hydration capacity, the volume fraction, the volume size and the inline text limit, and the largest offloadable file that they allow.
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
 - For each landed window, the count and bytes of its unfiled members. An unfiled member is a manifest member, other than the series file, that no adoption run has filed. A window with no run SHALL count every member except the series file.
@@ -165,9 +173,9 @@ A status call MAY carry a series ID and the next window's bytes. The cell SHALL 
 
 #### Scenario: The budget is computed from its inputs
 
-- **WHEN** the volume is 20 GiB, the growth threshold is 80%, use is 7 GiB, the reserve is 0.25 GiB and the hydration capacity is 2.25 GiB
-- **AND** the placed-copy allowance is 1 GiB, the offload temporary allowance is 1 GiB, and landed windows hold 0.5 GiB of unfiled text
-- **THEN** the status reports a window budget of 4 GiB
+- **WHEN** the volume is 20 GiB, the growth threshold is 80%, use is 3 GiB, and the reserve is 0.25 GiB
+- **AND** the hydration capacity is 5.25 GiB, the placed-copy allowance is 5 GiB, and landed windows hold 0.5 GiB of unfiled text
+- **THEN** the status reports a window budget of 2 GiB
 
 #### Scenario: The reachable budget counts what eviction can free
 

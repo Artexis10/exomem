@@ -2,7 +2,7 @@
 
 ### Requirement: Bound originals are written through to the cell's media store
 
-On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded. Offload SHALL apply the classification rule before it encrypts. An original that the rule calls resident SHALL get a recorded refusal, and offload SHALL write no temporary file for it.
+On a cell selected for the media store, every original that a governed sidecar binds by `binary_sha256` SHALL be written to the cell's media store after the vault commit, whatever its type. The cell SHALL encrypt the original, upload it as a new version, confirm that version's size and digest, and only then record the stored-object reference, with its version ID, in the sidecar. Offload work SHALL run on the durable media job ledger. Before an offload uploads a version or reuses one, it SHALL record a protection record for the object name and commit it with a full sync, so that any later crash-consistent capture of the volume contains it. An offload SHALL reuse an existing version only when a live sidecar references that version at the moment the protection record commits. The protection record SHALL be retired only after the sidecar write that publishes the reference has itself been synced to disk. Notes, sidecars, extracted text, indexes and datasets SHALL NOT be offloaded. Offload SHALL apply the classification rule before it encrypts. An original that the rule calls resident SHALL get a recorded refusal, and offload SHALL write no temporary file for it. Offload SHALL reserve its ciphertext temporary file from the hydration capacity. An offload that finds the capacity in use SHALL wait and try again, with no attempt consumed.
 
 #### Scenario: A recording is captured on a selected cell
 
@@ -12,9 +12,14 @@ On a cell selected for the media store, every original that a governed sidecar b
 
 #### Scenario: A resident original is never encrypted
 
-- **WHEN** an offload job reaches a 1.5 GiB video, and the object bound is 1 GiB
+- **WHEN** an offload job reaches a 6 GiB video, and the largest offloadable file is 5 GiB
 - **THEN** the worker records the video as resident without encrypting it
 - **AND** no temporary file for it appears on the volume, and the video stays local
+
+#### Scenario: An offload waits for the hydration capacity
+
+- **WHEN** an offload job reaches a 5 GiB recording while a hydration holds most of the hydration capacity
+- **THEN** the offload waits with its attempt count unchanged, and runs once the hydration ends
 
 #### Scenario: The store is unreachable
 
@@ -106,7 +111,7 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 #### Scenario: An original that could not come back stays
 
-- **WHEN** a stored original's plaintext and ciphertext together exceed the hydration capacity, and volume use is above the target
+- **WHEN** a stored original's plaintext exceeds the hydration capacity, and volume use is above the target
 - **THEN** eviction skips the original
 
 #### Scenario: An original is still being processed
@@ -152,7 +157,7 @@ When volume use passes the configured eviction target, the cell SHALL evict cach
 
 ### Requirement: A media job defers when its original cannot be hydrated
 
-When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration can fail for a transport error, or because other hydrations hold the hydration capacity. Such a failure SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A worker SHALL NOT claim a returned job again before its retry time. The retry time SHALL start at 1 minute and double with each return, up to 15 minutes. An original whose hydration needs more than the whole hydration capacity SHALL block the job with `MEDIA_HYDRATION_TOO_LARGE`. The download routes SHALL refuse such an original with `MEDIA_HYDRATION_TOO_LARGE`, not with a refusal that tells the client to retry. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
+When a worker claims a media job whose original is evicted, it SHALL hydrate the original first. A hydration can fail for a transport error, or because other hydrations or offloads hold the hydration capacity. Such a failure SHALL return the job to the queue for a later attempt. That return SHALL consume no attempt and SHALL keep the job's recorded speech progress. A worker SHALL NOT claim a returned job again before its retry time. The retry time SHALL start at 1 minute and double with each return, up to 15 minutes. An original whose plaintext exceeds the whole hydration capacity SHALL block the job with `MEDIA_HYDRATION_TOO_LARGE`. The download routes SHALL refuse such an original with `MEDIA_HYDRATION_TOO_LARGE`, not with a refusal that tells the client to retry. A verification mismatch SHALL fail the job with `MEDIA_ORIGINAL_UNVERIFIED`.
 
 #### Scenario: The edge is down when a job is claimed
 
@@ -173,12 +178,12 @@ When a worker claims a media job whose original is evicted, it SHALL hydrate the
 
 #### Scenario: An original larger than the hydration capacity
 
-- **WHEN** a worker claims a job for an evicted original whose plaintext and ciphertext together exceed the whole hydration capacity
+- **WHEN** a worker claims a job for an evicted original whose plaintext exceeds the whole hydration capacity
 - **THEN** the job is blocked with `MEDIA_HYDRATION_TOO_LARGE`, and the worker does not claim it again
 
 #### Scenario: A download of an original larger than the hydration capacity
 
-- **WHEN** an owner downloads an evicted original whose plaintext and ciphertext together exceed the whole hydration capacity
+- **WHEN** an owner downloads an evicted original whose plaintext exceeds the whole hydration capacity
 - **THEN** the route refuses it with `MEDIA_HYDRATION_TOO_LARGE` and no retry hint
 
 ### Requirement: The worker bounds the jobs that keep hydrated originals
@@ -228,12 +233,12 @@ When adoption files an offloadable artifact on a cell selected for the media sto
 
 #### Scenario: A resident video gets no offload job
 
-- **WHEN** adoption files a 1.5 GiB video, and the object bound is 1 GiB
+- **WHEN** adoption files a 6 GiB video, and the largest offloadable file is 5 GiB
 - **THEN** the video has no offload job, and it stays on the volume
 
 ### Requirement: Hydration verifies an original before it reappears
 
-The cell SHALL hydrate an evicted original by fetching the version its reference names through the media edge, decrypting it to a temporary file, verifying size and SHA-256 against the sidecar, and renaming it into place. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
+The cell SHALL hydrate an evicted original in one stream: it fetches the version that its reference names through the media edge and decrypts it into one temporary file in the original's folder. It SHALL verify the ciphertext digest and the original's size and SHA-256 against the sidecar. Only then SHALL it link the file into place with no replace. Hydration SHALL write no other full copy of the original or its ciphertext on the volume. It SHALL reserve the original's plaintext size from the hydration capacity. A stop SHALL leave nothing at the original's path, and no temporary file that outlives the next start. A mismatch SHALL fail closed with `MEDIA_ORIGINAL_UNVERIFIED`, leave the path empty and keep the evicted state. Hydration SHALL record the placed file's cache identity (inode, change time, size and verified SHA-256) in cell-local state. Reconciliation, the governance companion check and the file watcher SHALL treat a file that matches its cache identity as unchanged and SHALL NOT rewrite the sidecar's recorded provenance for it. Eviction and hydration SHALL NOT publish a deletion or creation to the deletion fan-out, and hydration SHALL NOT create a processing job or re-index the original. Hydration concurrency and temporary space SHALL be bounded.
 
 #### Scenario: Playback of an evicted lecture
 
@@ -250,6 +255,11 @@ The cell SHALL hydrate an evicted original by fetching the version its reference
 
 - **WHEN** a hydrated file's SHA-256 differs from the sidecar
 - **THEN** the request fails with `MEDIA_ORIGINAL_UNVERIFIED`, the temporary file is removed and nothing appears at the original's path
+
+#### Scenario: A large original hydrates in one copy
+
+- **WHEN** a 5 GiB evicted original hydrates
+- **THEN** volume use rises by about 5 GiB at most while it hydrates, and the hydration reserves 5 GiB of the hydration capacity
 
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
@@ -370,7 +380,7 @@ No age or time cutoff SHALL decide destruction. cellctl SHALL delete the manifes
 
 ### Requirement: Owners retrieve originals only with their own authority
 
-The gateway SHALL serve a download route for originals that works only with the owner's signed-in session. The route SHALL forward to the cell, which SHALL hydrate an evicted original if needed and stream it with byte-range support. A tool result MAY carry this route's link, because the link grants nothing without the session. A tool result SHALL NOT carry a bearer link, a presigned URL or ciphertext metadata. `exomem cloud download` SHALL fetch an original over OAuth, stream it to a temporary file, verify size and SHA-256 against the record, and rename it into place only after both match; any failure SHALL delete the partial file.
+The gateway SHALL serve a download route for originals that works only with the owner's signed-in session. The route SHALL forward to the cell, which SHALL hydrate an evicted original if needed and stream it with byte-range support. The cell SHALL stream the original from its copy on the volume and SHALL NOT write another full copy for the download. It SHALL hash that copy before the first byte, and stop the response when the file changes before the last byte. A tool result MAY carry this route's link, because the link grants nothing without the session. A tool result SHALL NOT carry a bearer link, a presigned URL or ciphertext metadata. `exomem cloud download` SHALL fetch an original over OAuth, stream it to a temporary file, verify size and SHA-256 against the record, and rename it into place only after both match; any failure SHALL delete the partial file.
 
 #### Scenario: A link is opened without a session
 
@@ -381,6 +391,11 @@ The gateway SHALL serve a download route for originals that works only with the 
 
 - **WHEN** a signed-in owner plays an evicted recording and seeks to a later timestamp
 - **THEN** the cell answers the byte-range request after hydration
+
+#### Scenario: A download writes no second copy
+
+- **WHEN** an owner downloads a 5 GiB evicted original
+- **THEN** volume use rises by the hydrated copy alone, and the route serves that copy
 
 #### Scenario: A local agent downloads an original
 
