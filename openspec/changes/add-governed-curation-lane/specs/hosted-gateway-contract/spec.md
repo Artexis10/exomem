@@ -1,21 +1,20 @@
 ## ADDED Requirements
 
-### Requirement: Remote maintenance refusal remains closed around curation
+### Requirement: Remote curation stays bound to its reviewed plan
 
-For an active surface whose resolved schema declares
-curation, the request-bound remote
-maintenance gate SHALL admit write execution only for `structured-files` and
-`curation`. `fix`, `reconcile`, `backfill-ids`, and every future unknown write
-mode SHALL retain the operator-only refusal before manager dispatch. Within
+For an active surface whose resolved schema declares curation, the
+request-bound remote maintenance gate SHALL admit curation writes. Within
 curation, only an exact immutable reviewed plan may reach a content leaf; the
 mode MUST NOT become a wrapper for ordinary maintenance or an arbitrary
 command. Surfaces whose resolved schema omits curation MUST NOT receive this
-exception.
+exception. The `remote-maintenance-admission` capability defines remote
+admission for every other maintenance mode.
 
-#### Scenario: Remote reconcile remains refused
+#### Scenario: Curation does not carry other maintenance
 
-- **WHEN** a remote caller invokes write-mode reconcile after curation ships
-- **THEN** it still receives `MAINTENANCE_REQUIRES_CLI` before manager dispatch
+- **WHEN** a remote caller asks curation to run a step that is not part of its
+  exact reviewed plan, such as an ordinary repair or reconcile
+- **THEN** the cell refuses before any content leaf executes
 
 #### Scenario: Remote curation omits its reviewed identity
 
