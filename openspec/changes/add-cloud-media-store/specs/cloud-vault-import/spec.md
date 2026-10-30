@@ -8,11 +8,14 @@ The Cloud CLI SHALL split a folder larger than the cell's window budget into win
 
 Windows SHALL carry offloadable artifacts first, resident artifacts next and text last, each in path order across the series. The CLI SHALL size each window within the reachable budget that the cell reports. While the budget does not cover the next window, each status call SHALL carry the series ID and that window's bytes as the demand. The CLI SHALL renew the demand at least every 5 minutes while it waits. The CLI SHALL wait and report in these cases:
 - the budget is unknown;
-- the reachable budget covers the next window, and the budget does not cover it yet.
+- the reachable budget covers the next window, and the budget does not cover it yet;
+- the reachable budget cannot hold the next member, and the reachable budget plus the job-pinned bytes can.
 
 It SHALL stop and report, without waiting, in these cases:
 - the cell reports media usage unknown or the allowance exhausted;
-- the reachable budget cannot hold even the next member. This stop SHALL say "band too small" and give the budget, the reachable budget and that member's bytes.
+- the reachable budget plus the job-pinned bytes cannot hold even the next member. This stop SHALL say "band too small" and give the budget, the reachable budget, the job-pinned bytes and that member's bytes.
+
+Every stop SHALL say that the members not yet sent are not in Exomem, and that the person must keep them.
 
 #### Scenario: A folder of three times the budget lands without growth
 
@@ -54,6 +57,7 @@ It SHALL stop and report, without waiting, in these cases:
 
 - **WHEN** the cell reports the media allowance exhausted after five windows have landed
 - **THEN** the CLI stops, reports the allowance and the members not yet sent, and creates no further window
+- **AND** it says that those members are not in Exomem, and that the person must keep them
 
 #### Scenario: Media usage is unknown
 
@@ -62,8 +66,15 @@ It SHALL stop and report, without waiting, in these cases:
 
 #### Scenario: The band is too small
 
-- **WHEN** the cell reports a reachable budget of 0.5 GiB, and the next member is a 0.8 GiB recording
-- **THEN** the CLI stops with "band too small" and reports the budget, the reachable budget and the recording's bytes
+- **WHEN** the cell reports a reachable budget of 0.5 GiB and no job-pinned bytes, and the next member is a 0.8 GiB recording
+- **THEN** the CLI stops with "band too small" and reports the budget, the reachable budget, the job-pinned bytes and the recording's bytes
+
+#### Scenario: Long jobs pin the band
+
+- **WHEN** the cell reports a reachable budget of 0.5 GiB and 6 GiB of job-pinned bytes
+- **AND** the next member is a 0.8 GiB recording
+- **THEN** the CLI waits and reports that claimed jobs keep originals on the volume
+- **AND** it plans the next window once the reachable budget holds the recording
 
 ### Requirement: An older cell gets one import
 
@@ -142,9 +153,11 @@ One module SHALL hold the rule that classifies a member as text, an offloadable 
 The Adoption Studio status SHALL report these figures. Each figure that the cell cannot read SHALL be unknown with a reason, never zero.
 - The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity, `max_hydrations` × the largest offloadable file, and one offload temporary file of up to the object bound.
 - The reachable budget: the window budget once the agent files every landed window, pending offloads finish and eviction frees every eligible original. It SHALL leave out an original that an owner read within the minimum idle age.
+- The job-pinned bytes: the offloadable originals that claimed, unfinished media jobs keep on the volume, other than those that the worker hydrated for them.
 - The inputs of the classification rule: the object bound, the hydration capacity and the inline text limit, and the largest offloadable file that they allow.
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
+- For each landed window, the count and bytes of its unfiled members. An unfiled member is a manifest member that no adoption run has filed. A window with no run SHALL count every member.
 - For each landed window, the count and bytes of its residual, and its member paths page by page.
 - For each discarded window with a residual record, the record's members as "discarded, not filed", with path, bytes and code, page by page.
 
@@ -161,6 +174,11 @@ A status call MAY carry a series ID and the next window's bytes. The cell SHALL 
 - **WHEN** the window budget is 1 GiB, 6 GiB of eligible originals are cached, and landed windows hold 2 GiB of unfiled offloadable members
 - **AND** an owner read another 1 GiB of originals within the minimum idle age
 - **THEN** the status reports a reachable budget of 9 GiB
+
+#### Scenario: A landed window with no run
+
+- **WHEN** a window has landed with 40 members, and no adoption run has started on its stage
+- **THEN** the status reports 40 unfiled members for that window, with their bytes
 
 #### Scenario: A status call records a demand
 
@@ -189,7 +207,7 @@ For an `adopt` import, the import Job SHALL record each member's identity in the
 
 ### Requirement: A discard keeps a residual record
 
-When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. The record SHALL stay until a resend or an acknowledgement clears its members.
+When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The record SHALL stay until a resend or an acknowledgement clears its members.
 
 #### Scenario: A discard after a path conflict
 
@@ -201,6 +219,11 @@ When the discard Job discards a recorded stage, it SHALL keep a residual record 
 
 - **WHEN** a discard stops after it rewrote the receipt and before it removed the stage, and the person discards the window again
 - **THEN** the receipt still holds the residual record from the first attempt
+
+#### Scenario: The receipt cannot be read
+
+- **WHEN** the person discards a window whose stage exists, and its receipt cannot be read
+- **THEN** the discard refuses with `IMPORT_RECEIPT_UNREADABLE`, and the stage stays
 
 ### Requirement: Each window carries the series file
 
@@ -240,9 +263,9 @@ When the person asks to resend a series' residual, the CLI SHALL send the residu
 
 ### Requirement: The CLI tells the person to keep the source
 
-When the last window lands, the CLI SHALL report that the upload is done and that filing continues. It SHALL tell the person to keep the source folder until the cell reports no residual and no residual record for any window.
+When the last window lands, the CLI SHALL report that the upload is done and that filing continues. It SHALL tell the person to keep the source folder while the cell reports an unfiled member in any landed window or any residual record.
 
 #### Scenario: The last window lands before filing ends
 
 - **WHEN** the last window lands while earlier windows still have unfiled members
-- **THEN** the CLI reports the upload as done, names the windows with a residual, and tells the person to keep the source folder
+- **THEN** the CLI reports the upload as done, names the windows with unfiled members, and tells the person to keep the source folder

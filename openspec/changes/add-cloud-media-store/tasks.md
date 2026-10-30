@@ -91,6 +91,7 @@
     - an offload is claimed before queued transcription;
     - a never-read original is evicted under pressure, and an owner-read one is not;
     - eviction takes never-read originals before owner-read ones, and offload records no read;
+    - among never-read originals, eviction takes those with no pending job first;
     - a demand evicts below the everyday stop point until the budget covers it, and a lapsed demand does not;
     - a demand that the budget plus the eligible bytes cannot cover evicts nothing, and a demand above the reachable budget is ignored;
     - two series keep separate demands, and eviction serves the larger one;
@@ -117,12 +118,14 @@
     - the batch writer never lists the renamed binary as a destination;
     - `import_discard` settles a renamed but uncommitted member first, or refuses and names it;
     - the discard Job keeps a residual record of the unfiled members in the receipt, in the same write that drops the manifest;
-    - a retried discard keeps that record;
+    - a retried discard keeps that record, and a discard writes an empty record when every member was filed;
+    - a discard refuses with `IMPORT_RECEIPT_UNREADABLE` and keeps the stage when it cannot read the receipt;
     - the file watcher and media scans bind no renamed file before replay settles it.
-  - [ ] 5.4.6 Report both budgets, the classification inputs, the remaining allowance, the drain state and each window's residual with its paths in `adoption_studio status`. Report each residual record's members as "discarded, not filed", and add `adoption_studio(action="acknowledge")`. Accept a series ID and the next window's bytes as that series' demand. Verify these with tests:
-    - the budget arithmetic;
+  - [ ] 5.4.6 Report these in `adoption_studio status`: both budgets, the job-pinned bytes, the classification inputs, the remaining allowance, the drain state and each window's residual with its paths. Report each landed window's unfiled members, with or without a run. Report each residual record's members as "discarded, not filed", and add `adoption_studio(action="acknowledge")` with explicit paths. Accept a series ID and the next window's bytes as that series' demand. Verify these with tests:
+    - the budget arithmetic, and job-pinned bytes that leave out originals the worker hydrated;
+    - a landed window with no run reports every member as unfiled;
     - a recorded and renewed demand for each of two series, and an ignored demand above the reachable budget;
-    - a residual record listed until an acknowledgement clears it, for all paths or the named ones;
+    - a residual record listed until an acknowledgement clears the named paths, and an acknowledgement without paths refused;
     - unknown when an input cannot be read, and no budget on a cell without the store.
   - [ ] 5.4.7 Add CLI windows. Verify these with tests against a synthetic API and MCP:
     - three times the budget becomes three or more windows, each within the budget and the published admission limit;
@@ -130,8 +133,10 @@
     - a window that another series' landing no longer fits is not created, because the CLI reads the budget again right before the create;
     - a waiting CLI renews its demand at least every 5 minutes;
     - a window that the reachable budget covers waits and sends its bytes as the demand;
-    - "band too small" stops and reports the budget, the reachable budget and the member's bytes;
+    - "band too small" stops and reports the budget, the reachable budget, the job-pinned bytes and the member's bytes;
+    - a next member that only the job-pinned bytes would make room for waits instead of stopping;
     - "allowance exhausted" and "media usage unknown" stop and report;
+    - every stop says that the members not yet sent are not in Exomem and must be kept;
     - a series whose resident bytes exceed the reachable budget is refused before upload, with its files listed;
     - a source folder with `.exomem-series.json` at its top level is refused before upload;
     - a resend reads the residual records of discarded windows and carries the first series' file;
@@ -141,8 +146,8 @@
     - a refused window is planned again smaller;
     - an older cell gets one import, or a refusal when the folder exceeds its known size;
     - each window carries the series file;
-    - the CLI tells the person to keep the source until no window has a residual or a residual record.
-  - [ ] 5.4.8 Update the tool text, regenerate the surface and plugins, and tell an agent without a shell to give the person the CLI command. Verify: the tool-surface and scaffold-leak tests pass, and descriptions stay within the plugin description limit.
+    - the CLI tells the person to keep the source while any landed window has an unfiled member or any residual record remains.
+  - [ ] 5.4.8 Update the tool text, regenerate the surface and plugins, and tell an agent without a shell to give the person the CLI command. The `acknowledge` text says that acknowledging is the person's decision. Verify: the tool-surface and scaffold-leak tests pass, and descriptions stay within the plugin description limit.
   - [ ] 5.4.9 Take one owner census per offload batch through the existing `usage` parameter, and reuse it across guard releases. First list every writer that can bind a version while the runtime serves. Verify: a test counts one census for a batch of 500 offloads and shows another write between two members. A publication-time reference change is still refused.
   - [ ] 5.4.10 In cellctl, render the growth threshold into the store policy, so the cell reads the one value that cellctl uses. Verify: a manifest test shows the policy's threshold equals cellctl's growth threshold.
   - [ ] 5.4.11 Pass the series file's path list as `whole_scan`. Take a recorded stage's collection root and default label from its series file or manifest. Never list the series file as an item. Verify: a bare name that repeats in a later window stays ambiguous. Two windows of one series get one root and label, and a fully filed stage keeps its root. A resend window with the first series' file gets the same root.

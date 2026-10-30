@@ -123,7 +123,7 @@ Adoption SHALL take the collection root of a recorded stage from its record, not
 
 ### Requirement: The residual tells the person to keep the source
 
-`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While a residual or a residual record is not empty, the tool text SHALL tell the person to keep the source folder. `adoption_studio(action="acknowledge")` with an import ID SHALL clear that window's residual record, or only the paths that it names.
+`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While any landed window has an unfiled member or any residual record remains, the tool text SHALL tell the person to keep the source folder. An unfiled member is a manifest member that no adoption run has filed, so a landed window with no run counts every member. `adoption_studio(action="acknowledge")` SHALL take an import ID and the paths to clear from that window's residual record. It SHALL refuse a call without paths. Its tool text SHALL say that acknowledging is the person's decision.
 
 #### Scenario: A window keeps a residual
 
@@ -141,3 +141,13 @@ Adoption SHALL take the collection root of a recorded stage from its record, not
 
 - **WHEN** the person acknowledges one path of a window's residual record
 - **THEN** the status no longer lists that path, and it still lists the record's other members
+
+#### Scenario: An acknowledgement without paths
+
+- **WHEN** an agent calls `acknowledge` with an import ID and no paths
+- **THEN** the call is refused, and the residual record keeps every member
+
+#### Scenario: A window has landed and no run has started
+
+- **WHEN** a window has landed, and no adoption run has started on its stage
+- **THEN** the status tells the person to keep the source folder, although no residual exists yet
