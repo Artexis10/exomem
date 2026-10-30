@@ -186,7 +186,9 @@ def test_an_owner_is_served_the_earlier_map_stale_until_a_background_pass_rebuil
     assert _topic_titles(stale) == _topic_titles(warm)
     assert stale["map"]["stale"] is True and stale["generation"]["index_stale"] is True
     assert stale["generation"]["index_generation"] == warm["generation"]["index_generation"]
-    assert stale["map"]["generation"] != warm["map"]["generation"]  # the caller can tell it from the fresh one
+    # The same items under the stale flag are the map the caller holds: a write must not resend it.
+    held = _activate(vault, max_chars=8000, continuity=warm["continuity"])
+    assert held["map"]["unchanged"] is True and held["map"]["items"] == [] and held["map"]["stale"] is True
 
     for _ in range(3):  # a pass the activation index took first is not lost: the next stale serve schedules it again
         working_set_runtime.join_builds(vault)
