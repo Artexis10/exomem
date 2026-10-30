@@ -142,6 +142,7 @@ from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import vocabulary_delta as vocabulary_delta_module
 from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
@@ -6796,6 +6797,9 @@ def op_activate_context(
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
                         due_state_module.for_activation(vault_root, packet, purpose=purpose)
+                        # Vocabulary added since this conversation was last told, once per admitted
+                        # digest change and counted inside the packet's own `limit_chars`.
+                        vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:

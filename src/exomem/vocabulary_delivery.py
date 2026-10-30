@@ -19,6 +19,7 @@ from . import (
     mutation_terminal,
     tag_variants,
     topic_carrier_considerations,
+    vocabulary_delta,
     vocabulary_notifications,
     vocabulary_projection,
     vocabulary_recovery,
@@ -152,15 +153,16 @@ def _tag_advisory(vault_root: Path, path: str) -> dict[str, Any] | None:
 def after_commit(vault_root: Path, result: Any) -> Any:
     """Preserve the canonical terminal even if any optional-guidance step fails."""
     guided = _after_commit(vault_root, result)
-    if guided is result:
+    if guided is not result:
         # Early exits (not a committed write, no page path, or an off envelope)
         # carry no tag guidance either.
-        return result
-    leaf = result.get("leaf_result")
-    path = deferred_index._safe_markdown_rel_path(leaf.get("path"))
-    # A tag variant outranks a carrier: the carrier fills the slot only when the tag notice left it free.
-    guided = _with_tag_advisory(guided, _tag_advisory(vault_root, path))
-    return _with_carrier_advisory(vault_root, guided, path)
+        leaf = result.get("leaf_result")
+        path = deferred_index._safe_markdown_rel_path(leaf.get("path"))
+        # A tag variant outranks a carrier: the carrier fills the slot only when the tag notice left it free.
+        guided = _with_tag_advisory(guided, _tag_advisory(vault_root, path))
+        guided = _with_carrier_advisory(vault_root, guided, path)
+    # A registry save writes no page, so the broadcast of new vocabulary has its own, page-free seam.
+    return vocabulary_delta.with_pending(vault_root, guided)
 
 
 def _after_commit(vault_root: Path, result: Any) -> Any:

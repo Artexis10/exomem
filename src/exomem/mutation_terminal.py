@@ -2115,6 +2115,13 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         from .vocabulary_delivery import public_projection
 
         compact.update(public_projection(result))
+    from . import vocabulary_delta
+
+    if vocabulary_delta.PENDING_KEY in result:
+        # Delivery is decided here, where the detail is known: a `legacy` response returned above.
+        delivered = vocabulary_delta.delivered_by(result)
+        if delivered is not None:
+            compact["vocabulary_delta"] = delivered
     if "additive_authority" in result:
         from .vocabulary_receipts import valid_projection
 
