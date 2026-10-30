@@ -95,7 +95,7 @@ The CLI SHALL treat a cell that reports no window budget as an older cell, or as
 Before the first upload, the CLI SHALL refuse a series in each of these cases and list the files concerned:
 - 2 × its text bytes + its resident artifact bytes exceed the reachable budget that the cell reports;
 - its offloadable bytes exceed the remaining media allowance that the cell reports;
-- an offloadable member exceeds the effective file limit that the cell reports (pending operator confirmation). The CLI SHALL list each such member with its size, and give the limit.
+- an offloadable member exceeds the effective file limit that the cell reports. The CLI SHALL list each such member with its size, and give the limit. This refusal was decided on 2026-10-30 under the operator's standing rule for reversible choices; the operator may revert it.
 
 #### Scenario: Resident files do not fit
 
@@ -170,7 +170,7 @@ The Adoption Studio status SHALL report these figures. Each figure that the cell
 - The window budget: growth threshold × volume size − used, less the fixed terms and the text bytes that landed windows have not filed. The fixed terms are the free-space reserve, the hydration capacity and `max_hydrations` × the largest offloadable file.
 - The reachable budget: the window budget once the agent files every landed window, pending offloads finish and eviction frees every eligible original. It SHALL leave out an original that an owner read within the minimum idle age.
 - The job-pinned bytes: the offloadable originals that claimed, unfinished media jobs keep on the volume, the copies that the worker hydrated for them included.
-- The effective file limit (pending operator confirmation): the largest offloadable member that can land now. It is the reachable budget plus the job-pinned bytes, capped by the largest offloadable file.
+- The effective file limit: the largest offloadable member that can land now. It is the reachable budget plus the job-pinned bytes, capped by the largest offloadable file. This figure was decided on 2026-10-30 under the operator's standing rule for reversible choices; the operator may revert it.
 - The inputs of the classification rule: the object bound, the hydration capacity, the volume fraction, the volume size and the inline text limit, and the largest offloadable file that they allow.
 - The remaining media allowance.
 - The drain state: the unfiled bytes of landed windows, the count of pending offloads and the evictable bytes.
