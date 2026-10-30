@@ -61,7 +61,17 @@ class Unchanged:
     """What a same-head re-admission decided on: the published bookkeeping and the replica it names."""
 
     evidence: tuple
-    signature: tuple
+    witness: tuple
+
+
+def replica_witness(root):
+    """The vault replica's full path signature, change time included, or None when it is absent."""
+    from ..vault_portability import _source_signature
+
+    try:
+        return _source_signature(os.lstat(replica.replica_path(root)))
+    except FileNotFoundError:
+        return None
 
 
 def unchanged_replica(session, recorded, local):
@@ -80,7 +90,9 @@ def unchanged_replica(session, recorded, local):
     )
 
     if (recorded is None or local is None or recorded.instance_id != local.instance_id
-            or (recorded.commit_seq, recorded.head_hash) != (local.commit_seq, local.head_hash)):
+            or (recorded.commit_seq, recorded.head_hash) != (local.commit_seq, local.head_hash)
+            # A store that settlement migrates republishes its replica at the new schema.
+            or connection.schema_pending(session.path)):
         return None
     with closing(connection.open_head_reader(session.path)) as reader:
         evidence = replica.published_evidence(legacy_originals.metadata(reader))
@@ -92,13 +104,13 @@ def unchanged_replica(session, recorded, local):
         with os.fdopen(descriptor, "rb") as shared:
             digest = hashlib.file_digest(shared, "sha256").hexdigest()
             after = os.fstat(shared.fileno())
-        if (_source_signature(after) != before
-                or _cross_source_signature(source.lstat()) != _cross_source_signature(after)):
+        found = source.lstat()
+        if _source_signature(after) != before or _cross_source_signature(found) != _cross_source_signature(after):
             return None
     except (OSError, PortabilityError):
         # An absent, replaced or unsafe replica is the full publication path's to judge.
         return None
-    return Unchanged(evidence, _signature(after)) if digest == evidence[1] else None
+    return Unchanged(evidence, _source_signature(found)) if digest == evidence[1] else None
 
 
 @dataclass

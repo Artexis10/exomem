@@ -1339,7 +1339,7 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
     legacy_originals.backfill(writer, lambda: session.require(token))
     if (unchanged is not None
             and replica.published_evidence(legacy_originals.metadata(writer.connection)) == unchanged.evidence
-            and takeover.replica_signature(session.root) == unchanged.signature
+            and takeover.replica_witness(session.root) == unchanged.witness
             and not legacy_originals.needs_replica_copy(session.root, writer.connection)):
         # The replica already carries this head under the stored epoch, which every later
         # grant exceeds; a new epoch would only force a copy no adopter reads (A3). No copy

@@ -117,8 +117,9 @@ def published_evidence(metadata):
             or metadata.get(schema.META_REPLICA_DIVERGENCE) is not None
             or metadata.get(schema.META_ADOPTED_FOREIGN_REPLICA) is not None
             or metadata.get(authority.MARKER_REQUIRED) != "1"
-            or metadata.get(_DIGEST) is None or metadata.get(_PUBLISHED) is None
-            or json.loads(metadata[_PUBLISHED]) != _head(metadata)
+            or metadata.get(_DIGEST) is None
+            # Published heads are written only as ``_json``; a malformed one is the full path's to judge.
+            or metadata.get(_PUBLISHED) != _json(_head(metadata))
             or not _published_metadata_current(metadata)):
         return None
     return (_json(_head(metadata)), metadata[_DIGEST], metadata.get(_EPOCH), metadata.get(_INTENT))

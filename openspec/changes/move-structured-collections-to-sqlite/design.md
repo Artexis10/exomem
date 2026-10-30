@@ -1323,10 +1323,10 @@ Warm checkout validates the held token through the existing coordinator status a
   - Replica at the same `commit_seq` with a different head: `COLLECTION_STORE_DIVERGED` (A4).
 - If **no foreign head was ever recorded**, the new holder never waits. That covers a single-host vault, the same instance re-acquiring after idle release, and every non-multi-host install.
 - **Unchanged re-admission copies nothing.** The same instance re-admits without a new lease epoch or a replica copy when all of these hold:
-  - the coordinator recorded this instance's live head;
+  - the coordinator recorded this instance's live head, and the live store needs no schema migration;
   - the store published that head under its stored epoch, with no pending publication, create intent, divergence or foreign adoption record;
   - the vault replica holds exactly the bytes the store last published.
-  The replica hash runs before the mutation boundary. Under the boundary, settlement compares the publication records and the replica's file signature again; any difference takes the full publication path. Custody, the import-original backfill, the token check under the report lock and the head report still run. The stored epoch is a grant that every later token exceeds, so another host adopts the replica as before. This keeps the routine idle-release cycle from holding the boundary for a whole-replica copy.
+  The replica hash runs before the mutation boundary. Under the boundary, settlement compares the publication records and the replica's file signature, change time included, again; any difference, or a record it cannot read, takes the full publication path. Custody, the import-original backfill, the token check under the report lock and the head report still run. The stored epoch is a grant that every later token exceeds, so another host adopts the replica as before. This keeps the routine idle-release cycle from holding the boundary for a whole-replica copy.
 - **Bounded.** The refusal is re-checked on every replica change (the `_Collections/` watch, A4) and every 10 s. After 15 minutes it also raises attention with the same remedy. Reads and knowledge writes are never blocked.
 
 **Explicit adopt-local.** `exomem collections adopt-local --why "…"` (also `maintain_memory(mode="collections-store-adopt-local")`) is owner-only and preview-first. It continues from the local store deliberately:

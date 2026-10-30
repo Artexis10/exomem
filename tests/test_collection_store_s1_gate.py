@@ -484,13 +484,25 @@ def test_an_unchanged_re_admission_keeps_the_replica_the_next_host_adopts(abc, t
     assert status == {"status": "admitted"} and rows == ["After re-admission", "Canonical"]
 
 
-def test_a_replaced_replica_still_diverges_when_the_store_is_unchanged(abc):
-    """Defect: re-admission trusts its publication records over replica bytes that sync replaced."""
+@pytest.mark.parametrize("after_hash", [False, True], ids=["before-takeover", "between-hash-and-boundary"])
+def test_a_replaced_replica_still_diverges_when_the_store_is_unchanged(abc, monkeypatch, after_hash):
+    """Defect: re-admission trusts its publication records, or bytes it hashed before the boundary,
+    over replica bytes that sync replaced."""
     abc.release()
     older = replica.replica_path(abc.root).read_bytes()
     assert abc.write_c(LATER, "Published after the older copy")["outcome"] == "committed"
     _idle_release(abc)
-    replica.replica_path(abc.root).write_bytes(older)
+    if after_hash:
+        unchanged = takeover.unchanged_replica
+
+        def replaced_after_hashing(*args):
+            found = unchanged(*args)
+            replica.replica_path(abc.root).write_bytes(older)
+            return found
+
+        monkeypatch.setattr(takeover, "unchanged_replica", replaced_after_hashing)
+    else:
+        replica.replica_path(abc.root).write_bytes(older)
     abc.manager.ensure_writer()
     assert abc.open()["status"] == "diverged"
     assert abc.manager.status()["collection_store"]["status"] == "diverged"
