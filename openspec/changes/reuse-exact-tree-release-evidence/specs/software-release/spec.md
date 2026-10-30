@@ -10,8 +10,8 @@ Release reviewed source with reusable test evidence and independently qualified 
 
 CI SHALL run the partial tier for each pull request, draft or ready, on the supported floor Python (`requires-python`). Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
 
-#### Scenario: A pull request becomes ready
-- **WHEN** a source PR is opened, updated, or marked ready for review
+#### Scenario: A pull request is opened or updated
+- **WHEN** a source PR, draft or ready, is opened, reopened or updated
 - **THEN** its partial jobs run on the supported floor Python and no Full-only job runs
 - **AND** its run issues no Full receipt
 
