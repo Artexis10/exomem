@@ -1293,10 +1293,6 @@ def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str
     return rendered, identity
 
 
-#: Most pages one backfill job commits under a single hold of the mutation boundary.
-BACKFILL_CHUNK_PAGES = 100
-
-
 def _pages_without_id(
     vault_root: Path, skipped: list[dict[str, str]]
 ) -> Iterator[tuple[str, Path, str, Any]]:
@@ -1404,10 +1400,10 @@ def _rebuild_reference_index(vault_root: Path) -> None:
 def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
     """Add IDs to the pages of one reviewed plan, in chunks that each verify and commit alone.
 
-    Planning reads every page before any hold. Each chunk then takes the mutation
-    boundary itself, re-reads its pages under it and skips any that changed since
-    the plan, so a chunk's hold lasts for 100 pages and a concurrent edit is never
-    overwritten. A stop between chunks keeps the chunks that committed.
+    Planning reads every page before any hold. `maintenance_jobs.commit_pages` then
+    takes the mutation boundary in short holds, re-reads its pages under each and skips
+    any that changed since the plan, so a concurrent edit is never overwritten. A stop
+    between chunks keeps the chunks that committed.
     """
     from . import maintenance_jobs
 
@@ -1423,8 +1419,6 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
     identity_issues = scan_issues(root)
     _refuse_duplicates(identity_issues)
     assigned: dict[str, str] = {}
-    changed: list[str] = []
-    processed = 0
 
     def add_id(rel: str, raw: str) -> str:
         updated, identity = add_id_to_markdown(raw)
@@ -1432,18 +1426,10 @@ def _backfill_planned(vault_root: Path, plan_id: str) -> dict:
         return updated
 
     try:
-        for start in range(0, len(pending), BACKFILL_CHUNK_PAGES):
-            maintenance_jobs.checkpoint("committing", done=processed, total=len(pending))
-            kept, moved = maintenance_jobs.commit_chunk(
-                root,
-                "backfill_ids_chunk",
-                pending[start : start + BACKFILL_CHUNK_PAGES],
-                add_id,
-                extra=lambda committed: {"minted": {rel: assigned[rel] for rel in committed}},
-            )
-            changed.extend(moved)
-            processed += len(kept) + len(moved)
-        maintenance_jobs.checkpoint("indexing", done=processed, total=len(pending))
+        _, changed = maintenance_jobs.commit_pages(
+            root, "backfill_ids_chunk", pending, add_id, receipt_value=assigned.__getitem__
+        )
+        maintenance_jobs.checkpoint("indexing", done=len(pending), total=len(pending))
     except BaseException:
         if assigned:
             # The stop is what the job reports; the index still learns of the chunks that committed.

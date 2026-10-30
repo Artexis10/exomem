@@ -32,6 +32,7 @@ from exomem import (
     commands,
     embeddings,
     maintenance_jobs,
+    query_data,
     writer_lease,
 )
 from exomem import server as server_module
@@ -81,6 +82,18 @@ async def _start(client, plan_id: str, why: str = "give pages their identity") -
 
 async def _status(client, run_id: str) -> dict:
     return await _call(client, "check_memory", {"kind": "maintenance-job", "run_id": run_id})
+
+
+async def _receipt_entries(client, run_id: str) -> list[dict]:
+    """Every entry of a finished job's receipt, read page by page from the status read's `next_cursor`."""
+    status = await _status(client, run_id)
+    cursor = status["receipt"]["next_cursor"]
+    entries: list[dict] = []
+    while cursor is not None:
+        page = await _call(client, "check_memory", {"kind": "maintenance-job", "run_id": run_id, "cursor": cursor})
+        entries.extend(page["entries"])
+        cursor = page["next_cursor"]
+    return entries
 
 
 async def _list(client) -> dict:
@@ -149,10 +162,10 @@ def test_remote_backfill_assigns_exactly_the_previewed_pages(server, vault) -> N
         preview = await _preview(client)
         handle = await _start(client, preview["plan_id"])
         final = await _until_terminal(client, handle["run_id"])
-        return preview, handle, final
+        return preview, handle, final, await _receipt_entries(client, handle["run_id"])
 
     before = _page_ids(vault)
-    preview, handle, final = _session(server, scenario)
+    preview, handle, final, entries = _session(server, scenario)
     after = _page_ids(vault)
 
     assert handle["state"] == "running"
@@ -161,11 +174,135 @@ def test_remote_backfill_assigns_exactly_the_previewed_pages(server, vault) -> N
     previewed = set(preview["would_update"])
     assert all(before[path] is None and after[path] is not None for path in previewed)
     assert {p: i for p, i in after.items() if p not in previewed} == {p: i for p, i in before.items() if p not in previewed}
-    minted = {path: ref for chunk in final["receipt"]["chunks"] for path, ref in chunk["minted"].items()}
+    assert {entry["kind"] for entry in entries} == {"committed"}
+    minted = {entry["path"]: entry["value"] for entry in entries}
     assert set(minted) == previewed
     assert {path: f"exomem://memory/{after[path]}" for path in previewed} == minted
     assert final["progress"]["done"] == final["progress"]["total"] == len(previewed)
     assert final["committed"] == len(previewed)
+
+
+def test_a_finished_job_reads_as_totals_and_its_paths_come_page_by_page_under_the_response_bound(
+    server, vault, monkeypatch
+) -> None:
+    # A small bound makes the fixture vault's few pages span several receipt pages.
+    monkeypatch.setattr(query_data, "MAX_RESPONSE_BYTES", 600)
+
+    async def scenario(client):
+        preview = await _preview(client)
+        handle = await _start(client, preview["plan_id"])
+        final = await _until_terminal(client, handle["run_id"])
+        pages, cursor = [], final["receipt"]["next_cursor"]
+        while cursor is not None:
+            pages.append(
+                await _call(client, "check_memory", {"kind": "maintenance-job", "run_id": handle["run_id"], "cursor": cursor})
+            )
+            cursor = pages[-1]["next_cursor"]
+        return preview, final, pages
+
+    preview, final, pages = _session(server, scenario)
+
+    previewed = set(preview["would_update"])
+    assert final["committed"] == len(previewed)
+    assert not any(path in json.dumps(final) for path in previewed)
+    assert len(pages) >= 2
+    assert all(len(json.dumps(page)) <= 600 for page in pages)
+    assert {entry["path"] for page in pages for entry in page["entries"]} == previewed
+
+
+def test_a_write_that_fails_inside_a_batch_leaves_that_batch_outcome_unknown_in_the_receipt(
+    server, vault, monkeypatch
+) -> None:
+    def disk_gone(*_args, **_kwargs):
+        raise RuntimeError("the disk went away")
+
+    monkeypatch.setattr(maintenance_jobs, "BATCH_PAGES", 2)
+    monkeypatch.setattr(vault_module, "batch_atomic_write", disk_gone)
+
+    async def scenario(client):
+        preview = await _preview(client)
+        handle = await _start(client, preview["plan_id"])
+        final = await _until_terminal(client, handle["run_id"])
+        return preview, final, await _receipt_entries(client, handle["run_id"])
+
+    preview, final, entries = _session(server, scenario)
+
+    assert final["state"] == "failed"
+    assert final["receipt"]["outcome_unknown"] == 2 == len(entries)
+    assert {entry["kind"] for entry in entries} == {"outcome_unknown"}
+    assert {entry["path"] for entry in entries} <= set(preview["would_update"])
+
+
+def _plain_pages(vault: Path, count: int) -> list[tuple[str, Path, str]]:
+    """`count` pages as `commit_pages` takes them: `(vault-relative path, file, content hash)`."""
+    pages = []
+    for index in range(count):
+        path = vault / "Knowledge Base" / "Notes" / f"hold-{index}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntype: insight\n---\n# Hold {index}\n", encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        pages.append((path.relative_to(vault).as_posix(), path, vault_module.content_hash(text)))
+    return pages
+
+
+def test_a_job_lets_a_writer_in_after_the_page_it_is_writing_instead_of_after_its_whole_chunk(
+    server, vault, monkeypatch
+) -> None:
+    # Only a waiting writer ends a hold here: the time budget is out of reach.
+    monkeypatch.setattr(maintenance_jobs, "HOLD_SECONDS", 3600.0)
+    monkeypatch.setattr(maintenance_jobs, "BATCH_PAGES", 1)
+    pages = _plain_pages(vault, 4)
+    boundaries, rewritten, entered = [], [], []
+    real_hold = maintenance_jobs.chunk_hold
+
+    @contextmanager
+    def watched(*args, **kwargs):
+        with real_hold(*args, **kwargs) as boundary:
+            boundaries.append(boundary)
+            yield boundary
+
+    monkeypatch.setattr(maintenance_jobs, "chunk_hold", watched)
+    writer_queued = threading.Event()
+
+    def rewrite(rel: str, text: str) -> str:
+        rewritten.append(rel)
+        if len(rewritten) == 1:  # the first page is under the hold: a writer now queues for the boundary
+            assert writer_queued.wait(_DEADLINE_SECONDS)
+        return text + "\nedited\n"
+
+    def other_writer() -> None:
+        with writer_lease.get_manager().mutation_guard(vault, request_id="other-writer", operation="edit"):
+            entered.append(len(rewritten))
+
+    job = threading.Thread(target=lambda: maintenance_jobs.commit_pages(vault, "test_pages", pages, rewrite))
+    writer = threading.Thread(target=other_writer)
+    job.start()
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    while not boundaries:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    writer.start()
+    while boundaries[0].waiter_count() == 0:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    writer_queued.set()
+    job.join(_DEADLINE_SECONDS)
+    writer.join(_DEADLINE_SECONDS)
+
+    assert entered == [1]
+    assert len(rewritten) == len(pages)
+
+
+def test_a_job_whose_time_budget_is_spent_still_writes_a_page_every_hold(server, vault, monkeypatch) -> None:
+    monkeypatch.setattr(maintenance_jobs, "HOLD_SECONDS", 0.0)
+    monkeypatch.setattr(maintenance_jobs, "BATCH_PAGES", 1)
+    pages = _plain_pages(vault, 3)
+
+    committed, skipped = maintenance_jobs.commit_pages(vault, "test_pages", pages, lambda rel, text: text + "\nedited\n")
+
+    assert committed == [rel for rel, _, _ in pages]
+    assert skipped == []
+    assert all(path.read_text(encoding="utf-8").endswith("edited\n") for _, path, _ in pages)
 
 
 def test_start_without_plan_and_reason_is_refused_and_leaves_no_job(server, vault) -> None:
@@ -282,7 +419,8 @@ def test_cancel_before_the_first_chunk_ends_the_job_cancelled_with_nothing_writt
     assert cancel["cancel_requested"] is True
     assert final["state"] == "cancelled"
     assert final["committed"] == 0
-    assert final["receipt"]["chunks"] == []
+    assert final["receipt"]["chunks"] == 0
+    assert final["receipt"]["next_cursor"] is None
     assert _page_ids(vault) == before
 
 
@@ -299,7 +437,8 @@ def test_a_service_stopping_ends_a_running_job_interrupted_with_nothing_written(
 
     assert final["state"] == "interrupted"
     assert final["error_code"] == "SERVICE_STOPPING"
-    assert final["receipt"]["chunks"] == []
+    assert final["receipt"]["chunks"] == 0
+    assert final["receipt"]["next_cursor"] is None
     assert _page_ids(vault) == before
 
 
@@ -483,26 +622,26 @@ def test_remote_fix_writes_what_the_local_command_writes_and_names_every_path(se
     async def scenario(client):
         preview = await _fix_preview(client)
         handle = await _fix_start(client, preview["plan_id"])
-        return preview, handle, await _until_terminal(client, handle["run_id"])
+        final = await _until_terminal(client, handle["run_id"])
+        return preview, handle, final, await _receipt_entries(client, handle["run_id"])
 
-    preview, handle, final = _session(server, scenario)
+    preview, handle, final, entries = _session(server, scenario)
     local = commands.op_audit_fix(twin)
 
     assert {row["path"] for row in preview["fixed"]} >= set(_FIXED_PAGES)
     assert handle["plan_id"] == preview["plan_id"] == local["plan_id"]
     assert final["state"] == "completed"
     assert _knowledge_base_bytes(vault) == _knowledge_base_bytes(twin)
-    chunks = final["receipt"]["chunks"]
-    assert {path for chunk in chunks for path in chunk.get("paths", []) if chunk.get("index_refresh") is None} == set(
-        _FIXED_PAGES
-    )
-    [refresh] = [chunk for chunk in chunks if chunk.get("index_refresh") == "committed"]
-    assert "Knowledge Base/index.md" in refresh["paths"]
+    # The index refresh commits last, in a chunk of its own after the page chunks.
+    last_chunk = max(entry["chunk"] for entry in entries)
+    refreshed = {entry["path"] for entry in entries if entry["chunk"] == last_chunk}
+    assert {entry["path"] for entry in entries if entry["chunk"] != last_chunk} == set(_FIXED_PAGES)
+    assert "Knowledge Base/index.md" in refreshed
     assert "- Sources: 4 (articles: 2, books: 1, sessions: 1)" in (vault / "Knowledge Base" / "index.md").read_text(
         encoding="utf-8"
     )
-    assert final["committed"] == len(_FIXED_PAGES) + len(refresh["paths"])
-    assert chunks[-1]["summary"]["fixed"] == preview["summary"]["fixed"]
+    assert final["committed"] == len(_FIXED_PAGES) + len(refreshed)
+    assert final["receipt"]["notes"]["summary"]["fixed"] == preview["summary"]["fixed"]
 
 
 def test_a_page_edited_after_the_fix_preview_stops_the_job_with_nothing_written(server, vault) -> None:
@@ -522,7 +661,7 @@ def test_a_page_edited_after_the_fix_preview_stops_the_job_with_nothing_written(
     assert final["error_code"] == "STALE_MAINTENANCE_PLAN"
     assert final["receipt"]["error"]["details"]["plan_id"] != preview["plan_id"]
     assert final["committed"] == 0
-    assert final["receipt"]["chunks"] == []
+    assert final["receipt"]["chunks"] == 0
     assert _knowledge_base_bytes(vault) == unchanged
 
 
@@ -540,7 +679,7 @@ def test_a_failed_embedding_rebuild_is_reported_in_the_receipt(server, vault, mo
     final = _session(server, scenario)
 
     assert final["state"] == "completed"
-    summary = final["receipt"]["chunks"][-1]["summary"]
+    summary = final["receipt"]["notes"]["summary"]
     assert "the encoder is down" in summary["embeddings_error"]
     assert "embeddings_chunks" not in summary
 
@@ -603,7 +742,7 @@ def test_remote_reconcile_heals_the_drift_and_removes_the_orphan_the_preview_nam
     assert final["state"] == "completed"
     assert not (vault / _ORPHAN_FRAMES).exists()
     assert _COUNT_ROW in (vault / "Knowledge Base" / "index.md").read_text(encoding="utf-8")
-    summary = final["receipt"]["chunks"][-1]["summary"]
+    summary = final["receipt"]["notes"]["summary"]
     assert summary["plan_id"] == preview["plan_id"]
     assert summary["frame_orphans_removed"] == 1
     assert summary["indexes_updated"] == len(preview["indexes_updated"]) >= 1

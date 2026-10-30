@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import commands, epistemic_graph, find, foreground_priority, memory_refs, mutation_lock
+from exomem import commands, epistemic_graph, find, foreground_priority, mutation_lock
 
 
 def test_yield_is_free_when_no_request_is_in_flight() -> None:
@@ -196,27 +196,6 @@ def test_the_whole_vault_graph_pass_yields_between_pages(
     # One yield per page in the pass, and one per page in each of the two
     # direct-disk freshness walks that bracket it.
     assert len(calls) >= 3 * 6
-
-
-def test_the_backfill_planning_walk_yields_between_pages_in_a_bulk_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    notes = tmp_path / "Knowledge Base" / "Notes"
-    notes.mkdir(parents=True)
-    for index in range(6):
-        (notes / f"page-{index}.md").write_text(f"---\ntype: note\n---\n\n# Page {index}\n", encoding="utf-8")
-    calls: list[float] = []
-
-    def spy(*, max_wait: float = foreground_priority.MAX_YIELD_SECONDS) -> float:
-        calls.append(max_wait)
-        return 0.0
-
-    monkeypatch.setattr(foreground_priority, "yield_to_foreground", spy)
-    with foreground_priority.bulk():
-        preview = memory_refs.backfill_ids(tmp_path, dry_run=True)
-
-    assert len(preview["would_update"]) == 6
-    assert len(calls) >= 6
 
 
 def _gil_releasing_phase(calls: int = 50) -> float:

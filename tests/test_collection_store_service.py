@@ -453,11 +453,14 @@ def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote
             return call(root, "maintain_memory", **arguments)
 
     _published(SimpleNamespace(meta=lambda: store_meta(root)))
+    path = replica.replica_path(root)
+    path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
+    _until(lambda: schema.META_REPLICA_DIVERGENCE in store_meta(root))
     preview = remote(mode="collections-store-adopt-local")
     applied = remote(mode="collections-store-adopt-local", apply=True, plan_id=preview["plan_id"],
                      why="adopt over the remote surface")
 
-    assert applied["status"] == "in_sync"
+    assert (preview["step"], applied["status"]) == ("adopt-local", "adopted"), applied.get("reason")
     refused(lambda: remote(mode="collections-store-export", apply=True, plan_id="reviewed", why="export"),
             "MAINTENANCE_REQUIRES_CLI")
 

@@ -793,7 +793,7 @@ def reconcile(
     if report._graph_reconcile_registered is not None or report._graph_rebuild_handoff is not None:
         # A registered graph flight keeps running after the job ends or stops, so the receipt says
         # the graph is not done yet, whatever `graph_status` read at this instant.
-        maintenance_jobs.record_chunk(detail={"graph": "pending"})
+        maintenance_jobs.note(graph="pending")
 
     # ---- 2d. CLIP + scene-frame orphan healing ----
     # Heals vaults that already lost content through the pre-fix gap (a media
@@ -901,7 +901,7 @@ def reconcile(
     report.receipt_reconcile = receipts.reconcile(vault_root, dry_run=dry_run)
 
     # A job's receipt reads the counts of what this run did; the full report stays the dispatcher's result.
-    maintenance_jobs.record_chunk(detail={"summary": _job_summary(report)})
+    maintenance_jobs.note(summary=_job_summary(report))
     return report
 
 

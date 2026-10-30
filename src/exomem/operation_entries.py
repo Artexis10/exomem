@@ -775,7 +775,7 @@ def _maintenance_rows():
             rows.append(_row(action, "check_memory" if read else "repair_memory",
                              fields if read else (field, *write_extra, "plan_id", "why"),
                              constraints=(_literal(field, value, value is default),), destructive=not read))
-    rows.append(_row("maintenance-job", "check_memory", ("run_id",)))
+    rows.append(_row("maintenance-job", "check_memory", ("run_id", "cursor")))
     rows.append(_row("maintenance-job-cancel", "repair_memory", ("run_id", "why"), ("run_id", "why")))
     for action in ("structured-files", "tag-variants", "collections-store-adopt-local", "collections-store-export"):
         fields = ("collection", "apply", "plan_id", "source_snapshot", "why", "exclude_groups", "acknowledge_skipped")

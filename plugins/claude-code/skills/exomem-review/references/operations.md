@@ -813,7 +813,7 @@ migration.
 2. Review the complete proposal and resolve duplicate or malformed IDs first.
 3. After explicit confirmation, repeat with `dry_run=false`. A remote client sends the
    preview's `plan_id` and a `why` with `repair_memory`, follows the returned `run_id` with
-   `maintenance-job`, and reads the minted IDs in the receipt. The write preserves all
+   `maintenance-job`, and reads the minted IDs page by page through the receipt's `next_cursor`. The write preserves all
    existing valid IDs; a page that changed after the preview is skipped and reported.
 
 ### Writes performed

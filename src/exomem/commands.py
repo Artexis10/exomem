@@ -10919,13 +10919,15 @@ def op_maintain_memory(
     vocabulary_fingerprint: str | None = None,
     exclude_groups: list[str] | None = None,
     acknowledge_skipped: bool | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
     A remote fix, backfill-ids or reconcile write runs as a maintenance job: preview with
     dry_run=true, then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
-    maintenance-job reads one job's state and receipt (run_id) or lists them;
+    maintenance-job reads one job's state and receipt (run_id) or lists them; the receipt's
+    next_cursor, passed as cursor, reads the written paths page by page;
     maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
     writes for its run. A remote collections-store-export apply returns
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
@@ -10960,6 +10962,7 @@ def op_maintain_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
         acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
+        cursor: A next_cursor of a maintenance-job receipt.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10971,6 +10974,8 @@ def op_maintain_memory(
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
         raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
+    if cursor is not None and (mode != "maintenance-job" or run_id is None):
+        raise ValueError("INVALID_ARGUMENTS: cursor applies only to maintenance-job with a run_id")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -11201,7 +11206,7 @@ def op_maintain_memory(
             return maintenance_jobs_module.request_cancel(vault_root, run_id, why)
         if run_id is None:
             return maintenance_jobs_module.job_list(vault_root)
-        return maintenance_jobs_module.job_status(vault_root, run_id)
+        return maintenance_jobs_module.job_status(vault_root, run_id, cursor)
     if mode == "collections-store":
         if (
             categories is not None

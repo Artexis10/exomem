@@ -5,14 +5,20 @@ A remote ``backfill-ids`` or ``fix`` write (later ``reconcile``) is admitted by
 thread claims one job row, starts a daemon thread and returns a handle at once.
 The thread dispatches the real leaf through ``invoke_command`` as the starting
 principal on the internal ``maintenance-job`` surface, so every ordinary check
-still applies. The leaf commits in chunks, each under its own short mutation
-boundary hold (``chunk_hold``), and reports through ``checkpoint`` and
-``record_chunk``. A request thread never holds the boundary for a job's work.
+still applies. The leaf commits its pages in chunks (``commit_pages``), each
+under its own short mutation boundary hold, and reports through ``checkpoint``,
+``note`` and ``record_paths``. A request thread never holds the boundary for a
+job's work.
 
 State lives in ``.maintenance-jobs.sqlite`` in the vault's state directory. A
 job belongs to the process that runs it (the idempotency owner identity). A row
 whose owner is gone reads as ``interrupted``; the next claim and the service
 activation record it.
+
+The receipt of a finished job is bounded however large the vault is: a status
+read returns the totals, the chunk count, the leaf's small notes and a reduced
+leaf report. The paths, with the IDs a job minted, are read page by page
+(``job_status`` with a ``cursor``), each page at most half of the 64 KiB response bound.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -72,6 +78,18 @@ RETAIN_SECONDS = 30 * 24 * 3600
 RETAIN_NEWEST = 200
 #: Longest a chunk waits for a busy mutation boundary before the job fails.
 BUSY_BUDGET_SECONDS = 600.0
+#: Longest one chunk holds the mutation boundary before it lets a waiting writer in. A foreground
+#: writer waits ``EXOMEM_MUTATION_TIMEOUT`` (5 s by default) for the boundary, so about one second
+#: leaves it a wide margin. A chunk always writes at least one batch, so a job always progresses.
+HOLD_SECONDS = 1.0
+#: Most pages one chunk writes: the contract bounds a chunk by pages as well as by time.
+CHUNK_PAGES = 100
+#: Pages one atomic write commits inside a hold. A batch costs a fixed index and graph fan-out plus
+#: a per-page share (about 0.5 s plus 0.1 s per page on a development host), so four pages keep one
+#: batch close to ``HOLD_SECONDS``: the hold cannot end between the pages of a batch.
+BATCH_PAGES = 4
+#: Largest field of a leaf report that the receipt keeps; a larger one is reduced to its size.
+RESULT_FIELD_BYTES = 1024
 #: Longest service shutdown waits for a job to reach its next checkpoint.
 SHUTDOWN_JOIN_SECONDS = 5.0
 
@@ -136,6 +154,19 @@ def _store(vault_root: Path, *, create: bool) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+@contextmanager
+def _write(vault_root: Path) -> Iterator[sqlite3.Connection]:
+    """One write transaction on the job store: committed on a clean exit, rolled back on any exception."""
+    with _store(vault_root, create=True) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+
 def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Connection:
     if create:
         retained.parent.mkdir(parents=True, exist_ok=True)
@@ -156,15 +187,16 @@ def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Conne
                 "flags TEXT NOT NULL, plan_id TEXT NOT NULL, why TEXT NOT NULL, surface TEXT NOT NULL, "
                 "audience TEXT NOT NULL, owner TEXT NOT NULL, state TEXT NOT NULL, phase TEXT, "
                 "done INTEGER NOT NULL DEFAULT 0, total INTEGER, cancel_requested INTEGER NOT NULL DEFAULT 0, "
-                "cancel_why TEXT, started_at REAL NOT NULL, ended_at REAL, error_code TEXT, outcome TEXT)"
+                "cancel_why TEXT, started_at REAL NOT NULL, ended_at REAL, error_code TEXT, notes TEXT, outcome TEXT)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, started_at)")
+            # One row per page a job wrote or tried to write, in the order the job reached it.
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS chunks ("
-                "run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, committed INTEGER NOT NULL, "
-                "skipped_changed INTEGER NOT NULL, outcome_unknown INTEGER NOT NULL, detail TEXT, "
-                "PRIMARY KEY (run_id, ordinal))"
+                "CREATE TABLE IF NOT EXISTS entries ("
+                "seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, chunk INTEGER NOT NULL, "
+                "kind TEXT NOT NULL, path TEXT NOT NULL, value TEXT)"
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS entries_run ON entries(run_id, seq)")
             conn.commit()
         reserved_paths._publish_sqlite_owner_family(root, path, _STORE_ID, conn)
     except BaseException:
@@ -324,20 +356,39 @@ def narrows_boundary(kwargs: Mapping[str, Any], surface: str | None) -> bool:
 
 # --------------------------------------------------------------------------- views
 
+#: What an entry of a job's receipt says about its page. ``PENDING`` is a write that was
+#: about to start: it reads as ``outcome_unknown`` once the job has ended with it unsettled.
+_COMMITTED = "committed"
+_SKIPPED = "skipped_changed"
+_PENDING = "pending"
+_UNKNOWN = "outcome_unknown"
 
-def _chunks(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM chunks WHERE run_id = ? ORDER BY ordinal", (run_id,)).fetchall()
+
+def _totals(conn: sqlite3.Connection, run_id: str | None = None) -> dict[str, dict[str, int]]:
+    """Entry counts per job and kind, in one query."""
+    rows = conn.execute(
+        "SELECT run_id, kind, COUNT(*) AS n FROM entries "
+        + ("WHERE run_id = ? " if run_id is not None else "")
+        + "GROUP BY run_id, kind",
+        (run_id,) if run_id is not None else (),
+    ).fetchall()
+    totals: dict[str, dict[str, int]] = {}
+    for row in rows:
+        totals.setdefault(row["run_id"], {})[row["kind"]] = row["n"]
+    return totals
 
 
-def _view(conn: sqlite3.Connection, row: sqlite3.Row, *, full: bool) -> dict[str, Any]:
+def _view(
+    conn: sqlite3.Connection, row: sqlite3.Row, counts: Mapping[str, int], *, full: bool
+) -> dict[str, Any]:
     mine, state_dir = _owner()
     state = _effective_state(row, mine, state_dir)
     swept = state != row["state"]
-    chunks = _chunks(conn, row["run_id"])
     totals = {
-        "committed": sum(chunk["committed"] for chunk in chunks),
-        "skipped_changed": sum(chunk["skipped_changed"] for chunk in chunks),
-        "outcome_unknown": sum(chunk["outcome_unknown"] for chunk in chunks),
+        "committed": counts.get(_COMMITTED, 0),
+        "skipped_changed": counts.get(_SKIPPED, 0),
+        # A write that was about to start in a job that is no longer running may have happened.
+        _UNKNOWN: counts.get(_PENDING, 0) if state != RUNNING else 0,
     }
     view: dict[str, Any] = {
         "run_id": row["run_id"],
@@ -359,38 +410,92 @@ def _view(conn: sqlite3.Connection, row: sqlite3.Row, *, full: bool) -> dict[str
     }
     if full and state != RUNNING:
         stored = json.loads(row["outcome"]) if row["outcome"] else {}
+        entries = sum(counts.values())
         view["receipt"] = {
             **totals,
-            "chunks": [
-                {
-                    "ordinal": chunk["ordinal"],
-                    "committed": chunk["committed"],
-                    "skipped_changed": chunk["skipped_changed"],
-                    "outcome_unknown": chunk["outcome_unknown"],
-                    **(json.loads(chunk["detail"]) if chunk["detail"] else {}),
-                }
-                for chunk in chunks
-            ],
+            "chunks": conn.execute(
+                "SELECT COUNT(DISTINCT chunk) FROM entries WHERE run_id = ?", (row["run_id"],)
+            ).fetchone()[0],
+            "notes": json.loads(row["notes"]) if row["notes"] else {},
             "result": stored.get("result"),
             "error": stored.get("error"),
+            # The paths and minted IDs are not in this read; pass this as `cursor` to read them.
+            "next_cursor": "0" if entries else None,
         }
     return view
+
+
+def _job_view(conn: sqlite3.Connection, row: sqlite3.Row, *, full: bool) -> dict[str, Any]:
+    return _view(conn, row, _totals(conn, row["run_id"]).get(row["run_id"], {}), full=full)
 
 
 def _not_found() -> OpError:
     return OpError("NOT_FOUND", "no maintenance job has this run_id", "List jobs with mode maintenance-job.")
 
 
-def job_status(vault_root: Path, run_id: str) -> dict[str, Any]:
+def job_status(vault_root: Path, run_id: str, cursor: str | None = None) -> dict[str, Any]:
+    """One job's state, or with a `cursor` one page of the paths its receipt lists."""
     require_owner(vault_root)
     try:
         with _store(vault_root, create=False) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 raise _not_found()
-            return _view(conn, row, full=True)
+            view = _job_view(conn, row, full=cursor is None)
+            return view if cursor is None else _page(conn, view, cursor)
     except FileNotFoundError:
         raise _not_found() from None
+
+
+def _page(conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str) -> dict[str, Any]:
+    """The entries of a finished job after `cursor`, as many as fit in half the response bound."""
+    from . import query_data
+
+    if view["state"] == RUNNING:
+        raise OpError(
+            "MAINTENANCE_JOB_RUNNING",
+            "a running job has no receipt to page yet",
+            "Read the job with mode maintenance-job until its state is not running.",
+        )
+    try:
+        after = int(cursor)
+    except ValueError:
+        after = -1
+    if after < 0:
+        raise OpError(
+            "INVALID_ARGUMENTS",
+            "cursor is not a next_cursor of this job's receipt",
+            "Pass the receipt's next_cursor, or the next_cursor of the previous page.",
+        )
+    limit = query_data.MAX_RESPONSE_BYTES // 2
+    entries: list[dict[str, Any]] = []
+    size = 0
+    last = after
+    more = False
+    for row in conn.execute(
+        "SELECT seq, chunk, kind, path, value FROM entries WHERE run_id = ? AND seq > ? ORDER BY seq",
+        (view["run_id"], after),
+    ):
+        entry = {
+            "chunk": row["chunk"],
+            "kind": _UNKNOWN if row["kind"] == _PENDING else row["kind"],
+            "path": row["path"],
+        }
+        if row["value"] is not None:
+            entry["value"] = row["value"]
+        cost = len(_canonical(entry)) + 1
+        if entries and size + cost > limit:
+            more = True
+            break
+        entries.append(entry)
+        size += cost
+        last = row["seq"]
+    return {
+        "run_id": view["run_id"],
+        "state": view["state"],
+        "entries": entries,
+        "next_cursor": str(last) if more else None,
+    }
 
 
 def job_list(vault_root: Path) -> dict[str, Any]:
@@ -398,7 +503,8 @@ def job_list(vault_root: Path) -> dict[str, Any]:
     try:
         with _store(vault_root, create=False) as conn:
             rows = conn.execute("SELECT * FROM jobs ORDER BY started_at DESC, seq DESC").fetchall()
-            return {"jobs": [_view(conn, row, full=False) for row in rows]}
+            totals = _totals(conn)
+            return {"jobs": [_view(conn, row, totals.get(row["run_id"], {}), full=False) for row in rows]}
     except FileNotFoundError:
         return {"jobs": []}
 
@@ -433,7 +539,7 @@ def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
                     live.reason = live.reason or CANCEL_CODE
                     live.stop.set()
                 row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
-                return _view(conn, row, full=True)
+                return _job_view(conn, row, full=True)
         except FileNotFoundError:
             raise _not_found() from None
 
@@ -529,7 +635,7 @@ def _claim(
             for row in running:
                 if row["mode"] == mode and row["flags"] == flags_json and row["plan_id"] == plan_id:
                     conn.commit()
-                    return _view(conn, row, full=False), False
+                    return _job_view(conn, row, full=False), False
             if running:
                 raise OpError(
                     "MAINTENANCE_JOB_ACTIVE",
@@ -561,7 +667,7 @@ def _claim(
             conn.commit()
             raise
         row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
-        return _view(conn, row, full=False), True
+        return _job_view(conn, row, full=False), True
 
 
 def _prune(conn: sqlite3.Connection) -> None:
@@ -569,7 +675,7 @@ def _prune(conn: sqlite3.Connection) -> None:
     cutoff = time.time() - RETAIN_SECONDS
     stale = "state != ? AND ended_at < ? AND run_id NOT IN (SELECT run_id FROM jobs ORDER BY started_at DESC, seq DESC LIMIT ?)"
     params = (RUNNING, cutoff, RETAIN_NEWEST)
-    conn.execute(f"DELETE FROM chunks WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
+    conn.execute(f"DELETE FROM entries WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
     conn.execute(f"DELETE FROM jobs WHERE {stale}", params)
 
 
@@ -625,7 +731,7 @@ def _run(
             _JOB.set(live)
             with _whole_run_hold(live, command.name, kwargs.get("mode")):
                 result = writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
-        state, error_code, outcome = COMPLETED, None, {"result": result}
+        state, error_code, outcome = COMPLETED, None, {"result": _bounded(result)}
     except JobStop as stop:
         state, error_code, outcome = stop.state, stop.code, {}
     except foreground_priority.BulkCancelled:
@@ -664,7 +770,22 @@ def _error_record(error: BaseException) -> dict[str, Any]:
         "code": _error_code(error),
         "message": str(getattr(error, "message", None) or getattr(error, "reason", None) or error),
         "remediation": getattr(error, "remediation", None),
-        "details": dict(details) if isinstance(details, Mapping) else {},
+        "details": _bounded(dict(details)) if isinstance(details, Mapping) else {},
+    }
+
+
+def _bounded(report: Any) -> Any:
+    """A leaf report as the receipt keeps it: a field too large to read in one response becomes its size.
+
+    The paths a job wrote are in the receipt's entries, so a report that lists them again loses nothing.
+    """
+    if not isinstance(report, Mapping):
+        return report
+    return {
+        key: {"omitted": len(value)}
+        if isinstance(value, (list, dict)) and len(_canonical(value)) > RESULT_FIELD_BYTES
+        else value
+        for key, value in report.items()
     }
 
 
@@ -732,19 +853,13 @@ def checkpoint(phase: str, done: int | None = None, total: int | None = None) ->
     if live is None:
         return
     raise_if_stopped()
-    with _store(live.vault_root, create=True) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            row = conn.execute("SELECT cancel_requested FROM jobs WHERE run_id = ?", (live.run_id,)).fetchone()
-            conn.execute(
-                "UPDATE jobs SET phase = ?, done = COALESCE(?, done), total = COALESCE(?, total) "
-                "WHERE run_id = ? AND state = ?",
-                (phase, done, total, live.run_id, RUNNING),
-            )
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
+    with _write(live.vault_root) as conn:
+        row = conn.execute("SELECT cancel_requested FROM jobs WHERE run_id = ?", (live.run_id,)).fetchone()
+        conn.execute(
+            "UPDATE jobs SET phase = ?, done = COALESCE(?, done), total = COALESCE(?, total) "
+            "WHERE run_id = ? AND state = ?",
+            (phase, done, total, live.run_id, RUNNING),
+        )
     if row is not None and row["cancel_requested"]:
         # Another process (the CLI) asked; this process's own cancel set the event already.
         live.reason = live.reason or CANCEL_CODE
@@ -763,43 +878,75 @@ def _fail_under_pressure() -> None:
         raise JobStop(MEMORY_PRESSURE_CODE, FAILED)
 
 
-def record_chunk(
-    *,
-    committed: int = 0,
-    skipped_changed: int = 0,
-    outcome_unknown: int = 0,
-    committed_paths: list[str] | None = None,
-    detail: dict[str, Any] | None = None,
-) -> None:
-    """Append one chunk's counts and leaf-specific receipt fields (``detail``) to the job's receipt."""
+def note(**fields: Any) -> None:
+    """Add small leaf-specific fields to the job's receipt; a field named again replaces the earlier one."""
     live = _JOB.get()
     if live is None:
         return
+    with _write(live.vault_root) as conn:
+        row = conn.execute("SELECT notes FROM jobs WHERE run_id = ?", (live.run_id,)).fetchone()
+        merged = {**(json.loads(row["notes"]) if row is not None and row["notes"] else {}), **fields}
+        conn.execute("UPDATE jobs SET notes = ? WHERE run_id = ?", (_canonical(_bounded(merged)), live.run_id))
+
+
+def record_paths(paths: Sequence[str], *, committed: bool) -> None:
+    """Record pages a leaf wrote outside `commit_pages`, as one chunk, after its write ended.
+
+    ``committed=False`` records a write that failed, so its outcome is unknown.
+    """
+    live = _JOB.get()
+    if live is None or not paths:
+        return
     live.chunks += 1
-    live.committed_paths.extend(committed_paths or ())
-    with _store(live.vault_root, create=True) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute(
-                "INSERT INTO chunks (run_id, ordinal, committed, skipped_changed, outcome_unknown, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (live.run_id, live.chunks, committed, skipped_changed, outcome_unknown,
-                 _canonical(detail) if detail else None),
-            )
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
+    _insert(live, live.chunks, _COMMITTED if committed else _PENDING, [(path, None) for path in paths])
+    if committed:
+        live.committed_paths.extend(paths)
+
+
+def _insert(live: _Live, chunk: int, kind: str, items: Sequence[tuple[str, str | None]]) -> dict[str, int]:
+    """Add entries to the job's receipt; return the sequence number of each path."""
+    with _write(live.vault_root) as conn:
+        return {
+            path: conn.execute(
+                "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)",
+                (live.run_id, chunk, kind, path, value),
+            ).lastrowid
+            for path, value in items
+        }
+
+
+def _settle(
+    live: _Live,
+    intended: Mapping[str, int],
+    committed: Mapping[str, str | None],
+    skipped: Collection[str],
+    unknown: Collection[str],
+) -> None:
+    """Turn a chunk's intent entries into what happened; an entry never attempted is dropped.
+
+    ``unknown`` stay pending: a write that raised may have reached the disk.
+    """
+    with _write(live.vault_root) as conn:
+        for path, seq in intended.items():
+            if path in committed:
+                conn.execute(
+                    "UPDATE entries SET kind = ?, value = ? WHERE seq = ?", (_COMMITTED, committed[path], seq)
+                )
+            elif path in skipped:
+                conn.execute("UPDATE entries SET kind = ? WHERE seq = ?", (_SKIPPED, seq))
+            elif path not in unknown:
+                conn.execute("DELETE FROM entries WHERE seq = ?", (seq,))
 
 
 @contextmanager
-def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> Iterator[None]:
+def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> Iterator[Any]:
     """Hold the mutation boundary for one chunk, waiting out a busy boundary for a bounded time.
 
     A busy boundary is another writer's turn, not a failure: the job checks for
     a stop between attempts and gives up only after ``BUSY_BUDGET_SECONDS``.
     ``stoppable=False`` is for settling work that a stop must not skip, such as
-    rebuilding an index over chunks that already committed.
+    rebuilding an index over chunks that already committed. Yields the boundary,
+    which says how many writers wait for it (``waiter_count``).
     """
     from . import writer_lease
 
@@ -809,7 +956,7 @@ def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> I
             if stoppable:
                 raise_if_stopped()
             try:
-                stack.enter_context(
+                boundary = stack.enter_context(
                     writer_lease.active_manager().mutation_guard(
                         vault_root,
                         request_id=current_run_id() or writer_lease.active_mutation_request_id(),
@@ -824,58 +971,128 @@ def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> I
         # The boundary may have been busy for the whole wait: a stop that arrived then ends the job unwritten.
         if stoppable:
             raise_if_stopped()
-        yield
+        yield boundary
 
 
-def commit_chunk(
+def commit_pages(
     vault_root: Path,
     operation: str,
     entries: Sequence[tuple[str, Path, str]],
     rewrite: Callable[[str, str], str],
     *,
-    extra: Callable[[list[str]], dict[str, Any]] | None = None,
+    receipt_value: Callable[[str], str | None] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Rewrite one chunk of a plan's pages under one hold, record it, and return `(committed, skipped)`.
+    """Rewrite a plan's pages in short holds of the mutation boundary; return `(committed, skipped)`.
 
-    An entry is `(rel, path, content hash the plan was made from)`. Under the hold each page is read
+    An entry is `(rel, path, content hash the plan was made from)`. Each hold is one chunk of at most
+    `CHUNK_PAGES` pages that ends after `HOLD_SECONDS`, or as soon as a writer waits for the boundary,
+    and the job lets that writer in before it takes the boundary again. Under a hold each page is read
     again: one that cannot be read, or whose hash moved, is skipped and never overwritten.
-    `rewrite(rel, text)` gives a kept page's new text. A failed commit may have written some pages, so
-    the chunk is recorded as `outcome_unknown` and the failure re-raised. ``extra(committed)`` adds receipt fields.
+    `rewrite(rel, text)` gives a kept page's new text, and `receipt_value(rel)` what the receipt lists
+    beside the page after `rewrite` ran (a minted ID). A failed write may have reached the disk, so
+    its pages stay `outcome_unknown` in the receipt and the failure is raised.
     """
+    from . import foreground_priority
+
+    committed: list[str] = []
+    skipped: list[str] = []
+    position = 0
+    while position < len(entries):
+        checkpoint("committing", done=position, total=len(entries))
+        # A writer that queued behind the last hold takes its turn before this job takes the next.
+        foreground_priority.yield_to_foreground()
+        position += _commit_chunk(
+            vault_root, operation, entries[position : position + CHUNK_PAGES], rewrite, receipt_value, committed, skipped
+        )
+    return committed, skipped
+
+
+def _commit_chunk(
+    vault_root: Path,
+    operation: str,
+    window: Sequence[tuple[str, Path, str]],
+    rewrite: Callable[[str, str], str],
+    receipt_value: Callable[[str], str | None] | None,
+    committed: list[str],
+    skipped: list[str],
+) -> int:
+    """Write as many pages of `window` as one hold allows; return how many it reached.
+
+    The window's pages are entered in the receipt as pending before the hold, outside the boundary,
+    so a crash inside the hold leaves them `outcome_unknown`. They are settled after the hold.
+    """
+    live = _JOB.get()
+    intended: dict[str, int] = {}
+    if live is not None:
+        live.chunks += 1
+        intended = _insert(live, live.chunks, _PENDING, [(rel, None) for rel, _, _ in window])
+    wrote: dict[str, str | None] = {}
+    moved: list[str] = []
+    unknown: list[str] = []
+    reached = 0
+    failure: BaseException | None = None
+    try:
+        with chunk_hold(vault_root, operation) as boundary:
+            started = time.monotonic()
+            slowest = 0.0
+            while reached < len(window):
+                batch = window[reached : reached + BATCH_PAGES]
+                began = time.monotonic()
+                unknown = [rel for rel, _, _ in batch]
+                _write_batch(vault_root, batch, rewrite, receipt_value, wrote, moved)
+                unknown = []
+                reached += len(batch)
+                slowest = max(slowest, time.monotonic() - began)
+                # The next batch could run past the budget, a writer waits, or the job was told to stop.
+                if (
+                    boundary.waiter_count() > 0
+                    or (live is not None and live.stop.is_set())
+                    or time.monotonic() - started + slowest >= HOLD_SECONDS
+                ):
+                    break
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        if live is not None:
+            try:
+                _settle(live, intended, wrote, moved, unknown)
+            except Exception:
+                if failure is None:
+                    raise
+    committed.extend(wrote)
+    skipped.extend(moved)
+    return reached
+
+
+def _write_batch(
+    vault_root: Path,
+    batch: Sequence[tuple[str, Path, str]],
+    rewrite: Callable[[str, str], str],
+    receipt_value: Callable[[str], str | None] | None,
+    wrote: dict[str, str | None],
+    moved: list[str],
+) -> None:
+    """Read each page of `batch` again under the hold, then write the unchanged ones in one atomic batch."""
     from . import vault
 
     writes: list[vault.PlannedWrite] = []
     kept: list[str] = []
-    skipped: list[str] = []
-    failure: BaseException | None = None
-    with chunk_hold(vault_root, operation):
-        for rel, path, digest in entries:
-            try:
-                text, guard = vault.read_guarded_text(vault_root, path)
-            except (OSError, UnicodeDecodeError, vault.PathGuardError):
-                skipped.append(rel)
-                continue
-            if vault.content_hash(text) != digest:
-                skipped.append(rel)
-                continue
-            kept.append(rel)
-            writes.append(vault.PlannedWrite(path=path, content=rewrite(rel, text), guard=guard, expected_hash=digest))
-        if writes:
-            try:
-                vault.batch_atomic_write(writes, vault_root=vault_root)
-            except BaseException as error:  # noqa: BLE001 - recorded, then re-raised below
-                failure = error
-    if failure is not None:
-        record_chunk(
-            skipped_changed=len(skipped),
-            outcome_unknown=len(writes),
-            detail={"skipped_changed": skipped, "outcome_unknown": kept},
-        )
-        raise failure
-    record_chunk(
-        committed=len(kept),
-        skipped_changed=len(skipped),
-        committed_paths=kept,
-        detail={"paths": kept, "skipped_changed": skipped, **(extra(kept) if extra is not None else {})},
-    )
-    return kept, skipped
+    for rel, path, digest in batch:
+        try:
+            text, guard = vault.read_guarded_text(vault_root, path)
+        except (OSError, UnicodeDecodeError, vault.PathGuardError):
+            moved.append(rel)
+            continue
+        if vault.content_hash(text) != digest:
+            moved.append(rel)
+            continue
+        kept.append(rel)
+        writes.append(vault.PlannedWrite(path=path, content=rewrite(rel, text), guard=guard, expected_hash=digest))
+    if writes:
+        vault.batch_atomic_write(writes, vault_root=vault_root)
+    for rel in kept:
+        wrote[rel] = receipt_value(rel) if receipt_value is not None else None
+    live = _JOB.get()
+    if live is not None:
+        live.committed_paths.extend(kept)

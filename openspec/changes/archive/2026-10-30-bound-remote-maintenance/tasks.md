@@ -15,4 +15,4 @@ Retirement scope (2026-10-11): Retirement supersedes the Hosted adapter cases. M
 - [x] 3.1 Run focused command-surface tests, Ruff, privacy validation, and strict OpenSpec validation.
 - [x] 3.2 Obtain independent adversarial review and address every actionable finding.
 - [x] 3.3 Merge, publish a patch release, deploy both the personal cell and the client cell, then verify readiness, recall, immediate remote refusal, and a free mutation boundary.
-  Evidence (2026-10-30): #797 (`d7dc55ce8`) merged and first shipped in v0.62.0; the personal service reports 0.150.0 and the client cell 0.146.1 on `/health`, both later; the Hosted adapter cases were retired by #1691. `add-remote-maintenance-jobs` supersedes the refusal with governed jobs.
+  Evidence (2026-10-30): #797 (`d7dc55ce8`) merged and first shipped in v0.62.0; the personal service and the client cell both report a version later than v0.62.0 on `/health`; the Hosted adapter cases were retired by #1691. `add-remote-maintenance-jobs` supersedes the refusal with governed jobs.

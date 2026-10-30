@@ -3127,7 +3127,11 @@
                   "const": "maintenance-job",
                   "type": "string"
                 },
-                "run_id": {}
+                "run_id": {},
+                "cursor": {
+                  "type": "string",
+                  "description": "A next_cursor of a maintenance-job receipt."
+                }
               },
               "required": [
                 "kind"

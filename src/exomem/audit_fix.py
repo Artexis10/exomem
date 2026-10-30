@@ -444,9 +444,6 @@ def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
     return ordered
 
 
-#: Most content rewrites one fix job commits under a single hold of the mutation boundary.
-FIX_CHUNK_PAGES = 100
-
 
 def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> list[_Rewrite]:
     """Plan every content rewrite: compiled pages (passes 1 and 2) and media sidecars (pass 2b)."""
@@ -637,33 +634,27 @@ def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: A
 def _commit_in_chunks(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: AuditFixReport) -> None:
     """Commit one reviewed plan in guarded chunks, then refresh the indexes in one last short hold.
 
-    Planning read every page before any hold. Each chunk takes the mutation boundary itself,
-    re-reads its pages under it and skips any that changed since the plan, so a hold lasts for
-    at most 100 pages and a concurrent edit is never overwritten. A stop keeps the chunks that
-    committed and skips the index refresh; the receipt says so, and the next reconcile heals it.
+    Planning read every page before any hold. `maintenance_jobs.commit_pages` then takes the mutation
+    boundary in short holds, re-reads its pages under each and skips any that changed since the plan,
+    so a concurrent edit is never overwritten. A stop keeps the chunks that committed and skips the
+    index refresh; the receipt says so, and the next reconcile heals it.
     """
     from . import maintenance_jobs
 
     root = Path(vault_root)
     # Colliding destinations are refused before the first write, as `_apply_whole` refuses them.
     _compose_writes([rewrite.write for rewrite in rewrites])
-    skipped: list[str] = []
-    processed = 0
     index_started = False
     planned = {rewrite.rel: rewrite.write.content for rewrite in rewrites}
     try:
-        for start in range(0, len(rewrites), FIX_CHUNK_PAGES):
-            maintenance_jobs.checkpoint("committing", done=processed, total=len(rewrites))
-            kept, moved = maintenance_jobs.commit_chunk(
-                root,
-                "audit_fix_chunk",
-                [(item.rel, item.write.path, item.before_hash) for item in rewrites[start : start + FIX_CHUNK_PAGES]],
-                # A kept page still has the text the plan was made from, so it gets the planned text.
-                lambda rel, _text: planned[rel],
-            )
-            skipped.extend(moved)
-            processed += len(kept) + len(moved)
-        maintenance_jobs.checkpoint("indexing", done=processed, total=len(rewrites))
+        kept, skipped = maintenance_jobs.commit_pages(
+            root,
+            "audit_fix_chunk",
+            [(item.rel, item.write.path, item.before_hash) for item in rewrites],
+            # A kept page still has the text the plan was made from, so it gets the planned text.
+            lambda rel, _text: planned[rel],
+        )
+        maintenance_jobs.checkpoint("indexing", done=len(kept) + len(skipped), total=len(rewrites))
         with maintenance_jobs.chunk_hold(root, "audit_fix_index"):
             index_started = True
             failure = None
@@ -675,24 +666,15 @@ def _commit_in_chunks(vault_root: Path, kb: Path, rewrites: list[_Rewrite], repo
                     batch_atomic_write(refresh, vault_root=root)
                 except BaseException as error:  # noqa: BLE001 - recorded, then re-raised below
                     failure = error
+        maintenance_jobs.record_paths(refreshed, committed=failure is None)
         if failure is not None:
-            maintenance_jobs.record_chunk(
-                outcome_unknown=len(refresh), detail={"index_refresh": "unknown", "paths": refreshed}
-            )
             raise failure
-        if refresh:
-            maintenance_jobs.record_chunk(
-                committed=len(refresh), detail={"index_refresh": "committed", "paths": refreshed}
-            )
     except BaseException as error:
         if not index_started:
             # The chunks that committed stay; the index refresh did not run, and the receipt names why.
             with contextlib.suppress(Exception):
-                maintenance_jobs.record_chunk(
-                    detail={
-                        "index_refresh": "skipped",
-                        "reason": str(getattr(error, "code", None) or type(error).__name__),
-                    }
+                maintenance_jobs.note(
+                    index_refresh="skipped", reason=str(getattr(error, "code", None) or type(error).__name__)
                 )
         raise
     if skipped:
@@ -787,6 +769,6 @@ def audit_fix(
         report.summary[f"fixed_{cat}"] = n
     if reviewed:
         # A job's caller gets the dispatcher's mutation receipt, not this report: the job receipt carries the summary.
-        maintenance_jobs.record_chunk(detail={"summary": report.summary})
+        maintenance_jobs.note(summary=report.summary)
 
     return report
