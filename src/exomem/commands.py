@@ -5101,9 +5101,10 @@ def op_link(
         connections: List of vault-relative wikilink targets to put under
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
-        relations: `{kind, target}` objects written under `## Relations` as
-            `- kind [[target]]`; kind is a registered relation key, target
-            follows `connections` conventions.
+        relations: `{kind, target, reason?}` objects written under `## Relations`
+            as `- kind [[target]]`; kind is a registered relation key, target
+            follows `connections` conventions. A generic kind (`relates_to`) to
+            an entity needs a `reason` when a specific relation fits.
         (per-type fields): see the bullet list above.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
             the name already denotes other active entities and this is a
@@ -10303,7 +10304,7 @@ def op_connect_memory(
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
-        relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
+        relations: create-entity only. {kind, target, reason?} edges; relates_to needs a reason.
     """
     if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
         raise ValueError(

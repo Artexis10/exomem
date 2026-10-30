@@ -620,7 +620,7 @@ def _note(content: str) -> str:
     return (
         f"{content}\n\n## Observations\n\n"
         "- [operating constraint] Keep retries bounded #reliability\n\n"
-        "## Relations\n\n- relates_to [[General Context]]\n"
+        "## Relations\n\n- about_entity [[General Context]]\n"
     )
 
 

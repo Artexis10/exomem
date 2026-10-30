@@ -23,9 +23,10 @@ NAME = "Harbour Studio"
 
 @pytest.fixture(autouse=True)
 def _relation_anchor(tmp_path: Path) -> None:
-    """A pre-existing Entity every note below relates_to, so the semantic
+    """A pre-existing Entity every note below is about, so the semantic
     contract's qualifying-relation requirement is satisfied without the
-    relation touching the unresolved identity `entity_candidate` is about."""
+    relation touching the unresolved identity `entity_candidate` is about.
+    The edge is `about_entity`: a generic edge to an entity is refused."""
     anchor = tmp_path / "Knowledge Base" / "Entities" / "Organizations" / "General Context.md"
     anchor.parent.mkdir(parents=True, exist_ok=True)
     anchor.write_text(
@@ -46,7 +47,7 @@ def _content(note: str, *, name: str = NAME) -> str:
         f"- [scheduling] Coordinated with [[{name}]] on the schedule.\n"
         "\n"
         "## Relations\n\n"
-        "- relates_to [[General Context]]\n"
+        "- about_entity [[General Context]]\n"
     )
 
 

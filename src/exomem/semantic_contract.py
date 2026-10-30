@@ -73,6 +73,9 @@ _CONNECTIVITY_ORIGINS = frozenset(
 _MAX_WIKILINK_FACTS_PER_PAGE = 32
 _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
+# Bulk operations the generic-relation barrier skips: a batch import authors edges in numbers
+# that no caller can answer one by one, and its reviewer already decides each page as a whole.
+BARRIER_EXEMPT_OPERATIONS = frozenset({"adoption_compile"})
 _GRANDFATHERED_OPERATIONS = frozenset(
     {"edit", "move", "observe", "recover", "tier2_overwrite", "tier2_append"}
 )
@@ -5117,7 +5120,7 @@ def _registry_findings(
     return findings
 
 
-def _entity_type_registry(vault_root: Path) -> Any:
+def entity_type_registry(vault_root: Path) -> Any:
     from . import entity_types
     from .vocabulary.registry import RegistryError
 
@@ -5129,7 +5132,7 @@ def _entity_type_registry(vault_root: Path) -> Any:
         return entity_types.core_registry()
 
 
-def _endpoint_page_kind(
+def endpoint_page_kind(
     state: SemanticPageState | None, types: Any
 ) -> relation_endpoints.PageKind | None:
     """What a page is for endpoint matching; None when its note type cannot say."""
@@ -5141,6 +5144,37 @@ def _endpoint_page_kind(
     return relation_endpoints.page_kind(note_type.role, state.frontmatter.get("entity_type"), types)
 
 
+def fact_endpoints(
+    page: SemanticPageState, corpus: SemanticCorpusContext, fact: RelationFact
+) -> tuple[SemanticPageState | None, SemanticPageState | None]:
+    """The subject and target pages of an edge `page` authors; None for a page not in `corpus`."""
+    target_path = (fact.resolved_target_path or "").split("#", 1)[0]
+    other = page if target_path == page.path else corpus.pages.get(target_path)
+    # A reversed frontmatter field (`superseded_by`) authors the edge from its target.
+    return (page, other) if fact.logical_source_path == fact.authored_path else (other, page)
+
+
+def fits_scope(
+    registry: relation_registry.RelationRegistry,
+    key: str,
+    page: SemanticPageState,
+    fact: RelationFact,
+) -> bool:
+    """Whether the relation `key` is valid where `fact` stands: the page's projects, type and origin."""
+    return (
+        _registry_resolution(
+            registry,
+            key,
+            projects=page.projects,
+            page_type=page.page_type,
+            source_kind=fact.source_kind,
+            target_kind=fact.target_kind,
+            origin=fact.origin,
+        ).status
+        != "scope_violation"
+    )
+
+
 def _sides_outside(
     endpoints: relation_endpoints.Endpoints,
     subject: SemanticPageState | None,
@@ -5150,7 +5184,7 @@ def _sides_outside(
     """The sides of an edge whose page is definitely outside the declared families."""
     outside: list[str] = []
     for side, state in (("subject", subject), ("object", target)):
-        kind = _endpoint_page_kind(state, types)
+        kind = endpoint_page_kind(state, types)
         if kind is not None and relation_endpoints.fits(endpoints.side(side), kind, types) is False:
             outside.append(side)
     return outside
@@ -5177,13 +5211,8 @@ def _endpoint_findings(
         endpoints = registry.endpoints_of(fact.canonical_relation)
         if endpoints is None:
             continue
-        types = types or _entity_type_registry(corpus.vault_root)
-        target_path = fact.resolved_target_path.split("#", 1)[0]
-        other = page if target_path == page.path else corpus.pages.get(target_path)
-        # A reversed frontmatter field (`superseded_by`) authors the edge from its target.
-        subject, target = (
-            (page, other) if fact.logical_source_path == fact.authored_path else (other, page)
-        )
+        types = types or entity_type_registry(corpus.vault_root)
+        subject, target = fact_endpoints(page, corpus, fact)
         sides = _sides_outside(endpoints, subject, target, types)
         definition = registry.definition(fact.canonical_relation)
         # A symmetric relation reads the same either way round, so it fits in either orientation.

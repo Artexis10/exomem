@@ -347,6 +347,7 @@ def create_file(
                 draft_id=identity,
                 draft_token=token,
                 relation_disposition=relation_disposition,
+                relation_review_reason=relation_review_reason,
             )
         except semantic_writes.SemanticWriteError as error:
             raise CreateFileError(error.code, error.reason) from error

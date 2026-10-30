@@ -684,7 +684,7 @@
                     "type": "object"
                   },
                   "type": "array",
-                  "description": "create-entity only. Typed {kind, target} edges; connections stay relates_to."
+                  "description": "create-entity only. {kind, target, reason?} edges; relates_to needs a reason."
                 }
               },
               "required": [
