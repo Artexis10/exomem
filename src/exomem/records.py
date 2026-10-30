@@ -4633,6 +4633,10 @@ def hold_candidate(
             )
         ],
         vault_root=root,
+        # The held file is bookkeeping for a write that did not happen. The
+        # caller's refusal follows, and a commit point here would report that
+        # refusal as a committed write the caller must not retry.
+        commit_point=False,
     )
     return {"held_id": reference, "path": relative, "diagnostics": diagnostics}
 
