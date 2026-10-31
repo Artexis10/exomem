@@ -22,6 +22,7 @@ Originals must still stay byte-identical as evidence. The owner must be able to 
 - **Export without the key in an egress pod.** A packing step that reaches only the edge decrypts evicted originals. A separate step without the key uploads the archive.
 - **Downloads and playback.** An owner opens an original through a link that works only in a browser signed in to Exomem. Local agents use `exomem cloud download` over OAuth. No tool result carries a bearer link.
 - **Storage quota.** The included media allowance is a configured value in the one limits source; the first value is 100 GB. Admission checks it before any byte arrives. The 20 GiB volume cap stays and stops being the media limit.
+- **Imports larger than the volume (amended 2026-10-30, task 5.4).** The Cloud CLI splits the folder into windows that the cell's window budget sizes. Adoption files each artifact member by renaming its staged file into the Knowledge Base. Write-through and eviction then free the volume for the next window. Eviction counts owner reads only, runs during the import, and frees room on demand while a series waits. Files up to 5 GiB, or a quarter of the volume, go to the store, and hydration streams into one copy. During an import, a file must also fit the cell's band. On a 20 GiB cell, that band often holds files of only 2 to 3 GiB. Design D12 records the options and the four choices that the operator confirmed on 2026-10-30. After its store is turned off, a cell whose stored media exceed its volume keeps its media key and edge egress. Its media then stays readable.
 - **Default off, soft fail.** The store, the edge and eviction are off by default. A cell is enabled from a canary list or by a fleet switch. With the store unreachable, a cell keeps every original on its volume, queues offload work and evicts nothing.
 
 No server-side model is added. Extraction keeps running inside the cell, before any eviction, under `add-cloud-multimodal-processing`.
@@ -37,6 +38,8 @@ No server-side model is added. Extraction keeps running inside the cell, before 
 - `automatic-media-processing`: an evicted original keeps its sidecar, transcript and derived rows, and re-processing hydrates it first.
 - `hosted-vault-portability`: deletion fan-out treats eviction as a state, not a deletion, and export writes evicted originals byte-identical.
 - `cloud-operator-access`: privacy copy discloses the media store and who holds the media key.
+- `cloud-vault-import`: an import larger than the volume arrives in windows, the import receipt records each member's identity, and the cell reports its window budget. A discard keeps a record of the members that adoption did not file.
+- `adoption-studio`: adoption files an artifact member by rename, links resolve against the whole series, and the residual tells the person to keep the source.
 - `cloud-cell`: not canonical yet. The runtime egress rule gains the media edge peer through dated in-place amendments in `adopt-exomem-cloud-plain-cells` and `move-cloud-cells-to-local-storage`. This change carries no delta for it.
 
 ## Impact
@@ -44,6 +47,6 @@ No server-side model is added. Extraction keeps running inside the cell, before 
 - **Exomem (`src/exomem`):** the sidecar descriptor and `original_state`, hydrate and evict, the offload worker on the existing durable media job ledger, the reconciler, governance companions, deletion fan-out, export and download, and a filesystem-backed store for local tests.
 - **cellctl and chart:** media key bundle minting and wrapping, the per-cell edge credential, NetworkPolicy and admission rules, the edge Deployment and Service, quota metering and deletion proof.
 - **Terraform:** a media bucket with versioning, no version-deleting lifecycle, and its edge key.
-- **Substrate (its own change):** the signed-in download link, the tus upload proxy and the split import admission. This change fixes the contract they build to.
+- **Substrate (its own change):** the signed-in download link and the tus upload proxy. Home windows and a per-kind import space factor (D10, D12) would each need a Substrate change of their own. This change fixes the contract they build to.
 - **Storage plan:** phase 7 of `move-cloud-cells-to-local-storage` depends on this change for any media-heavy cell. Phases 1–6 do not.
 - **Privacy:** the media bundle shares the volume and backup keys' cell root, following `cloud-cell-key-custody`. The operator can recover it in standard mode. Tenant-locked custody follows that contract and is not claimed before `lock_complete_at`. The provider and media edge see ciphertext; playback and authorized exports retain their disclosed plaintext exposure.
