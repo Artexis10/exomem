@@ -138,73 +138,46 @@ def earlier_import_of(
     )
 
 
-def _source_pages(root: Path) -> list[Path]:
-    """Every Markdown page under Sources, in the order `read_import_index` reads them."""
-    sources = kb_root(root) / "Sources"
-    pages: list[Path] = []
-    if not sources.is_dir():
-        return pages
-    for dirpath, dirnames, filenames in os.walk(sources):
-        dirnames.sort()
-        pages.extend(
-            Path(dirpath) / name for name in sorted(filenames) if name.lower().endswith(".md")
-        )
-    return pages
-
-
-def source_page_paths(root: Path) -> list[str]:
-    """The vault-relative path of every Markdown page under Sources that can hold an import.
-
-    Names only, no page is opened. The Sources index is left out: every filing rewrites it and it
-    holds no import, so it must not move `sources_seal`.
-    """
-    sources_index = kb_root(root) / "Sources" / "index.md"
-    return [
-        page.relative_to(root).as_posix() for page in _source_pages(root) if page != sources_index
-    ]
-
-
-def sources_seal(paths: Iterable[str]) -> str:
-    """An order-free digest of a set of Source page paths.
-
-    Two listings with one seal hold the same pages.
-    """
-    return hashlib.sha256("\n".join(sorted(set(paths))).encode("utf-8")).hexdigest()
-
-
-def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
-    """The entry a Source page's parsed front matter gives, or None when it names no original."""
-    try:
-        frontmatter = _leading_frontmatter(root, page)
-    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-        return None
-    if frontmatter is None:
-        return None
-    imported_from = _text_field(frontmatter.get("imported_from"))
-    if imported_from is None:
-        return None
-    aliases = frontmatter.get("aliases")
-    return EarlierImport(
-        path=page.relative_to(root).as_posix(),
-        imported_from=imported_from,
-        import_collection=_text_field(frontmatter.get("import_collection")),
-        collection_path=_text_field(frontmatter.get("collection_path")),
-        original_sha256=_text_field(frontmatter.get("original_sha256")),
-        captured=str(frontmatter.get("captured") or ""),
-        aliases=tuple(
-            nfc(a) for a in aliases if isinstance(a, str) and a.strip()
-        ) if isinstance(aliases, list) else (),
-    )
-
-
 def read_import_index(root: Path) -> list[EarlierImport]:
     """Every Source page whose parsed front matter names its original.
 
     The decision is the parsed ``imported_from`` field, never a substring of the
     page, so a page that merely quotes a path does not count as an import.
     """
-    entries = (read_import_entry(root, page) for page in _source_pages(root))
-    return [entry for entry in entries if entry is not None]
+    sources = kb_root(root) / "Sources"
+    found: list[EarlierImport] = []
+    if not sources.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(sources):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if not name.lower().endswith(".md"):
+                continue
+            page = Path(dirpath) / name
+            try:
+                frontmatter = _leading_frontmatter(root, page)
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                continue
+            if frontmatter is None:
+                continue
+            imported_from = _text_field(frontmatter.get("imported_from"))
+            if imported_from is None:
+                continue
+            aliases = frontmatter.get("aliases")
+            found.append(
+                EarlierImport(
+                    path=page.relative_to(root).as_posix(),
+                    imported_from=imported_from,
+                    import_collection=_text_field(frontmatter.get("import_collection")),
+                    collection_path=_text_field(frontmatter.get("collection_path")),
+                    original_sha256=_text_field(frontmatter.get("original_sha256")),
+                    captured=str(frontmatter.get("captured") or ""),
+                    aliases=tuple(
+                        nfc(a) for a in aliases if isinstance(a, str) and a.strip()
+                    ) if isinstance(aliases, list) else (),
+                )
+            )
+    return found
 
 
 def latest_earlier_import(
@@ -1143,11 +1116,8 @@ __all__ = [
     "plan_item",
     "plan_note",
     "plan_total_bytes",
-    "read_import_entry",
     "read_import_index",
     "resolve_links",
-    "source_page_paths",
-    "sources_seal",
     "title_from_text",
     "wikilink_for",
 ]

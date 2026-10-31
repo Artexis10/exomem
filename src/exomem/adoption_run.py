@@ -53,7 +53,6 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .kbdir import kb_dirname
 from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
-from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
 RUNS_DIR = "_Adoption/runs"
 SCHEMA_VERSION = 1
@@ -90,11 +89,6 @@ BYTE_RATE_MIN_ITEM_MIB = 1.0
 # call; once the first had run, each further sidecar cost about 0.1 s; reply
 # handling took about 2.4 s for 456 written paths (0.005 s each).
 TERMINAL_WORK_RESERVE_SECONDS = 20.0
-# What a fast-acknowledgement call reserves for its custody handoff is the handoff time measured on
-# this vault, between two bounds. The floor is the acknowledgement's own wait bound, which a short
-# call's tail can spend whatever the handoff measured; the ceiling is the whole reserve above,
-# which also stands until a handoff has been measured.
-CUSTODY_RESERVE_FLOOR_SECONDS = _FAST_ACK_DEADLINE_SECONDS
 TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
 REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
@@ -790,7 +784,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE, "sources_seal"})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _present(root: Path, run: dict, **extra) -> dict:
@@ -1459,12 +1453,8 @@ def plan(
                 "items": [],
                 "skipped": [],
                 "next": 0,
-                # Listed before the first index read below, so a page filed in between breaks the
-                # seal at apply instead of hiding from the plan.
-                "sources_seal": adoption_plan.sources_seal(adoption_plan.source_page_paths(root)),
             }
             run["plan"] = None
-            run["sources_seal"] = None
             run["phase"] = "selecting"
 
         collection = run.get("collection") or {"label": None, "root": ""}
@@ -1555,7 +1545,6 @@ def plan(
             },
         }
         run["plan_draft"] = None
-        run["sources_seal"] = draft.get("sources_seal")
         run["phase"] = "planned"
         reply = {"progress": progress}
         if entry is not None:
@@ -1673,7 +1662,6 @@ class _ApplyPacer:
     def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
         from .writer_lease import active_derived_batch_custody
 
-        self._root = root
         self._budget = budget
         self._item_seconds: float | None = None
         self._mib_seconds: float | None = None
@@ -1687,18 +1675,9 @@ class _ApplyPacer:
     def _tracked(rate: float | None, seen: float) -> float:
         return seen if rate is None else max(rate, seen)
 
-    def _custody_reserve(self, chunk: list[dict]) -> float:
-        """Seconds the end of the call needs to hand off custody of the batches so far and this chunk's."""
-        from .writer_lease import owed_custody_handoff_seconds
-
-        measured = owed_custody_handoff_seconds(self._root, more_batches=_custody_batches(chunk))
-        if measured is None:
-            return TERMINAL_WORK_RESERVE_SECONDS
-        return min(max(measured, CUSTODY_RESERVE_FLOOR_SECONDS), TERMINAL_WORK_RESERVE_SECONDS)
-
-    def _owed_after_loop(self, chunk: list[dict], artifacts: int) -> float:
+    def _owed_after_loop(self, artifacts: int) -> float:
         if not self._owes_fanout:
-            return self._custody_reserve(chunk)
+            return TERMINAL_WORK_RESERVE_SECONDS
         if not artifacts:
             return 0.0
         return TERMINAL_WORK_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
@@ -1732,7 +1711,7 @@ class _ApplyPacer:
         return (
             self._budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
             - REPLY_SECONDS_PER_ITEM * (self._started_items + len(chunk))
-            - self._owed_after_loop(chunk, self._deferred_artifacts + self._media(chunk))
+            - self._owed_after_loop(self._deferred_artifacts + self._media(chunk))
         )
 
     def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
@@ -1744,11 +1723,6 @@ class _ApplyPacer:
             chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
             cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         return chunk if first or cost <= self._room(chunk) else []
-
-    def next_unit(self, pending: list[dict]) -> tuple[float, int, float]:
-        """The full next chunk, before any trim: its predicted seconds, its batches and its room."""
-        chunk = _take_chunk(pending, APPLY_CHUNK_ITEMS)
-        return self._cost(chunk), _custody_batches(chunk), self._room(chunk)
 
     def note_fits(self, chunk: list[dict], seconds: float) -> bool:
         """Keep the same terminal headroom between the chunk's individual notes."""
@@ -1768,11 +1742,6 @@ class _ApplyPacer:
                 self._extraction_seconds, sum(extractions) / len(extractions)
             )
             self._deferred_artifacts += len(extractions)
-
-
-def _custody_batches(chunk: list[dict]) -> int:
-    """The custody batches a chunk may commit: one for its Sources, at most one per draft note."""
-    return 1 + sum(_owes_note(planned) for planned in chunk)
 
 
 def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
@@ -1839,53 +1808,17 @@ def _request_extraction(root: Path, planned: dict, budget: request_budget.Reques
 class _CallReads:
     """What one `apply` call reads from the vault once and keeps current across its chunks.
 
-    Walking every Source for each chunk made a re-run cost grow with the whole vault,
-    and walking every Source for each call made a long run's calls slower as it filed.
+    Walking every Source for each chunk made a re-run cost grow with the whole vault.
     Each starts empty and fills on first use; a batch that raised drops the Source
     reads, because what it left on disk is then unknown. A batch writes no note, so
     the note index stays.
-
-    The Source index is read in full only where the run's own state cannot answer. The plan
-    seals the Source pages it saw (`run["sources_seal"]`) and every call that files extends the
-    seal by its own pages. While the pages listed now carry that seal, nothing else has been
-    filed since the plan: an earlier import of a pending original is then only the Source
-    the plan froze for it, or one this run wrote, and both sit at the item's `target_path`.
     """
 
     index: list[adoption_plan.EarlierImport] | None = None
-    #: Source pages under the seal: the listing at the call's start, then the pages the call filed.
-    pages: list[str] | None = None
-    sealed: bool = False
     source_counts: dict[str, int] | None = None
     notes: adoption_plan.NoteIndex | None = None
     stage: import_stage.Stage | None = None
     stage_read: bool = False
-
-    def open_sources(self, root: Path, run: dict) -> None:
-        """List the Sources once, and read them in full only when the run's seal no longer holds."""
-        if self.pages is not None:
-            return
-        self.pages = adoption_plan.source_page_paths(root)
-        seal = run.get("sources_seal")
-        self.sealed = seal is not None and adoption_plan.sources_seal(self.pages) == seal
-        if not self.sealed and self.index is None:
-            # No seal (a plan made before the seal existed), or a Source was filed or removed by
-            # someone else since the plan or the run's last call: only the walk can answer.
-            self.index = adoption_plan.read_import_index(root)
-
-    def earlier_imports(self, root: Path, run: dict, planned: dict) -> list[adoption_plan.EarlierImport]:
-        """The earlier imports that can decide this pending original: all of them, or its own page."""
-        self.open_sources(root, run)
-        if self.index is not None:
-            return self.index
-        entry = adoption_plan.read_import_entry(root, root / planned["target_path"])
-        return [] if entry is None else [entry]
-
-    def whole_index(self, root: Path, run: dict) -> list[adoption_plan.EarlierImport]:
-        """Every earlier import, walked now: for a batch that raised, which left unknown pages."""
-        self.open_sources(root, run)
-        self.index = adoption_plan.read_import_index(root)
-        return self.index
 
     def recorded_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
         """The run's stage manifest, read once per call: a manifest can list a million files."""
@@ -1916,12 +1849,11 @@ def _commit_chunk(
         )
     except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
         reads.source_counts = None
-        # The pages the batch left are unknown, so only the walk can say which items landed.
-        index = reads.whole_index(root, run)
+        reads.index = adoption_plan.read_import_index(root)
         landed: list[dict] = []
         unlanded: list[tuple[dict, adopt_module.ImportItem]] = []
         for planned, item in survivors:
-            earlier = _earlier_with_same_bytes(root, index, label, planned)
+            earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path),
@@ -1971,6 +1903,9 @@ def _apply_chunk(
     plan = run["plan"]
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
+    if reads.index is None:
+        reads.index = adoption_plan.read_import_index(root)
+    index = reads.index
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
@@ -1997,7 +1932,6 @@ def _apply_chunk(
             texts[path] = text
         if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
             continue  # an earlier call wrote its Source; only the note is owed
-        index = reads.earlier_imports(root, run, planned)
         if planned["action"] == "already-imported":
             frozen = [entry for entry in index if entry.path == planned["target_path"]]
             if _earlier_with_same_bytes(root, frozen, label, planned) is None:
@@ -2042,11 +1976,9 @@ def _apply_chunk(
         )
         for planned in landed:
             if _source_status(outcomes[planned["original_path"]]) == "applied":
-                reads.pages.append(planned["target_path"])
-                if reads.index is not None:
-                    reads.index.append(
-                        adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
-                    )
+                reads.index.append(
+                    adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
+                )
     landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
         outcome = outcomes[planned["original_path"]]
@@ -2302,9 +2234,9 @@ def _filed_and_gone(
         or adoption_consume.entry_of(stage, planned["original_path"]) is None
     ):
         return None
-    return _earlier_with_same_bytes(
-        root, reads.earlier_imports(root, run, planned), (run.get("collection") or {}).get("label"), planned
-    )
+    if reads.index is None:
+        reads.index = adoption_plan.read_import_index(root)
+    return _earlier_with_same_bytes(root, reads.index, (run.get("collection") or {}).get("label"), planned)
 
 
 def _settle_staged(
@@ -2383,7 +2315,6 @@ def apply(
     twice: every item is checked against the earlier imports before it is copied.
     """
     from . import client_artifacts
-    from .writer_lease import active_manager
 
     root = Path(root)
     run_date = _today(today)
@@ -2459,19 +2390,11 @@ def apply(
             # refuses below with nothing written, as before.
             run["phase"] = "applying"
             run["inflight"] = True
-            # Read once here, before the first chunk's timer, so the pacer does not price it into items.
-            reads.open_sources(root, run)
 
         pacer = _ApplyPacer(root, budget)
         stopped = False
         chunks = 0
         while pending:
-            if chunks:
-                # Each chunk is committed whole, so a waiting derived proof may hold the boundary here.
-                seconds, batches, room = pacer.next_unit(pending)
-                active_manager().lend_boundary(
-                    root, next_unit_seconds=seconds, next_unit_batches=batches, room_seconds=room
-                )
             chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
                 stopped = True
@@ -2545,8 +2468,6 @@ def apply(
             reply["continuation"] = _issue_cursor(run, "apply")
         if entry is not None:
             entry["state"], entry["reply"] = "used", reply
-        if reads.sealed:
-            run["sources_seal"] = adoption_plan.sources_seal(reads.pages)
         store.save(run)
     return _present(root, run, **reply)
 

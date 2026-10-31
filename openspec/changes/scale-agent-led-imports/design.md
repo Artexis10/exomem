@@ -81,14 +81,7 @@ The `observe_transfer` description, its `import_handoff` routes and the `adoptio
 
 Substrate admission still multiplies declared bytes by two. On attachable storage, a cell grows its volume or refuses the import. A local-storage cell publishes no limits and keeps legacy admission without growth. The rehearsal therefore proves one-copy filing on a local-storage cell with a fixed volume below twice the data. Making the factor depend on the import kind remains the `publish-cloud-import-limits` follow-up, and attachable cells near the cap need it.
 
-### D8. An apply call lends its boundary to a waiting derived proof
-
-An apply call holds the vault boundary for its whole leaf, which can take most of a request budget. A derived proof that waits that long gives up, and the drain backs off. So the call lends the boundary between two committed chunks. Only a hold that opts in can borrow: the derived receipt proof and the component completion, which are brief and write no canonical content. The lender keeps the cross-process lock, so another process still waits.
-
-A loan first hands off custody of the call's batches, then advances the commit generation, as a release would. The handoff re-proves every batch of the call that shares a path with a new one, so the call prices it at the measured time per proved batch times all of its batches. It lends only when that handoff ends before the earliest borrower gives up, the borrower could not wait for the next chunk, and the handoff fits in the time left for the next chunk. No offer outlives that time. A call in a new process lends only after a first handoff has been measured.
-
 ## Risks
 
 - **A wrong consume deletes the only staged copy.** D1 and D2 restrict it to manifest-listed artifacts in a recorded stage, verified against the Knowledge Base copy. The person's own folder or device keeps the original bytes in every route, because both importers copy.
-- **A loan stalls the call.** A borrower keeps the boundary for as long as its work takes. D8 admits only brief derived holds, and the call stops offering when its room ends.
 - **Links across pages.** D4 leaves alias-only matches on a paged collection unresolved rather than guessed.

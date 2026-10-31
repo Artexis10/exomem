@@ -1620,9 +1620,6 @@ def prove_committed(
         vault_root,
         operation="derived_receipt_proof",
         holder_kind="derived-worker",
-        # One batch's proof is brief and writes only derived rows, so it may run
-        # between two units of a long mutation.
-        may_borrow=True,
     ):
         return _prove_committed_guarded(
             vault_root,
@@ -3213,8 +3210,6 @@ def complete_component(
         vault_root,
         operation="derived_component_completion",
         holder_kind="derived-worker",
-        # One component's completion is brief and writes only derived rows, as a proof is.
-        may_borrow=True,
     ):
         if observe_current_generation is not None:
             current_generation = observe_current_generation(vault_root)

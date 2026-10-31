@@ -18,7 +18,6 @@ The intended experience is that a person asks their agent to bring their data in
 - **Paging.** `adoption_studio start` pages through any number of candidates with an opaque cursor that keeps one collection identity. Pages plan in order and never guess a link target.
 - **Large files.** A new adoption ceiling replaces the client-pull cap for staged files on every runtime. Each artifact is copied in one streamed pass that hashes as it copies, so files over 100 MiB adopt on Cloud as they do locally.
 - **Agent guidance.** The import tools and the Adoption Studio next actions guide an agent through the whole flow: import, wait, page, select, plan, apply, finish, review the residual and discard.
-- **Lend the boundary between chunks.** An apply call holds the vault boundary for its whole leaf. Between two committed chunks, it lends the boundary to a waiting derived proof that would otherwise give up. A loan first hands off custody of the call's batches.
 
 ## Capabilities
 
@@ -31,11 +30,10 @@ The intended experience is that a person asks their agent to bring their data in
   - record finished local stages;
   - report the residual at finish.
 - `cloud-vault-import`: the import receipt lists each staged member.
-- `hosted-mutation-safety`: a command that holds the boundary across several units lends it between two units to an in-process derived proof or completion.
 
 ## Impact
 
-- **Code:** `adoption_run.py`, `adopt.py`, `adoption_plan.py`, `local_import.py`, `cloud_import_job.py` (it only reads its receipt), `client_artifacts.py`, `commands.py` (tool text), `mutation_lock.py`, `writer_lease.py` and `derived_receipts.py` (the lend), the skill scaffold reference and the Cloud rehearsal import scenario.
+- **Code:** `adoption_run.py`, `adopt.py`, `adoption_plan.py`, `local_import.py`, `cloud_import_job.py` (it only reads its receipt), `client_artifacts.py`, `commands.py` (tool text), the skill scaffold reference and the Cloud rehearsal import scenario.
 - **Out of scope:**
   - Substrate admission still multiplies declared bytes by two. Making that factor per kind is a follow-up in `publish-cloud-import-limits` and its Substrate pair.
   - Imports larger than the cell volume remain `add-cloud-media-store` task 5.4.
