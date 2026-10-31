@@ -31,7 +31,7 @@ Exomem SHALL accept an active refresh token only for its bound client and SHALL 
 - **THEN** the second process observes the same family and redemption state and completes exactly the same rotation contract
 
 ### Requirement: Concurrent refresh retries are briefly idempotent
-The first redemption of a refresh sequence SHALL create one atomic shared redemption receipt. Every redemption of that same token within 30 seconds of the first SHALL return the same next refresh token and MUST NOT be classified as theft; each response MAY contain a distinct valid access token.
+The first redemption of a refresh sequence SHALL create one atomic shared redemption receipt. Every redemption of that same token within 300 seconds of the first SHALL return the same next refresh token and MUST NOT be classified as theft; each response MAY contain a distinct valid access token.
 
 #### Scenario: Two ChatGPT workers refresh concurrently
 - **WHEN** two valid requests for the same refresh token race across one or more Exomem processes
@@ -39,14 +39,14 @@ The first redemption of a refresh sequence SHALL create one atomic shared redemp
 - **AND** both successful responses contain the same next refresh token
 
 #### Scenario: First refresh response is lost
-- **WHEN** the bound client retries the consumed refresh token within 30 seconds because it did not receive the first response
+- **WHEN** the bound client retries the consumed refresh token within 300 seconds because it did not receive the first response
 - **THEN** Exomem reconstructs the same next refresh token from durable state and succeeds without GitHub reauthorization
 
 ### Requirement: Late refresh-token reuse revokes the family
-A consumed refresh token presented more than 30 seconds after its first redemption SHALL be treated as refresh-token reuse. Exomem MUST revoke the complete family, return `invalid_grant`, and reject every refresh token and access token bound to that family thereafter.
+A consumed refresh token presented more than 300 seconds after its first redemption SHALL be treated as refresh-token reuse. Exomem MUST revoke the complete family, return `invalid_grant`, and reject every refresh token and access token bound to that family thereafter.
 
 #### Scenario: Rotated token is replayed after the retry window
-- **WHEN** a previously consumed refresh token is presented more than 30 seconds after its redemption
+- **WHEN** a previously consumed refresh token is presented more than 300 seconds after its redemption
 - **THEN** Exomem returns `invalid_grant` and durably revokes the refresh family
 - **AND** the current refresh token and all family-bound access tokens no longer validate
 

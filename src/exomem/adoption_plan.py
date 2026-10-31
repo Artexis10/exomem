@@ -29,6 +29,7 @@ from . import (
     context_refs,
     find_results,
     held_fs,
+    import_stage,
     markdown_regions,
     note_types,
     reserved_paths,
@@ -138,46 +139,73 @@ def earlier_import_of(
     )
 
 
+def _source_pages(root: Path) -> list[Path]:
+    """Every Markdown page under Sources, in the order `read_import_index` reads them."""
+    sources = kb_root(root) / "Sources"
+    pages: list[Path] = []
+    if not sources.is_dir():
+        return pages
+    for dirpath, dirnames, filenames in os.walk(sources):
+        dirnames.sort()
+        pages.extend(
+            Path(dirpath) / name for name in sorted(filenames) if name.lower().endswith(".md")
+        )
+    return pages
+
+
+def source_page_paths(root: Path) -> list[str]:
+    """The vault-relative path of every Markdown page under Sources that can hold an import.
+
+    Names only, no page is opened. The Sources index is left out: every filing rewrites it and it
+    holds no import, so it must not move `sources_seal`.
+    """
+    sources_index = kb_root(root) / "Sources" / "index.md"
+    return [
+        page.relative_to(root).as_posix() for page in _source_pages(root) if page != sources_index
+    ]
+
+
+def sources_seal(paths: Iterable[str]) -> str:
+    """An order-free digest of a set of Source page paths.
+
+    Two listings with one seal hold the same pages.
+    """
+    return hashlib.sha256("\n".join(sorted(set(paths))).encode("utf-8")).hexdigest()
+
+
+def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
+    """The entry a Source page's parsed front matter gives, or None when it names no original."""
+    try:
+        frontmatter = _leading_frontmatter(root, page)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return None
+    if frontmatter is None:
+        return None
+    imported_from = _text_field(frontmatter.get("imported_from"))
+    if imported_from is None:
+        return None
+    aliases = frontmatter.get("aliases")
+    return EarlierImport(
+        path=page.relative_to(root).as_posix(),
+        imported_from=imported_from,
+        import_collection=_text_field(frontmatter.get("import_collection")),
+        collection_path=_text_field(frontmatter.get("collection_path")),
+        original_sha256=_text_field(frontmatter.get("original_sha256")),
+        captured=str(frontmatter.get("captured") or ""),
+        aliases=tuple(
+            nfc(a) for a in aliases if isinstance(a, str) and a.strip()
+        ) if isinstance(aliases, list) else (),
+    )
+
+
 def read_import_index(root: Path) -> list[EarlierImport]:
     """Every Source page whose parsed front matter names its original.
 
     The decision is the parsed ``imported_from`` field, never a substring of the
     page, so a page that merely quotes a path does not count as an import.
     """
-    sources = kb_root(root) / "Sources"
-    found: list[EarlierImport] = []
-    if not sources.is_dir():
-        return found
-    for dirpath, dirnames, filenames in os.walk(sources):
-        dirnames.sort()
-        for name in sorted(filenames):
-            if not name.lower().endswith(".md"):
-                continue
-            page = Path(dirpath) / name
-            try:
-                frontmatter = _leading_frontmatter(root, page)
-            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-                continue
-            if frontmatter is None:
-                continue
-            imported_from = _text_field(frontmatter.get("imported_from"))
-            if imported_from is None:
-                continue
-            aliases = frontmatter.get("aliases")
-            found.append(
-                EarlierImport(
-                    path=page.relative_to(root).as_posix(),
-                    imported_from=imported_from,
-                    import_collection=_text_field(frontmatter.get("import_collection")),
-                    collection_path=_text_field(frontmatter.get("collection_path")),
-                    original_sha256=_text_field(frontmatter.get("original_sha256")),
-                    captured=str(frontmatter.get("captured") or ""),
-                    aliases=tuple(
-                        nfc(a) for a in aliases if isinstance(a, str) and a.strip()
-                    ) if isinstance(aliases, list) else (),
-                )
-            )
-    return found
+    entries = (read_import_entry(root, page) for page in _source_pages(root))
+    return [entry for entry in entries if entry is not None]
 
 
 def latest_earlier_import(
@@ -467,7 +495,8 @@ def source_failure(error: Exception) -> dict[str, str]:
 
 
 def read_facts(
-    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True
+    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True,
+    vouched: tuple[import_stage.Identity, str] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Hash one original and decide how it imports.
 
@@ -475,6 +504,8 @@ def read_facts(
     ``{"code", "reason"}``. A text-like file that is not valid UTF-8, or is too big
     to hold, imports as an artifact so its bytes survive. With ``hash_artifact`` false an
     artifact is only sized and its ``original_sha256`` is None, for a caller whose copy hashes it.
+    An artifact whose identity equals ``vouched`` (a stage manifest's identity and SHA-256) takes that
+    SHA-256, is not bound by the ceiling and is not read: adoption files it by rename, not by copy.
     """
     from .add import AddError, artifact_identity
 
@@ -484,14 +515,20 @@ def read_facts(
 
         with open_original(root, original_path, physical=True) as source:
             size = source.version.size
-            if size > ceiling:
+            reads_as_text = text_hint and size <= INLINE_TEXT_MAX_BYTES
+            stands_for_bytes = (
+                vouched is not None and not reads_as_text and import_stage.Identity.of_version(source.version) == vouched[0]
+            )
+            if size > ceiling and not stands_for_bytes:
                 return {"code": OVER_CEILING, "reason": f"original exceeds the {ceiling:,} byte adoption ceiling"}
-            if text_hint and size <= INLINE_TEXT_MAX_BYTES:
+            if reads_as_text:
                 data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
                 if len(data) != size:
                     return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
                 text = decode_text(data)
                 digest, length = hashlib.sha256(data).hexdigest(), len(data)
+            elif stands_for_bytes:
+                digest, length = vouched[1], size
             elif hash_artifact:
                 digest, length = artifact_identity(source.stream, ceiling=ceiling)
             else:
@@ -799,9 +836,10 @@ def plan_item(
     index: Iterable[EarlierImport],
     notes: NoteIndex,
     ceiling: int,
+    vouched: tuple[import_stage.Identity, str] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Facts, identity and a frozen destination for one original; or a refusal dict."""
-    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint)
+    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
         return {"path": original_path, **read}
     facts, text = read
@@ -1116,8 +1154,11 @@ __all__ = [
     "plan_item",
     "plan_note",
     "plan_total_bytes",
+    "read_import_entry",
     "read_import_index",
     "resolve_links",
+    "source_page_paths",
+    "sources_seal",
     "title_from_text",
     "wikilink_for",
 ]

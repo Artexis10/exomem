@@ -645,6 +645,12 @@ _DECLARED_UNBOUNDED_JOINS = {
         "self._q.join",
     ): "explicit test/operator queue drain when timeout=None; request paths do not call it",
     (
+        "mutation_lock.py",
+        "VaultMutationCoordinator.lend",
+        "state.turn.wait",
+    ): "waits for a borrower that already took the boundary; only prove_committed and "
+    "complete_component borrow, each for one batch, and lend makes no offer after its room",
+    (
         "media_store.py",
         "_decrypt_into",
         "process.wait",

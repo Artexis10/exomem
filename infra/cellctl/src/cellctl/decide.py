@@ -43,12 +43,9 @@ from .state import (
     RolloutRow,
     row_hold_kind,
 )
-from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, StorageConfig
+from .storage_config import DEFAULT_STORAGE, GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS, StorageConfig
 
 _SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
-# move-cloud-cells-to-local-storage D10: a local cell grows once its backup
-# finds the filesystem past this share of its size.
-GROWTH_THRESHOLD_PERCENT = 80
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 CLOUD_MODE_ENV = "EXOMEM_CLOUD_CELL"
 CLOUD_READ_ONLY_ENV = "EXOMEM_CLOUD_READ_ONLY"
 RESOURCE_POLICY_ENV = "EXOMEM_CLOUD_RESOURCE_POLICY"
+CLOUD_HEALTH_PORT_ENV = "EXOMEM_CLOUD_HEALTH_PORT"
 CLOUD_CELL_ISSUER = "exomem-cloud-cell"
 #: The canonical shape of a cell ID: sixteen base32 characters. Shape only;
 #: the control plane decides which cells exist.
@@ -84,6 +85,23 @@ def cloud_read_only_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
     raw = str(values.get(CLOUD_READ_ONLY_ENV, "")).strip().lower()
     return raw in _TRUE
+
+
+def health_port(env: Mapping[str, str] | None = None) -> int | None:
+    """The port of the cell's health-only listener (`cloud_health`), or None.
+
+    The platform sets it; a cell started without it serves readiness only on
+    the port that carries MCP, as a local install does.
+    """
+    values = os.environ if env is None else env
+    if not cloud_mode_enabled(values):
+        return None
+    raw = str(values.get(CLOUD_HEALTH_PORT_ENV, "")).strip()
+    if not raw:
+        return None
+    if not (raw.isascii() and raw.isdecimal()) or not 1 <= int(raw) <= 65535:
+        raise CloudConfigError("CLOUD_HEALTH_PORT_INVALID", "health port must be within 1..65535")
+    return int(raw)
 
 
 def resource_policy(env: Mapping[str, str] | None = None) -> str:

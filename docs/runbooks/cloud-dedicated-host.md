@@ -437,6 +437,44 @@ cannot resolve until each cell has a new report. The email names no cell.
 Expected result: the claim shows the new size, and a `RESOLVED: cell-disk-low`
 email follows the cell's next backup report.
 
+## Cell recall lagging
+
+cellctl emails `cell-recall-lagging` while any serving cell's recall serves a
+catalogue that has not advanced for `alerts.recall_lag_warn_seconds` in
+`infra/contracts/observability-v1.json`. Writes still work, and recall still
+answers, but from the catalogue it last published, so new notes are missing from
+search. The cell stays ready, so `cell-unavailable` does not fire. The email names no cell.
+
+cellctl reads each serving cell's readiness once a minute on the cell's
+health-only port, 8766. That port answers only `GET /health/ready`, with the
+same answer as port 8765. The alert fires when `retrieval.state` is `lagging`
+and `retrieval.catalogue_unchanged_seconds` is at or above the threshold. The
+cell counts that age from when its own process first saw the catalogue, so a
+cell restart starts it again from zero, and a cellctl restart does not.
+
+cellctl keeps the last definite reading of each serving cell: lagging past the
+threshold, or `retrieval.state` `ready`, which means that the catalogue has
+caught up. A younger lag, a cell with no ready pod and a cell that does not
+answer keep that cell's last reading. The alert resolves when the last reading
+of every serving cell is `ready`. After a cellctl restart, the alert sends no
+resolution until cellctl has a reading for every serving cell.
+
+Do not restart the cell to clear the alert. A lagging cell still serves writes
+and recall. A restarted cell stays unready until it has warmed again, and its
+age starts again from zero, so you lose the measure of the stall.
+
+1. List the cells that fire: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-recall-lagging`.
+2. Set `CELL_ID` to a listed cell, then read the pod's IP and node: `kubectl -n "exo-cell-$CELL_ID" get pod cell-0 --output wide`.
+3. On that node, read the cell's readiness: `curl --silent --max-time 10 "http://<pod IP>:8766/health/ready"`.
+   `retrieval.lagging_scopes` names the scopes whose catalogue trails, and `retrieval.repair` shows the lexical repair.
+4. If `retrieval.repair.phase` is not `idle`, read the answer again in ten minutes, and wait while the repair runs.
+5. If `cell-disk-low` also lists this cell, follow [Cell disk low](#cell-disk-low).
+6. Otherwise, save the readiness answer and the cell's log, and file the stall as a defect: `kubectl -n "exo-cell-$CELL_ID" logs cell-0 --since=1h`.
+
+Expected result: the cell's readiness shows `retrieval.state` `ready`, and a
+`RESOLVED: cell-recall-lagging` email follows within a few minutes. If no email
+follows, the cellctl log names the serving cells that cellctl could not read.
+
 ## Move a cell to a new claim
 
 A planned move takes a serving cell off its volume without losing a write.

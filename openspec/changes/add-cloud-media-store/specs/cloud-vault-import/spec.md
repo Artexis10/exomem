@@ -229,13 +229,23 @@ For an `adopt` import, the import Job SHALL record each member's identity in the
 
 ### Requirement: A discard keeps a residual record
 
-When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each staged member that adoption did not file, with its path, bytes and residual code. It SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: `import_discard` with `walk_stage` set. That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A discard SHALL refuse `walk_stage` with `IMPORT_REQUEST_INVALID` when it can read the receipt, and keep the stage. A retried walk SHALL keep the record that an earlier walk wrote. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
+When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each member of the stage manifest that adoption did not file, and each staged file that the manifest does not list, with its path, bytes and residual code. A member that is no longer in the stage SHALL keep the bytes of its manifest entry. A member is filed when a run's outcome says so, not when the stage no longer holds it. The record SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: `import_discard` with `walk_stage` set. That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A discard SHALL refuse `walk_stage` with `IMPORT_REQUEST_INVALID` when it can read the receipt, and keep the stage. A retried walk SHALL keep the record that an earlier walk wrote, and a discard that can read the receipt again SHALL NOT write an empty record over a walk record that lists members. When a member of the window is renamed but not committed, the discard SHALL refuse with `IMPORT_RENAMES_PENDING` before it writes any record. When the Job cannot read the receipt, it SHALL write the held paths under `renames_pending` into the walk file, which then holds no member list, and a retried walk SHALL replace that file with the member record. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
 
 #### Scenario: A discard after a path conflict
 
 - **WHEN** the person discards a window in which two members stayed unfiled after a path conflict
 - **THEN** the receipt keeps a residual record of both members, with their paths, bytes and the conflict code
 - **AND** the stage folder is gone
+
+#### Scenario: A renamed member whose replay was refused
+
+- **WHEN** a member was renamed into the Knowledge Base, its replay was refused because the file changed, and the person moves the file and discards the window
+- **THEN** the residual record lists the member with its manifest bytes and the code `failed`, although the stage holds no copy of it
+
+#### Scenario: A discard after a walk
+
+- **WHEN** a walk recorded the staged files, the receipt can be read again, and a plain discard finds every manifest member filed
+- **THEN** the receipt gets no residual record, and the walk record stays the window's record
 
 #### Scenario: A discard stops and runs again
 
@@ -252,6 +262,12 @@ When the discard Job discards a recorded stage, it SHALL keep a residual record 
 - **WHEN** an agent discards that window again with `walk_stage` set
 - **THEN** a separate record lists each staged file except the series file, with the code `receipt_unreadable`
 - **AND** the unreadable receipt stays, the stage folder is gone, and the status lists those files as "discarded, not filed"
+
+#### Scenario: A walk while a renamed member has no page
+
+- **WHEN** an agent discards a window with `walk_stage` set, the Job cannot read its receipt, and one member is renamed but its Source page is not committed
+- **THEN** the discard refuses with `IMPORT_RENAMES_PENDING`, the walk file lists that member's Knowledge Base path under `renames_pending`, and the stage stays
+- **AND** after the person moves that file and keeps the source, a retried walk records the staged files and the walk file no longer carries `renames_pending`
 
 #### Scenario: A walk with a readable receipt
 
