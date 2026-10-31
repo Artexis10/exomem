@@ -662,3 +662,24 @@ def test_a_shared_name_create_entity_asks_for_an_identity_decision(tmp_path):
     assert fingerprint in str(error.value)
     assert "no canonical path" not in str(error.value)
     assert VocabularyState(tmp_path).get(item.ref)["state"] != "applied"
+
+
+def test_an_unkeyed_cli_application_is_refused_before_it_binds_the_reviewed_decision(vault):
+    """In-process writes wait out contention without a key; a reviewed application still needs one."""
+    from exomem import product_invoke
+    from exomem.cli_ops import OpError
+
+    item = _proposed(vault)
+    with pytest.raises(OpError, match="requires a canonical idempotency identity"):
+        product_invoke.invoke_product(
+            "connect_memory",
+            {
+                "operation": "create-entity",
+                "entity_type": "organization",
+                "name": "Acme Labs",
+                "summary": "A durable organization identity.",
+                "vocabulary_ref": item.ref,
+                "vocabulary_fingerprint": item.fingerprint,
+            },
+        )
+    assert VocabularyState(vault).get(item.ref)["state"] == "proposed"

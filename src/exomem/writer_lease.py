@@ -5130,6 +5130,47 @@ class LeaseManager:
             yield mutation
 
     @contextmanager
+    def absorbing_mutation_guard(
+        self, vault_root: os.PathLike[str] | str, *, operation: str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """`mutation_guard`, waiting out an ordinary busy boundary before the body runs.
+
+        For a caller whose writes before it holds the boundary are none, or content-addressed
+        bytes a retry reuses, such as an upload commit: a refusal at the acquire has had no
+        effect. Only the acquire is
+        attempted again, through the keyed writes' wait (arrival order, waiter cap and refusal
+        causes). The body runs once, holding the boundary; a busy it raises is never retried,
+        because it may have consumed the request stream. The caller's place in line and its
+        waiter slot end with the acquire: it no longer waits.
+        """
+        if not _writes_absorb_contention():
+            with self.mutation_guard(vault_root, operation=operation) as mutation:
+                yield mutation
+            return
+
+        def refused_before_the_body(error: OpError) -> bool:
+            return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+
+        with ExitStack() as held:
+
+            def acquire() -> VaultMutationCoordinator:
+                with mutation_lock.absorbing_busy():
+                    return held.enter_context(self.mutation_guard(vault_root, operation=operation))
+
+            yield self._absorb_contention(
+                operation,
+                _ContentionWait(
+                    self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+                ),
+                acquire,
+                absorbable=refused_before_the_body,
+                request_id=str(uuid.uuid4()),
+                join_on_arrival=True,
+                # The /upload route or the session park hands the refusal to its caller and records it.
+                seam_records=True,
+            )
+
+    @contextmanager
     def projection_guard(
         self, vault_root: os.PathLike[str] | str, *, operation: str
     ) -> Iterator[VaultMutationCoordinator]:
@@ -5380,6 +5421,7 @@ class LeaseManager:
         idempotency_principal_scope: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
+        absorb_unkeyed: bool = False,
     ) -> Any:
         t_start = time.perf_counter()
         # Same instant on the clock the acknowledgement's own deadlines use, so
@@ -6468,6 +6510,7 @@ class LeaseManager:
                 # that preparation fetched caller-supplied temporary handles, the
                 # server cannot fetch them again; only the caller can retry.
                 rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
+                absorb_unkeyed=absorb_unkeyed,
             )
             if (
                 vocabulary_replay_terminal is not None
@@ -6672,6 +6715,7 @@ class LeaseManager:
         wait_started: float | None = None,
         wait_deadline: float | None = None,
         rerun_safe: bool = True,
+        absorb_unkeyed: bool = False,
     ) -> Any:
         """Run one keyed write, waiting out an ordinary busy boundary.
 
@@ -6684,8 +6728,13 @@ class LeaseManager:
         key commits exactly once; anything that observed a commit is never
         re-run. A write is attempted again only while the request budget still
         fits another attempt as long as the last one.
+
+        `absorb_unkeyed` is the in-process caller's (CLI, terminal UI) own mark: it has no
+        key and no reply it could lose, so a refusal raised before the commit is waited out
+        the same way and nothing is stored. A remote caller never sets it, because one that
+        gave up during the wait and sent the write again would commit it twice.
         """
-        eligible = key is not None and rerun_safe and _writes_absorb_contention()
+        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _writes_absorb_contention()
         store_attempt = _ACTIVE_STORE_ATTEMPT.get()
         if store_attempt is not None:
             return self._run_store_attempt(
@@ -6725,12 +6774,12 @@ class LeaseManager:
             return True
 
         return self._absorb_contention(
-            command, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
+            command.name, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
         )
 
     def _absorb_contention(
         self,
-        command: Any,
+        command_name: str,
         wait: _ContentionWait,
         attempt: Callable[[], Any],
         *,
@@ -6738,11 +6787,13 @@ class LeaseManager:
         request_id: str,
         join_on_arrival: bool,
         on_refuse: Callable[[OpError], None] | None = None,
+        seam_records: bool = False,
     ) -> Any:
         """Attempt a write until it returns, waiting in line after each refusal `absorbable` admits.
 
         Only the calling thread waits. `absorbable` admits a refusal raised before anything
-        committed; every other error propagates on first sight.
+        committed; every other error propagates on first sight. With `seam_records`, the
+        refusal leaves unclaimed: the caller hands it to a seam that journals and counts it.
         """
         # The last refusal this write absorbed: a wait that runs out in line
         # still names the holder that kept it waiting.
@@ -6756,10 +6807,12 @@ class LeaseManager:
                 on_refuse(error)
             if error.code != "MUTATION_BUSY":
                 # A handed-back store or preparation refusal keeps its own shape and cause.
-                mutation_journal.claim_refusal(error)
+                if not seam_records:
+                    mutation_journal.claim_refusal(error)
                 return error
-            # The one place a busy from this loop becomes client-visible.
-            _count_busy_once(error)
+            # The one place a busy from this loop becomes client-visible, unless a seam records it.
+            if not seam_records:
+                _count_busy_once(error)
             # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
             error.details.pop("wait_ms", None)
             error.details.update(cause=cause, waited_ms=wait.waited_ms(), absorbed_attempts=wait.absorbed)
@@ -6768,7 +6821,7 @@ class LeaseManager:
                 "contention_refused",
                 level=logging.WARNING,
                 request_id=request_id,
-                command=command.name,
+                command=command_name,
                 cause=cause,
                 waited_ms=error.details["waited_ms"],
             )
@@ -6830,7 +6883,7 @@ class LeaseManager:
                     _log_mutation_event(
                         "contention_absorbed",
                         request_id=request_id,
-                        command=command.name,
+                        command=command_name,
                         attempts=wait.absorbed + 1,
                         waited_ms=wait.waited_ms(),
                     )
@@ -6984,7 +7037,7 @@ class LeaseManager:
                 journal()
 
         return self._absorb_contention(
-            command,
+            command.name,
             wait,
             attempt,
             absorbable=absorbable,
@@ -8133,6 +8186,7 @@ def invoke_command(
     idempotency_principal_scope: str | None = None,
     implicit_idempotency_scope: str | None = None,
     mutation_request_id: str | None = None,
+    absorb_unkeyed: bool = False,
     **kwargs: Any,
 ) -> Any:
     from .commands import (
@@ -8279,6 +8333,7 @@ def invoke_command(
                 idempotency_principal_scope=idempotency_principal_scope,
                 implicit_idempotency_scope=implicit_idempotency_scope,
                 mutation_request_id=mutation_request_id,
+                absorb_unkeyed=absorb_unkeyed,
             )
 
     if not injected or not is_vault_root(injected[0]):

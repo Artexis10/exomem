@@ -339,3 +339,25 @@ def test_a_record_append_waits_out_the_boundary(
             contention,
         )
     assert result
+
+
+def test_an_unkeyed_write_that_committed_is_not_run_again_when_it_ends_busy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a receipt to replay, a second run of a committed write would write it twice."""
+    runs = []
+
+    def leaf(_vault):
+        runs.append(1)
+        writer_lease.mark_active_mutation_committed()
+        raise OpError("MUTATION_BUSY", "busy after its commit", details={"committed": False})
+
+    stub = commands.Command(
+        name="unkeyed_committed_then_busy", leaf=leaf, params=(), surfaces=frozenset(),
+        cli_writes=True, response_detail="legacy",
+    )
+    monkeypatch.setenv("XDG_STATE_HOME", str(vault.parent / "state"))
+    with pytest.raises(OpError):  # reported as committed with an uncertain acknowledgement
+        writer_lease.invoke_command(stub, vault, absorb_unkeyed=True)
+
+    assert runs == [1]

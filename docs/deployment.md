@@ -1719,6 +1719,10 @@ The service preserves the file only when its SHA-256 matches. `GET` on the
 session returns its state and, after the commit, the receipt. The state
 `retryable` means that the service holds every byte but the commit failed for
 a reason other than the bytes; the next request on the session retries it.
+When the reason is a busy or still-warming vault (`MUTATION_BUSY`,
+`COLLECTION_STORE_BUSY` or `MUTATION_WARMING`), the service also retries the
+commit itself, after 2 seconds and then after twice the previous wait, up to
+60 seconds, until the session expires.
 
 A deployment behind Cloudflare Access must let `HEAD`, `PATCH`, `GET` and
 `DELETE` requests to `/upload/sessions/*` through without an Access login.

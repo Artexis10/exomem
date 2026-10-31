@@ -692,6 +692,8 @@ def test_edit_memory_cli_primary_operation_is_normalized_before_invocation(
     assert code == 0, f"{err}\n{out}"
     assert len(calls) == 1
     assert calls[0].pop("idempotency_key") is None
+    # An in-process write with no key waits out contention; nothing is stored for a replay.
+    assert calls[0].pop("absorb_unkeyed") is True
     assert calls == [
         {
             "path": _INSIGHT,
