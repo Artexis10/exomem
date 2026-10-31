@@ -15,6 +15,7 @@ import dreamer_fixture as fx
 import pytest
 
 from exomem import (
+    commands,
     corpus_aware,
     dreamer,
     dreamer_families,
@@ -358,3 +359,43 @@ def test_link_evidence_takes_the_source_title_from_the_graph(
     assert shared and all(item["path"] == fx.SOURCE_ONE for item in shared), proposals
     assert {item["title"] for item in shared} == {"Field report one"}
     assert fx.SOURCE_ONE not in parsed, parsed
+
+
+def _party(title: str, entity_type: str) -> str:
+    return (
+        f"---\ntitle: {title}\ntype: entity\nentity_type: {entity_type}\nstatus: active\n"
+        'created: 2026-01-01\nupdated: 2026-05-04\nsources:\n  - "[[Sources/field-report-one]]"\n---\n\n'
+        f"# {title}\n\n{title} is an invented entity.\n"
+    )
+
+
+def test_a_pair_a_specific_relation_fits_is_left_in_the_queue_for_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The link route could only accept the generic relation, so the dreamer proposes no link for a
+    person and an organization that share a source; the relation queue still offers the pair."""
+    vault = fx.build(tmp_path)
+    person = f"{fx.KB}/Notes/Entities/ada-marsh.md"
+    organization = f"{fx.KB}/Notes/Entities/birch-works.md"
+    fx.edit(vault, person, _party("Ada Marsh", "person"))
+    fx.edit(vault, organization, _party("Birch Works", "organization"))
+    before = {rel: (vault / rel).read_bytes() for rel in (person, organization)}
+
+    _quiet(vault)
+
+    open_links = _rows(vault)
+    assert _pair(open_links, person, organization) is None
+    assert _pair(open_links, organization, person) is None
+    # Pages with no fitting relation are still proposed, so the dreamer did run over this vault.
+    assert _pair(open_links, fx.CAVITATION, fx.INLET) is not None
+    assert {rel: (vault / rel).read_bytes() for rel in (person, organization)} == before
+    fx.warm_identity(vault, monkeypatch)
+    queue = commands.op_review_memory(vault, mode="relation-queue")
+    [item] = [
+        item
+        for group in queue["groups"]
+        for item in group["items"]
+        if (item["from"], item["to"], item["method"]) == (person, organization, "shared_sources")
+    ]
+    assert "owns" in [option["key"] for option in item["options"]]
+    assert item["bullet"] is None

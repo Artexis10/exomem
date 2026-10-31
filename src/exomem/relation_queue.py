@@ -212,15 +212,19 @@ class RelationFit:
         *,
         registry: relation_registry.RelationRegistry | None = None,
         source_page: Any | None = None,
+        relation: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Up to four fitting relations when the candidate proposes the generic one, else none."""
+        """Up to four fitting relations when the relation is the generic one, else none.
+
+        `relation` is the one under judgement: the candidate's own, unless an agent asked for another.
+        """
         page = source_page
         if registry is None:
             page = page or self._page(str(candidate.get("from") or ""))
             if page is None:
                 return []
             registry = relation_registry.load_for_page(self._root, page.rel_path, page.frontmatter)
-        definition = registry.definition(str(candidate.get("relation_type") or ""))
+        definition = registry.definition(str(relation or candidate.get("relation_type") or ""))
         # Generic is a registry attribute (`generic`); no relation key is compared here.
         if definition is None or not definition.generic:
             return []
@@ -238,6 +242,45 @@ class RelationFit:
             other,
             self._types(),
             accepts=lambda key: _usable_relation(registry, key, page, target) is not None,
+        )
+
+
+#: What the agent does when the queue will not write the generic relation for a pair a specific one fits.
+RELATION_CHOICE_REMEDIATION = (
+    "Choose a specific relation, or dismiss the candidate. "
+    "A generic edge with a reason can be authored on the page."
+)
+
+
+def require_relation_choice(
+    vault_root: Path,
+    candidate: dict[str, Any],
+    requested_relation: str | None,
+    *,
+    page: Any | None = None,
+    fit: RelationFit | None = None,
+) -> None:
+    """Refuse to accept the generic relation where a specific one fits; the agent chooses.
+
+    Naming no relation takes the candidate's own, so a generic candidate is refused. Naming
+    the generic relation is refused too. Any other registered relation passes.
+    """
+    page = page or _page_for(vault_root, str(candidate.get("from") or ""))
+    if page is None:
+        return
+    registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
+    fit = fit or RelationFit(vault_root)
+    relation = None
+    if requested_relation is not None:
+        chosen = selected_relation(vault_root, candidate, requested_relation, source_page=page)
+        relation = str(chosen.get("relation_type") or "")
+    options = fit.options(candidate, registry=registry, source_page=page, relation=relation)
+    if options:
+        raise OpError(
+            "RELATION_CHOICE_REQUIRED",
+            "a specific relation fits these two pages, so the generic relation is not chosen for you",
+            RELATION_CHOICE_REMEDIATION,
+            details={"options": options, "mutated": False},
         )
 
 
@@ -707,6 +750,7 @@ def _enrich(
     candidate: dict[str, Any],
     *,
     exact_refs: tuple[str, str] | None = None,
+    fit: RelationFit | None = None,
 ) -> dict[str, Any]:
     from_path = str(candidate.get("from") or page.rel_path)
     to_path = str(candidate.get("to") or "")
@@ -723,7 +767,9 @@ def _enrich(
         to_ref=to_ref,
         signal_version=_evidence_signal_version(page, candidate),
     )
-    return {
+    # Where a specific relation fits, the item offers it and no bullet: the agent picks the relation.
+    options = (fit or RelationFit(vault_root)).options(candidate, source_page=page)
+    item = {
         "review_id": review_id,
         "ref": relation_review_ref(review_id),
         "fingerprint": fingerprint,
@@ -732,10 +778,13 @@ def _enrich(
         "relation_type": candidate.get("relation_type"),
         "method": candidate.get("method"),
         "evidence": candidate.get("evidence") or {},
-        "bullet": _bullet(candidate),
+        "bullet": None if options else _bullet(candidate),
         "target_ref": from_ref,
         "state": "open",
     }
+    if options:
+        item["options"] = options
+    return item
 
 
 def _classify_candidate(
@@ -748,6 +797,7 @@ def _classify_candidate(
     authored: set[tuple[str, str]] | None = None,
     exact_refs: tuple[str, str] | None = None,
     today=None,
+    fit: RelationFit | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Apply the three read-time eligibility filters to one candidate.
 
@@ -769,7 +819,7 @@ def _classify_candidate(
         return "authored_edge", None
     if _is_placeholder_target(vault_root, to_path):
         return "placeholder_target", None
-    enriched = _enrich(vault_root, page, candidate, exact_refs=exact_refs)
+    enriched = _enrich(vault_root, page, candidate, exact_refs=exact_refs, fit=fit)
     effective, _decision = store.effective_state(
         enriched["review_id"],
         enriched["fingerprint"],
@@ -1069,16 +1119,7 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate is no longer eligible "
             f"({reason}); refresh the queue and inspect {ref} again"
         )
-    if requested_relation is None:
-        options = RelationFit(vault_root).options(candidate, source_page=page)
-        if options:
-            # The queue never picks the generic relation where a specific one fits; the agent does.
-            raise OpError(
-                "RELATION_CHOICE_REQUIRED",
-                "this candidate only says the two pages are related, and a specific relation fits them",
-                "Accept again with requested_relation set to one of the listed options.",
-                details={"options": options, "mutated": False},
-            )
+    require_relation_choice(vault_root, candidate, requested_relation, page=page)
     selected = selected_relation(
         vault_root,
         candidate,

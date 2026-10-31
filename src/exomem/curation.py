@@ -175,6 +175,8 @@ _CREATE_ENTITY_FIELDS = frozenset(
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})
+#: The relation an agent chooses for the candidate; optional, but required where a specific relation fits.
+_ACCEPT_RELATION_OPTIONAL_FIELDS = frozenset({"requested_relation"})
 # nosemgrep: ep-word-set -- remove_relation defines these closed request fields.
 _REMOVE_RELATION_FIELDS = frozenset({"subject", "predicate", "target", "why"})
 _APPEND_RECORD_FIELDS = frozenset(
@@ -239,7 +241,7 @@ _RECOVER_FIELDS = frozenset({"trash_path", "restore_path", "allow_curated"})
 _ARG_FIELDS = {
     "create-note": _CREATE_NOTE_FIELDS,
     "create-entity": _CREATE_ENTITY_FIELDS,
-    "accept-relation": _ACCEPT_RELATION_FIELDS,
+    "accept-relation": _ACCEPT_RELATION_FIELDS | _ACCEPT_RELATION_OPTIONAL_FIELDS,
     "edit": _EDIT_FIELDS,
     OBSERVE_UNIT_STEP_KIND: _OBSERVE_UNIT_FIELDS,
     # The private undo protocol adds one optional binding, with no new required field.
@@ -478,7 +480,7 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         if "registry_scope" in args:
             _require_string(args["registry_scope"], f"steps[{ordinal}].args.registry_scope")
     elif kind == "accept-relation":
-        for field in _ACCEPT_RELATION_FIELDS:
+        for field in _ACCEPT_RELATION_FIELDS | (_ACCEPT_RELATION_OPTIONAL_FIELDS & args.keys()):
             _require_string(args.get(field), f"steps[{ordinal}].args.{field}")
         if not _HEX64.fullmatch(args["expected_hash"]) or not _HEX24.fullmatch(
             args["expected_fingerprint"]
@@ -1457,6 +1459,13 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             preimage, before_hash = _read_target(vault_root, path)
             if before_hash != args["expected_hash"]:
                 raise _error("CURATION_BINDING_STALE", "relation target hash is stale")
+            # The plan names the relation: a generic one, or none, is refused where a specific one fits.
+            relation_queue.require_relation_choice(
+                vault_root,
+                resolved.candidate,
+                args.get("requested_relation"),
+                page=resolved.source_page,
+            )
             prepared = {"candidate": dict(resolved.candidate)}
             after_hash = None
             effect_before = [{"path": path, "content_hash": before_hash}]
@@ -2585,7 +2594,13 @@ def _dispatch_step(
     if kind == "create-entity":
         return commands.op_connect_memory(vault_root, operation="create-entity", **args)
     if kind == "accept-relation":
-        return commands.op_connect_memory(vault_root, operation="accept-relation", **args)
+        # The sealed plan binds the chosen relation. The leaf's vocabulary binding belongs to a
+        # reviewed vocabulary decision, which a curation step does not carry.
+        token = commands._legacy_selected_relation.set("requested_relation" in args)
+        try:
+            return commands.op_connect_memory(vault_root, operation="accept-relation", **args)
+        finally:
+            commands._legacy_selected_relation.reset(token)
     if kind == "edit":
         operation = dict(args["operation"])
         operation.pop("validate_only", None)

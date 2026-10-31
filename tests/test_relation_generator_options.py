@@ -13,10 +13,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from test_curation_execution import _apply, _propose
 from test_relation_endpoints import _entity, _served
 
+from exomem import (
+    commands,
+    curation,
+    epistemic_graph,
+    find,
+    freshness,
+    relation_queue,
+    semantic_contract,
+)
 from exomem import edit as edit_module
-from exomem import epistemic_graph, find, freshness, relation_queue, semantic_contract
 
 NOTES = "Knowledge Base/Notes/Insights"
 
@@ -190,5 +199,82 @@ def test_a_candidate_between_two_plain_notes_still_accepts_without_naming_a_rela
 
     assert accepted["mutated"] is True, accepted
     assert f"- relates_to [[{pages[1].removesuffix('.md')}]]" in (vault / pages[0]).read_text(
+        encoding="utf-8"
+    )
+
+
+def _entity_pair_in_fixture_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, str, dict, str]:
+    """A person and an organization that cite one source, and the queue's candidate between them."""
+    source = "Knowledge Base/Sources/Sessions/2026-10-31-curation-shared-source.md"
+    pages = {
+        source: "---\ntype: source\ntitle: Curation shared source\n---\n# Curation shared source\n\nRaw notes.\n",
+        "Knowledge Base/Entities/People/Ada Marsh.md": _entity_page("Ada Marsh", "person", source),
+        "Knowledge Base/Entities/Organizations/Birch Works.md": _entity_page(
+            "Birch Works", "organization", source
+        ),
+    }
+    for rel, text in pages.items():
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(text, encoding="utf-8")
+    person, organization = list(pages)[1:]
+    _rebuild(vault, monkeypatch)
+    review = commands.op_review_memory(vault, mode="relation-queue")
+    [(group, item)] = [
+        (group, item)
+        for group in review["groups"]
+        for item in group["items"]
+        if (item["from"], item["to"], item["method"]) == (person, organization, "shared_sources")
+    ]
+    return person, organization, item, group["content_hash"]
+
+
+def _entity_page(title: str, entity_type: str, source: str) -> str:
+    return (
+        f"---\ntype: entity\nentity_type: {entity_type}\ntitle: {title}\nstatus: active\n"
+        f"sources:\n  - {source}\n---\n# {title}\n\n## Summary\n\n{title} is an invented entity.\n"
+    )
+
+
+def _accept_step(item: dict[str, Any], expected_hash: str, **extra: str) -> dict[str, Any]:
+    return {
+        "step_id": "relation",
+        "kind": "accept-relation",
+        "args": {
+            "ref": item["ref"],
+            "expected_hash": expected_hash,
+            "why": "Accept the reviewed relation candidate.",
+            "expected_fingerprint": item["fingerprint"],
+            **extra,
+        },
+    }
+
+
+@pytest.mark.parametrize("requested", [None, "relates_to"])
+def test_a_curation_plan_that_leaves_the_generic_relation_where_a_specific_one_fits_is_refused(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, requested: str | None
+) -> None:
+    person, _organization, item, expected_hash = _entity_pair_in_fixture_vault(vault, monkeypatch)
+    before = (vault / person).read_bytes()
+    extra = {} if requested is None else {"requested_relation": requested}
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _accept_step(item, expected_hash, **extra))
+
+    assert refused.value.code == "RELATION_CHOICE_REQUIRED"
+    assert '"key":"owns"' in str(refused.value)
+    assert (vault / person).read_bytes() == before
+
+
+def test_a_curation_plan_that_names_a_fitting_relation_writes_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    person, organization, item, expected_hash = _entity_pair_in_fixture_vault(vault, monkeypatch)
+
+    proposed = _propose(vault, _accept_step(item, expected_hash, requested_relation="owns"))
+    _apply(vault, proposed)
+
+    assert f"- owns [[{organization.removesuffix('.md')}]]" in (vault / person).read_text(
         encoding="utf-8"
     )
