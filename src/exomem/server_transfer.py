@@ -1378,7 +1378,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             try:
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
-                with media_store.local_originals(vault_root, (rel,)):
+                with media_store.local_originals(vault_root, (rel,), read=True):
                     snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None

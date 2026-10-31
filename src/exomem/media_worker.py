@@ -161,6 +161,8 @@ _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: cost being removed below is the store open, not the wakeup, and stretching
 #: this is what would actually delay a job.
 _SUPERVISE_POLL_SECONDS = 0.5
+#: How often the supervisor checks the eviction target between jobs (D3, M3).
+_EVICTION_INTERVAL_SECONDS = 60.0
 #: Backstop for the writes a signature comparison cannot separate from its own.
 #: Two of them: a foreign worker pid dying without writing anything at all, and
 #: a commit that lands between `needs_worker()`'s read and the signature taken
@@ -502,6 +504,7 @@ class MediaWorker:
                 if job is None:
                     return
                 self._process(job)
+                _evict(self._vault_root)
             except Exception:  # noqa: BLE001 — a bad job must never kill the worker
                 log.exception("media worker job crashed: %s", getattr(job, "binary_path", "?"))
             finally:
@@ -1674,6 +1677,7 @@ class MediaWorker:
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
+        eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
         # The store signature this supervisor last saw answer "no work", and
         # when to stop trusting it.  `None` means "ask the store".
         idle_signature: tuple[object, ...] | None = None
@@ -1688,6 +1692,9 @@ class MediaWorker:
                 except Exception:  # noqa: BLE001 - convergence retries at the next start
                     log.warning("media worker: engine convergence deferred", exc_info=True)
             while not self._stop_event.is_set():
+                if _clock() >= eviction_at:
+                    _evict(self._vault_root)
+                    eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
                 child = self._child
                 running = child is not None and child.poll() is None
                 if brakes and (running or self._pressure_high):
@@ -2421,6 +2428,16 @@ def _idle_seconds() -> float:
         return 300.0
 
 
+def _evict(vault_root: Path) -> None:
+    """Check the eviction target after a job or on the timer; a failure never stops the worker (D3, M3)."""
+    from . import media_store
+
+    try:
+        media_store.evict_to_target(vault_root)
+    except Exception:  # noqa: BLE001 - the next job or tick checks again
+        log.warning("media worker: eviction deferred", exc_info=True)
+
+
 def run_child(
     vault_root: Path,
     *,
@@ -2615,6 +2632,7 @@ def run_child(
                         fail(job, outcome.error or "stale extraction commit")
                 else:
                     store.complete(job)
+            _evict(vault_root)
             if brakes:
                 # One job per child: the next starts fresh, with no growth from this
                 # one, and the supervisor's watchdog times exactly one job.

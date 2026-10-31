@@ -663,6 +663,11 @@ class MediaJobStore:
                              "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, pid INTEGER NOT NULL, "
                              "temporary_bytes INTEGER NOT NULL DEFAULT 0, hydrating INTEGER NOT NULL DEFAULT 0)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_binary_rel ON media_access(binary_rel)")
+                self._migrate_eviction_columns(conn)
+                # Eviction on demand (D3): one lease per import series, served at the largest live demand.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_demands ("
+                             "series TEXT PRIMARY KEY, demand_bytes INTEGER NOT NULL, "
+                             "budget_offset INTEGER NOT NULL, renewed_at REAL NOT NULL)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
@@ -741,6 +746,32 @@ class MediaJobStore:
             conn.execute("INSERT INTO media_offload_refusals(binary_rel, sha256, code, ciphertext_size, created_at) "
                          "SELECT binary_rel, sha256, code, ciphertext_size, created_at FROM media_offload_refusals_old")
             conn.execute("DROP TABLE media_offload_refusals_old")
+
+    @staticmethod
+    def _migrate_eviction_columns(conn: sqlite3.Connection) -> None:
+        """Columns that let eviction and the claim read originals from the ledger alone (D3, M3 and M4).
+
+        `media_cache.owner_read` is NULL until an owner reads the original. A row from
+        before the column keeps its old read time, so an upgrade evicts no original
+        earlier than before. `pinned` marks a claimed job, which keeps its original
+        until the job completes, fails or is blocked.
+        """
+        cache = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
+        if "size" not in cache:
+            conn.execute("ALTER TABLE media_cache ADD COLUMN size INTEGER")
+        if "owner_read" not in cache:
+            conn.execute("ALTER TABLE media_cache ADD COLUMN owner_read REAL")
+            conn.execute("UPDATE media_cache SET owner_read = last_read")
+        if "evicted" not in cache:
+            conn.execute("ALTER TABLE media_cache ADD COLUMN evicted INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS media_cache_candidates ON media_cache(evicted, size)")
+        jobs = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "pinned" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        # One rule for every path that fails or blocks a job, including engine waits and stop limits.
+        conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_release_pin AFTER UPDATE OF state ON jobs "
+                     "WHEN NEW.state IN ('failed', 'blocked') "
+                     "BEGIN UPDATE jobs SET pinned = 0 WHERE id = NEW.id; END")
 
     @staticmethod
     def _migrate_offload_columns(conn: sqlite3.Connection) -> None:
@@ -1112,7 +1143,7 @@ class MediaJobStore:
                 """
                 UPDATE jobs
                 SET state = 'running', attempts = attempts + 1,
-                    claim_revision = claim_revision + 1,
+                    claim_revision = claim_revision + 1, pinned = 1,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
@@ -1164,7 +1195,7 @@ class MediaJobStore:
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
                         reprocess = 0, language = NULL, language_mode = NULL,
-                        state = 'pending', updated_at = ?, last_error = NULL
+                        state = 'pending', pinned = 0, updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
                     """,
                     (
@@ -1780,7 +1811,7 @@ class MediaJobStore:
                     delete_job = False
                     changed = conn.execute(
                         """
-                        UPDATE jobs SET do_ocr = ?, state = 'pending', last_error = NULL,
+                        UPDATE jobs SET do_ocr = ?, state = 'pending', pinned = 0, last_error = NULL,
                             reprocess = CASE WHEN ? THEN reprocess ELSE 0 END,
                             language = CASE WHEN ? THEN language ELSE NULL END,
                             language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,

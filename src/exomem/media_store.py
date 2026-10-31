@@ -228,12 +228,14 @@ def recover_cache(vault: Path, path: Path, snapshot: OriginalSnapshot) -> bool:
 def _record_cache(conn, store: MediaJobStore, snapshot: OriginalSnapshot, source: reserved_paths.GenericBinarySource) -> None:
     assert snapshot.reference is not None
     source.require_current()
+    # `last_read` is the legacy record time; only `owner_read` decides idleness (D3, M4).
     conn.execute(
-        "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read) VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0) "
         "ON CONFLICT(binary_rel) DO UPDATE SET reference=excluded.reference, sha256=excluded.sha256, "
-        "identity=excluded.identity, last_read=excluded.last_read",
+        "identity=excluded.identity, last_read=excluded.last_read, size=excluded.size, evicted=0",
         (store._relative(snapshot.path), _reference_key(snapshot.reference), snapshot.binary_sha256,
-         _source_identity(source), time.time()),
+         _source_identity(source), time.time(), snapshot.binary_size),
     )
 
 
@@ -244,7 +246,8 @@ def _clear_dead_access(conn, rows) -> None:
 
 
 @contextmanager
-def _pin(vault: Path, path: Path):
+def _pin(vault: Path, path: Path, *, read: bool = False):
+    """Keep an original on the volume; `read` marks an owner's playback, download or viewing (D3, M4)."""
     store = MediaJobStore(vault)
     token = uuid.uuid4().hex
     conn = store._connect()
@@ -261,8 +264,9 @@ def _pin(vault: Path, path: Path):
         conn = store._connect()
         try:
             with conn:
-                conn.execute("UPDATE media_cache SET last_read = ? WHERE binary_rel = ?",
-                             (time.time(), store._relative(path)))
+                if read:
+                    conn.execute("UPDATE media_cache SET owner_read = ? WHERE binary_rel = ?",
+                                 (time.time(), store._relative(path)))
                 conn.execute("DELETE FROM media_access WHERE token = ?", (token,))
         finally:
             conn.close()
@@ -861,8 +865,10 @@ def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
 
 
 @contextmanager
-def local_originals(vault: Path, paths: tuple[str | Path, ...]):
+def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = False):
     """Materialize selected original bindings and pin them through a local operation.
+
+    `read` marks an owner's download; moves, exports and recovery record no read.
 
     A rename or trash operation changes the held pathname, so this context keeps
     access pins rather than a read handle that must retain its original name.
@@ -891,7 +897,7 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...]):
             relative = snapshot.path.relative_to(root).as_posix()
             if not any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes):
                 continue
-            ledger, token = stack.enter_context(_pin(root, snapshot.path))
+            ledger, token = stack.enter_context(_pin(root, snapshot.path, read=read))
             current = original_state(root, snapshot.path)
             if current.state == "evicted":
                 _hydrate(root, current, ledger, token)
@@ -899,8 +905,11 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...]):
 
 
 @contextmanager
-def open_original(vault: Path, path: str | Path, *, physical: bool = False):
-    """Pin before resolution; retain verified bytes through the caller's read."""
+def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False):
+    """Pin before resolution; retain verified bytes through the caller's read.
+
+    `read` marks an owner's playback or viewing; processing and imports record no read.
+    """
     vault = Path(vault).resolve()
     target = Path(path)
     if not target.is_absolute():
@@ -910,7 +919,7 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False):
         with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
             yield source
         return
-    with _pin(vault, target) as (ledger, token):
+    with _pin(vault, target, read=read) as (ledger, token):
         snapshot = original_state(vault, target)
         if snapshot.state == "evicted":
             _hydrate(vault, snapshot, ledger, token)
@@ -963,10 +972,11 @@ def evict(vault: Path, path: Path) -> bool:
             relative = ledger._relative(path)
             _clear_dead_access(conn, conn.execute(
                 "SELECT token, pid FROM media_access WHERE binary_rel = ?", (relative,)).fetchall())
-            row = conn.execute("SELECT last_read FROM media_cache WHERE binary_rel = ?", (relative,)).fetchone()
-            if (row is None or time.time() - row[0] < float(config["minimum_idle_seconds"])
+            row = conn.execute("SELECT owner_read FROM media_cache WHERE binary_rel = ?", (relative,)).fetchone()
+            if (row is None
+                    or row["owner_read"] is not None and time.time() - row["owner_read"] < float(config["minimum_idle_seconds"])
                     or conn.execute("SELECT 1 FROM media_access WHERE binary_rel = ?", (relative,)).fetchone()
-                    or conn.execute("SELECT 1 FROM jobs WHERE binary_rel = ?", (relative,)).fetchone()
+                    or conn.execute(_PINNING_JOB, (relative,)).fetchone()
                     or original_state(vault, path) != snapshot or _identity(vault, path) != identity):
                 conn.rollback()
                 return False
@@ -981,34 +991,121 @@ def evict(vault: Path, path: Path) -> bool:
                             return False
                         filesystem.unlink(file).require()
                         filesystem.flush_directory(parent).require()
+            conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
             conn.commit()
             return True
         finally:
             conn.close()
 
 
+# A claimed job keeps its original until it completes, fails or is blocked (D3, M4).
+_PINNING_JOB = "SELECT 1 FROM jobs WHERE binary_rel = ? AND pinned = 1 AND state IN ('pending', 'running')"
+# A demand lapses 15 minutes after its series last renewed it (D3).
+DEMAND_LEASE_SECONDS = 15 * 60
+# Each pass reads at most this many candidates, so eviction never walks the whole cache.
+_EVICTION_BATCH = 64
+_ELIGIBLE = (
+    "FROM media_cache WHERE evicted = 0 AND size IS NOT NULL AND size <= :hydration "
+    "AND (owner_read IS NULL OR owner_read <= :idle_before) "
+    "AND NOT EXISTS (SELECT 1 FROM media_access WHERE media_access.binary_rel = media_cache.binary_rel) "
+    "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
+    "AND jobs.pinned = 1 AND jobs.state IN ('pending', 'running'))"
+)
+# Unread originals first, those with no pending job before those with one, each largest first;
+# then owner-read originals, largest first and longest idle on ties (D3, M4).
+_EVICTION_ORDER = (
+    "ORDER BY owner_read IS NOT NULL, "
+    "CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
+    "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read"
+)
+
+
+def record_demand(vault: Path, series: str, demand_bytes: int, *, budget: int, reachable_budget: int) -> bool:
+    """Renew one import series' demand for room; a demand above the reachable budget is ignored.
+
+    The window budget falls by what the volume gains while the series waits, so the
+    demand keeps the budget as an offset from current use (simplest choice, marked).
+    """
+    if demand_bytes > reachable_budget:
+        return False  # Any status caller can send a demand, so one the cell cannot reach changes nothing.
+    ledger = MediaJobStore(vault)
+    conn = ledger._connect()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO media_demands(series, demand_bytes, budget_offset, renewed_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(series) DO UPDATE SET demand_bytes=excluded.demand_bytes, "
+                "budget_offset=excluded.budget_offset, renewed_at=excluded.renewed_at",
+                (series, int(demand_bytes), int(budget) + shutil.disk_usage(vault).used, time.time()),
+            )
+    finally:
+        conn.close()
+    return True
+
+
+def _live_demand(ledger: MediaJobStore) -> tuple[int, int] | None:
+    conn = ledger._connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM media_demands WHERE renewed_at < ?", (time.time() - DEMAND_LEASE_SECONDS,))
+            row = conn.execute("SELECT demand_bytes, budget_offset FROM media_demands "
+                               "ORDER BY demand_bytes DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    return None if row is None else (int(row["demand_bytes"]), int(row["budget_offset"]))
+
+
+def _eviction_candidates(ledger: MediaJobStore, parameters: dict[str, object]) -> tuple[list[str], int]:
+    conn = ledger._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _clear_dead_access(conn, conn.execute("SELECT token, pid FROM media_access").fetchall())
+        conn.commit()
+        eligible = conn.execute("SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE, parameters).fetchone()[0]
+        rows = conn.execute("SELECT binary_rel " + _ELIGIBLE + " " + _EVICTION_ORDER + " LIMIT :batch",
+                            {**parameters, "batch": _EVICTION_BATCH}).fetchall()
+        return [row["binary_rel"] for row in rows], int(eligible)
+    finally:
+        conn.close()
+
+
 def evict_to_target(vault: Path) -> int:
+    """Evict above the everyday target, or while a live demand can be met (D3, M3)."""
+    vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not True or config.get("eviction_enabled") is not True:
         return 0
-    usage = shutil.disk_usage(vault)
+    bounds = media_capacity.bounds_for(config, vault)
+    if bounds is None:
+        return 0
     target = float(config["eviction_target"])
     margin = float(config["eviction_margin"])
     if not 0 < margin < target < 1:
         raise ValueError("media eviction fractions require 0 < margin < target < 1")
-    if usage.used <= usage.total * target:
-        return 0
+    usage = shutil.disk_usage(vault)
+    everyday = usage.total * (target - margin) if usage.used > usage.total * target else None
     ledger = MediaJobStore(vault)
-    conn = ledger._connect(readonly=True)
-    try:
-        reads = {row["binary_rel"]: row["last_read"] for row in conn.execute("SELECT binary_rel, last_read FROM media_cache")}
-    finally:
-        conn.close()
-    candidates = sorted((item for item in bound_originals(vault) if item.state == "cached"),
-                        key=lambda item: (-item.binary_size, reads.get(ledger._relative(item.path), time.time())))
+    demand = _live_demand(ledger)
+
+    def needed(used: int) -> tuple[bool, bool]:
+        return (everyday is not None and used > everyday,
+                demand is not None and demand[1] - used < demand[0])
+
+    # `size <= :hydration` is the SQL form of `Bounds.hydration_fits`, which `evict` checks again.
+    parameters = {"hydration": bounds.hydration_bytes,
+                  "idle_before": time.time() - float(config["minimum_idle_seconds"])}
     count = 0
-    for item in candidates:
-        if shutil.disk_usage(vault).used <= usage.total * (target - margin):
+    while any(needed(shutil.disk_usage(vault).used)):
+        candidates, eligible = _eviction_candidates(ledger, parameters)
+        above_target, _short = needed(shutil.disk_usage(vault).used)
+        if not above_target and demand is not None and demand[1] - shutil.disk_usage(vault).used + eligible < demand[0]:
+            break  # A demand that the eligible originals cannot cover yet evicts nothing.
+        evicted = 0
+        for relative in candidates:
+            if not any(needed(shutil.disk_usage(vault).used)):
+                break
+            evicted += int(evict(vault, vault / relative))
+        count += evicted
+        if not evicted:
             break
-        count += int(evict(vault, item.path))
     return count
