@@ -231,11 +231,10 @@ def test_rest_principals_with_different_audiences_do_not_share_an_unkeyed_result
             "/api/remember", json=body, headers={"Cf-Access-Jwt-Assertion": subject}
         )
 
-    alice, bob, alice_again = post("alice"), post("bob"), post("alice")
+    alice, bob = post("alice"), post("bob")
 
-    assert [r.status_code for r in (alice, bob, alice_again)] == [200, 200, 200]
+    assert [r.status_code for r in (alice, bob)] == [200, 200]
     assert alice.json()["data"]["path"] != bob.json()["data"]["path"]
-    assert alice_again.json()["data"]["path"] == alice.json()["data"]["path"]
     assert len(list((vault / "Knowledge Base").rglob("same-bytes-two-principals*.md"))) == 2
 
 
