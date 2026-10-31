@@ -51,6 +51,7 @@ def _served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ).structured_content
         return content["result"] if set(content) == {"result"} else content
 
+    call.mcp = mcp
     return vault, call
 
 

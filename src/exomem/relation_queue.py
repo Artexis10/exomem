@@ -22,13 +22,23 @@ from pathlib import Path
 from typing import Any
 
 from . import activation as activation_module
-from . import context_refs, relation_registry, semantic_language_registry, semantic_units
+from . import (
+    context_refs,
+    note_types,
+    recall_policy,
+    relation_endpoints,
+    relation_options,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+)
 from . import epistemic_graph as epistemic_graph_module
 from . import find as find_module
 from . import graph_sync as graph_sync_module
 from . import review_state as review_state_module
 from . import semantic_contract as semantic_contract_module
 from . import vault as vault_module
+from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .vault import kb_root
 
@@ -84,9 +94,49 @@ def _candidate_identity(candidate: dict[str, Any]) -> str:
 
 
 def _bullet(candidate: dict[str, Any]) -> str:
-    relation = candidate.get("authored_label") or candidate.get("relation_type") or "relates_to"
+    # A candidate with no relation names nothing to write; the generic relation is never assumed.
+    relation = candidate.get("authored_label") or candidate.get("relation_type")
+    if not relation:
+        raise ValueError("INVALID_SELECTED_RELATION: the candidate names no relation to write")
     destination = str(candidate.get("to") or "").removesuffix(".md")
     return f"- {relation} [[{destination}]]"
+
+
+def _usable_relation(
+    registry: relation_registry.RelationRegistry,
+    requested: str,
+    page: Any,
+    target: Any,
+) -> str | None:
+    """The canonical key when `requested` is active between these two pages, else None.
+
+    The one rule for "this relation may be written between the reviewed endpoints", shared
+    by the selection below and by the options a generated candidate offers.
+    """
+    source_project = page.frontmatter.get("project")
+    target_project = target.frontmatter.get("project")
+    if not isinstance(source_project, str):
+        source_project = None
+    if not isinstance(target_project, str):
+        target_project = None
+    resolved = semantic_contract_module._registry_resolution(
+        registry,
+        requested,
+        projects=(source_project,) if source_project is not None else (),
+        page_type=page.page_type,
+        source_kind=page.page_type,
+        target_kind=target.page_type,
+        origin="markdown_relation",
+    )
+    definition, canonical = resolved.definition, resolved.canonical
+    if (
+        definition is None
+        or canonical is None
+        or resolved.status not in {"core", "extension", "alias"}
+        or (definition.projects and target_project not in definition.projects)
+    ):
+        return None
+    return canonical
 
 
 def selected_relation(
@@ -105,35 +155,136 @@ def selected_relation(
     target = _page_for(vault_root, str(candidate.get("to") or ""))
     if page is None or target is None:
         raise ValueError("REVIEW_ITEM_CHANGED: refresh the relation candidate")
-    source_project = page.frontmatter.get("project")
-    target_project = target.frontmatter.get("project")
-    if not isinstance(source_project, str):
-        source_project = None
-    if not isinstance(target_project, str):
-        target_project = None
     registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
-    resolved = semantic_contract_module._registry_resolution(
-        registry,
-        requested_relation,
-        projects=(source_project,) if source_project is not None else (),
-        page_type=page.page_type,
-        source_kind=page.page_type,
-        target_kind=target.page_type,
-        origin="markdown_relation",
-    )
-    definition, canonical = resolved.definition, resolved.canonical
-    if (
-        definition is None
-        or canonical is None
-        or resolved.status not in {"core", "extension", "alias"}
-        or (definition.projects and target_project not in definition.projects)
-    ):
+    canonical = _usable_relation(registry, requested_relation, page, target)
+    if canonical is None:
         raise ValueError("INVALID_SELECTED_RELATION: relation is not active for reviewed endpoints")
     return {
         **candidate,
         "relation_type": canonical,
         "authored_label": relation_registry.authored_label(registry, requested_relation, canonical),
     }
+
+
+class RelationFit:
+    """The specific relations that fit a generated candidate's two pages.
+
+    A generator proposes the generic relation when its evidence shows two pages are related
+    and nothing more (shared sources, a shared question). When the registry names a specific
+    relation that joins those pages, the candidate carries it as an option and the agent
+    chooses; `relation_options.fitting_options` is the one producer. Page lookups are held for
+    one read, so a page that many candidates name is read once.
+    """
+
+    def __init__(self, vault_root: Path, *, basis: note_types.Basis | None = None) -> None:
+        self._root = Path(vault_root)
+        self._pages: dict[str, Any | None] = {}
+        self._basis = basis or note_types.Basis(self._root)
+        self._entity_types: Any = None
+
+    def _types(self) -> Any:
+        if self._entity_types is None:
+            self._entity_types = semantic_contract_module.entity_type_registry(self._root)
+        return self._entity_types
+
+    def _page(self, rel_path: str) -> Any | None:
+        rel = epistemic_graph_module._page_rel(rel_path)
+        if rel not in self._pages:
+            # A page recall policy keeps out is read no further, so it adds nothing to an option list.
+            allowed = bool(rel) and recall_policy.is_recall_candidate(self._root, self._root / rel)
+            self._pages[rel] = _page_for(self._root, rel) if allowed else None
+        return self._pages[rel]
+
+    def _kind(self, page: Any) -> relation_endpoints.PageKind | None:
+        # Mirrors `semantic_contract.endpoint_page_kind` for a parsed page rather than a write state.
+        resolved = self._basis.resolve(
+            semantic_contract_module.normalized_compiled_type(page.page_type)
+        )
+        if resolved.note_type is None:
+            return None
+        return relation_endpoints.page_kind(
+            resolved.note_type.role, page.frontmatter.get("entity_type"), self._types()
+        )
+
+    def options(
+        self,
+        candidate: dict[str, Any],
+        *,
+        registry: relation_registry.RelationRegistry | None = None,
+        source_page: Any | None = None,
+        relation: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Up to four fitting relations when the relation is the generic one, else none.
+
+        `relation` is the one under judgement: the candidate's own, unless an agent asked for another.
+        """
+        page = source_page
+        if registry is None:
+            page = page or self._page(str(candidate.get("from") or ""))
+            if page is None:
+                return []
+            registry = relation_registry.load_for_page(self._root, page.rel_path, page.frontmatter)
+        definition = registry.definition(str(relation or candidate.get("relation_type") or ""))
+        # Generic is a registry attribute (`generic`); no relation key is compared here.
+        if definition is None or not definition.generic:
+            return []
+        page = page or self._page(str(candidate.get("from") or ""))
+        target = self._page(str(candidate.get("to") or ""))
+        if page is None or target is None:
+            return []
+        subject = self._kind(page)
+        other = self._kind(target)
+        if subject is None or other is None:
+            return []
+        return relation_options.fitting_options(
+            registry,
+            subject,
+            other,
+            self._types(),
+            accepts=lambda key: _usable_relation(registry, key, page, target) is not None,
+        )
+
+
+#: What the agent does when the queue will not write the generic relation for a pair a specific one
+#: fits. Naming a relation here takes a recorded vocabulary choice, so the steps run in this order.
+RELATION_CHOICE_REMEDIATION = (
+    "Choose one of the offered relations. Ask a vocabulary question for this candidate, "
+    "record a reuse decision that names the relation, then accept the candidate with requested_relation, "
+    "vocabulary_ref and vocabulary_fingerprint. Or dismiss the candidate. "
+    "A generic edge with a reason can be authored on the page."
+)
+
+
+def require_relation_choice(
+    vault_root: Path,
+    candidate: dict[str, Any],
+    requested_relation: str | None,
+    *,
+    page: Any | None = None,
+    fit: RelationFit | None = None,
+) -> None:
+    """Refuse to accept the generic relation where a specific one fits; the agent chooses.
+
+    Naming no relation takes the candidate's own, so a generic candidate is refused. Naming
+    the generic relation is refused too. Any other registered relation passes.
+    """
+    page = page or _page_for(vault_root, str(candidate.get("from") or ""))
+    if page is None:
+        return
+    registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
+    fit = fit or RelationFit(vault_root)
+    relation = None
+    if requested_relation is not None:
+        chosen = selected_relation(vault_root, candidate, requested_relation, source_page=page)
+        relation = str(chosen.get("relation_type") or "")
+    options = fit.options(candidate, registry=registry, source_page=page, relation=relation)
+    if options:
+        raise OpError(
+            "RELATION_CHOICE_REQUIRED",
+            "a specific relation fits these two pages, so the generic relation is not chosen for you",
+            RELATION_CHOICE_REMEDIATION,
+            details={"options": options, "mutated": False},
+        )
 
 
 def _evidence_signal_version(page: Any, candidate: dict[str, Any]) -> str:
@@ -455,7 +606,7 @@ def _shared_source_candidates(
         {
             "from": rel_path,
             "to": epistemic_graph_module._page_rel(str(target_path)),
-            "relation_type": "relates_to",
+            "relation_type": relation_registry.generic_relation_key(),
             "method": "shared_sources",
             "evidence": {
                 "shared_source": epistemic_graph_module._page_rel(
@@ -602,6 +753,7 @@ def _enrich(
     candidate: dict[str, Any],
     *,
     exact_refs: tuple[str, str] | None = None,
+    fit: RelationFit | None = None,
 ) -> dict[str, Any]:
     from_path = str(candidate.get("from") or page.rel_path)
     to_path = str(candidate.get("to") or "")
@@ -618,7 +770,9 @@ def _enrich(
         to_ref=to_ref,
         signal_version=_evidence_signal_version(page, candidate),
     )
-    return {
+    # Where a specific relation fits, the item offers it and no bullet: the agent picks the relation.
+    options = (fit or RelationFit(vault_root)).options(candidate, source_page=page)
+    item = {
         "review_id": review_id,
         "ref": relation_review_ref(review_id),
         "fingerprint": fingerprint,
@@ -627,10 +781,13 @@ def _enrich(
         "relation_type": candidate.get("relation_type"),
         "method": candidate.get("method"),
         "evidence": candidate.get("evidence") or {},
-        "bullet": _bullet(candidate),
+        "bullet": None if options else _bullet(candidate),
         "target_ref": from_ref,
         "state": "open",
     }
+    if options:
+        item["options"] = options
+    return item
 
 
 def _classify_candidate(
@@ -643,6 +800,7 @@ def _classify_candidate(
     authored: set[tuple[str, str]] | None = None,
     exact_refs: tuple[str, str] | None = None,
     today=None,
+    fit: RelationFit | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Apply the three read-time eligibility filters to one candidate.
 
@@ -664,7 +822,7 @@ def _classify_candidate(
         return "authored_edge", None
     if _is_placeholder_target(vault_root, to_path):
         return "placeholder_target", None
-    enriched = _enrich(vault_root, page, candidate, exact_refs=exact_refs)
+    enriched = _enrich(vault_root, page, candidate, exact_refs=exact_refs, fit=fit)
     effective, _decision = store.effective_state(
         enriched["review_id"],
         enriched["fingerprint"],
@@ -964,6 +1122,7 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate is no longer eligible "
             f"({reason}); refresh the queue and inspect {ref} again"
         )
+    require_relation_choice(vault_root, candidate, requested_relation, page=page)
     selected = selected_relation(
         vault_root,
         candidate,
