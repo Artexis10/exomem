@@ -837,6 +837,30 @@ def _published_parameters(
     return sig, visible, resolved
 
 
+def _note_withheld_store_pages(command_name: str, result: typing.Any, vault_root: typing.Any) -> typing.Any:
+    """Tell the owner that this pass withheld the collection store's pages because the store refused it.
+
+    The two answers that carry the dispatcher's notice carry this one in the same fields. Any other
+    caller, and any other command, is told nothing, so a withheld store's existence never leaks.
+    """
+    from .collection_store import preview as store_preview
+
+    if not store_preview.pages_unavailable(vault_root):
+        return result
+    if command_name == "ask_memory" and isinstance(result, (list, dict)):
+        from . import find
+
+        out = {"hits": result} if isinstance(result, list) else dict(result)
+        warming = dict(out.get("warming") or {})
+        warming["components"] = sorted({*warming.get("components", ()), find._STORE_UNAVAILABLE_COMPONENT})
+        return {**out, "warming": warming}
+    if command_name == "activate_context" and isinstance(result, dict) and isinstance(result.get("generation"), dict):
+        from . import activation_result
+
+        return {**result, "generation": {**result["generation"], "collection_store": activation_result.UNAVAILABLE}}
+    return result
+
+
 def bind_vault(
     leaf: Callable,
     *injected: object,
@@ -930,6 +954,7 @@ def bind_vault(
             t0 = time.perf_counter()
             returned_from_invoke = False
             try:
+                from . import published_admission
                 from .collection_store import connection, ownership
                 from .collection_store.governance import _StaleQueryHistoryProjection
                 from .governance.egress import is_vault_root, postfilter
@@ -951,9 +976,13 @@ def bind_vault(
                         call_spans.record_span_since("command.leaf", "command.leaf_start")
                         call_spans.mark("command.leaf_done")
                         if injected and is_vault_root(injected[0]):
-                            with ownership.read_scope(injected[0]) as ownership_scope:
+                            # This pass decides on its own: it asks the store once for the pages the
+                            # result names, and shares no answer with the dispatcher's pass.
+                            with ownership.read_scope(injected[0]) as ownership_scope, \
+                                    published_admission.deciding():
                                 result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
                                 ownership_scope.finish()
+                                result = _note_withheld_store_pages(command.name, result, injected[0])
                     except _StaleQueryHistoryProjection:
                         if not invocation_read_only:
                             raise

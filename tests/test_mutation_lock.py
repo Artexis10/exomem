@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import logging
@@ -1830,10 +1831,11 @@ def test_collection_ownership_read_hold_is_declared_collection_read(
         SimpleNamespace(monotonic=lambda: 1.0, time=time.time, sleep=time.sleep),
     )
 
-    # The dominant production path: get_page and list_directory prove ownership
-    # through a ReadScope, not through `current(private=True)`.
-    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
-        ownership.ReadScope(vault).proof()
+    # A request's ReadScope proves ownership without the boundary; the snapshot that keeps
+    # canonical data beside its proof still holds it, and this vault has no store to read.
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"), \
+            contextlib.suppress(OpError), ownership.read_snapshot(vault):
+        pass
 
     released = _events(caplog, "mutation_lock_released")
     assert [r.fields["holder_kind"] for r in released] == ["collection-read"]

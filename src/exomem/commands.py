@@ -3098,6 +3098,10 @@ def op_find(
     # these hits are lexical-only ranking. Present only during that window
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
+    from .collection_store import preview as store_preview
+
+    if store_preview.pages_unavailable(vault_root):
+        degraded.append(find_module._STORE_UNAVAILABLE_COMPONENT)
     if restricted:
         # These internal status tokens disclose pending writes before RAW admission.
         hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
@@ -6808,6 +6812,11 @@ def op_activate_context(
                     # already said `absent` when it skipped the stage for the request's budget.
                     if isinstance(packet.get("generation"), dict):
                         packet["generation"].setdefault("conversation", bounded.state)
+                        # The pages the store owns were withheld together after its refusal: say so.
+                        from .collection_store import preview as store_preview
+
+                        if store_preview.pages_unavailable(vault_root):
+                            packet["generation"]["collection_store"] = activation_result_module.UNAVAILABLE
                     # Served packets include optional omissions; abstentions retain their own cause.
                     if packet.get("abstained") is False:
                         active_budget = request_budget_module.current()

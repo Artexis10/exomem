@@ -1055,7 +1055,8 @@ def _select(
     # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
     items = [_map_item(view, owner.rows[position]) for position in selected]
     empty = not owner.world.rows
-    generation = _digest(json.dumps([items, available, overflow, empty, view.stale, view.graph], sort_keys=True))
+    # The stale flag rides beside the generation, so a stale serve and a fresh one of the same map share it.
+    generation = _digest(json.dumps([items, available, overflow, empty, view.graph], sort_keys=True))
     read = {key: value for key, value in states.items() if key not in owner.states} if available else {}
     compiled = _ActivationMap(
         replace(view, generation=generation, state_available=available), owner.world, selected, overflow, empty
