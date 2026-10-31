@@ -224,21 +224,44 @@ test("a suggestion with fitting relations is written as the chosen one, never th
   expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- operates [[Knowledge Base/Entities/Organizations/Birch Works]]");
 });
 
-test("a refused queue accept names the relations that fit with the server's remediation", async ({page}) => {
+test("a queue item with fitting relations is written as the chosen one through an audited edit", async ({page}) => {
   const calls = [];
-  const options = [{key: "owns", label: "owns", description: "", parent: null}, {key: "operates", label: "operates", description: "", parent: null}];
+  const options = [{key: "owns", label: "owns", description: "The subject owns the object.", parent: null}, {key: "operates", label: "operates", description: "", parent: null}];
   const group = {...relationGroups[0], items: [{...relationGroups[0].items[0], relation_type: "relates_to", relation_label: "relates to", bullet: null, options}]};
+  await connectRelations(page, calls, {queueResponses: [relationQueue({groups: [group]})]});
+  await expect(page.getByText("a specific relation fits: owns, operates")).toBeVisible();
+  await expect(page.getByRole("button", {name: /^Accept/})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /^Dismiss/})).toHaveCount(1);
+  await page.getByRole("button", {name: /Choose relation/}).click();
+  const choices = page.getByRole("dialog").getByRole("combobox");
+  await expect(choices).toContainText("owns → Knowledge Base/Notes/Insights/target-two.md");
+  await expect(choices).not.toContainText("relates to");
+  await choices.selectOption({label: "operates → Knowledge Base/Notes/Insights/target-two.md"});
+  await page.getByLabel("Audit reason").fill("Chosen after review");
+  await page.getByRole("button", {name: "Confirm governed edit"}).click();
+  await expect.poll(() => calls.some((call) => call.name === "edit_memory")).toBeTruthy();
+  expect(calls.find((call) => call.name === "edit_memory").body).toMatchObject({
+    path: group.source_path,
+    why: "Chosen after review",
+    expected_hash: "hash-z",
+    new_string: "- operates [[Knowledge Base/Notes/Insights/target-two]]",
+  });
+  expect(calls.some((call) => call.body?.operation === "accept-relation")).toBeFalsy();
+});
+
+test("a refusal that still arrives on a queue accept reads as the server's remediation, not a code", async ({page}) => {
+  const calls = [];
+  const group = {...relationGroups[0], items: [{...relationGroups[0].items[0], relation_type: "relates_to", relation_label: "relates to"}]};
   const controls = {
     queueResponses: [relationQueue({groups: [group]})],
     choiceRefusal: {code: "RELATION_CHOICE_REQUIRED", message: "a specific relation fits these two pages, so the generic relation is not chosen for you", remediation: "Choose one of the offered relations."},
   };
   await connectRelations(page, calls, controls);
-  await expect(page.getByText("a specific relation fits: owns, operates")).toBeVisible();
   await page.getByRole("button", {name: /Accept relates to/}).click();
   await page.getByLabel("Audit reason").fill("Accepted after review");
   await page.getByRole("button", {name: "Confirm governed accept"}).click();
   const alert = page.getByRole("alert");
-  await expect(alert).toContainText("Relations that fit: owns, operates.");
+  await expect(alert).toContainText("Refresh the queue to see the relations that fit.");
   await expect(alert).toContainText("Choose one of the offered relations.");
   await expect(alert).not.toContainText("RELATION_CHOICE_REQUIRED");
   await expect(page.getByRole("dialog")).toBeVisible();
