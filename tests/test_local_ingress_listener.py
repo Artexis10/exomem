@@ -490,3 +490,70 @@ def test_serve_runs_both_listeners_on_one_ingress_and_stops_them_together(
                 assert probe.connect_ex(("127.0.0.1", local_port)) != 0
 
     asyncio.run(scenario())
+
+
+class _FailingStartSupervisor(_Supervisor):
+    def __init__(self, directory: Path, ingress: ServiceIngress) -> None:
+        super().__init__(directory, ingress)
+        self.fail = asyncio.Event()
+
+    async def start(self) -> None:
+        await self.fail.wait()
+        raise RuntimeError("candidate worker exited before readiness")
+
+
+def test_a_failed_first_start_stops_the_supervisor_and_closes_both_listeners(
+    manager, tmp_path
+) -> None:
+    # The listeners open before the first worker is ready, so a start that
+    # fails must still end serve() rather than leave an open port with no worker.
+    async def scenario() -> None:
+        directory = manager.private_directory(tmp_path / "m")
+        supervisor = _FailingStartSupervisor(directory, ServiceIngress(ingress_key=KEY))
+        public = manager.bind_local_listener(0)
+        public_port = public.getsockname()[1]
+        public.close()
+        local = manager.bind_local_listener(0)
+        local_port = local.getsockname()[1]
+        serving = asyncio.create_task(
+            manager.serve(supervisor, host="127.0.0.1", port=public_port, local_socket=local)
+        )
+        async with asyncio.timeout(10):
+            while True:
+                with socket.socket() as probe:
+                    if probe.connect_ex(("127.0.0.1", public_port)) == 0:
+                        break
+                await asyncio.sleep(0.02)
+        supervisor.fail.set()
+        with pytest.raises(RuntimeError, match="before readiness"):
+            await asyncio.wait_for(serving, 20)
+        for port in (public_port, local_port):
+            with socket.socket() as probe:
+                assert probe.connect_ex(("127.0.0.1", port)) != 0
+
+    asyncio.run(scenario())
+
+
+class _WarmingSupervisor(_Supervisor):
+    async def start(self) -> None:
+        await asyncio.Event().wait()
+
+
+def test_a_server_failure_during_the_first_warm_is_not_a_clean_exit(
+    manager, tmp_path, monkeypatch
+) -> None:
+    # A clean return would read as a deliberate stop to systemd and hide the error.
+    import uvicorn
+
+    async def broken_startup(self, sockets=None):
+        raise RuntimeError("listener could not start")
+
+    monkeypatch.setattr(uvicorn.Server, "startup", broken_startup)
+
+    async def scenario() -> None:
+        directory = manager.private_directory(tmp_path / "m")
+        supervisor = _WarmingSupervisor(directory, ServiceIngress(ingress_key=KEY))
+        with pytest.raises(RuntimeError, match="listener could not start"):
+            await asyncio.wait_for(manager.serve(supervisor, host="127.0.0.1", port=0), 20)
+
+    asyncio.run(scenario())

@@ -658,6 +658,17 @@ instead of being closed on the first non-success. A replacement that refuses the
 original credential (401 or 403) is a definitive answer and still closes the
 stream.
 
+## When the service starts
+
+The supervisor opens the public listener, the local listener and the control
+socket before it starts the first worker. Until that worker reports ready, the
+phase is `starting`, and every call gets an immediate HTTP 503 with the body
+`Request not dispatched`. No call executes and none waits in the queue, because
+a cold warm, such as a full catalogue rebuild, can outlast any queue budget.
+When the first worker reports ready, ingress serves calls and the phase becomes
+`ready`. A first worker that fails to start still stops the supervisor with a
+failed exit status.
+
 ## When the worker crashes
 
 A worker that exits outside a transition no longer stops the supervisor. The
