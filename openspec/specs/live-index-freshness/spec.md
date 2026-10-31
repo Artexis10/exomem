@@ -673,6 +673,41 @@ validation.
 - **THEN** telemetry reports a bounded phase, duration, and stable result reason
 - **AND** contains no vault path, note name, or note content
 
+#### Scenario: Observed writes during a detached replay do not void it
+
+- **WHEN** an observed event on another path lands while a completed detached
+  replacement replays a delta
+- **AND** every replayed path still proves its signature or its absence
+- **THEN** the replay stands and the replacement records the replay's target
+  checkpoint
+- **AND** the next replay or a later repair applies the newer event
+- **AND** a replay into the live catalogue still requires the registry to sit at
+  its target checkpoint
+
+#### Scenario: Observed writes on both sides of the census walk still publish
+
+- **WHEN** the final source census walk sees one observed write and misses
+  another
+- **AND** the census replay re-proves each path in its delta
+- **AND** every path outside that delta matches one registry snapshot taken
+  after the walk
+- **THEN** the system publishes the replacement
+- **AND** counts the excused paths in the repair telemetry
+
+#### Scenario: Drift no event reported still aborts the repair
+
+- **WHEN** the census walk disagrees with the registry on a path outside the
+  census replay's delta
+- **OR** a path changed again after its own observed event without a new event
+- **THEN** the system declines publication as `source_changed`
+- **AND** preserves the live catalogue
+
+#### Scenario: A delta that needs a source proof excuses nothing
+
+- **WHEN** the census replay absorbs a delta from the safety-net reconcile walk
+- **THEN** the census excuses no path
+- **AND** publishes only when the whole walk matches the rebased target
+
 ### Requirement: Bounded write-time index maintenance
 
 A component deferral that has already durably recorded path-exact receipts covering the batch SHALL count as batch-report success and SHALL NOT seed a full-component refresh demand. The system SHALL mint a durable full-component refresh demand from a write-time outcome only for a component whose incomplete work has no durable path coverage, and SHALL count both outcomes — covered deferrals accepted and uncovered deferrals escalated — in stable content-free telemetry.
