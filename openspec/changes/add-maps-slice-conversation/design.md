@@ -77,7 +77,9 @@ tests prove it.
   slice first), it is `absent`, as an anchors packet reports a skipped
   conversation stage.
 - `generation.continuity` in `maps` mode is `absent` with no token, `applied`
-  when the token carries a map generation, and `stale` for any other token.
+  when the token carries a map generation and was minted under the serving role
+  registry and conventions, and `stale` for any other token, as `read_continuity`
+  rules for an anchors token.
   `applied` means that activation compared the token's map generation with the
   served map's. `map.unchanged` says whether they matched. A vault write that
   moves the map generation no longer turns the report into `stale`.

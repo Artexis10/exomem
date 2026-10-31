@@ -27,14 +27,14 @@ In `maps` mode, the turn slice's anchors compile SHALL receive the request's `co
 - **THEN** activation writes no session, heat or learning record
 
 ### Requirement: A maps packet reports its continuity inputs
-In a served `maps` packet, `generation.conversation` SHALL be the state that the turn slice's compile computed for the request's `conversation`. When no slice compile reads the conversation, it SHALL be `absent`. `generation.continuity` SHALL be `absent` when the request carries no token, `applied` when the token carries a map generation, and `stale` for any other token. `generation.continuity_thread` SHALL be `absent`.
+In a served `maps` packet, `generation.conversation` SHALL be the state that the turn slice's compile computed for the request's `conversation`. When no slice compile reads the conversation, it SHALL be `absent`. `generation.continuity` SHALL be `absent` when the request carries no token, `applied` when the token carries a map generation and was minted under the serving role registry and conventions, and `stale` for any other token. `generation.continuity_thread` SHALL be `absent`.
 
 #### Scenario: A token reads applied after the map moves
 - **WHEN** a caller passes the token of its last `maps` packet after a vault write changed the map generation
 - **THEN** `generation.continuity` is `applied`, and the map is sent in full
 
 #### Scenario: A token without a map generation reads stale
-- **WHEN** a `maps` request carries a token that cannot be decoded, or an `anchors` token with no map generation
+- **WHEN** a `maps` request carries a token that cannot be decoded, an `anchors` token with no map generation, or a token minted under other conventions
 - **THEN** `generation.continuity` is `stale`
 
 #### Scenario: With the slice off, the conversation is not read

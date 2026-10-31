@@ -2915,14 +2915,19 @@ def unevaluated_continuity(continuity: str | None) -> str:
     return CONTINUITY_ABSENT if not str(continuity or "").strip() else CONTINUITY_STALE
 
 
-def maps_continuity_state(continuity: str | None) -> str:
+def maps_continuity_state(continuity: str | None, *, roles_hash: str, conventions_hash: str) -> str:
     """The state a served maps packet reports for the token it was given.
 
-    A token that carries a map generation is `applied`: activation compared that generation with the served
-    map's, and `map.unchanged` says whether they matched. Any other token (undecodable, or an anchors token
-    with no map generation) is `stale`, and no token is `absent`. The token carries no thread or refs to apply.
+    A token that carries a map generation and was minted under the serving role registry and conventions is
+    `applied`: activation compared that generation with the served map's, and `map.unchanged` says whether
+    they matched. Any other token (undecodable, an anchors token with no map generation, or one minted under
+    other registries, as `read_continuity` rules) is `stale`, and no token is `absent`.
     """
     if not str(continuity or "").strip():
         return CONTINUITY_ABSENT
     held = decode_continuity(continuity)
-    return CONTINUITY_APPLIED if held is not None and "map_generation" in held else CONTINUITY_STALE
+    if held is None or "map_generation" not in held:
+        return CONTINUITY_STALE
+    if held["roles_hash"] != str(roles_hash) or held["conventions_hash"] != str(conventions_hash):
+        return CONTINUITY_STALE
+    return CONTINUITY_APPLIED

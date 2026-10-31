@@ -7512,7 +7512,11 @@ def _op_activate_context_body(
         packet["generation"]["continuity_thread"] = "absent"
         packet["generation"]["conversation"] = slice_conversation
         if not packet.get("abstained"):
-            packet["generation"]["continuity"] = working_set_runtime_module.maps_continuity_state(continuity)
+            packet["generation"]["continuity"] = working_set_runtime_module.maps_continuity_state(
+                continuity,
+                roles_hash=packet["generation"]["roles_hash"],
+                conventions_hash=packet["generation"]["conventions_hash"],
+            )
         map_generation = packet["generation"].get("map_generation")
         if map_generation is not None and not packet.get("abstained"):
             # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
