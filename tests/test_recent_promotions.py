@@ -6,10 +6,12 @@ writers and the real due-state carrier and change only the caller identity.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
 import pytest
+from test_vocabulary_registries import _served
 
 from exomem import command_surface, commands, promotions
 from exomem import due_state as due_state_module
@@ -98,6 +100,27 @@ def test_the_creating_session_does_not_spend_its_own_notice(
 
     _as(monkeypatch, "session-b")
     assert _count(vault) == 1
+
+
+def test_the_compact_bootstrap_hint_for_a_promotion_delivers_its_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `next` hint of the counts summary, followed as written, serves the entry it counts."""
+    _vault, call = _served(tmp_path, monkeypatch)
+    _as(monkeypatch, "session-a")
+    call("change_connections", {"operation": {
+        "kind": "create-entity", "entity_type": "concept", "name": "Tidal Ledger",
+        "summary": "A synthetic accounting concept used to exercise promotions.",
+    }})
+
+    _as(monkeypatch, "session-b")
+    hint = call("bootstrap", {})["due_state"]["next"]
+    call_node = ast.parse(hint, mode="eval").body
+    arguments = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call_node.keywords}
+    followed = call(call_node.func.id, arguments)
+
+    assert "error" not in followed, (hint, followed)
+    assert [row["category"] for row in followed["due_state"]["top"]] == [CATEGORY], (hint, followed)
 
 
 @pytest.mark.parametrize("obligation_kind", ["source-backlog", "authored"])
