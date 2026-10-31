@@ -79,7 +79,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
-from . import call_spans, foreground_priority, request_budget, reserved_paths, state_paths
+from . import (
+    __version__,
+    call_spans,
+    foreground_priority,
+    request_budget,
+    reserved_paths,
+    state_paths,
+)
 from .find_types import RankingPage
 from .kbdir import kb_dirname
 from .log_events import log_event
@@ -5764,6 +5771,21 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
+        """Record the schema and the release that derived every page row (caller owns the txn).
+
+        A release can change how rows derive from the same bytes without a
+        schema, parser or identity bump, so `_seed_from_live` reuses rows only
+        from a catalogue that the running release built.
+        """
+        stamps = (("schema_version", str(SCHEMA_VERSION)), ("catalog_release", __version__))
+        for key, value in stamps:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
     def _write_catalog_identity(
         self, conn: sqlite3.Connection, identity: str | None = None
     ) -> None:
@@ -6175,11 +6197,7 @@ class LexicalStore:
                 conn.execute("DELETE FROM unit_fts")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
+            self._stamp_whole_build(conn)
         self._witnessed.clear()
         self._term_frequency_cache = None
         self._filtered_term_frequency_cache = None
@@ -7662,11 +7680,7 @@ class LexicalStore:
                         if cancel is not None and cancel.is_set():
                             raise _DetachedBuildCancelled
                         self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(SCHEMA_VERSION),),
-                )
+                self._stamp_whole_build(conn)
             reparsed, removed, inserted, unchanged = (
                 counts if counts is not None else (0, 0, len(members), 0)
             )
@@ -7725,13 +7739,23 @@ class LexicalStore:
         Returns the `_reconcile_catalog` counts and "current", or None and the
         reason the caller parses the whole corpus into the temp instead. On None
         the temp family has been removed, so the caller starts from empty.
+        Contention propagates, so `rebuild_atomic` declines and the worker retries.
         """
+        from .vault import VaultLockError
+
         conn = self._connect_setup(temp_path)
         try:
             basis = self._seed_from_live(conn, identity)
             if basis is None:
-                return self._reconcile_catalog(conn, members, signatures), "current"
+                counts = self._reconcile_catalog(conn, members, signatures)
+                if counts is not None:
+                    return counts, "current"
+                basis = "damaged"
         except Exception as e:  # noqa: BLE001 - reuse only saves work; parse the corpus instead
+            if isinstance(e, VaultLockError) or (
+                isinstance(e, sqlite3.Error) and classify_sqlite_error(e) == "transient"
+            ):
+                raise
             log.warning("lexical repair could not reuse the live catalogue (%s)", e)
             basis = "error"
         finally:
@@ -7743,15 +7767,17 @@ class LexicalStore:
         """Copy the live catalogue into the empty temp behind `conn` if it may be reused.
 
         Returns None when `conn` holds a reusable copy, else the reason it does
-        not: a retired, quarantine-bound or missing live store, a stale schema or
-        identity, a failed integrity check, or declarations that differ from a
-        fresh build's (an FTS tokenizer, index or trigger the copy would
-        otherwise keep).
+        not: a retired, quarantine-bound or missing live store, a stale schema,
+        identity or release, a failed integrity check, or declarations that
+        differ from a fresh build's (an FTS tokenizer, index or trigger the copy
+        would otherwise keep).
         """
         if self._failed:
             return "failed"
         # An ordinary connection may discard the WAL of a corrupt set, which the
         # publication must move aside whole (`_publish_over_quarantined_set`).
+        # Outside the barrier this is advisory: the probe never writes, and the
+        # publication classifies the set again under the barrier.
         if self._live_set_disposition() == "quarantine":
             return "quarantine"
         if not self.path.exists():
@@ -7767,6 +7793,9 @@ class LexicalStore:
             return "schema"
         if self._meta_catalog_identity(conn) != identity:
             return "identity"
+        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        if release is None or release[0] != __version__:
+            return "release"
         # A whole-corpus build reads nothing from the live file; a copy would
         # carry its damage into every later repair, so check the copy once.
         if conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
@@ -7797,25 +7826,53 @@ class LexicalStore:
             ).fetchall()
         )
 
+    @staticmethod
+    def _index_rows_missing(conn: sqlite3.Connection) -> bool:
+        """Whether a page or semantic unit lacks the full-text row a build writes for it.
+
+        A build writes one `fts` and one `tri` row per page and one `unit_fts`
+        row per semantic unit when FTS5 is available. Without FTS5 neither the
+        copy nor a fresh build has those tables, so only present tables are
+        counted. Run after `_delete_orphan_rows`: a count below its owner's is
+        then a missing row, which no page input shows.
+        """
+        tables = {
+            name
+            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # The schema's own full-text tables and their owner tables, as `_ensure_fts_schema`
+        # declares them: a closed set.
+        for index, owner in (("fts", "pages"), ("tri", "pages"), ("unit_fts", "semantic_units")):
+            if index in tables and (
+                conn.execute(f"SELECT count(*) FROM {index}").fetchone()[0]
+                != conn.execute(f"SELECT count(*) FROM {owner}").fetchone()[0]
+            ):
+                return True
+        return False
+
     def _reconcile_catalog(
         self,
         conn: sqlite3.Connection,
         members: dict[Path, list[bool]],
         signatures: dict,
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int] | None:
         """Bring a catalogue's page rows to one walk, parsing only the pages that moved.
 
-        `conn` holds a complete catalogue of this release's schema built under
+        `conn` holds a complete catalogue that the running release built under
         the catalogue identity the caller captured; it is never the live
         sidecar, whose writers this does not serialize with. A stored page stays
         only while every input of its rows still matches: the walk's mtime and
         scope membership, the content hash of the page's current bytes, and the
         semantic generation the current parser and registries give those bytes.
         Every other walked page is deleted and parsed again, stored pages the
-        walk lacks are removed, and new pages are inserted, so the rows equal a
-        whole-corpus build of the same walk. Meta rows are the caller's.
+        walk lacks are removed, and new pages are inserted, so the rows of an
+        undamaged catalogue equal a whole-corpus build of the same walk. Damage
+        that leaves a page's inputs intact, such as a changed column or a
+        deleted semantic unit, stays until that page is written or a release
+        builds the catalogue whole. Meta rows are the caller's.
 
-        Returns the (reparsed, removed, inserted, unchanged) page counts.
+        Returns the (reparsed, removed, inserted, unchanged) page counts, or None
+        when an owner row lacks its full-text row (`_index_rows_missing`).
         """
         from . import freshness as freshness_module
         from . import semantic_index
@@ -7871,6 +7928,8 @@ class LexicalStore:
             # External owner-row corruption can leave page and semantic-unit
             # index rows behind; purge them before SQLite reuses rowids.
             self._delete_orphan_rows(conn)
+            if self._index_rows_missing(conn):
+                return None
             for rel, (rowid, _inputs) in stored.items():
                 if rel not in walk:
                     self._delete_rowid(conn, rowid)

@@ -52,7 +52,7 @@ from typing import Any
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore, reserved_paths
+from exomem import find_types, freshness, lexstore, reserved_paths
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -2420,3 +2420,57 @@ def test_an_identity_change_still_rebuilds_the_whole_corpus(
         "Knowledge Base/b.md",
         "Knowledge Base/c.md",
     ]
+
+
+@pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+def test_a_catalogue_from_another_release_is_rebuilt_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kb_file(tmp_path, "held.md", "- [config] withholdme ^u1")
+    _kb_file(tmp_path, "other.md", "- [config] steadyword ^u1")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    # An earlier release built the catalogue. This release withholds the word
+    # from the same bytes, with no schema, parser or identity bump.
+    conn = sqlite3.connect(store.path)
+    with conn:
+        conn.execute("UPDATE meta SET value = 'earlier-release' WHERE key = 'catalog_release'")
+    conn.close()
+    search_body = find_types.ParsedPage.search_body.func
+    monkeypatch.setattr(
+        find_types.ParsedPage,
+        "search_body",
+        property(lambda page: search_body(page).replace("withholdme", "")),
+    )
+    parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
+    assert store.rebuild_atomic() is True
+
+    assert sorted(parsed) == ["Knowledge Base/held.md", "Knowledge Base/other.md"]
+    assert lexstore.search_bm25(tmp_path, "withholdme", k=5, scope="kb") == []
+
+
+@pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kb_file(tmp_path, "lost.md", "- [config] lostword ^u1")
+    _kb_file(tmp_path, "other.md", "- [config] steadyword ^u1")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    # The page row and its inputs survive; only its full-text row is gone.
+    conn = sqlite3.connect(store.path)
+    with conn:
+        conn.execute(
+            "DELETE FROM fts WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
+            ("Knowledge Base/lost.md",),
+        )
+    conn.close()
+    assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
+    parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
+    assert store.rebuild_atomic() is True
+
+    assert sorted(parsed) == ["Knowledge Base/lost.md", "Knowledge Base/other.md"]
+    hits = lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb")
+    assert [path for path, _score in hits] == ["Knowledge Base/lost.md"]
