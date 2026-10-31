@@ -1108,8 +1108,9 @@ def _cached_original(vault: Path, ledger: MediaJobStore, path: Path) -> Original
     """
     try:
         snapshot = original_state(vault, path)
-        if snapshot.state == "cached" and cache_matches(vault, path, snapshot=snapshot):
-            return snapshot if snapshot.offloadable else KEPT
+        if snapshot.state == "cached":
+            # A drifted cache identity, after a chmod for one, keeps the row and its owner read until a recovery.
+            return snapshot if snapshot.offloadable and cache_matches(vault, path, snapshot=snapshot) else KEPT
     except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
         return KEPT  # An unreadable path keeps its row; a later pass reads it again.
     return PRUNED if _prune(vault, ledger, path, snapshot) else KEPT
@@ -1127,8 +1128,7 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
         try:
             conn.execute("BEGIN IMMEDIATE")
             if (conn.execute("SELECT 1 FROM media_access WHERE binary_rel = ?", (relative,)).fetchone()
-                    or original_state(vault, path) != snapshot
-                    or snapshot.state == "cached" and cache_matches(vault, path, snapshot=snapshot)):
+                    or original_state(vault, path) != snapshot):
                 conn.rollback()
                 return False
             if snapshot.state == "evicted":

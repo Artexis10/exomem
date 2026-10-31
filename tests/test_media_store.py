@@ -1733,6 +1733,26 @@ def test_a_never_read_original_leaves_under_pressure_and_an_owner_read_one_stays
     assert originals.original_state(vault, played).state == "cached"
 
 
+def test_an_original_whose_cache_identity_drifted_keeps_its_row_and_owner_read(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that drops the cache row of an original still on its path, which loses the owner's last read."""
+    from exomem import media_jobs, media_store
+
+    played = _stored(vault, "played", 600)
+    with media_store.open_original(vault, played, read=True):
+        pass
+    played.chmod(0o640)
+    assert not media_store.cache_matches(vault, played)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 7_000, played))
+
+    media_store.evict_to_target(vault)
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        rows = connection.execute("SELECT owner_read FROM media_cache WHERE binary_rel = ?",
+                                  (played.relative_to(vault).as_posix(),)).fetchall()
+    assert len(rows) == 1 and rows[0][0] is not None
+    assert originals.original_state(vault, played).state == "cached"
+
+
 def test_eviction_takes_unread_originals_first_and_among_them_those_with_no_pending_job(vault: Path, selected_store, monkeypatch):
     """Catches eviction in plain size order, which takes an owner's old video before an unread recording."""
     from exomem import media_jobs, media_store
