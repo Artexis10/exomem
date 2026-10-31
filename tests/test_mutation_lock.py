@@ -1398,10 +1398,46 @@ def test_a_holder_sees_a_waiter_in_another_process_only_while_it_waits(
             assert finished.wait(_OBSERVE_SECONDS)
         # Still alive when it acquired or gave up, so the signal was dropped, not orphaned.
         assert waiter.is_alive() == (ending != "is_killed")
-        assert holder.waiter_count() == 0
+        # A probe's answer may be one poll interval old.
+        assert _wait_until(lambda: holder.waiter_count() == 0)
     finally:
         linger.set()
         _join_or_terminate([waiter])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the cross-process waiter signal is a POSIX shared lock")
+def test_a_stalled_probe_does_not_stretch_a_bounded_wait(tmp_path: Path) -> None:
+    """A probe that keeps its exclusive lock on the sidecar must not push a write past its timeout."""
+    import fcntl
+
+    context = multiprocessing.get_context("spawn")
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    waiter = VaultMutationCoordinator(state_root, vault)
+    attempting, holding, linger = context.Event(), context.Event(), context.Event()
+    holder = context.Process(
+        target=_process_try_boundary,
+        args=(str(state_root), str(vault), attempting, holding, linger, _HOLD_SECONDS),
+    )
+    probe = mutation_lock_module._open_lock_handle(
+        mutation_lock_module._waiters_lock_path(waiter.lock_path)
+    )
+    unstall = threading.Timer(3.0, probe.close)
+    try:
+        holder.start()
+        assert holding.wait(_OBSERVE_SECONDS), "the other process never took the boundary"
+        fcntl.flock(probe.fileno(), fcntl.LOCK_EX)
+        unstall.start()
+        started = time.monotonic()
+        with pytest.raises(OpError), waiter.hold(timeout_seconds=0.3):
+            pass
+        assert time.monotonic() - started < 2.0
+    finally:
+        unstall.cancel()
+        probe.close()
+        linger.set()
+        _join_or_terminate([holder])
 
 
 def test_sequential_holds_on_one_thread_reacquire_the_os_boundary(

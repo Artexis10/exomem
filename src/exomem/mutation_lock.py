@@ -1927,6 +1927,11 @@ class _LocalLockState:
     #: thread that holds `guard` and polls for the OS lock sets it, and it
     #: clears it before leaving `_waiting`, so it is set only while `waiters > 0`.
     signal_handle: BinaryIO | None = None
+    #: The last probe for a waiter in another process, and when it ran. Read and
+    #: written under `metadata_guard`; `waiter_count` repeats the probe at most
+    #: once per poll interval, however often background work asks.
+    foreign_waiter: bool = False
+    foreign_probed_at: float = -math.inf
 
 
 _LOCAL_STATES: dict[Path, _LocalLockState] = {}
@@ -1956,16 +1961,17 @@ def _raise_waiter_signal(state: _LocalLockState) -> None:
     waiter leaves no signal. A wait that the first try ends never raises it, so an
     uncontended hold pays nothing. The signal is a hint: if it cannot be published,
     the holder does not step aside for this process, as before, and the waiting
-    write must not fail for it. Windows has no shared advisory lock here, so there
-    the signal stays process-local.
+    write must not fail for it. The shared lock is a non-blocking try, so a probe's
+    momentary exclusive lock cannot push the bounded wait past its deadline; the
+    caller tries again at its next poll. Windows has no shared advisory lock here,
+    so there the signal stays process-local.
     """
     if os.name == "nt" or state.lock_path is None or state.signal_handle is not None:
         return
     handle = None
     try:
         handle = _open_lock_handle(_waiters_lock_path(state.lock_path))
-        # Blocking, though only a probe's momentary exclusive lock can make it wait.
-        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     except OSError:
         if handle is not None:
             handle.close()
@@ -2194,17 +2200,23 @@ class VaultMutationCoordinator:
         A positive count is the number of threads of this process now waiting.
         With none, it is 1 when another process waits (that process holds a
         shared lock on the boundary's waiters sidecar) and 0 otherwise. The
-        contention counters stay process-local. On Windows only this process's
-        threads count.
+        other-process answer is at most one poll interval old. The contention
+        counters stay process-local. On Windows only this process's threads count.
         """
         state = _state_for(self.lock_path)
         with state.metadata_guard:
             local = state.waiters
-        if local or os.name == "nt":
-            return local
+            if local or os.name == "nt":
+                return local
+            now = time.monotonic()
+            if now - state.foreign_probed_at < self.poll_interval_seconds:
+                return int(state.foreign_waiter)
         # This process holds its shared lock only while `waiters > 0`, so the
         # probe cannot meet it here.
-        return int(_another_process_waits(self.lock_path))
+        found = _another_process_waits(self.lock_path)
+        with state.metadata_guard:
+            state.foreign_waiter, state.foreign_probed_at = found, now
+        return int(found)
 
     @contextmanager
     def hold(
