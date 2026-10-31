@@ -2207,3 +2207,17 @@ def test_stopping_the_service_installs_its_pending_log_view(served_log, monkeypa
     assert log_state(root) == [("pending",)]
     served_log.stop()
     assert SESSION_HEADING in (root / X3_LOG).read_bytes()
+
+
+def test_a_view_published_before_its_stat_is_recorded_is_not_an_owner_edit(store):
+    """Defect: the store thread's sweep reads a view the store just installed, whose stat edit-back has
+    not recorded yet, as an owner edit, so a store that released the lease on idle takes it again."""
+    appended(store)
+    path = store.root / manifest_path()
+    store.connection.execute("UPDATE projection_state SET stat_identity=NULL WHERE path=?", (manifest_path(),))
+    store.connection.commit()
+    with sqlite3.connect(store.connection.execute("PRAGMA database_list").fetchone()[2]) as reader:
+        reader.row_factory = sqlite3.Row
+        assert manifest_path() not in edit_back.changed_views(reader, store.root)[0]
+        path.write_bytes(path.read_bytes().replace(b"title: Work", b"title: Revised work"))
+        assert manifest_path() in edit_back.changed_views(reader, store.root)[0]
