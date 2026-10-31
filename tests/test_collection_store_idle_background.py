@@ -9,7 +9,7 @@ from test_collection_store_s1_gate import LATER, ROW, _until, coordinator
 from test_collection_store_service import ON, Service, _served_vault, call, offline_create
 from test_collection_store_writer import CID, manifest_path
 
-from exomem import writer_lease
+from exomem import graph_sync, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import capability, connection, edit_back, runtime
 from exomem.collection_store.writer import CollectionWriter
@@ -44,7 +44,13 @@ def rows(root, sql, parameters=()):
 def release_on_idle(manager):
     """Let the lease loop's own idle rule fire now, instead of waiting out the idle period.
 
-    The clock is aged again whenever a last background write moved it, until the loop releases."""
+    The clock is aged again whenever a last background write moved it, until the loop releases.
+    A graph rebuild the setup's writes left running publishes under the lease, so it must finish
+    first; on a loaded runner it outlived the release and its publication took the lease again."""
+    _until(lambda: not any(
+        thread.name == graph_sync.GRAPH_REBUILD_THREAD_NAME and thread.is_alive()
+        for thread in threading.enumerate()
+    ), seconds=60)
     idle = manager.config.idle_release_seconds
 
     def released():
