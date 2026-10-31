@@ -86,7 +86,8 @@ eligible for a remote claim.
 ### Requirement: A worker credential admits only the worker routes
 
 The owner SHALL issue, list and revoke worker credentials with the host CLI.
-The service SHALL store only a hash of each token. A worker credential SHALL
+The service SHALL store only a hash of each token. Each credential SHALL expire
+after the lifetime set at issue, 90 days by default. A worker credential SHALL
 admit the five `/media-worker/v1/` routes and no other route. A heartbeat, read,
 result or release SHALL also require that the credential's worker holds the
 lease.
@@ -98,6 +99,10 @@ lease.
 #### Scenario: A worker cannot touch another worker's lease
 - **WHEN** worker B sends a result for a lease that worker A holds
 - **THEN** the service refuses it and the lease is unchanged
+
+#### Scenario: An expired credential is refused
+- **WHEN** a worker calls claim with a credential past its lifetime
+- **THEN** the service refuses it as unauthenticated
 
 #### Scenario: A revoked credential stops at once
 - **WHEN** the owner revokes a credential that holds a lease
@@ -155,3 +160,23 @@ lease age, and each worker credential with the time it was last seen.
 #### Scenario: The owner sees where a job runs
 - **WHEN** a worker holds a lease and the owner reads media status
 - **THEN** the status names the worker, the job and the lease age
+
+### Requirement: A worker's concurrent leases are bounded by its slots
+
+A worker SHALL declare its slot count in the claim request. The service SHALL
+NOT grant a credential more concurrent leases than the lower of the declared
+slots and the credential's configured `max_leases`.
+
+#### Scenario: A full worker gets no more work
+- **WHEN** a worker that declared one slot holds a lease and calls claim again
+- **THEN** the service returns `204` and grants no second lease
+
+### Requirement: The worker keeps no originals
+
+The worker SHALL store an original only in its own temporary storage for the
+life of the lease, and SHALL delete it when the lease ends, whatever the
+outcome.
+
+#### Scenario: A finished job leaves no audio behind
+- **WHEN** a worker hands in a result or releases a lease
+- **THEN** the worker's temporary copy of that original no longer exists

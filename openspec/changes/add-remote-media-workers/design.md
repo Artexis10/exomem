@@ -125,6 +125,9 @@ the set. The credential admits the five worker routes and nothing else. A
 heartbeat, read, result or release also requires that the credential's worker
 holds the lease.
 
+A credential expires after a lifetime that the owner sets at issue, 90 days by
+default. Its holder must be issued a new one before then.
+
 OAuth does not fit a headless daemon, and the local ingress grant is bound to
 the loopback listener. A dedicated credential keeps a leaked worker token from
 reaching notes, tools or uploads.
@@ -151,6 +154,14 @@ Remote claims therefore follow the same claim order and hydration cap as local
 claims. The defaults route nothing, so a vault without the block behaves as
 today.
 
+### D7a. A worker declares its capacity in slots
+
+A worker declares how many jobs it can run at once, from its own memory and
+device, for example one on an 8 GB GPU. The service grants a credential at most
+that many concurrent leases, and never more than the `max_leases` that the
+owner sets for the credential. Capacity is therefore a fixed number per worker.
+A burst of jobs waits in the queue instead of overloading the worker's machine.
+
 ### D8. The worker returns structure; the service renders
 
 A remote extraction payload carries the ASR segments with their times and
@@ -160,6 +171,12 @@ local voice-profile store, renders the transcript text with the same functions
 as the local path, and records the result. Voice profiles therefore never leave
 the vault owner, and a remote transcript renders exactly as a local one. The
 service drops the embeddings after matching and stores none of them.
+
+### D8a. The worker keeps no originals
+
+The worker writes an original only to its own temporary storage, verifies it,
+and deletes it when the lease ends, whatever the outcome. It keeps no cache of
+originals between jobs.
 
 ### D9. The vault's policy travels with the job
 

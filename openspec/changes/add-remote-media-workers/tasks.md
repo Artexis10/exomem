@@ -7,7 +7,7 @@
 
 ## 2. Service routes and credential
 
-- [ ] 2.1 Add the worker credential store (hashed, machine-local) and `exomem media-worker credential issue|list|revoke`.
+- [ ] 2.1 Add the worker credential store (hashed, machine-local, expiring, with `max_leases`) and `exomem media-worker credential issue|list|revoke`.
 - [ ] 2.2 Add the five `/media-worker/v1/` routes, with admission that accepts only a worker credential and checks lease holding.
 - [ ] 2.3 Stream the original from a held read handle with `Range`, under the lease's pin and the release gate.
 - [ ] 2.4 Render a remote extraction from its structure with the local renderer, matching speaker clusters against the local voice profiles.
@@ -20,7 +20,7 @@
 
 ## 4. Worker
 
-- [ ] 4.1 Add `exomem media-worker run --service URL --credential-file PATH`: claim, verify the original, compute with `extract`, heartbeat, hand in, release on shutdown.
+- [ ] 4.1 Add `exomem media-worker run --service URL --credential-file PATH --slots N`: claim up to N leases, verify the original, compute with `extract`, heartbeat, hand in, delete the original copy, release on shutdown.
 - [ ] 4.2 Return anonymous diarisation turns and one embedding per raw cluster when diarisation is enabled on the worker.
 
 ## 5. Proof
