@@ -1,6 +1,6 @@
 """Real end-to-end smoke for the diarization sidecar worker.
 
-GATED: skips unless the sidecar venv is built (`sidecar/diarizer/.venv`). On CI / un-provisioned
+GATED: skips unless the sidecar venv is built (`python -m exomem.diarizer_sidecar`). On CI / un-provisioned
 boxes there's no sidecar, so this skips; on a provisioned box it runs the actual worker subprocess
 under the SIDECAR interpreter. Do NOT `importorskip("pyannote.audio")` here — pyannote deliberately
 isn't installed in the MAIN venv; it lives only in the sidecar.
@@ -27,7 +27,7 @@ _SIDECAR_PY = extract._diarizer_sidecar_python()
 
 pytestmark = pytest.mark.skipif(
     _SIDECAR_PY is None,
-    reason="diarizer sidecar venv not built (sidecar/diarizer/.venv) — run scripts/setup-diarizer.ps1",
+    reason="diarizer sidecar venv not built — run python -m exomem.diarizer_sidecar",
 )
 
 

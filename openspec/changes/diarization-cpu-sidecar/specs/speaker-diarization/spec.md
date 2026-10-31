@@ -22,11 +22,20 @@ NOT raise.
 
 #### Scenario: Sidecar not provisioned degrades to plain transcript
 
-- **WHEN** `EXOMEM_DIARIZE` is set but `sidecar/diarizer/.venv` (or `EXOMEM_DIARIZE_SIDECAR_PYTHON`)
-  resolves to no interpreter
+- **WHEN** `EXOMEM_DIARIZE` is set but no sidecar venv is built for the installed release's sidecar
+  lock (or `EXOMEM_DIARIZE_SIDECAR_PYTHON` names no interpreter)
 - **THEN** no subprocess is spawned, the condition is logged, and extraction emits the plain
   transcript
 - **AND** the result is byte-identical to diarization being disabled
+
+#### Scenario: A wheel install finds the sidecar and keeps it across release switches
+
+- **WHEN** the service runs from an installed wheel, not a source checkout, and the sidecar venv was
+  built with `python -m exomem.diarizer_sidecar`
+- **THEN** the service finds the sidecar interpreter and the packaged `worker.py`
+- **AND** a switch to a release with the same sidecar lock reuses the venv
+- **AND** a switch to a release with a different sidecar lock looks for a venv for that lock, which
+  the managed upgrade builds after the switch while `EXOMEM_DIARIZE` is on
 
 #### Scenario: Sidecar failure soft-fails
 

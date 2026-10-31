@@ -26,7 +26,7 @@ transcript. Never raises.
 
 ## Decisions
 
-- **Isolated uv project pinned to Q's proven Blackwell stack.** `sidecar/diarizer/pyproject.toml`
+- **Isolated uv project pinned to Q's proven Blackwell stack.** `src/exomem/_sidecars/diarizer/pyproject.toml`
   pins `pyannote.audio 4.x` (loading the `speaker-diarization-3.1` model) / `torch 2.9.1+cu130` /
   `torchaudio 2.9.1` (Python 3.12, auto-fetched by uv). `torch 2.9.1+cu130` is the sweet spot — it
   ships Blackwell `sm_120` kernels AND works with pyannote, whereas the main service's `2.12+cu132`
@@ -61,6 +61,14 @@ transcript. Never raises.
 - **Locate, never auto-build.** `_diarizer_sidecar_python()` returns the venv interpreter (or the
   `EXOMEM_DIARIZE_SIDECAR_PYTHON` override), or `None` if unbuilt → plain transcript + a clear log.
   Runtime never runs `uv` (avoids the fragile-interpreter hazard `restart.ps1` already guards).
+- **Ship the sidecar with the package; keep its venv outside every release.** A managed service runs
+  from installed wheels, where a repo-relative `sidecar/diarizer/` never exists. The sidecar project
+  lives at `src/exomem/_sidecars/diarizer/` and ships in the wheel. Its venv lives under the
+  machine-local state root at `sidecars/diarizer/<lock hash>`, so a release switch neither drops it
+  nor shares a stale one: the same lock reuses the venv, a new lock looks for a new one.
+  `python -m exomem.diarizer_sidecar` builds it and removes venvs for other locks; the managed
+  `scripts/upgrade.sh` runs it with the newly active release after each switch while
+  `EXOMEM_DIARIZE` is on, and reports a failure without undoing the switch.
 - **Remove pyannote from the main venv.** Leaving it reachable in cu132 is an active hazard: a
   future `uv sync --extra diarization` re-pulls `torchcodec`, which breaks the embedding stack on
   the next restart. The main `diarization` extra is now `speechbrain`-only.
@@ -78,7 +86,7 @@ to the sidecar's pyannote version.
 
 - **Sidecar venv drift / disappearance** (Kaspersky quarantine per `restart.ps1`; a bare main
   `uv sync` does not touch the sidecar). The `is_file()` guard degrades to plain transcript;
-  recovery is `setup-diarizer.ps1`. Add a Kaspersky exclusion for `sidecar/diarizer/.venv`.
+  recovery is `setup-diarizer.ps1`. Add a Kaspersky exclusion for the sidecar venv directory under the state root (`sidecars/diarizer/`).
 - **Gated weights.** First diarized upload downloads pyannote weights into the shared HF cache;
   `setup-diarizer.ps1 -Prewarm` front-loads it. Needs `HUGGINGFACE_TOKEN` + accepted conditions for
   `speaker-diarization-3.1` and `segmentation-3.0`.

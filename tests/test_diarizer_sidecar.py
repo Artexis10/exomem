@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from exomem import extract
+from exomem import diarizer_sidecar, extract
 
 
 def _fake_python(monkeypatch) -> None:
@@ -218,3 +218,26 @@ def test_timeout_override_and_floor(monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_DIARIZE_TIMEOUT", raising=False)
     # Unprobeable path → the generous floor.
     assert extract._diarizer_timeout(Path("does-not-exist.wav")) >= 900.0
+
+
+def test_built_sidecar_is_the_one_the_service_finds(monkeypatch, tmp_path) -> None:
+    """Defect: the venv was built where the installed service never looked (sidecar_venv=False)."""
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path))
+    monkeypatch.delenv("EXOMEM_DIARIZE_SIDECAR_PYTHON", raising=False)
+    stale = tmp_path / "sidecars" / "diarizer" / "an-older-lock"
+    stale.mkdir(parents=True)
+    monkeypatch.setattr(diarizer_sidecar.shutil, "which", lambda name: "/usr/bin/uv")
+
+    def _run(cmd, env=None, check=False):
+        if cmd[0] == "/usr/bin/uv":  # uv sync creates the interpreter in UV_PROJECT_ENVIRONMENT
+            interpreter = Path(env["UV_PROJECT_ENVIRONMENT"]) / diarizer_sidecar._PYTHON
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text("")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(diarizer_sidecar.subprocess, "run", _run)
+    assert extract._diarizer_sidecar_python() is None
+    built = diarizer_sidecar.build()
+    assert extract._diarizer_sidecar_python() == built
+    assert extract._diarizer_worker_script().is_file()
+    assert not stale.exists()
