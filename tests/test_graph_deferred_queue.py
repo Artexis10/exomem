@@ -1907,7 +1907,10 @@ def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
         monkeypatch,
         {
             PAGE_A: _page("A", "A is revised against [[queue-b]]."),
-            PAGE_B: _page("B", "B is revised and cites nothing."),
+            # Retitled, so that the drain of B widens to A. A's replay was
+            # withheld while B was queued, and only a batch that holds A
+            # covers the committed generation and acknowledges it.
+            PAGE_B: _page("B renamed", "B is revised and cites nothing."),
         },
     )
     real_drain = EpistemicGraphIndex.drain_paths
