@@ -76,6 +76,30 @@ following their remediation: wait before retrying a warming or busy call; retry 
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
 
+## Relation choices and unlinked names on a write
+
+Write the specific relation when one fits. `relates_to` is for a real generic
+connection. A write can answer in three ways.
+
+- **A new generic edge that joins an entity is refused.** The error is
+  `GENERIC_RELATION_NEEDS_REASON`. The write commits nothing and lists up to four
+  fitting relations. Either write the edge as one of them, or keep it generic:
+  repeat the call with `relation_disposition="generic"`, a `relation_review_reason`
+  that says why none fits, the returned `relation_review_hash`, and the returned
+  draft fields (a creation) or `transition_token` (an edit). On `create-entity`,
+  give the `relations` item a `reason` instead. An edge the page already carried is
+  not asked about again.
+- **A new generic edge between two notes commits.** The write returns
+  `relation_advisory.specific_options`: fitting relations, each with an `edit_note`
+  route that swaps the predicate of that one bullet. Follow a route when the
+  relation states what the source says. Otherwise dismiss the offer with
+  `triage_memory(ref=<its review>, action="dismiss", why=..., expected_fingerprint=<its
+  fingerprint>)`.
+- **`undeclared_referents` lists links to nothing.** Each of its `names` is a link that
+  this write added and that has no page and no entity, with its `create-entity` route.
+  Follow the route when the name is a durable referent: stable, recurring and
+  useful beyond this source. Otherwise dismiss it the same way.
+
 ## Relation disposition on compiled writes
 
 Once a vault holds any compiled page, a new compiled page must either carry a

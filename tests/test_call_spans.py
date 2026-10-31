@@ -527,6 +527,8 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "post_commit.due_state",
         "post_commit.capture_sweep",
         "post_commit.entity_candidate",
+        "post_commit.undeclared_referents",
+        "post_commit.specific_options",
         "advisory.default_sweep",
         "command.body",
         "command.terminal_filter",

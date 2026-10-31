@@ -67,19 +67,31 @@ def queues_for_owner(vault_root: Path) -> str | None:
     return "audience_restricted" if mode == "v1" else None
 
 
-def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
+def admission_refusal(
+    vault_root: Path, spec: RegistrySpec, *, policy: Any | None = None,
+    tombstones: frozenset[str] | None = None,
+) -> dict[str, Any] | None:
     """Admit the adapter's complete overlay before hashes, aliases or entries are read.
 
     Each S1 adapter reads only its declared overlay and shipped packs. The two
     taxonomy subjects share one overlay, so admission covers both axes together.
     A withheld overlay makes the operation unavailable until domain-aware delivery.
+
+    A pass over many registries reads the compiled `policy` and the `tombstones`
+    once and hands them in, as `egress.release_walk_filter` does: the governance
+    plane does not move while one pass runs, and each omitted read costs a walk
+    of the governance tree. Omitting both keeps the per-call read.
     """
     from ..governance import egress
 
     return _admission_refusal(
         vault_root, spec,
-        release_level=lambda path: egress.release_level_for_path_only(vault_root, path),
-        history_storage_level=lambda: _history_storage_level(vault_root, spec),
+        release_level=lambda path: egress.release_level_for_path_only(
+            vault_root, path, policy=policy, tombstones=tombstones,
+        ),
+        history_storage_level=lambda: _history_storage_level(
+            vault_root, spec, policy=policy, tombstones=tombstones,
+        ),
     )
 
 
@@ -108,6 +120,7 @@ def _recheck_verified_session(root: Path, who: RequestPrincipal) -> None:
 def _history_storage_level(
     vault_root: Path, spec: RegistrySpec, *, principal: RequestPrincipal | None = None,
     purpose: str | None = None, policy: Any | None = None,
+    tombstones: frozenset[str] | None = None,
 ) -> tuple[int, bool]:
     """Return metadata admission and proven absence for the declared history directory."""
     import sqlite3
@@ -140,7 +153,8 @@ def _history_storage_level(
         return egress.LEVEL_NONE, False
     # Directory metadata has no content fingerprint; each history file retains byte admission.
     level = egress._release_level_for_path_only_snapshot(
-        root, directory, principal=who, purpose=purpose, policy=policy, content_fingerprint=None,
+        root, directory, principal=who, purpose=purpose, policy=policy, tombstones=tombstones,
+        content_fingerprint=None,
     )
     return level, absent
 
@@ -325,8 +339,15 @@ def selected_admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str
     return admission_refusal(vault_root, spec)
 
 
-def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | None:
-    """Admit every kept snapshot before a history producer reads its header or bytes."""
+def history_refusal(
+    vault_root: Path, spec: RegistrySpec, *, policy: Any | None = None,
+    tombstones: frozenset[str] | None = None,
+) -> dict[str, Any] | None:
+    """Admit every kept snapshot before a history producer reads its header or bytes.
+
+    `policy` and `tombstones` are handed in for a pass over many registries, as for
+    `admission_refusal`.
+    """
     from .. import registry_history
     from ..governance import egress
 
@@ -339,14 +360,16 @@ def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | No
         return None
     except OSError:
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
-    level, absent = _history_storage_level(root, spec)
+    level, absent = _history_storage_level(root, spec, policy=policy, tombstones=tombstones)
     if level < egress.LEVEL_FULL:
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     if absent:
         return None
     names = registry_history.kept_names(root, directory, suffix=".yaml")
     if names is None or any(
-        egress.release_level_for_path_only(root, f"{directory}/{name}") < egress.LEVEL_FULL
+        egress.release_level_for_path_only(
+            root, f"{directory}/{name}", policy=policy, tombstones=tombstones,
+        ) < egress.LEVEL_FULL
         for name in names[: registry_history.HISTORY_KEEP]
     ):
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}

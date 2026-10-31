@@ -126,11 +126,14 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
         "title": "Authored additions",
         "status": "active",
         "today": dt.date(2020, 1, 1),
+        # A generic edge to an entity is kept on a stated reason, not refused.
+        "relation_disposition": "generic",
+        "relation_review_reason": "The note names no narrower relation to the concept.",
     }
     draft = note.note(vault, validate_only=True, **draft_arguments)
     created = note.note(
         vault, draft_token=draft.draft_token, draft_id=draft.draft_id,
-        draft_hash=draft.draft_hash, **draft_arguments
+        draft_hash=draft.draft_hash, relation_review_hash=draft.draft_hash, **draft_arguments
     )
     path = created.path
     _, body, _ = vault_module.parse_frontmatter((vault / path).read_text())
@@ -174,8 +177,10 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     assert cohort["authored_edges"]["numerator"] == 2
     assert cohort["endpoint_classes"]["note_to_entity"]["raw_generic_share"]["numerator"] == 1
     assert cohort["endpoint_classes"]["note_to_note"]["raw_generic_share"]["denominator"] == 1
-    assert cohort["unreasoned_generic_edges"]["numerator"] is None
-    assert cohort["unreasoned_generic_edges"]["coverage"]["status"] == "unavailable"
+    # The one generic edge kept the reason its writer gave, so no logged reason is blank.
+    assert cohort["unreasoned_generic_edges"]["numerator"] == 0
+    assert cohort["unreasoned_generic_edges"]["denominator"] == 1
+    assert cohort["unreasoned_generic_edges"]["coverage"]["status"] == "partial"
     assert cohort["referents"]["acted"]["numerator"] is None
     assert cohort["placement_by_basis"]["numerator"] == 1
     assert cohort["coverage"]["status"] == "partial"

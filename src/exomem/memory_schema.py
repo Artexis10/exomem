@@ -1054,6 +1054,8 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
             value["presentation_role"] = item.presentation_role
         if item.label is not None:
             value["label"] = item.label
+        if item.endpoints is not None:
+            value["endpoints"] = item.endpoints.as_dict()
         scope = {}
         if item.projects:
             scope["projects"] = sorted(item.projects)

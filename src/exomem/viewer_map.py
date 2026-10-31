@@ -90,9 +90,9 @@ def op_viewer_map(
     No interactive request builds or proves a cold graph snapshot.
 
     Args:
-        max_nodes: Drawing cap, from 1 to 200. Default 200.
-        max_edges: Drawing cap, from 0 to 400. Default 400.
-        purpose: Optional declared purpose under the existing disclosure policy.
+        max_nodes: Drawing cap, from 1 to 200.
+        max_edges: Drawing cap, from 0 to 400.
+        purpose: Declared purpose under the existing disclosure policy.
 
     Returns:
         Coverage state, snapshot identity, observation time, admitted page nodes

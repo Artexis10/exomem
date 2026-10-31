@@ -1046,7 +1046,7 @@ def test_a_citation_records_a_cite_event(vault) -> None:
     content = (
         "Retries against the queue stay bounded.\n\n## Observations\n\n"
         "- [operations] Retries against the ingest queue stay bounded at three attempts.\n\n"
-        "## Relations\n\n- relates_to [[Idempotency Key]]\n"
+        "## Relations\n\n- about_entity [[Idempotency Key]]\n"
     )
     writer_lease.invoke_command(
         _command("remember"),

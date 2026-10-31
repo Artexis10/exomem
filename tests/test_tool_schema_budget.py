@@ -33,9 +33,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # can be redone without losing the old text.
 # The multilingual flag on change_media process and reprocess adds 170 B, so a recording that mixes
 # languages is read in each of them.
+# The change_connections create-entity kind admits `ref` (33 B), so the route that a write receipt's
+# `undeclared_referents` block names runs on the nested surface and records its origin page.
 # Paged, consuming imports add `after` and `consume` to import_memory, so the budget rises 100 B after the
 # import text was trimmed.
-TOTAL_BUDGET = 162_500
+# The generic-relation wording on the write tools needs 50 B more once both changes are in, so the budget
+# rises 50 B.
+TOTAL_BUDGET = 162_550
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -45,7 +49,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "browse_memory": 6700,
     "capture_source": 3350,
     "import_memory": 5850,
-    "change_connections": 3200,
+    "change_connections": 3250,
     "change_files": 7100,
     "change_governance": 4650,
     "change_media": 1600,
@@ -177,6 +181,35 @@ def test_cloud_surface_stays_under_its_budget_and_ceilings(
     assert not unbudgeted, f"Cloud tools without a ceiling: {unbudgeted}"
     over = [f"{r['name']}: {r['total']:,} > {ceilings[r['name']]:,}" for r in rows if r["total"] > ceilings[r["name"]]]
     assert not over, "over ceiling: " + "; ".join(over)
+
+
+def _values_for(node, key):
+    """Every value stored under `key` anywhere in a JSON schema."""
+    if isinstance(node, dict):
+        for name, value in node.items():
+            if name == key:
+                yield value
+            yield from _values_for(value, key)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _values_for(item, key)
+
+
+@pytest.mark.parametrize("cloud", [False, True], ids=["local", "cloud"])
+def test_served_schemas_admit_the_revert_action_and_the_registry_remove_verb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cloud: bool
+) -> None:
+    """A byte ceiling pushes toward trimming a schema; a trimmed enum or delta shape would refuse the undo."""
+    wires = {wire["name"]: wire for wire in _wires(_build_server(monkeypatch, tmp_path, cloud=cloud))}
+
+    revert_choices = [
+        selector.get("enum") for selector in _values_for(wires["repair_memory"]["inputSchema"], "curation_action")
+    ]
+    assert ["revert"] in revert_choices
+    registry_deltas = [
+        delta for delta in _values_for(wires["read_schema"]["inputSchema"], "proposal") if "remove" in delta.get("properties", {})
+    ]
+    assert registry_deltas, "the registry delta admits the remove verb"
 
 
 def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) -> None:

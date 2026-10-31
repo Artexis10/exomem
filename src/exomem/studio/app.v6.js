@@ -46,6 +46,30 @@ function relationName(entry, fallback) {
   return entry.relation_label || entry.relation_type || fallback;
 }
 
+// The server supplies the generic relation; where it names none, the row says so rather than naming one.
+const UNNAMED_RELATION = "unnamed relation";
+
+// What a candidate can be written as. Fitting relations (`options`) replace the generic one;
+// without them the candidate's own relation is the key, and a candidate naming none is not writable.
+function relationChoices(candidates) {
+  return candidates.flatMap((candidate) => {
+    const options = Array.isArray(candidate.options) ? candidate.options : [];
+    if (options.length) {
+      return options.map((option) => ({
+        candidate,
+        key: option.key,
+        text: option.label || option.key,
+        description: option.description || "",
+      }));
+    }
+    return [{candidate, key: candidate.relation_type || "", text: relationName(candidate, UNNAMED_RELATION), description: ""}];
+  });
+}
+
+function fittingRelations(item) {
+  return (Array.isArray(item.options) ? item.options : []).map((option) => option.label || option.key);
+}
+
 function errorMessage(error) {
   if (!(error instanceof ApiError)) return "Unexpected Studio error.";
   return error.remediation ? `${error.message} ${error.remediation}` : error.message;
@@ -433,6 +457,32 @@ async function openProposal(kind) {
   }
 }
 
+// The select that picks the relation to write, and the line that describes the chosen one.
+function choiceFields(choices, labelText) {
+  const wrapper = element("label", labelText);
+  const select = document.createElement("select");
+  select.name = "candidate";
+  choices.forEach((choice, index) => {
+    const modelLabel = choice.candidate.method === "model" ? " · model-backed proposal" : "";
+    const text = choice.key ? choice.text : `${UNNAMED_RELATION} (not writable)`;
+    const option = new Option(`${text} → ${choice.candidate.to}${modelLabel}`, String(index));
+    option.disabled = !choice.key;
+    select.append(option);
+  });
+  wrapper.append(select);
+  const description = element("p", "", "section-note");
+  description.setAttribute("aria-live", "polite");
+  const showDescription = () => { description.textContent = choices[Number(select.value)]?.description || ""; };
+  select.addEventListener("change", showDescription);
+  showDescription();
+  return [wrapper, description];
+}
+
+// The bullet carries the key; a display label would author a different relation.
+function relationBullet(choice) {
+  return `- ${choice.key} [[${String(choice.candidate.to || "").replace(/\.md$/, "")}]]`;
+}
+
 async function prepareRelationProposal() {
   const proposal = await command("connect_memory", {
     operation: "suggest-relations",
@@ -440,26 +490,18 @@ async function prepareRelationProposal() {
     include_model_suggestions: true,
     limit: 10,
   });
-  dialogAction = {kind: "relation", proposal};
+  const choices = relationChoices(proposal.candidates || []);
+  dialogAction = {kind: "relation", proposal, choices};
   byId("dialog-title").textContent = "Review a provisional relation";
   byId("dialog-description").textContent = `${context.target.title || context.target.path} · Suggestions are read-only and may include model-backed candidates. Choose one, then confirm a separate audited edit.`;
-  const candidates = proposal.candidates || [];
-  if (!candidates.length) {
+  if (!choices.length) {
     replaceChildren(byId("dialog-fields"), [element("p", "No relation candidates were measured. Nothing can be written from this proposal.", "section-note empty")]);
     return false;
   }
-  const wrapper = element("label", "Provisional candidate");
-  const select = document.createElement("select");
-  select.name = "candidate";
-  candidates.forEach((candidate, index) => {
-    const modelLabel = candidate.method === "model" ? " · model-backed proposal" : "";
-    select.append(new Option(`${relationName(candidate, "relates_to")} → ${candidate.to}${modelLabel}`, String(index)));
-  });
-  wrapper.append(select);
   const warnings = (proposal.warnings || []).map((warning) => element("p", String(warning), "section-note"));
-  replaceChildren(byId("dialog-fields"), [wrapper, inputField("Audit reason", "why", "Accepted reviewed relation", {required: true}), ...warnings]);
+  replaceChildren(byId("dialog-fields"), [...choiceFields(choices, "Provisional candidate"), inputField("Audit reason", "why", "Accepted reviewed relation", {required: true}), ...warnings]);
   byId("dialog-confirm").textContent = "Confirm governed edit";
-  return true;
+  return choices.some((choice) => choice.key);
 }
 
 async function prepareCompileProposal() {
@@ -497,6 +539,7 @@ async function submitDialog(event) {
   if (dialogAction.kind === "triage") await submitTriage();
   if (dialogAction.kind === "relation") await submitRelation();
   if (dialogAction.kind === "relation-accept") await submitRelationAccept();
+  if (dialogAction.kind === "relation-choose") await submitRelationChoose();
   if (dialogAction.kind === "relation-triage") await submitRelationTriage();
   if (dialogAction.kind === "compile") await submitCompilation();
   if (dialogAction.kind === "replace") await submitReplacement();
@@ -564,21 +607,35 @@ async function guardedWrite(write, options = {}) {
   }
 }
 
-async function submitRelation() {
-  const data = new FormData(byId("dialog-form"));
-  const candidate = dialogAction.proposal.candidates?.[Number(data.get("candidate"))];
-  if (!candidate) {
-    showError(byId("dialog-error"), new ApiError("Choose a valid proposal before confirming."));
-    return;
-  }
-  await guardedWrite(() => command("edit_memory", {
-    path: context.target.path,
-    why: data.get("why"),
+// Both relation dialogs write the same audited bullet. edit_memory keeps refusing a missing heading
+// (only the relation queue's accept creates one), so a page without `## Relations` gets a plain
+// instruction in place of the heading code.
+function writeRelationBullet({path, why, choice, expectedHash}) {
+  return command("edit_memory", {
+    path,
+    why,
     heading: "Relations",
     section_position: "append",
-    // The bullet carries the key; a display label would author a different relation.
-    new_string: `- ${candidate.relation_type || "relates_to"} [[${String(candidate.to || "").replace(/\.md$/, "")}]]`,
-    expected_hash: context.target.content_hash,
+    new_string: relationBullet(choice),
+    expected_hash: expectedHash,
+  }).catch((error) => {
+    if (!(error instanceof ApiError) || error.code !== "HEADING_NOT_FOUND") throw error;
+    throw new ApiError("This page has no Relations section yet; add one, then choose again.", {code: error.code, status: error.status});
+  });
+}
+
+async function submitRelation() {
+  const data = new FormData(byId("dialog-form"));
+  const choice = dialogAction.choices?.[Number(data.get("candidate"))];
+  if (!choice?.key) {
+    showError(byId("dialog-error"), new ApiError("Choose a relation that can be written before confirming."));
+    return;
+  }
+  await guardedWrite(() => writeRelationBullet({
+    path: context.target.path,
+    why: data.get("why"),
+    choice,
+    expectedHash: context.target.content_hash,
   }));
 }
 
@@ -712,18 +769,24 @@ function renderRelationCandidate(item, group) {
   li.dataset.ref = item.ref;
   const summary = element("div", "", "relation-summary");
   const destination = String(item.to || "").replace(/\.md$/, "");
-  const relation = relationName(item, "relates_to");
+  const relation = relationName(item, UNNAMED_RELATION);
   summary.append(element("strong", `${relation} → ${destination}`));
   summary.append(element("span", `method: ${label(item.method)}`, "tag"));
   summary.append(element("span", `source: ${item.source_path}`, "path"));
+  const fitting = fittingRelations(item);
+  if (fitting.length) summary.append(element("span", `a specific relation fits: ${fitting.join(", ")}`, "fine-print"));
   li.append(summary);
   const actions = element("div", "", "actions");
-  const accept = element("button", "Accept");
+  // The queue refuses the generic relation where a specific one fits, so the owner chooses one instead.
+  const choosing = fitting.length > 0;
+  const accept = element("button", choosing ? "Choose relation" : "Accept");
   accept.type = "button";
   accept.dataset.relationRef = item.ref;
-  accept.dataset.relationAction = "accept";
-  accept.setAttribute("aria-label", `Accept ${relation} → ${destination} from ${item.source_path}`);
-  accept.addEventListener("click", () => openRelationAccept(item, group));
+  accept.dataset.relationAction = choosing ? "choose" : "accept";
+  accept.setAttribute("aria-label", choosing
+    ? `Choose relation → ${destination} from ${item.source_path}`
+    : `Accept ${relation} → ${destination} from ${item.source_path}`);
+  accept.addEventListener("click", () => (choosing ? openRelationChoose(item, group) : openRelationAccept(item, group)));
   const dismiss = element("button", "Dismiss");
   dismiss.type = "button";
   dismiss.dataset.relationRef = item.ref;
@@ -747,11 +810,26 @@ function openRelationAccept(item, group) {
   const destination = String(item.to || "").replace(/\.md$/, "");
   byId("dialog-kicker").textContent = "Governed accept";
   byId("dialog-title").textContent = "Accept this relation?";
-  byId("dialog-description").textContent = `${group.title || group.path} · ${relationName(item, "relates_to")} → ${destination}`;
+  byId("dialog-description").textContent = `${group.title || group.path} · ${relationName(item, UNNAMED_RELATION)} → ${destination}`;
   replaceChildren(byId("dialog-fields"), [inputField("Audit reason", "why", "Accepted reviewed relation", {required: true})]);
   byId("dialog-error").hidden = true;
   byId("dialog-confirm").disabled = false;
   byId("dialog-confirm").textContent = "Confirm governed accept";
+  dialog.showModal();
+}
+
+function openRelationChoose(item, group) {
+  const choices = relationChoices([item]);
+  dialogAction = {kind: "relation-choose", item, group, choices};
+  restoreRef = item.ref;
+  const destination = String(item.to || "").replace(/\.md$/, "");
+  byId("dialog-kicker").textContent = "Governed edit";
+  byId("dialog-title").textContent = "Choose the relation to write";
+  byId("dialog-description").textContent = `${group.title || group.path} → ${destination} · The chosen relation is written on the source page as a separate audited edit.`;
+  replaceChildren(byId("dialog-fields"), [...choiceFields(choices, "Relation"), inputField("Audit reason", "why", "Accepted reviewed relation", {required: true})]);
+  byId("dialog-error").hidden = true;
+  byId("dialog-confirm").disabled = false;
+  byId("dialog-confirm").textContent = "Confirm governed edit";
   dialog.showModal();
 }
 
@@ -761,7 +839,7 @@ function openRelationTriage(item, action) {
   const destination = String(item.to || "").replace(/\.md$/, "");
   byId("dialog-kicker").textContent = "Governed triage";
   byId("dialog-title").textContent = `${label(action)} this relation candidate?`;
-  byId("dialog-description").textContent = `${relationName(item, "relates_to")} → ${destination}`;
+  byId("dialog-description").textContent = `${relationName(item, UNNAMED_RELATION)} → ${destination}`;
   const fields = [];
   if (action === "snooze") {
     const labelNode = element("label", "Snooze through");
@@ -787,6 +865,25 @@ function openRelationTriage(item, action) {
   dialog.showModal();
 }
 
+// A row whose item carries `options` offers a choice, not Accept. A refusal still arrives when the
+// item had none at read time. The owner then reads the relations that fit with the server's own
+// remediation; naming one through accept is a vocabulary decision that Studio does not make.
+function choiceRefusal(error, item) {
+  if (!(error instanceof ApiError) || error.code !== "RELATION_CHOICE_REQUIRED") return error;
+  const fitting = fittingRelations(item);
+  const named = fitting.length ? `Relations that fit: ${fitting.join(", ")}.` : "Refresh the queue to see the relations that fit.";
+  return new ApiError(`${error.message}. ${named}`, {code: error.code, status: error.status, remediation: error.remediation});
+}
+
+// What every governed decision on a queue item shares: no item precheck, and a drift refusal
+// leaves the visible candidate in place until the owner refreshes.
+const queueDecisionGuard = {
+  precheck: false,
+  onDrift: async () => {},
+  driftCodes: ["REVIEW_ITEM_CHANGED", "REVIEW_REFRESH_REQUIRED", "STALE_EDIT"],
+  driftMessage: "The relation candidate or source changed. Nothing was written; refresh required before another decision. The visible candidate is unchanged.",
+};
+
 async function submitRelationAccept() {
   const data = new FormData(byId("dialog-form"));
   const why = String(data.get("why") || "").trim();
@@ -803,14 +900,27 @@ async function submitRelationAccept() {
       expected_hash: item.source_content_hash,
       why,
       expected_fingerprint: item.fingerprint,
-    }),
-    {
-      precheck: false,
-      onDone: () => loadRelationQueue({focusRef: item.ref}),
-      onDrift: async () => {},
-      driftCodes: ["REVIEW_ITEM_CHANGED", "REVIEW_REFRESH_REQUIRED", "STALE_EDIT"],
-      driftMessage: "The relation candidate or source changed. Nothing was written; refresh required before another decision. The visible candidate is unchanged.",
-    },
+    }).catch((error) => { throw choiceRefusal(error, item); }),
+    {...queueDecisionGuard, onDone: () => loadRelationQueue({focusRef: item.ref})},
+  );
+}
+
+async function submitRelationChoose() {
+  const data = new FormData(byId("dialog-form"));
+  const why = String(data.get("why") || "").trim();
+  if (!why) {
+    showError(byId("dialog-error"), new ApiError("An audit reason is required to write a relation."));
+    return;
+  }
+  const {item, choices} = dialogAction;
+  const choice = choices[Number(data.get("candidate"))];
+  if (!choice?.key) {
+    showError(byId("dialog-error"), new ApiError("Choose a relation that can be written before confirming."));
+    return;
+  }
+  await guardedWrite(
+    () => writeRelationBullet({path: item.source_path, why, choice, expectedHash: item.source_content_hash}),
+    {...queueDecisionGuard, onDone: () => loadRelationQueue({focusRef: item.ref})},
   );
 }
 
@@ -831,18 +941,12 @@ async function submitRelationTriage() {
       why,
       expected_fingerprint: item.fingerprint,
     }),
-    {
-      precheck: false,
-      onDone: () => loadRelationQueue({focusRef: item.ref}),
-      onDrift: async () => {},
-      driftCodes: ["REVIEW_ITEM_CHANGED", "REVIEW_REFRESH_REQUIRED", "STALE_EDIT"],
-      driftMessage: "The relation candidate or source changed. Nothing was written; refresh required before another decision. The visible candidate is unchanged.",
-    },
+    {...queueDecisionGuard, onDone: () => loadRelationQueue({focusRef: item.ref})},
   );
 }
 
 function focusRelationCandidate(ref) {
-  const acceptButtons = [...document.querySelectorAll('[data-relation-action="accept"]')];
+  const acceptButtons = [...document.querySelectorAll('[data-relation-action="accept"], [data-relation-action="choose"]')];
   const target = acceptButtons.find((node) => node.dataset.relationRef === ref) || acceptButtons[0];
   (target || byId("refresh"))?.focus();
 }
