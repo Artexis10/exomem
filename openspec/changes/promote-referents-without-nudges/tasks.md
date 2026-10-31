@@ -74,7 +74,7 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 ## 7. Labels (D6)
 
 - [x] 7.1 Add the relation `label`, `relation_registry.display_label`, and `relation_label` from every producer named in D6. Check: one test per producer through its public door asserts the label of a core relation, of an extension (`<label> (a kind of <parent label>)`) and of a shared label with its namespace; schema-fidelity tests show every existing key field unchanged.
-- [ ] 7.2 Show `relation_label` in Studio (`app.v5.js`) in its own PR under the frontend procedure. Check: Chrome DevTools inspection of the graph and relation-queue views before and after; accept payloads still send the key.
+- [x] 7.2 Show `relation_label` in Studio (`app.v5.js`) in its own PR under the frontend procedure. Check: Chrome DevTools inspection of the graph and relation-queue views before and after; accept payloads still send the key. Shipped as `app.v6.js` (the versioned assets are cached as immutable). The three payloads Studio reads did not carry the label after 7.1, so the review-context graph edges, the relation-queue items and the suggested relations now add it; a candidate reads as the meaning its authored spelling resolves to.
 
 ## 8. Typed activation (D4, conditional on the D8 development rounds and its trigger)
 

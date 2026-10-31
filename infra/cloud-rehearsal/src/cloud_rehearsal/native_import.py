@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import stat
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
@@ -102,6 +105,23 @@ def enable_versioning(store: ObjectStore) -> None:
         raise StepFailure("the rehearsal storage did not enable versioning")
 
 
+@dataclass
+class CliRun:
+    """One finished `exomem cloud import` process and the files it left on the host."""
+
+    name: str
+    fixture: Path
+    checkpoint: Path
+    import_id: str
+    result: dict
+    egress: str
+    log_file: Path
+
+
+def _cli_name(ctx: Context, label: str) -> str:
+    return f"exo-rehearsal-cli-{label}-{ctx.stack.run_id}" if label else f"exo-rehearsal-cli-{ctx.stack.run_id}"
+
+
 async def import_folder(ctx: Context, image: str) -> dict:
     """Retain native CLI evidence before teardown, including early failures."""
     try:
@@ -111,10 +131,17 @@ async def import_folder(ctx: Context, image: str) -> dict:
 
 
 def _retain_cli_diagnostics(ctx: Context) -> None:
-    name = f"exo-rehearsal-cli-{ctx.stack.run_id}"
+    evidence = retain_cli_diagnostics(ctx, "")
+    if evidence is not None:
+        ctx.report.stages["cloud_import"]["cli_diagnostics"] = evidence
+
+
+def retain_cli_diagnostics(ctx: Context, label: str) -> dict | None:
+    """Save the CLI container's log and state next to its fixture; None when it never started."""
+    name = _cli_name(ctx, label)
     if name not in ctx.stack.containers:
-        return
-    fixture = ctx.stack.workdir / "native-import"
+        return None
+    fixture = ctx.stack.workdir / (f"native-import-{label}" if label else "native-import")
     evidence = {}
     for filename, command in (
         ("cli.log", ["docker", "logs", name]),
@@ -125,27 +152,21 @@ def _retain_cli_diagnostics(ctx: Context) -> None:
         path.write_text(result.stdout + result.stderr)
         path.chmod(0o600)
         evidence[filename] = {"returncode": result.returncode, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-    ctx.report.stages["cloud_import"]["cli_diagnostics"] = evidence
+    return evidence
 
 
-async def _import_folder(ctx: Context, image: str) -> dict:
-    """Keep CLI auth, encryption, multipart reports and polling entirely native."""
+async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str = "",
+                         include_hidden: bool = False, wait_seconds: int = 900) -> CliRun:
+    """Run the shipped CLI against `source` as a person would, signing in through the headless browser.
+
+    `label` keeps a second import's container and files apart from the first one's.
+    """
     if not ctx.a.cell_id or not ctx.a.session:
         raise StepFailure("native import requires the provisioned owner cell and browser session")
-    fixture = ctx.stack.workdir / "native-import"
+    fixture = ctx.stack.workdir / (f"native-import-{label}" if label else "native-import")
     fixture.mkdir(mode=0o700)
-    source = ctx.stack.workdir / "native-import-source"
-    source.mkdir(mode=0o700)
-    (source / "notes").mkdir()
-    # These are invented fixture contents, not a tenant vocabulary or classification rule.
-    examples = {"plan.md": b"# Example plan\n\nPrepare the demonstration.\n",
-                "notes/checklist.txt": b"Review the source.\nConfirm the imported files.\n"}
-    truth = {}
-    for name, content in examples.items():
-        (source / name).write_bytes(content)
-        truth[name] = {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
     (fixture / "browser.py").write_text(BROWSER_SCRIPT)
-    name = f"exo-rehearsal-cli-{ctx.stack.run_id}"
+    name = _cli_name(ctx, label)
     ctx.stack.containers.append(name)
     run(["docker", "run", "--detach", "--name", name, "--network", ctx.substrate.sealed_network,
          "--user", f"{os.getuid()}:{os.getgid()}", "--entrypoint", "exomem",
@@ -156,6 +177,7 @@ async def _import_folder(ctx: Context, image: str) -> dict:
          "--env", "EXOMEM_CLOUD_RESOURCE_POLICY=legacy",
          "--env", "SSL_CERT_FILE=/ca.pem", "--env", "BROWSER=python3 /fixture/browser.py %s",
          image, "cloud", "import", "/input", "--checkpoint", "/fixture/checkpoint",
+         *(["--include-hidden"] if include_hidden else []),
          "--mcp-url", MCP_URL, "--api-base-url", PUBLIC_BASE_URL])
     egress = run(["docker", "exec", name, "python3", "-c", EGRESS_SCRIPT]).stdout.strip()
     if egress != "sealed":
@@ -172,8 +194,9 @@ async def _import_folder(ctx: Context, image: str) -> dict:
     if query.get("code_challenge_method") != ["S256"] or not query.get("code_challenge"):
         raise StepFailure("native OAuth did not use S256 PKCE")
     checkpoint = fixture / "checkpoint"
-    if stat.S_IMODE(checkpoint.stat().st_mode) != 0o700 or stat.S_IMODE((checkpoint / "checkpoint.json").stat().st_mode) != 0o600:
-        raise StepFailure("native checkpoint permissions are not private")
+    # The CLI signs in before it inventories the folder and writes checkpoint.json, so only the folder exists yet.
+    if stat.S_IMODE(checkpoint.stat().st_mode) != 0o700:
+        raise StepFailure("native checkpoint folder is not private")
     callback = await ctx.browser.consent_redirect(ctx.a.session, url, redirect_uri)
     # Deliver to the real loopback server in the CLI container, preserving code/state/issuer.
     await asyncio.to_thread(wait_for, lambda: run(["docker", "exec", name, "python3", "-c", LISTENER_SCRIPT,
@@ -182,7 +205,19 @@ async def _import_folder(ctx: Context, image: str) -> dict:
     delivered = run(["docker", "exec", "--interactive", name, "python3", "-c", CALLBACK_SCRIPT], input_text=callback)
     if delivered.stdout.strip() != "200":
         raise StepFailure("the native callback did not accept the authorization response")
-    exited = await asyncio.to_thread(run, ["docker", "wait", name], timeout=900)
+    record = checkpoint / "checkpoint.json"
+
+    def record_written_or_cli_ended() -> bool:
+        running = run(["docker", "inspect", "--format", "{{.State.Running}}", name], check=False).stdout.strip()
+        return record.exists() or running != "true"
+
+    await asyncio.to_thread(wait_for, record_written_or_cli_ended, timeout=wait_seconds,
+                            description="the native checkpoint record")
+    # A CLI that succeeded removes its record, so a fast run may leave none to check.
+    with contextlib.suppress(FileNotFoundError):
+        if stat.S_IMODE(record.stat().st_mode) != 0o600:
+            raise StepFailure("native checkpoint record is not private")
+    exited = await asyncio.to_thread(run, ["docker", "wait", name], timeout=wait_seconds)
     logs = run(["docker", "logs", name], check=False)
     log_file = fixture / "cli.log"
     log_file.write_text(logs.stdout + logs.stderr)
@@ -202,6 +237,23 @@ async def _import_folder(ctx: Context, image: str) -> dict:
     import_id = str(uuid.UUID(result["import_id"]))
     if result != {"ok": True, "import_id": import_id, "state": "done"}:
         raise StepFailure("native CLI did not report the completed C5 import")
+    return CliRun(name, fixture, checkpoint, import_id, result, egress, log_file)
+
+
+async def _import_folder(ctx: Context, image: str) -> dict:
+    """Keep CLI auth, encryption, multipart reports and polling entirely native."""
+    source = ctx.stack.workdir / "native-import-source"
+    source.mkdir(mode=0o700)
+    (source / "notes").mkdir()
+    # These are invented fixture contents, not a tenant vocabulary or classification rule.
+    examples = {"plan.md": b"# Example plan\n\nPrepare the demonstration.\n",
+                "notes/checklist.txt": b"Review the source.\nConfirm the imported files.\n"}
+    truth = {}
+    for name, content in examples.items():
+        (source / name).write_bytes(content)
+        truth[name] = {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+    cli = await run_cli_import(ctx, image, source)
+    result, import_id, egress, checkpoint, log_file = cli.result, cli.import_id, cli.egress, cli.checkpoint, cli.log_file
     row = await ctx.fetchrow("SELECT * FROM exomem_cloud_imports WHERE cell_id = $1 AND import_id = $2::uuid", ctx.a.cell_id, import_id)
     count = await ctx.fetchrow("SELECT count(*) AS count FROM exomem_cloud_imports WHERE cell_id = $1", ctx.a.cell_id)
     if not row or not count or count["count"] != 1 or row["observed_state"] != "done":

@@ -33,7 +33,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # can be redone without losing the old text.
 # The multilingual flag on change_media process and reprocess adds 170 B, so a recording that mixes
 # languages is read in each of them.
-TOTAL_BUDGET = 162_400
+# Paged, consuming imports add `after` and `consume` to import_memory, so the budget rises 100 B after the
+# import text was trimmed.
+TOTAL_BUDGET = 162_500
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -42,7 +44,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3350,
-    "import_memory": 5650,
+    "import_memory": 5850,
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
@@ -100,7 +102,7 @@ TOOL_CEILINGS: dict[str, int] = {
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 1600,
+    "observe_transfer": 1850,
     "transfer_memory": 1650,
 }
 

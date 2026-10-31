@@ -947,12 +947,15 @@ def _run_manifest_counts(summary: dict) -> list[str]:
         recall_label = "failed"
     else:
         recall_label = "unknown"
+    # A consumed item's staged copy is gone, so it is counted here and not as verified unchanged.
+    consumed = sum(1 for outcome in outcomes.values() if isinstance(outcome, dict) and outcome.get("consumed"))
     return [
         f"- Selected: {len(summary.get('selection') or [])}",
         f"- Applied: {applied}",
         f"- Not applied: {len(outcomes) - applied}",
         f"- Verified unchanged: {summary.get('verified_unchanged', 0)} of "
         f"{summary.get('verified_total', 0)}",
+        *([f"- Staged copy removed after filing: {consumed}"] if consumed else []),
         f"- Recall check: {recall_label}",
     ]
 

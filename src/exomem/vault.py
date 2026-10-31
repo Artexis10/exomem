@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import Context, ContextVar, copy_context
@@ -237,6 +238,9 @@ _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 
 
+# The vault folder that holds staged imports, one `<import_id>` folder each.
+IMPORT_STAGE_DIRNAME = "_Imports"
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
@@ -341,6 +345,29 @@ def is_lexical_rebuild_runtime_file_name(name: str) -> bool:
     return _LEXICAL_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
+def is_import_id(value: object) -> bool:
+    """True for a canonical lowercase UUID string, the only spelling an import id takes."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def in_import_stage(rel_path: str) -> bool:
+    """True when a vault-relative path is, or lies inside, a staged import `_Imports/<import_id>`.
+
+    A stage is transient input that adoption files into the Knowledge Base and then discards;
+    indexing it doubles every filed note and, after a large import lands offline, makes readiness
+    wait on a whole-catalogue rebuild over the stage. Only the vault root holds stages, each under
+    an import id, so a person's own `_Imports` folder elsewhere, or a named one at the root, stays
+    indexed.
+    """
+    segments = rel_path.replace("\\", "/").strip("/").split("/")
+    return len(segments) >= 2 and segments[0] == IMPORT_STAGE_DIRNAME and is_import_id(segments[1])
+
+
 def in_excluded_scan_dir(rel_path: str) -> bool:
     """True when any segment of `rel_path` is a reserved scan directory.
 
@@ -353,6 +380,8 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
+    if in_import_stage(rel_path):
+        return True
     segments = rel_path.replace("\\", "/").split("/")
     if (
         len(segments) >= 2

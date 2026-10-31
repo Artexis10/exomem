@@ -301,6 +301,7 @@ def _graph_section(
                 "src_key",
                 "dst_key",
                 "relation_type",
+                "relation_label",
                 "raw_relation",
                 "origin",
                 "source_path",
