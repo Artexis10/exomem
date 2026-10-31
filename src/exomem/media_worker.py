@@ -99,6 +99,8 @@ def _is_canonical_sidecar(sidecar: Path, binary: Path) -> bool:
 _COMPLETE = "complete"
 _HANDOFF = "handoff"
 _STALE = "stale"
+# A hydration failure that returns the job to the queue with no attempt spent (D3, M4).
+_RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
 _LANGUAGE_ACTION = (
@@ -252,6 +254,23 @@ def _authority_recheck_seconds(code: str) -> float:
 class _ProcessOutcome:
     state: str
     error: str | None = None
+
+
+def _hydration_outcome(error: Exception) -> _ProcessOutcome:
+    """Map a failure to bring a job's original onto the volume (D3, M4).
+
+    Transport and capacity failures return the job, and an original larger than the
+    whole capacity blocks it. Any other error, a verification mismatch included,
+    propagates and fails the job.
+    """
+    from . import media_store
+
+    assert isinstance(error, media_store.MediaStoreError)
+    if error.code in media_store.RETRYABLE_HYDRATION_CODES:
+        return _ProcessOutcome(_RETURNED, str(error))
+    if error.code == media_store.HYDRATION_TOO_LARGE_CODE:
+        return _ProcessOutcome(BLOCKED, str(error))
+    raise error
 
 
 def _content_digest(path: Path) -> str | None:
@@ -538,8 +557,13 @@ class MediaWorker:
             if job.do_ocr or job.do_clip:
                 original = (media_store.open_original(self._vault_root, job.binary_path)
                             if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
-                with original:
-                    outcome = self._process_original(job)
+                with contextlib.ExitStack() as held:
+                    try:
+                        held.enter_context(original)
+                    except media_store.MediaStoreError as error:
+                        outcome = _hydration_outcome(error)
+                    else:
+                        outcome = self._process_original(job)
             elif job.do_reembed:
                 self._run_reembed(job)
         if outcome.state == _HANDOFF:
@@ -2604,6 +2628,9 @@ def run_child(
                     store.mark(job, BLOCKED, outcome.error)
                 elif outcome.state == FAILED:
                     fail(job, outcome.error)
+                elif outcome.state == _RETURNED:
+                    store.return_for_retry(job)
+                    log.info("media worker: returned %s to the queue: %s", job.binary_path, outcome.error)
                 elif outcome.state == _STALE:
                     try:
                         current_content = job.sidecar_path.read_text(encoding="utf-8")

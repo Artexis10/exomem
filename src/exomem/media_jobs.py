@@ -534,19 +534,61 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     return int(deleted + kept)
 
 
-def _next_pending_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    """The job to claim next: the oldest fresh job, else the oldest resumed speech job.
+# A returned job waits 1 minute, doubling with each return, up to 15 minutes (D3, M4).
+RETRY_FIRST_SECONDS = 60
+RETRY_LIMIT_SECONDS = 15 * 60
+_CLAIMABLE = "state = 'pending' AND (retry_at IS NULL OR retry_at <= :now)"
+_FRESH = "NOT EXISTS (SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)"
+# The cache flag only orders the claim; the hydration itself reads the original's real state.
+# A pinned job's original stayed on the volume, so it never needs a hydration.
+_NEEDS_HYDRATION = (
+    "(pinned = 0 AND EXISTS (SELECT 1 FROM media_cache WHERE media_cache.binary_rel = jobs.binary_rel "
+    "AND media_cache.evicted = 1))"
+)
+# Claimed but unfinished jobs whose original the worker hydrated at the claim.
+_HYDRATED_CLAIMS = "SELECT COUNT(*) FROM jobs WHERE hydrated = 1 AND pinned = 1"
 
-    A resumed speech job has a progress row. It runs only when no fresh job waits, so a
-    long recording that keeps advancing delays a new upload by at most one job timeout.
-    Two indexed `LIMIT 1` queries keep the claim cheap on a long queue.
+
+def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None) -> sqlite3.Row | None:
+    """The job to claim next, in the order of D3 (M4).
+
+    Offload jobs come first. Then come jobs whose original is on the volume, then jobs
+    whose original must be hydrated, the last only while fewer than `max_hydrations`
+    claimed jobs hold a hydrated original. Within each group a fresh job comes before
+    a resumed speech job, which has a progress row, so a long recording that keeps
+    advancing delays a new upload by at most one job timeout. A returned job waits
+    for its retry time. Each group is one indexed `LIMIT 1` query.
     """
-    return conn.execute(
-        "SELECT * FROM jobs WHERE state = 'pending' AND NOT EXISTS "
-        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id) ORDER BY id LIMIT 1"
-    ).fetchone() or conn.execute(
-        "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
-    ).fetchone()
+    # PRAGMA table_info rows are (cid, name, ...); read by position on any row factory.
+    jobs = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    cache = {str(row[1]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
+    # These are the columns that this module's own migrations add; a read-only caller can see
+    # a ledger from before them, which keeps the earlier order until the next write adds them.
+    if "evicted" not in cache or not {"do_offload", "pinned", "hydrated", "retry_at"} <= jobs:
+        claimable, needs_hydration, groups = "state = 'pending'", "0", [_FRESH, "1"]
+    else:
+        claimable, needs_hydration = _CLAIMABLE, _NEEDS_HYDRATION
+        groups = ["do_offload = 1", f"NOT {_NEEDS_HYDRATION} AND {_FRESH}", f"NOT {_NEEDS_HYDRATION}"]
+        if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
+            groups += [_FRESH, "1"]
+    for group in groups:
+        row = conn.execute(
+            f"SELECT *, {needs_hydration} AS needs_hydration FROM jobs "
+            f"WHERE {claimable} AND {group} ORDER BY id LIMIT 1",
+            {"now": time.time()},
+        ).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
+def _max_hydrations(vault_root: Path) -> int | None:
+    """The store policy's hydration slots, or None when no store bounds hydration."""
+    from . import originals
+
+    config = originals.configuration(vault_root)
+    value = None if config is None else config.get("max_hydrations")
+    return None if value is None else int(value)
 
 
 class MediaJobStore:
@@ -754,7 +796,8 @@ class MediaJobStore:
         `media_cache.owner_read` is NULL until an owner reads the original. A row from
         before the column keeps its old read time, so an upgrade evicts no original
         earlier than before. `pinned` marks a claimed job, which keeps its original
-        until the job completes, fails or is blocked.
+        until the job completes, fails or is blocked. `returns` counts the times that a
+        hydration failure returned the job, which sets its `retry_at`.
         """
         cache = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
         if "size" not in cache:
@@ -768,6 +811,14 @@ class MediaJobStore:
         jobs = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "pinned" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        # Whether the worker hydrated the original when it claimed the job.
+        if "hydrated" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN hydrated INTEGER NOT NULL DEFAULT 0")
+        if "retry_at" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN retry_at REAL")
+        if "returns" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN returns INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS jobs_hydrated_claims ON jobs(pinned) WHERE hydrated = 1")
         # One rule for every path that fails or blocks a job, including engine waits and stop limits.
         conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_release_pin AFTER UPDATE OF state ON jobs "
                      "WHEN NEW.state IN ('failed', 'blocked') "
@@ -1131,23 +1182,26 @@ class MediaJobStore:
         `admit`, when given, sees that job before the claim and may refuse it, so a
         job the memory brakes do not admit stays pending and unclaimed.
         """
+        max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = _next_pending_row(conn)
+            row = _next_pending_row(conn, max_hydrations=max_hydrations)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
             now = time.time()
+            # A job that stays pinned across a slice keeps the flag from its first claim.
             changed = conn.execute(
                 """
                 UPDATE jobs
                 SET state = 'running', attempts = attempts + 1,
-                    claim_revision = claim_revision + 1, pinned = 1,
+                    claim_revision = claim_revision + 1,
+                    hydrated = CASE WHEN pinned = 1 THEN hydrated ELSE ? END, pinned = 1,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
-                (now, row["id"]),
+                (int(row["needs_hydration"]), now, row["id"]),
             ).rowcount
             conn.commit()
             if changed != 1:
@@ -1195,7 +1249,8 @@ class MediaJobStore:
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
                         reprocess = 0, language = NULL, language_mode = NULL,
-                        state = 'pending', pinned = 0, updated_at = ?, last_error = NULL
+                        state = 'pending', pinned = 0, returns = 0, retry_at = NULL,
+                        updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
                     """,
                     (
@@ -1279,6 +1334,28 @@ class MediaJobStore:
                     tuple(params),
                 ).rowcount
                 return changed == 1
+        finally:
+            conn.close()
+
+    def return_for_retry(self, job: MediaJob) -> bool:
+        """Return a claimed job whose original could not be hydrated now (D3, M4).
+
+        The return spends no attempt and keeps the job's speech progress. The job holds
+        no original, so it releases its pin, and a worker claims it again only after its
+        retry time.
+        """
+        if job.id is None:
+            return False
+        conn = self._connect()
+        try:
+            with conn:
+                now = time.time()
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', attempts = MAX(0, attempts - 1), pinned = 0, "
+                    "hydrated = 0, retry_at = ? + MIN(?, ? * (1 << MIN(returns, 4))), returns = returns + 1, "
+                    "last_error = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND claim_revision = ?",
+                    (now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS, now, job.id, job.claim_revision),
+                ).rowcount == 1
         finally:
             conn.close()
 
@@ -1617,9 +1694,10 @@ class MediaJobStore:
 
     def next_pending(self) -> MediaJob | None:
         """The job `claim_next` would claim now, without claiming it."""
+        max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect(readonly=True)
         try:
-            row = _next_pending_row(conn)
+            row = _next_pending_row(conn, max_hydrations=max_hydrations)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -1811,7 +1889,8 @@ class MediaJobStore:
                     delete_job = False
                     changed = conn.execute(
                         """
-                        UPDATE jobs SET do_ocr = ?, state = 'pending', pinned = 0, last_error = NULL,
+                        UPDATE jobs SET do_ocr = ?, state = 'pending', pinned = 0, returns = 0,
+                            retry_at = NULL, last_error = NULL,
                             reprocess = CASE WHEN ? THEN reprocess ELSE 0 END,
                             language = CASE WHEN ? THEN language ELSE NULL END,
                             language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
@@ -2272,10 +2351,13 @@ class MediaJobStore:
         conn = self._connect()
         try:
             clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
+            # A returned job is no work before its retry time; the supervisor's forced
+            # recheck finds it within a minute after.
             work = conn.execute(
-                "SELECT 1 FROM jobs WHERE state IN ('pending', 'running') "
+                "SELECT 1 FROM jobs WHERE (state = 'running' OR " + _CLAIMABLE + ") "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                "WHERE media_job_results.job_id = jobs.id) LIMIT 1"
+                "WHERE media_job_results.job_id = jobs.id) LIMIT 1",
+                {"now": time.time()},
             ).fetchone()
             if work is None:
                 candidates = conn.execute(

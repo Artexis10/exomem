@@ -36,6 +36,10 @@ class MediaStoreError(RuntimeError):
 
 # The refusal that the classification rule records for an original that stays on the volume (D12).
 RESIDENT_CODE = "MEDIA_ORIGINAL_RESIDENT"
+# An original whose plaintext exceeds the whole hydration capacity; waiting never clears it (D3, M4).
+HYDRATION_TOO_LARGE_CODE = "MEDIA_HYDRATION_TOO_LARGE"
+# The hydration failures that return a job to the queue: this module's own transport and capacity codes.
+RETRYABLE_HYDRATION_CODES = frozenset({"MEDIA_STORE_UNAVAILABLE", "MEDIA_STORE_BUSY"})
 
 
 def _resident(vault: Path, snapshot: OriginalSnapshot, config: dict[str, object]) -> bool:
@@ -281,6 +285,8 @@ def _reserve(store: MediaJobStore, token: str, snapshot: OriginalSnapshot, confi
     concurrent = int(config["max_hydrations"])
     if maximum <= 0 or concurrent <= 0:
         raise ValueError("media hydration limits must be positive")
+    if snapshot.binary_size > maximum:
+        raise MediaStoreError(HYDRATION_TOO_LARGE_CODE, "the original exceeds the whole hydration capacity")
     conn = store._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
