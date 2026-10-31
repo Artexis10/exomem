@@ -448,12 +448,17 @@ class Supervisor:
         # budget, so calls are refused at once as not dispatched until it ends.
         self.phase = "starting"
         self.ingress.unavailable()
-        target = self.records.active() or self.initial_target
-        target = await self.runtime.inspect(target)
-        self._migration_declared(target)
-        # A window shorter than the cold worker's warm stops it mid-warm, and
-        # the unit restarts into the same cold catalog.
-        client = await self.runtime.start(target, timeout=self._replacement_budget())
+        try:
+            target = self.records.active() or self.initial_target
+            target = await self.runtime.inspect(target)
+            self._migration_declared(target)
+            # A window shorter than the cold worker's warm stops it mid-warm, and
+            # the unit restarts into the same cold catalog.
+            client = await self.runtime.start(target, timeout=self._replacement_budget())
+        except BaseException:
+            # A refused or failed first start is not still starting.
+            self.phase = "unavailable"
+            raise
         self.records.accept(target)
         self.ingress.resume(client)
         self.phase = "ready"
