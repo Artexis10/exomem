@@ -6,9 +6,13 @@ inventory, offload and eviction all import it and no caller keeps a copy.
 
 from __future__ import annotations
 
+import functools
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # These three classes are the closed set that design D12 fixes; no caller extends them.
 TEXT = "text"
@@ -75,18 +79,45 @@ class HydrationLimits:
     hydrations: int
 
 
+# The store policy keys of the hydration capacity (D12, choice 3); the policy schema fixes them.
+_HYDRATION_KEYS = ("max_temporary_bytes", "max_hydrations")
+
+
+def hydration_policy_problem(config: dict[str, object]) -> str | None:
+    """Why the policy's hydration capacity is invalid, or None when it is valid or not configured."""
+    values = {key: config.get(key) for key in _HYDRATION_KEYS}
+    if all(value is None for value in values.values()):
+        return None
+    try:
+        if min(int(value) for value in values.values()) > 0:  # int(None) raises TypeError.
+            return None
+    except (TypeError, ValueError):
+        pass
+    shown = ", ".join(f"{key}={value!r}" for key, value in values.items())
+    return f"the media store policy needs both {' and '.join(_HYDRATION_KEYS)} as positive whole numbers; it sets {shown}"
+
+
 def hydration_limits(config: dict[str, object]) -> HydrationLimits | None:
-    """The policy's hydration capacity, or None when the policy configures none (D12, choice 3).
+    """The policy's hydration capacity, or None when the policy configures none or an invalid one (D12, choice 3).
 
     With none, offload stores an original without a reservation, as before the capacity
-    existed, and nothing classifies or evicts, because no hydration could be bounded.
+    existed, and nothing classifies or evicts, because no hydration could be bounded. An
+    invalid capacity counts as none, so it never stops the claims of local work; the
+    chart and the cellctl render are where a policy fails closed.
     """
-    if config.get("max_temporary_bytes") is None or config.get("max_hydrations") is None:
+    problem = hydration_policy_problem(config)
+    if problem is not None:
+        _warn_once(problem)
         return None
-    limits = HydrationLimits(int(config["max_temporary_bytes"]), int(config["max_hydrations"]))
-    if limits.temporary_bytes <= 0 or limits.hydrations <= 0:
-        raise ValueError("media hydration limits must be positive")
-    return limits
+    if config.get("max_temporary_bytes") is None:
+        return None
+    return HydrationLimits(int(config["max_temporary_bytes"]), int(config["max_hydrations"]))
+
+
+@functools.cache
+def _warn_once(problem: str) -> None:
+    # Every claim reads the policy, so the cache keeps one warning per problem in each process.
+    log.warning("media hydration capacity is off: %s", problem)
 
 
 def bounds_for(config: dict[str, object], vault: Path) -> Bounds | None:

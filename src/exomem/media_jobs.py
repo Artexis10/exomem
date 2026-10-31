@@ -613,6 +613,18 @@ def _max_hydrations(vault_root: Path) -> int | None:
     return None if limits is None else limits.hydrations
 
 
+def _hydration_policy_problem(vault_root: Path) -> str | None:
+    """Why the store policy turns hydration capacity off, for operator status, or None."""
+    from . import media_capacity, originals
+
+    try:
+        config = originals.configuration(vault_root)
+    except (OSError, ValueError) as exc:
+        # The exception's type only: its text can name a cell's configuration path.
+        return f"the media store configuration is unreadable ({type(exc).__name__})"
+    return None if config is None else media_capacity.hydration_policy_problem(config)
+
+
 class MediaJobStore:
     def __init__(self, vault_root: Path, *, create: bool = True) -> None:
         self.vault_root = vault_root.resolve()
@@ -2708,9 +2720,12 @@ def status(
         "engine_waiting_count": 0,
         "jobs": [],
         "errors": [],
+        "hydration_policy_problem": None,
     }
     if vault_root is None:
         return empty
+    # Operator detail: an invalid policy turns the hydration capacity off instead of stopping work.
+    empty["hydration_policy_problem"] = _hydration_policy_problem(Path(vault_root))
     store_path = job_store_path(vault_root)
     if not store_path.exists():
         return empty
@@ -2754,6 +2769,7 @@ def status(
             "engine_waiting_count": reasons[ENGINE_DISABLED],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
+            "hydration_policy_problem": empty["hydration_policy_problem"],
         }
     except (OSError, sqlite3.Error) as exc:
         return {**empty, "store": str(store_path), "healthy": False, "errors": [str(exc)]}

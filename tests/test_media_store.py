@@ -2321,6 +2321,19 @@ def test_a_policy_without_hydration_limits_offloads_and_evicts_nothing(vault: Pa
     assert path.exists()
 
 
+def test_a_zero_hydration_limit_turns_the_capacity_off_and_local_work_still_runs(vault: Path, selected_store):
+    """Catches a non-positive hydration limit that raises into every claim, which stops all local media work."""
+    from exomem import media_jobs
+
+    _configure(selected_store, vault, max_hydrations=0)
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(vault / "recording.mp3", vault / "recording.mp3.md", "audio"))
+
+    assert ledger.next_pending().id == job_id
+    assert ledger.claim_next().id == job_id
+    assert "max_hydrations" in media_jobs.status(vault)["hydration_policy_problem"]
+
+
 def test_an_original_as_large_as_the_whole_hydration_capacity_hydrates(vault: Path, selected_store):
     """Catches a reservation that also counts the ciphertext, so a file that fits the capacity never hydrates."""
     from exomem import media_store
