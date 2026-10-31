@@ -82,12 +82,17 @@ def repeats_parked_refusal(code: str | None) -> bool:
 def boundary_wait_ms(error: BaseException) -> float | None:
     """The boundary wait a `MUTATION_BUSY` carries on itself or on its cause.
 
-    A refusal that waited out contention first carries `waited_ms`, its caller's whole wait,
-    in place of one attempt's `wait_ms`.
+    A `MUTATION_BUSY` that waited out contention first carries `waited_ms`, its caller's whole
+    wait, in place of one attempt's `wait_ms`. Other errors' `waited_ms` (a namespace lock's
+    wait) is not a boundary wait.
     """
     for cause in _causes(error):
         details = getattr(cause, "details", None)
-        wait = (details.get("waited_ms", details.get("wait_ms"))) if isinstance(details, dict) else None
+        if not isinstance(details, dict):
+            continue
+        wait = details.get("wait_ms")
+        if getattr(cause, "code", None) == "MUTATION_BUSY":
+            wait = details.get("waited_ms", wait)
         if isinstance(wait, (int, float)) and not isinstance(wait, bool):
             return float(wait)
     return None
