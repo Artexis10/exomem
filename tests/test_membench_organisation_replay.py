@@ -8,9 +8,11 @@ scripted client; these tests cover the custody and record rules beneath it.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import json
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -21,10 +23,15 @@ from epistemic.journeys.f27_replay import AgentEnvelope
 from membench.utility.organisation_replay import runner
 from membench.utility.organisation_replay.__main__ import main as replay_main
 from membench.utility.organisation_replay.readback import edge_review_reasons
-from membench.utility.organisation_replay.runfile import call_records, check_run
+from membench.utility.organisation_replay.runfile import call_records, check_run, read_jsonl
 from membench.utility.organisation_replay.runner import RunConfig, bind, refuse_api_keys
-from membench.utility.organisation_replay.scripted import retry_after
-from membench.utility.organisation_replay.seed import SeedBuild, check_seed, note_body
+from membench.utility.organisation_replay.scripted import DoorFault, ScriptedSession, retry_after
+from membench.utility.organisation_replay.seed import (
+    SeedBuild,
+    check_seed,
+    note_body,
+    seed_session,
+)
 from membench.utility.organisation_replay.situation import SituationRefused, load_situation
 from membench.utility.switch_eval.arms import arm_specs
 from membench.utility.switch_eval.session import (
@@ -35,6 +42,7 @@ from membench.utility.switch_eval.session import (
     RunPaused,
     classify,
 )
+from membench.utility.switch_eval.state import Slot, _child_env
 from membench.utility.switch_eval.tap import process_start_ticks
 
 TOY = {
@@ -392,6 +400,77 @@ def test_the_seed_resends_only_a_refusal_that_committed_nothing(status, committe
         error["committed"] = committed
 
     assert retry_after({"success": False, "error": error}) == expected
+
+
+def product_slot(tmp_path):
+    """A fresh slot whose vault this checkout's product initialised, its arm spec and env.
+
+    A test that uses it starts the real product server, so it gets a longer timeout.
+    """
+    config = RunConfig(
+        out=tmp_path, arm="arm-x", profile="neutral-lexical", model="m",
+        client=AgentEnvelope(Path("claude"), "1.0.0 (Claude Code)"), launcher=(),
+        revision="a" * 40, base_revision="a" * 40, wheel=None,
+    )  # fmt: skip
+    spec = runner.arm_spec(config, "hookless", ())
+    slot = Slot(tmp_path / "slot")
+    runner.fresh_slot(slot, spec)
+    return slot, spec, _child_env(os.environ, slot, spec)
+
+
+@pytest.mark.timeout(180)
+def test_a_refusal_inside_a_wrapped_answer_is_a_refusal_to_the_seed_and_the_run_file(tmp_path):
+    # Failure caught: connect_memory answering as {"result": ...}, so its refusal
+    # (a warm-up refusal included) reads as success: the seed records an entity
+    # at no page without resending the call, and a measured call has no refusal code.
+    slot, spec, env = product_slot(tmp_path)
+
+    async def create_entity_of_unregistered_type():
+        async with ScriptedSession(slot, spec, env=env, log_dir=tmp_path / "log", name="seed") as s:
+            with pytest.raises(DoorFault, match="ENTITY_TYPE_UNKNOWN"):
+                await s.call(
+                    "connect_memory",
+                    {"operation": "create-entity", "entity_type": "type-unregistered",
+                     "name": "Entity Z", "summary": "Placeholder."},
+                )  # fmt: skip
+            return s.tap_log
+
+    records = call_records(read_jsonl(asyncio.run(create_entity_of_unregistered_type())))
+
+    assert records[-1]["refusal_code"] == "ENTITY_TYPE_UNKNOWN"
+
+
+@pytest.mark.timeout(180)
+def test_seed_notes_in_a_fresh_vault_commit_whether_or_not_the_draft_asks_for_a_review(tmp_path):
+    # Failure caught: the seed sending a reviewed-none review for a fresh vault's
+    # first note, which bootstraps without one, so the product refuses its commit
+    # (INVALID_RELATION_REVIEW) and every situation without a seed entity strikes.
+    notes = [
+        {"title": title, "type": "pattern", "folder": "Notes/Home H", "topics": ["topic-t"],
+         "body": f"## Decision\n\nPlaceholder decision for {title}.\n"}
+        for title in ("Note M", "Note N")
+    ]  # fmt: skip
+    # The notes' home and its topic only: no seed entity, so the first note is the vault's first page.
+    vocabulary = [{"registry": "domains", "key": "topic-t"}]
+    toy = {**TOY, "seed": {**TOY["seed"], "vocabulary": vocabulary, "entities": [], "notes": notes}}
+    situation = load_situation(write_situation(tmp_path, "x01.yaml", toy))
+    slot, spec, env = product_slot(tmp_path)
+    build = SeedBuild()
+
+    async def seed():
+        async with ScriptedSession(slot, spec, env=env, log_dir=tmp_path / "log", name="seed") as s:
+            await seed_session(s, situation, build, slot.vault)
+            return s.tap_log
+
+    drafts = [
+        event["result"]["structuredContent"]
+        for event in read_jsonl(asyncio.run(seed()))
+        if event.get("name") == "create_note" and event["arguments"].get("validate_only")
+    ]
+
+    # The first note bootstraps the vault; the second one's draft asks for the review.
+    assert [draft["reviewed_none_required"] for draft in drafts] == [False, True]
+    assert [note["title"] for note in build.notes if note["landed"]] == ["Note M", "Note N"]
 
 
 @pytest.mark.parametrize(
