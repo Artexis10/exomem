@@ -2114,7 +2114,7 @@ def _map_item_parts(item: dict) -> tuple[str, str]:
 def _format_slice_block(block: object, max_chars: int) -> str:
     """The turn slice as whole lines, or "" when it lists nothing or nothing fits.
 
-    The slice answers this turn alone, so it is rendered on every turn, also when the map
+    The slice answers this turn and its conversation, so it is rendered on every turn, also when the map
     beside it is the unchanged one. The server has already cut it to its own share of the budget.
     """
     if not isinstance(block, dict) or block.get("state") != "ready":
@@ -2126,7 +2126,8 @@ def _format_slice_block(block: object, max_chars: int) -> str:
         text, ref = _map_item_parts(item)
         evidence = ", ".join(str(kind) for kind in item.get("evidence") or ())
         label = f"{item.get('match') or 'lead'} ({evidence})" if evidence else str(item.get("match") or "lead")
-        lines.append(_packet_line(label, text, ref))
+        origin = _origin_label(item)
+        lines.append(_packet_line(label, f"{text} ({origin})" if origin else text, ref))
     if not lines:
         return ""
     leading = _packet_line("turn", str(block.get("description") or ""), "")
