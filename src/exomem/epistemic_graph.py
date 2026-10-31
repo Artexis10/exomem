@@ -9000,7 +9000,8 @@ class EpistemicGraphIndex:
             for candidate in ordered:
                 target = str(candidate["to"])
                 relation_type = str(candidate["relation_type"])
-                # A generic candidate is settled once a specific authored relation joins the two pages.
+                # A generic candidate is settled once a specific authored relation joins the
+                # two pages.
                 if bool(candidate.get("_authored")) or (
                     selected_registries[source].is_generic(relation_type)
                     and frozenset((source, target)) in specific_pairs
@@ -13867,7 +13868,10 @@ def _specific_pairs(
         [*pages, *keys],
     ).fetchall()
     view.prefetch(
-        [*(str(row[10]) for row in found), *(str(row[-1] or "").removeprefix("file:") for row in found)]
+        [
+            *(str(row[10]) for row in found),
+            *(str(row[-1] or "").removeprefix("file:") for row in found),
+        ]
     )
     pairs: set[frozenset[str]] = set()
     for *edge_row, dst_page_key in found:
