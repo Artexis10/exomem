@@ -4383,11 +4383,12 @@ def conversation_session(session: str | None = None) -> str | None:
 def emission_key(vault_root: Path | None = None, *, session: str | None = None) -> tuple[str, str, str]:
     """(session, audience, vault) — the scope one "already told them" fact belongs to.
 
-    Session identity comes from the MCP transport when it supplies one; stdio and
-    CLI have no session concept, so the process lifetime IS the conversation and a
-    per-process key is the honest equivalent rather than a degraded one. A caller
-    that names its own conversation (`session`, the hook door) is keyed by it when
-    the transport supplies none (`conversation_session`).
+    Session identity is `command_surface.mcp_session_id()` (read through
+    `mcp_caller_identity`): the HTTP session, or one id per stdio connection. A CLI
+    or hook process outside an MCP call has no session, so its process lifetime IS
+    the conversation and a per-process key is the honest equivalent rather than a
+    degraded one. A caller that names its own conversation (`session`, the hook
+    door) is keyed by it when the transport supplies none (`conversation_session`).
 
     The vault is part of the key because one process can serve more than one of
     them: without it, telling a principal about vault A's four overdue items would

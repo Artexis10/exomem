@@ -29,9 +29,11 @@ genuinely new hardware path here is macOS MPS.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 
+from . import cuda_containment
 from . import mode as mode_module
 
 log = logging.getLogger(__name__)
@@ -179,6 +181,11 @@ def select_device(
         if value.lower() == "mps":
             _enable_mps_fallback()
             return "mps"
+        if value.lower().startswith("cuda") and cuda_containment.no_cuda_visible():
+            # torch's device syntax, not a word list. No CUDA device is visible to this process (the serving
+            # worker, or a media child denied the GPU), so a CUDA model would fail to load: say so once.
+            _warn_cuda_unavailable(env, value, cuda_containment.preflight_failure())
+            return "cpu"
         return value  # verbatim: cpu / cuda / cuda:1 / ...
 
     m = mode_module.resolve_mode()
@@ -188,6 +195,17 @@ def select_device(
         auto_mps=auto_mps,
         avoid_cuda_when_asr=avoid_cuda_when_asr,
         want_cuda=(m == "performance"),
+    )
+
+
+@functools.cache
+def _warn_cuda_unavailable(env: str, value: str, denied: str | None) -> None:
+    log.warning(
+        "%s=%s asks for CUDA, but this process has no visible CUDA device (%s is empty). Using the CPU.%s",
+        env,
+        value,
+        cuda_containment.DEVICES_ENV,
+        f" The media supervisor denied this process the GPU: {denied}." if denied else "",
     )
 
 

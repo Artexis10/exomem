@@ -108,11 +108,13 @@ def test_the_receipt_freezes_every_case_file_and_binds_the_amended_document() ->
 
     chain = working_amendment_receipts(ROOT)
     seventh = chain[6]
-    assert [receipt.sequence for receipt in chain] == [1, 2, 3, 4, 5, 6, 7]
+    assert [receipt.sequence for receipt in chain] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert seventh.acknowledgment_status == "pending"
     assert seventh.parent_contract_sha256 == chain[5].contract_sha256
+    # Sequence 8 builds on the sequence-7 document, so the frozen §7 text stays bound
+    # through the chain rather than to the live file, which later amendments extend.
+    assert chain[7].parent_contract_sha256 == seventh.contract_sha256
     prereg = (ROOT / "benchmarks/epistemic/PREREGISTRATION.md").read_bytes()
-    assert seventh.contract_sha256 == hashlib.sha256(prereg).hexdigest()
     on_disk = {
         f"benchmarks/epistemic/fixtures/sequence7/{path.name}": hashlib.sha256(
             path.read_bytes()
@@ -120,7 +122,11 @@ def test_the_receipt_freezes_every_case_file_and_binds_the_amended_document() ->
         for path in FIXTURES.iterdir()
     }
     assert seventh.fixture_sha256 == on_disk
-    entry = prereg.decode("utf-8").split("**Referent-capture replay amendment, sequence 7.**")[1]
+    entry = (
+        prereg.decode("utf-8")
+        .split("**Referent-capture replay amendment, sequence 7.**")[1]
+        .split("**Organisation autonomy amendment, sequence 8.**")[0]
+    )
     for path, digest in on_disk.items():
         assert f"`{Path(path).name}`: `{digest}`" in entry
 

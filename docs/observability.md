@@ -255,7 +255,9 @@ it with `exomem logs verify`.
 - **`client_name` / `client_version` / `transport` / `session_id`** come from
   the MCP initialize handshake and are recorded **in the clear**: they identify
   software, the same class of value as a `User-Agent`. This is what makes one
-  client's calls separable when several are connected to one vault at once. It
+  client's calls separable when several are connected to one vault at once. On
+  stdio, `session_id` is one value for the life of the server process, so every
+  call of one connection shares it and two connections never do. It
   is client-declared, so treat it as a diagnostic hint, not an authorization
   input. `caller_principal_hash` is the separate, hashed, authenticated
   identity. A stateless request carries no handshake; there the name comes

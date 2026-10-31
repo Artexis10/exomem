@@ -1240,6 +1240,24 @@ def test_a_child_reads_the_current_service_environment_file(tmp_path, monkeypatc
     assert os.environ["EXOMEM_PRELOAD_MODELS"] == "0"
 
 
+def test_an_owned_worker_sees_no_cuda_device_and_the_media_child_gets_the_deployments_list(tmp_path, monkeypatch):
+    from exomem import asr_runtime
+
+    module = _manager()
+    env_file = tmp_path / "service.env"
+    env_file.write_text("CUDA_VISIBLE_DEVICES=1\n")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_file=env_file
+    )
+
+    worker_environment = runtime._owned_child_environment({"EXOMEM_TEST_OVERLAY": "1"})
+
+    assert worker_environment["CUDA_VISIBLE_DEVICES"] == ""
+    assert worker_environment["EXOMEM_TEST_OVERLAY"] == "1"
+    assert asr_runtime.cuda_runtime_child_env(worker_environment)["CUDA_VISIBLE_DEVICES"] == "1"
+
+
 def test_a_missing_service_environment_file_leaves_the_child_inheriting(tmp_path):
     module = _manager()
     runtime = module.WorkerRuntime(

@@ -360,15 +360,30 @@ def _get_whisper():
                 selection.device,
                 selection.compute_type,
             )
-            try:
-                _WHISPER = WhisperModel(
+
+            def load(chosen: asr_runtime.ASRSelection):
+                return WhisperModel(
                     WHISPER_MODEL,
-                    device=selection.device,
-                    compute_type=selection.compute_type,
+                    device=chosen.device,
+                    compute_type=chosen.compute_type,
                     cpu_threads=runtime_resources.resolve_policy().cpu_threads,
                     num_workers=1,
                 )
+
+            try:
+                try:
+                    _WHISPER = load(selection)
+                except Exception as exc:
+                    cpu = asr_runtime.cpu_selection_after_cuda_oom(selection, exc)
+                    if cpu is None:
+                        raise
+                    log.warning("the GPU ran out of memory while loading ASR; this media process runs ASR on the CPU: %s", exc)
+                    _WHISPER = load(cpu)
             except Exception as exc:
+                # Out of memory first: cuBLAS reports it as a CUDA runtime failure, which would block the job.
+                busy = asr_runtime.as_gpu_busy(exc)
+                if busy is not None:
+                    raise busy from exc
                 typed = asr_runtime.as_compute_runtime_error(exc)
                 if typed is not None:
                     raise typed from exc
@@ -410,6 +425,8 @@ def prewarm() -> asr_runtime.ASRComputeRuntimeError | None:
     except asr_runtime.ASRComputeRuntimeError as e:
         log.warning("ASR prewarm hit a compute runtime failure; worker will circuit-break: %s", e)
         return e
+    except asr_runtime.ASRGpuBusy as e:
+        log.info("ASR prewarm skipped (GPU busy); model will load on the first media job: %s", e)
     except ExtractionUnavailable as e:
         log.info("ASR prewarm skipped (engine unavailable): %s", e)
     except Exception:  # noqa: BLE001 — prewarm must never crash startup

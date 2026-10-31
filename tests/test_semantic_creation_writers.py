@@ -1590,7 +1590,7 @@ def test_log_plan_errors_are_typed_and_never_expose_underlying_text(
         raise ValueError(secret)
 
     if writer == "note":
-        monkeypatch.setattr(note, "plan_log_writes", fail_log_plan)
+        monkeypatch.setattr(note, "plan_log_entries", fail_log_plan)
         error_type = note.NoteError
 
         def invoke() -> object:

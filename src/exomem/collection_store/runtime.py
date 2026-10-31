@@ -1164,11 +1164,13 @@ class StoreServer:
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True, read_only=False):
+    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None):
         """Run ``work`` on the store thread and return its result or raise its error.
 
         ``read_only`` says the work changes nothing, so it runs under one view of path
-        placement, host configuration and governance policy (``_serve``)."""
+        placement, host configuration and governance policy (``_serve``). ``extend`` lets a
+        write that is still waiting at its acceptance deadline keep its place: it takes the
+        completion deadline and returns a later acceptance deadline, or None to refuse."""
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
@@ -1192,6 +1194,18 @@ class StoreServer:
                 call_spans.span("store.queue_wait"):
             while not request.taken:
                 remaining = deadline - time.monotonic()
+                if remaining <= 0 and not self._closed and extend is not None:
+                    # Work the store has not taken never ran, so waiting longer cannot repeat it.
+                    try:
+                        later = extend(completion_deadline)
+                    except BaseException:
+                        # A caller that sees an error must leave nothing queued to run later.
+                        if request in self._requests:
+                            self._requests.remove(request)
+                        raise
+                    if later is not None and later > deadline:
+                        deadline = later
+                        continue
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)

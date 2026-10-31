@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import types
+
 import pytest
 
-from exomem import asr_runtime
+from exomem import asr_runtime, resource_status
 
 
 def _probe(*, cuda: bool = True, cuda_types: set[str] | None = None, cpu_types: set[str] | None = None, capability: tuple[int, int] = (12, 0)):
@@ -41,6 +45,71 @@ def test_explicit_cuda_never_falls_back_when_probe_declines(monkeypatch: pytest.
     monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
     with pytest.raises(asr_runtime.ASRRuntimeRefusal, match="no CUDA device"):
         asr_runtime.select_asr_runtime(probe=_probe(cuda=False))
+
+
+@pytest.fixture
+def cuda_device_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CTranslate2 reports one CUDA device, so only the nvidia-smi headroom decides."""
+    fake = types.SimpleNamespace(
+        get_supported_compute_types=lambda device, index=0: {"float16"} if device == "cuda" else {"int8"},
+        get_cuda_device_count=lambda: 1,
+    )
+    monkeypatch.setitem(sys.modules, "ctranslate2", fake)
+
+
+def _nvidia_smi_reports(monkeypatch: pytest.MonkeyPatch, free_mib: int, total_mib: int = 24576) -> list[str]:
+    """Answer every nvidia-smi run with this memory; returns the executables that were run."""
+    executables: list[str] = []
+
+    def run(argv, **_kwargs):
+        executables.append(argv[0])
+        return subprocess.CompletedProcess(argv, 0, stdout=f"8.9, {free_mib}, {total_mib}\n", stderr="")
+
+    monkeypatch.setattr(asr_runtime.subprocess, "run", run)
+    return executables
+
+
+def test_a_card_too_small_for_asr_is_refused_instead_of_waited_for(
+    monkeypatch: pytest.MonkeyPatch, cuda_device_present: None
+) -> None:
+    monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "nvidia-smi")
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
+    _nvidia_smi_reports(monkeypatch, free_mib=900, total_mib=1024)
+
+    with pytest.raises(asr_runtime.ASRRuntimeRefusal, match="1024 MiB of memory in total"):
+        asr_runtime.select_asr_runtime()
+
+
+def test_probe_that_cannot_run_nvidia_smi_is_a_refusal_not_a_busy_gpu(
+    monkeypatch: pytest.MonkeyPatch, cuda_device_present: None
+) -> None:
+    monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: None)
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
+
+    probe = asr_runtime.probe_asr_runtime()
+
+    assert probe.busy is False
+    with pytest.raises(asr_runtime.ASRRuntimeRefusal, match="headroom probe failed"):
+        asr_runtime.select_asr_runtime(probe=probe)
+
+
+def test_probe_finds_nvidia_smi_at_the_wsl_location_when_path_lacks_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, cuda_device_present: None
+) -> None:
+    shim = tmp_path / "nvidia-smi"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    real_which = resource_status.shutil.which
+    monkeypatch.setattr(
+        resource_status.shutil, "which", lambda cmd, *a, **k: None if cmd == "nvidia-smi" else real_which(cmd, *a, **k)
+    )
+    monkeypatch.setattr(resource_status, "_EXTRA_NVIDIA_SMI_PATHS", (str(shim),))
+    executables = _nvidia_smi_reports(monkeypatch, free_mib=8192)
+
+    probe = asr_runtime.probe_asr_runtime()
+
+    assert probe.cuda_available is True
+    assert executables == [str(shim)]
 
 
 def test_auto_concrete_override_can_fallback_only_when_cpu_supports_it(monkeypatch: pytest.MonkeyPatch) -> None:

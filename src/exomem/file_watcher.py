@@ -942,12 +942,44 @@ def _import_watchdog():
     """Import watchdog lazily. Returns (Observer, FileSystemEventHandler).
 
     Isolated into a tiny function so `start()` can catch a missing dep and so tests
-    can patch it to simulate watchdog being absent.
+    can patch it to simulate watchdog being absent. Where watchdog picks inotify,
+    the Observer is the one whose watches never follow a directory symlink.
     """
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
 
+    # Only the inotify emitter takes a kernel mask. watchdog already imported
+    # that module to pick it, so the observer below cannot fail to import.
+    if Observer.__module__ == "watchdog.observers.inotify":
+        return _no_follow_inotify_observer(), FileSystemEventHandler
     return Observer, FileSystemEventHandler
+
+
+@functools.cache
+def _no_follow_inotify_observer() -> type:
+    """The inotify observer, with watches that never follow a directory symlink.
+
+    watchdog adds IN_DONT_FOLLOW to its default mask, but not to the mask that it
+    derives from an event filter. Without that bit, the watch that watchdog adds
+    for a symlinked directory inside a new directory follows the link. Writes
+    outside the vault then reach the watcher, and writes in an in-vault target
+    are reported under the link's path until a restart.
+    """
+    from watchdog.observers.api import DEFAULT_OBSERVER_TIMEOUT, BaseObserver
+    from watchdog.observers.inotify import InotifyEmitter
+    from watchdog.observers.inotify_c import InotifyConstants
+
+    class NoFollowInotifyEmitter(InotifyEmitter):
+        def get_event_mask_from_filter(self) -> int | None:
+            mask = super().get_event_mask_from_filter()
+            # None selects watchdog's default mask, which already holds the bit.
+            return None if mask is None else mask | InotifyConstants.IN_DONT_FOLLOW
+
+    class NoFollowInotifyObserver(BaseObserver):
+        def __init__(self, *, timeout: float = DEFAULT_OBSERVER_TIMEOUT) -> None:
+            super().__init__(NoFollowInotifyEmitter, timeout=timeout)
+
+    return NoFollowInotifyObserver
 
 
 def _graph_incompleteness_fields(vault_root: Path) -> str:
@@ -2367,6 +2399,7 @@ class FileWatcher:
 
         try:
             Observer, FileSystemEventHandler = _import_watchdog()
+            from watchdog import events as watchdog_events
         except Exception as e:  # noqa: BLE001 — optional dep
             if freshness.event_indexes_enabled():
                 log.info(
@@ -2381,6 +2414,22 @@ class FileWatcher:
         watcher = self
 
         class _Handler(FileSystemEventHandler):
+            # The event classes that the on_* methods below consume: a closed set
+            # fixed by watchdog's API. As the schedule's event filter, it also
+            # narrows the Linux inotify mask, so page reads (open and
+            # close-without-write) never reach this process. DirModifiedEvent
+            # keeps IN_CLOSE_WRITE in that mask.
+            consumed_events = [
+                watchdog_events.FileCreatedEvent,
+                watchdog_events.DirCreatedEvent,
+                watchdog_events.FileModifiedEvent,
+                watchdog_events.DirModifiedEvent,
+                watchdog_events.FileDeletedEvent,
+                watchdog_events.DirDeletedEvent,
+                watchdog_events.FileMovedEvent,
+                watchdog_events.DirMovedEvent,
+            ]
+
             def on_created(self, event):  # noqa: ANN001
                 if event.is_directory:
                     watcher._notify_view_change(Path(event.src_path), directory=True)
@@ -2420,7 +2469,12 @@ class FileWatcher:
             # Watch the whole vault: freshness (vault scope) and inbound links
             # index sibling folders too. The embed dispatch in _flush stays
             # KB-filtered, so only Knowledge Base/ markdown is re-embedded.
-            self._observer.schedule(_Handler(), str(self._vault_root), recursive=True)
+            self._observer.schedule(
+                _Handler(),
+                str(self._vault_root),
+                recursive=True,
+                event_filter=_Handler.consumed_events,
+            )
             self._observer.start()
         except Exception as e:  # noqa: BLE001 — watcher must never break the server
             log.warning("file watcher: observer failed to start (%s); live re-embed disabled", e)
