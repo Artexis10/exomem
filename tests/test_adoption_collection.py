@@ -149,6 +149,8 @@ def test_a_ruled_folder_lands_in_its_kind_directory_and_an_unregistered_kind_cha
             include=[{"path": "Coll/books", "source_kind": "no-such-kind"}, "Coll"],
         )
     assert refused.value.code.startswith("SOURCE_KIND_")
+    # The refusal offers the safe route first and gates registering on the person.
+    assert "without source_kind" in str(refused.value) and "after they confirm" in str(refused.value)
     assert adoption_run.status(vault, run_id=run_id)["selection"] == before["selection"]
 
     ruled = adoption_run.select(
@@ -277,6 +279,8 @@ def test_a_tiny_budget_needs_several_calls_writes_each_item_once_and_replays_a_r
     first = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
     assert first["phase"] == "applying"
     assert first["progress"] == {"applied": 1, "failed": 0, "remaining": 3, "total": 4}
+    (resume,) = first["next_actions"]  # an agent that stops here must report the counts, not "underway"
+    assert "background worker" in resume["description"] and "unfinished" in resume["description"]
     mid = adoption_run.status(vault, run_id=run_id)
     assert mid["interrupted"] is False
     assert mid["remaining"] == 3

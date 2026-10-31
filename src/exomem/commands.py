@@ -10641,11 +10641,13 @@ def op_adoption_studio(
     ref: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
+    after: str | None = None,
+    consume: bool = True,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
-    Never rewrite, move or delete originals. Status/work-item read; other actions
-    write. Apply commits the previewed plan or refuses.
+    Never rewrite or move originals; apply deletes filed staged copies.
+    Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     start scans; select chooses; plan previews; apply copies into Sources and
     drafts notes under own-note rules; cancel closes pre-apply; finish reports
@@ -10656,10 +10658,10 @@ def op_adoption_studio(
     Args:
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
-        path: For `start`, scan subtree (default: vault root). For run-listing
-            `status`, count distinct successfully filed originals across historical
-            runs in this subtree; null with `complete=false` if incomplete.
-            Omit for legacy listing.
+        path: For `start`, scan subtree (default: whole vault; ask which folder).
+            For run-listing
+            `status`, count distinct filed originals under it (null with
+            `complete=false` if incomplete). Omit for legacy listing.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
@@ -10670,7 +10672,7 @@ def op_adoption_studio(
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
         plan_id: For `apply`, from `plan`/`status`.
-        continuation: For `plan` and `apply`, from the previous result.
+        continuation: For `plan`/`apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
@@ -10679,6 +10681,8 @@ def op_adoption_studio(
         expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
+        after: For `start`, a reply's `next_after`.
+        consume: For `start`, false keeps staged copies.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -10690,7 +10694,7 @@ def op_adoption_studio(
         if action == "start":
             return adoption_run_module.start(
                 vault_root, path=path, include_hidden=include_hidden,
-                initialize_kb=initialize_kb, collection=collection,
+                initialize_kb=initialize_kb, collection=collection, after=after, consume=consume,
             )
         if action == "status":
             return adoption_run_module.status(vault_root, run_id=run_id, path=path)
@@ -10775,14 +10779,18 @@ def op_observe_transfer(
     returns file bytes, upload URLs or download links.
 
     1. import_handoff: the open import (one at a time) and the routes for sending bytes.
-       cli: needs a shell, `age` on PATH and a local browser sign-in; takes a folder or ZIP.
-       browser: Home page on a desktop, folders only, within one page session; phones
-       cannot upload folders.
+       cli: with a shell, `exomem cloud import <folder>`; needs `age` on PATH and a local
+       browser sign-in; takes a folder or ZIP.
+       browser: without a shell, the Home link; desktop only, folders only, within one page
+       session; phones cannot upload folders.
        attachments: chat or phone attachments go through preserve_artifacts or
        capture_source, within their per-call bounds.
-    2. status: the latest import (or import_id) and the export; poll it while an import runs.
-    3. When status shows an adopt import `done`, use the listed adoption tools to start
-       a collection on the `next` path (`_Imports/<id>`), then finish the run.
+    2. status: the latest import (or import_id) and the export; poll until an adopt import
+       is `done`.
+    3. File it: start on the `next` path (`_Imports/<id>`), and again with `next_after` while a
+       reply has one; select, plan and apply (at `apply_stop`, stop until space is free); finish.
+    4. Review the residual with the person; discard with transfer_memory.
+    Adoption removes each filed artifact's staged copy; notes stay until discard.
     When an export is ready, status gives a Home link and a CLI command to download it.
 
     Args:
