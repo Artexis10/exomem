@@ -125,6 +125,9 @@ async function mockApi(page, calls, controls = {}) {
       } else {
         data = {mutated: false, warnings: [], candidates: controls.suggestions || [{from: inboxItems[0].path, to: "Knowledge Base/Notes/Insights/related.md", relation_type: "vault.backs", relation_label: "backs (a kind of supports)", method: "recorded-link"}]};
       }
+    } else if (name === "edit_memory" && controls.missingSection) {
+      await route.fulfill({status: 404, contentType: "application/json", body: JSON.stringify({success: false, error: {code: "HEADING_NOT_FOUND", message: "heading 'Relations' not found in the page. Match an existing `## Heading`; read the page first.", remediation: null}})});
+      return;
     } else if (name === "triage_memory" && body.ref?.startsWith("exomem://review/relation/")) {
       const code = controls.decisionErrors?.shift();
       if (code) {
@@ -246,6 +249,21 @@ test("a queue item with fitting relations is written as the chosen one through a
     expected_hash: "hash-z",
     new_string: "- operates [[Knowledge Base/Notes/Insights/target-two]]",
   });
+  expect(calls.some((call) => call.body?.operation === "accept-relation")).toBeFalsy();
+});
+
+test("choosing a relation on a page without a Relations section says what to add and writes nothing else", async ({page}) => {
+  const calls = [];
+  const options = [{key: "owns", label: "owns", description: "", parent: null}];
+  const group = {...relationGroups[0], items: [{...relationGroups[0].items[0], relation_type: "relates_to", relation_label: "relates to", bullet: null, options}]};
+  await connectRelations(page, calls, {missingSection: true, queueResponses: [relationQueue({groups: [group]})]});
+  await page.getByRole("button", {name: /Choose relation/}).click();
+  await page.getByLabel("Audit reason").fill("Chosen after review");
+  await page.getByRole("button", {name: "Confirm governed edit"}).click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toHaveText("This page has no Relations section yet; add one, then choose again.");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  expect(calls.filter((call) => call.name === "edit_memory")).toHaveLength(1);
   expect(calls.some((call) => call.body?.operation === "accept-relation")).toBeFalsy();
 });
 

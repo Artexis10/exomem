@@ -607,6 +607,23 @@ async function guardedWrite(write, options = {}) {
   }
 }
 
+// Both relation dialogs write the same audited bullet. edit_memory keeps refusing a missing heading
+// (only the relation queue's accept creates one), so a page without `## Relations` gets a plain
+// instruction in place of the heading code.
+function writeRelationBullet({path, why, choice, expectedHash}) {
+  return command("edit_memory", {
+    path,
+    why,
+    heading: "Relations",
+    section_position: "append",
+    new_string: relationBullet(choice),
+    expected_hash: expectedHash,
+  }).catch((error) => {
+    if (!(error instanceof ApiError) || error.code !== "HEADING_NOT_FOUND") throw error;
+    throw new ApiError("This page has no Relations section yet; add one, then choose again.", {code: error.code, status: error.status});
+  });
+}
+
 async function submitRelation() {
   const data = new FormData(byId("dialog-form"));
   const choice = dialogAction.choices?.[Number(data.get("candidate"))];
@@ -614,13 +631,11 @@ async function submitRelation() {
     showError(byId("dialog-error"), new ApiError("Choose a relation that can be written before confirming."));
     return;
   }
-  await guardedWrite(() => command("edit_memory", {
+  await guardedWrite(() => writeRelationBullet({
     path: context.target.path,
     why: data.get("why"),
-    heading: "Relations",
-    section_position: "append",
-    new_string: relationBullet(choice),
-    expected_hash: context.target.content_hash,
+    choice,
+    expectedHash: context.target.content_hash,
   }));
 }
 
@@ -904,14 +919,7 @@ async function submitRelationChoose() {
     return;
   }
   await guardedWrite(
-    () => command("edit_memory", {
-      path: item.source_path,
-      why,
-      heading: "Relations",
-      section_position: "append",
-      new_string: relationBullet(choice),
-      expected_hash: item.source_content_hash,
-    }),
+    () => writeRelationBullet({path: item.source_path, why, choice, expectedHash: item.source_content_hash}),
     {...queueDecisionGuard, onDone: () => loadRelationQueue({focusRef: item.ref})},
   );
 }
