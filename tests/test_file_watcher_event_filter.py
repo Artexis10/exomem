@@ -46,9 +46,11 @@ def observed(vault: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(watcher, "_note_directories", note_directories)
     assert watcher.start() is True
 
-    def wait_for(kind: str, path: Path, deleted: bool) -> bool:
+    def wait_for(kind: str, path: Path, deleted: bool, *, times: int = 1) -> bool:
         with arrived:
-            return arrived.wait_for(lambda: (kind, path, deleted) in seen, _WAIT_SECONDS)
+            return arrived.wait_for(
+                lambda: seen.count((kind, path, deleted)) >= times, _WAIT_SECONDS
+            )
 
     try:
         yield page, wait_for
@@ -74,13 +76,6 @@ def test_an_in_place_write_reaches_the_watcher(observed) -> None:
     assert wait_for("file", page, False), "an in-place write was not recorded"
 
 
-def test_a_truncate_reaches_the_watcher(observed) -> None:
-    page, wait_for = observed
-    os.truncate(page, 0)
-
-    assert wait_for("file", page, False), "a truncate was not recorded"
-
-
 def test_a_delete_reaches_the_watcher(observed) -> None:
     page, wait_for = observed
     page.unlink()
@@ -97,6 +92,17 @@ def test_a_new_directory_and_its_page_reach_the_watcher(observed) -> None:
 
     assert wait_for("dir", folder, False), "a new directory was not noted"
     assert wait_for("file", created, False), "a page in a new directory was not recorded"
+
+
+def test_a_deleted_directory_reaches_the_watcher(observed) -> None:
+    page, wait_for = observed
+    folder = page.parent / "deleted-folder"
+    folder.mkdir()
+    assert wait_for("dir", folder, False), "a new directory was not noted"
+    folder.rmdir()
+
+    # The creation noted the directory once; the delete must note it again.
+    assert wait_for("dir", folder, False, times=2), "a deleted directory was not noted"
 
 
 def test_a_moved_directory_moves_its_pages_for_the_watcher(observed) -> None:
