@@ -277,7 +277,7 @@ _register_hold_summary_flush()
 
 
 # True while a capture write is being retried on the server: a refusal in that
-# window is absorbed, so no client saw it and it must not count or shout as one.
+# window is absorbed, so no client saw it and it must not shout as one.
 _ABSORBING_BUSY: ContextVar[bool] = ContextVar("exomem_absorbing_busy", default=False)
 
 
@@ -291,7 +291,13 @@ def absorbing_busy() -> Iterator[None]:
 
 
 def record_client_visible_busy() -> None:
-    """Count one MUTATION_BUSY that actually reached a client."""
+    """Count one MUTATION_BUSY that actually reached a client.
+
+    `_mutation_busy` only builds the refusal: a background holder is refused and
+    retries, and no client sees that. The count belongs to the seam that hands the
+    refusal to a request, and that seam claims the refusal first
+    (`mutation_journal.claim_refusal`) so it counts once.
+    """
     _bump_boundary_metric("exomem_mutation_busy_total", {"code": "MUTATION_BUSY"})
 
 
@@ -2986,8 +2992,6 @@ def _mutation_busy(
         last_holder = contention.get("last_holder")
         if last_holder is not None:
             details["last_holder"] = last_holder
-    if not _ABSORBING_BUSY.get():
-        record_client_visible_busy()
     return OpError(
         "MUTATION_BUSY",
         "vault mutation boundary is busy",

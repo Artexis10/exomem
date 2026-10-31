@@ -1164,13 +1164,16 @@ class StoreServer:
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None):
+    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None):
         """Run ``work`` on the store thread and return its result or raise its error.
 
         ``read_only`` says the work changes nothing, so it runs under one view of path
         placement, host configuration and governance policy (``_serve``). ``extend`` lets a
         write that is still waiting at its acceptance deadline keep its place: it takes the
-        completion deadline and returns a later acceptance deadline, or None to refuse."""
+        completion deadline and returns a later acceptance deadline, or None to refuse.
+        ``on_refusal(error, waited_seconds)`` hears a write refusal this queue makes
+        itself, just before the caller gets it: a timeout in the queue, or accepted work
+        still running. A refusal the work or ``extend`` raises reaches the caller from there."""
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
@@ -1183,6 +1186,11 @@ class StoreServer:
         with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), \
                 call_spans.span("store.admission_wait"):
             self.manager.await_store_admission(deadline)
+        def refuse(error):
+            if on_refusal is not None:
+                on_refusal(error, time.monotonic() - entry)
+            return error
+
         request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
             if not self._closed:
@@ -1190,6 +1198,7 @@ class StoreServer:
                 self._condition.notify_all()
         # Between two rebuild steps this thread waits as a bulk pass while other requests run;
         # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
+        refusal = None
         with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition, \
                 call_spans.span("store.queue_wait"):
             while not request.taken:
@@ -1209,9 +1218,13 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
-                    raise self._busy_refusal(
+                    # Built here, where the queue is stable; journaled below, off the lock the store thread takes.
+                    refusal = self._busy_refusal(
                         "the collection store did not take this request within the mutation timeout")
+                    break
                 self._condition.wait(remaining)
+        if refusal is not None:
+            raise refuse(refusal)
         # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
         waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
                    else foreground_priority.outside_foreground)
@@ -1223,11 +1236,11 @@ class StoreServer:
                 "the collection store did not finish this read within its completion deadline")
         if not completed:
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
-            raise OpError(
+            raise refuse(OpError(
                 "MUTATION_ACKNOWLEDGEMENT_PENDING",
                 "the accepted collection-store operation is still executing and may still commit",
                 details={"status": "uncertain", "committed": None},
-            )
+            ))
         if request.error is not None:
             raise request.error
         return request.result

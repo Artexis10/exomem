@@ -177,6 +177,7 @@ class _Running:
     lock: threading.Lock = field(default_factory=threading.Lock)
     size: int = -1
     digest: Any = None
+    parked: str | None = None  # the code of the park last recorded for a caller
 
 
 _RUNNING: dict[str, _Running] = {}
@@ -555,21 +556,34 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
     if size != int(record["length"]) or not hmac.compare_digest(digest, record["sha256"]):
         _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
         return
+    from .mutation_journal import retrying_park
+
     try:
-        receipt = committer(part, record)
+        # A refusal with the code of the park this retry started from adds no row and no count.
+        with retrying_park(running.parked):
+            receipt = committer(part, record)
     except CommitFailed as exc:
         if not exc.retryable:
             _fail(store, record, exc.code, exc.reason)
             return
-        code, reason = exc.code, exc.reason
-    except Exception:  # noqa: BLE001 - the bytes are sound, so a retry may succeed
+        code, reason, refusal = exc.code, exc.reason, exc
+    except Exception as exc:  # noqa: BLE001 - the bytes are sound, so a retry may succeed
         log.exception("upload session commit failed")
         code, reason = "UPLOAD_COMMIT_FAILED", "the upload could not be preserved yet"
+        refusal = exc
     else:
         _write_record(store, {**record, "state": COMMITTED, "receipt": receipt})
         _remove(part)
         _forget(session_id)
         return
+    # The committer ran outside any request's dispatcher, so the park records itself. A poll retries a parked
+    # session and parks it again for the same reason: that is one refusal, not a new one. A new process
+    # starts without this memory, so it records one row for each park code.
+    if running.parked != code:
+        from .writer_lease import record_caller_refusal
+
+        record_caller_refusal(refusal, tool="upload_session", code=code)
+        running.parked = code
     _write_record(store, {**record, "state": RETRYABLE, "code": code, "reason": reason})
 
 

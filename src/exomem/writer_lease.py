@@ -27,7 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
@@ -37,7 +37,7 @@ from typing import Any, get_args
 
 from filelock import ReadWriteLock, Timeout
 
-from . import call_spans, durable_write, mutation_lock, request_budget
+from . import call_spans, durable_write, mutation_journal, mutation_lock, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -5480,7 +5480,19 @@ class LeaseManager:
                 error="MUTATION_WARMING",
             )
             details["warming_component"] = warming
-            raise OpError(
+            # This gate runs ahead of the journaled block below, so the refusal records itself.
+            self._record_mutation_journal(
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt,
+                outcome="failed",
+                error_code="MUTATION_WARMING",
+                duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+                scope=implicit_idempotency_scope or idempotency_principal_scope,
+                targets=[str(mutation_subject)],
+                boundary_timing=(None, None),
+            )
+            warming_refusal = OpError(
                 "MUTATION_WARMING",
                 (
                     "graph handoff warm-up is still in progress"
@@ -5490,6 +5502,9 @@ class LeaseManager:
                 "Retry the same mutation after warm-up completes.",
                 details=details,
             )
+            # Claimed after its row, so a commit that wraps this refusal does not journal it again.
+            mutation_journal.claim_refusal(warming_refusal)
+            raise warming_refusal
 
         def invoke_leaf() -> Any:
             commit_state["leaf_started"] = True
@@ -6407,6 +6422,11 @@ class LeaseManager:
                 store_attempt.deferred_refusal = journal_refusal
             else:
                 journal_refusal()
+                # The refusal leaves invoke here, so this is where a busy becomes visible to the caller.
+                if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+                    _count_busy_once(error)
+                else:
+                    mutation_journal.claim_refusal(error)
             raise
         _log_mutation_event(
             "returned",
@@ -6471,20 +6491,33 @@ class LeaseManager:
         receipt: str | None,
         outcome: str,
         error_code: str | None,
-        duration_ms: float,
+        duration_ms: float | None,
         scope: str | None,
         targets: list[str],
         wide_hold: Mapping[str, Any] | None = None,
+        boundary_timing: tuple[float | None, float | None] | None = None,
     ) -> None:
-        """Best-effort mutation-journal write. Never raises."""
+        """Best-effort mutation-journal write. Never raises.
+
+        `boundary_timing` is the `(wait_ms, hold_ms)` the row reports. A refusal that
+        never held the boundary passes its own, so the row cannot borrow an earlier
+        hold from this context; `None` reads the hold this context just finished.
+        """
+        # A retry of a parked upload session that refuses for the park's own reason adds no row.
+        if outcome == "failed" and mutation_journal.repeats_parked_refusal(error_code):
+            return
         try:
             from .mutation_journal import record_mutation
 
-            timing = (
-                wide_hold["timing"]
-                if wide_hold is not None and "timing" in wide_hold
-                else last_mutation_timing()
-            )
+            if boundary_timing is None:
+                timing = (
+                    wide_hold["timing"]
+                    if wide_hold is not None and "timing" in wide_hold
+                    else last_mutation_timing()
+                )
+                boundary_timing = (
+                    (timing.get("wait_ms"), timing.get("hold_ms")) if timing else (None, None)
+                )
             lease_role = (
                 "standalone"
                 if not self.config.enabled
@@ -6499,8 +6532,8 @@ class LeaseManager:
                 outcome=outcome,
                 error_code=error_code,
                 duration_ms=duration_ms,
-                boundary_wait_ms=timing.get("wait_ms") if timing else None,
-                boundary_hold_ms=timing.get("hold_ms") if timing else None,
+                boundary_wait_ms=boundary_timing[0],
+                boundary_hold_ms=boundary_timing[1],
                 lease_role=lease_role,
                 fencing_token=self._fencing_token,
                 replica_id=self.config.replica_id,
@@ -6563,7 +6596,7 @@ class LeaseManager:
             if error.code != "MUTATION_BUSY":
                 return False
             if commit_state["observed"] or error.details.get("committed") is not False:
-                mutation_lock.record_client_visible_busy()
+                _count_busy_once(error)
                 return False
             return True
 
@@ -6591,18 +6624,18 @@ class LeaseManager:
         # still names the holder that kept it waiting.
         last_busy: OpError | None = None
 
-        def uncounted_busy() -> OpError:
-            with mutation_lock.absorbing_busy():
-                return _mutation_busy(None, wait_ms=wait.waited_ms())
+        def holderless_busy() -> OpError:
+            return _mutation_busy(None, wait_ms=wait.waited_ms())
 
         def refuse(error: OpError, cause: str, remediation: str) -> OpError:
             if on_refuse is not None:
                 on_refuse(error)
             if error.code != "MUTATION_BUSY":
                 # A handed-back store or preparation refusal keeps its own shape and cause.
+                mutation_journal.claim_refusal(error)
                 return error
             # The one place a busy from this loop becomes client-visible.
-            mutation_lock.record_client_visible_busy()
+            _count_busy_once(error)
             # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
             error.details.pop("wait_ms", None)
             error.details.update(cause=cause, waited_ms=wait.waited_ms(), absorbed_attempts=wait.absorbed)
@@ -6622,7 +6655,7 @@ class LeaseManager:
                 # Arriving behind others means parking this thread as they do.
                 if not wait.take_slot():
                     raise refuse(
-                        uncounted_busy(),
+                        holderless_busy(),
                         "capture_waiters_full",
                         _CAPTURE_WAITERS_FULL_REMEDIATION,
                     )
@@ -6630,7 +6663,7 @@ class LeaseManager:
             while True:
                 if wait.ticket is not None and not wait.wait_turn():
                     raise refuse(
-                        last_busy or uncounted_busy(),
+                        last_busy or holderless_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
@@ -6724,7 +6757,7 @@ class LeaseManager:
                 if before_commit and eligible and error.details.get("committed") is False:
                     attempt.handed_off = error
                 elif eligible:
-                    mutation_lock.record_client_visible_busy()
+                    _count_busy_once(error)
             elif error.code == "COLLECTION_STORE_BUSY":
                 # A store handoff refused the guard before the leaf ran, so nothing ran, keyed or not.
                 if not commit_state["leaf_started"]:
@@ -6796,14 +6829,26 @@ class LeaseManager:
             try:
                 if server is None:
                     return run()
-                return server.call(run, wake_maintenance=True, read_only=False, extend=extend)
+                return server.call(
+                    run,
+                    wake_maintenance=True,
+                    read_only=False,
+                    extend=extend,
+                    # The queue refuses a write it never took, or still holds, before `invoke` can journal it.
+                    on_refusal=partial(_record_store_queue_refusal, command, call_kwargs, server.root),
+                )
             finally:
                 _ACTIVE_STORE_ATTEMPT.reset(token)
                 received = received or current.received
 
         def absorbable(error: OpError) -> bool:
             if routing:
-                return error.code == "MUTATION_BUSY"
+                if error.code != "MUTATION_BUSY":
+                    return False
+                # Routing refuses before `invoke` runs, so this seam journals the refusal the caller finally sees.
+                refusal_journal[:] = [lambda: _record_store_queue_refusal(
+                    command, call_kwargs, injected[0], error, wait.waited_ms() / 1000)]
+                return True
             if current is None or error is not current.handed_off:
                 return False
             # The journal row, if any, of the refusal the caller would see now.
@@ -7586,6 +7631,51 @@ def active_manager() -> LeaseManager:
     return manager if manager is not None else get_manager()
 
 
+def _count_busy_once(error: BaseException) -> None:
+    """Count a `MUTATION_BUSY` as it reaches a caller, once, unless it repeats a recorded park."""
+    if mutation_journal.claim_refusal(error) and not mutation_journal.repeats_parked_refusal("MUTATION_BUSY"):
+        mutation_lock.record_client_visible_busy()
+
+
+def record_caller_refusal(
+    error: BaseException,
+    *,
+    tool: str,
+    code: str | None = None,
+    request_id: str | None = None,
+    targets: Sequence[str] = (),
+    duration_ms: float | None = None,
+) -> None:
+    """Journal and count a refusal that is leaving for a caller without passing `invoke`.
+
+    `invoke` records its own failures. The store queue, the `/upload` route and an
+    upload session's retryable park hand a refusal to a caller from outside it, so
+    those seams call this with the tool or route that was refused. A refusal that
+    already has its row (`invoke` journaled it, or an earlier seam did) records
+    nothing, so each refusal appears once. The boundary wait is the one the refusal
+    carries; a refusal that never reached the boundary reports none. Never raises.
+    """
+    try:
+        if not mutation_journal.claim_refusal(error):
+            return
+        code = code or leaf_contract_code(error) or type(error).__name__
+        active_manager()._record_mutation_journal(
+            request_id=request_id or str(uuid.uuid4()),
+            command=tool,
+            receipt=None,
+            outcome="failed",
+            error_code=code,
+            duration_ms=duration_ms,
+            scope=None,
+            targets=list(targets),
+            boundary_timing=(mutation_journal.boundary_wait_ms(error), None),
+        )
+        if code == "MUTATION_BUSY" and not mutation_journal.repeats_parked_refusal(code):
+            mutation_lock.record_client_visible_busy()
+    except Exception:  # noqa: BLE001 - observability must never change the refusal a caller gets
+        pass
+
+
 def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
@@ -7829,6 +7919,16 @@ def _store_request_is_read_only(command, kwargs):
         return False
 
 
+def _record_store_queue_refusal(command, kwargs, root, error, waited_seconds):
+    record_caller_refusal(
+        error,
+        tool=command.name,
+        request_id=kwargs.get("mutation_request_id"),
+        targets=[str(root)],
+        duration_ms=round(waited_seconds * 1000, 2),
+    )
+
+
 def _collection_store_thread(func):
     """Run a store-routed collection request on the store thread of the service serving its
     vault, in the caller's context (``collection_store.runtime.route``)."""
@@ -7866,6 +7966,10 @@ def _collection_store_thread(func):
                         # every tick after it kept the store thread busy beside the next request.
                         wake_maintenance=not (read_only or import_status),
                         read_only=read_only,
+                        # The queue refuses before `invoke` runs, so a refused write records itself here.
+                        on_refusal=None if read_only else partial(
+                            _record_store_queue_refusal, command, kwargs, server.root
+                        ),
                     )
         return func(command, *injected, **kwargs)
 

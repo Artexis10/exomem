@@ -831,7 +831,7 @@ def register_transfer_routes(
                 status_code=401,
             )
         from .cli_ops import OpError, error_dict, http_status_for
-        from .writer_lease import get_manager
+        from .writer_lease import get_manager, record_caller_refusal
 
         max_bytes = (
             config.local_upload_max_bytes
@@ -991,6 +991,7 @@ def register_transfer_routes(
                 status_code={archive_members.TOO_LARGE: 413, archive_members.NO_SPACE: 507}.get(exc.code, 400),
             )
         except (OpError, ValueError) as exc:
+            record_caller_refusal(exc, tool="upload", targets=[str(vault_root)])
             error = error_dict(exc)
             return JSONResponse(
                 {"code": error["code"], "reason": error["message"]},
