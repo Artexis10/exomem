@@ -17,8 +17,9 @@ from pathlib import Path
 
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture
+from test_rest_api import _client as _rest_client
 
-from exomem import commands, mutation_lock, record_formats, writer_lease
+from exomem import commands, mutation_lock, product_invoke, record_formats, writer_lease
 from exomem import schema as schema_module
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
@@ -339,3 +340,53 @@ def test_a_record_append_waits_out_the_boundary(
             contention,
         )
     assert result
+
+
+def _unkeyed_note(number: int) -> dict:
+    return {
+        "note_type": "insight",
+        "title": f"Unkeyed held-boundary note {number}",
+        "content": f"# Unkeyed held-boundary note {number}\n\n## Claim\n\nIt waited, then committed once.\n",
+        "status": "draft",
+    }
+
+
+def test_an_unkeyed_rest_write_waits_out_the_boundary_and_commits_once(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.05")
+    client = _rest_client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    holder = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+    with _Contention(monkeypatch, holder, vault, refusals=1) as contention:
+        (response,) = _run_concurrently(
+            [
+                lambda: client.post(
+                    "/api/remember",
+                    json=_unkeyed_note(0),
+                    headers={"Authorization": "Bearer sekret"},
+                )
+            ],
+            contention,
+        )
+
+    assert response.status_code == 200, response.text
+    assert (vault / response.json()["data"]["path"]).is_file()
+    assert len(list((vault / "Knowledge Base").rglob("unkeyed-held-boundary-note-0*.md"))) == 1
+
+
+def test_an_unkeyed_cli_write_waits_out_the_boundary_and_a_repeat_writes_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.05")
+    holder = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+    with _Contention(monkeypatch, holder, vault, refusals=1) as contention:
+        (first,) = _run_concurrently(
+            [lambda: product_invoke.invoke_product("remember", _unkeyed_note(1), vault_root=vault)],
+            contention,
+        )
+    again = product_invoke.invoke_product("remember", _unkeyed_note(1), vault_root=vault)
+
+    assert (vault / first["path"]).is_file()
+    # An in-process caller cannot lose a reply, so a repeat is a new write, not a replay.
+    assert again["path"] != first["path"]
+    assert len(list((vault / "Knowledge Base").rglob("unkeyed-held-boundary-note-1*.md"))) == 2

@@ -3940,6 +3940,32 @@ def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) ->
     assert calls == [1, 1, 1]
 
 
+@pytest.mark.parametrize(
+    ("name", "kwargs"),
+    [
+        ("govern_memory", {"operation": "session", "session_action": "open"}),
+        ("transfer_artifact", {"operation": "upload"}),
+    ],
+)
+def test_a_credential_issuing_command_keeps_no_implicit_identity(
+    tmp_path: Path, name: str, kwargs: dict
+) -> None:
+    """Every surface now passes a retry scope; a bearer in a terminal must never be cached under it."""
+    issued: list[str] = []
+    command = SimpleNamespace(
+        name=name,
+        read_only=False,
+        leaf=lambda **_: issued.append(f"bearer-{len(issued)}") or {"bearer": issued[-1]},
+    )
+    manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
+
+    first = manager.invoke(command, (), dict(kwargs), implicit_idempotency_scope="invocation:one")
+    second = manager.invoke(command, (), dict(kwargs), implicit_idempotency_scope="invocation:one")
+
+    assert first != second
+    assert issued == ["bearer-0", "bearer-1"]
+
+
 def test_failed_implicit_mutation_remains_retryable(tmp_path: Path) -> None:
     attempts = 0
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, semantic_index, server
+from exomem import cf_access, commands, semantic_index, server
 from exomem import find as find_module
 
 
@@ -180,6 +180,63 @@ def test_rest_remember_write_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -
     written = vault / r.json()["data"]["path"]
     assert written.exists()
     assert "scriptable" in written.read_text(encoding="utf-8")
+
+
+def _unkeyed_write(title: str) -> dict:
+    return {
+        "note_type": "insight",
+        "title": title,
+        "content": f"# {title}\n\n## Claim\n\nA resend must not write this twice.\n",
+        "status": "draft",
+    }
+
+
+def test_rest_resend_without_a_key_replays_instead_of_committing_twice(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that lost the reply and resent the write must not duplicate the note."""
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    auth = {"Authorization": "Bearer sekret"}
+    body = _unkeyed_write("Resent over REST")
+
+    first = client.post("/api/remember", json=body, headers=auth)
+    resend = client.post("/api/remember", json=body, headers=auth)
+
+    assert first.status_code == resend.status_code == 200, (first.text, resend.text)
+    assert resend.json()["data"]["path"] == first.json()["data"]["path"]
+    assert len(list((vault / "Knowledge Base").rglob("resent-over-rest*.md"))) == 1
+
+
+def test_rest_principals_with_different_audiences_do_not_share_an_unkeyed_result(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two Access identities sending the same bytes each write; neither gets the other's note."""
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_REST_API_KEY="sekret",
+        EXOMEM_CF_ACCESS_TEAM_DOMAIN="team.example.test",
+        EXOMEM_CF_ACCESS_AUD="audience-tag",
+    )
+    # The JWT signature check belongs to the Access library; the identity it returns is what matters here.
+    monkeypatch.setattr(
+        cf_access,
+        "verified_claims",
+        lambda token, **_: {"sub": token, "iss": "https://team.example.test"} if token else None,
+    )
+    body = _unkeyed_write("Same bytes two principals")
+
+    def post(subject: str):
+        return client.post(
+            "/api/remember", json=body, headers={"Cf-Access-Jwt-Assertion": subject}
+        )
+
+    alice, bob, alice_again = post("alice"), post("bob"), post("alice")
+
+    assert [r.status_code for r in (alice, bob, alice_again)] == [200, 200, 200]
+    assert alice.json()["data"]["path"] != bob.json()["data"]["path"]
+    assert alice_again.json()["data"]["path"] == alice.json()["data"]["path"]
+    assert len(list((vault / "Knowledge Base").rglob("same-bytes-two-principals*.md"))) == 2
 
 
 def test_rest_remember_validation_error_is_400(vault, monkeypatch: pytest.MonkeyPatch) -> None:

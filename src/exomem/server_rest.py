@@ -466,6 +466,20 @@ def register_rest_facade(
                     injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                     from .writer_lease import invoke_command
 
+                    explicit_key = request.headers.get("idempotency-key")
+                    # An unkeyed write takes its implicit retry identity from the
+                    # canonical audience, so it waits out contention and a resend
+                    # replays. An unresolved principal has no stable identity: it
+                    # keeps today's immediate refusal (MCP does the same). The
+                    # `rest:` prefix keeps these scopes apart from MCP's.
+                    implicit_scope = (
+                        f"rest:{bound_principal.audience_id}"
+                        if not explicit_key
+                        and bound_principal.resolved
+                        and bound_principal.audience_id != principal_module.MOST_RESTRICTIVE_AUDIENCE
+                        else None
+                    )
+
                     def invoke_bound() -> Any:
                         # Canonical audience at the REST boundary (design D5): a
                         # `None` scope is the vault's own shared key (owner); a
@@ -477,8 +491,9 @@ def register_rest_facade(
                             return invoke_command(
                                 _cmd,
                                 *injected,
-                                idempotency_key=request.headers.get("idempotency-key"),
+                                idempotency_key=explicit_key,
                                 idempotency_principal_scope=principal_scope,
+                                implicit_idempotency_scope=implicit_scope,
                                 mutation_request_id=canonical_request_id(
                                     request.headers.get("x-exomem-request-id")
                                 ),

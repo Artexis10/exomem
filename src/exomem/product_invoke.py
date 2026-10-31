@@ -17,6 +17,7 @@ impossible for every surface built on the seam.
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -144,10 +145,20 @@ def invoke_prepared(
         from .governance.authorization_request import AuthorizationContextUnavailable
 
         raise AuthorizationContextUnavailable
+    # An unkeyed call carries a retry identity unique to this invocation, so it
+    # waits out an ordinary busy boundary. Nothing replays across calls: an
+    # in-process caller cannot lose a reply, and a repeat is a new write.
+    implicit_scope = None if idempotency_key else f"invocation:{uuid.uuid4().hex}"
     with capabilities.active_surface(descriptor), principal_module.request_scope(
         principal
     ):
-        return invoke_command(cmd, *injected, idempotency_key=idempotency_key, **kwargs)
+        return invoke_command(
+            cmd,
+            *injected,
+            idempotency_key=idempotency_key,
+            implicit_idempotency_scope=implicit_scope,
+            **kwargs,
+        )
 
 
 def prepare_local_authorization(
