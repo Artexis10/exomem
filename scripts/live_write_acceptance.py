@@ -42,6 +42,7 @@ import importlib.resources
 import json
 import os
 import secrets
+import signal
 import socket
 import sqlite3
 import statistics
@@ -323,6 +324,7 @@ def _require_store_served(vault_root: Path, state_dir: Path, manager: writer_lea
         status = manager.status().get("collection_store", {})
         if status.get("status") == "admitted":
             return
+        # The runtime exposes no public read of the store thread's refusal; a rename fails the adoption test.
         server = store_runtime._SERVERS.get(vault_root.resolve())
         # The refusal that `exomem collections adopt-local` is named in, as the product reads it.
         code, message = server.refusal if server is not None else ("COLLECTION_STORE_UNAVAILABLE", "no store thread")
@@ -1287,4 +1289,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A plain `kill` must unwind the finally blocks, or the run's coordinator outlives it.
+    signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
     raise SystemExit(main())
