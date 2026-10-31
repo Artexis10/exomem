@@ -64,7 +64,7 @@ the unchanged collection. Then a bounded wait for media extraction (`process_med
 
 - `plan` and `apply` repeat while a result carries `continuation`. The next call of the same
   action passes it back, with the same `plan_id` for `apply`.
-- Each `plan` and `apply` page asks for the compact reply. After the last page, one `status` call
+- Each `plan` and `apply` page asks for the compact reply. After the last page, or the page that failed, one `status` call
   reads the run for the refusals and the plan. `select` and `finish` ask for the full reply.
 - `start` passes `collection=<folder name>`. If the product refuses it, the log says
   `collection_label: unsupported` and the driver retries without it.
