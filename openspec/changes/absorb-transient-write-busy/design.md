@@ -10,7 +10,7 @@
 - The CLI and terminal UI wait out contention with no replay identity at all. An in-process caller cannot lose a reply, so a receipt buys nothing; a re-attempt is safe because commit observation (`commit_state`) stops any attempt that committed from running again. A per-invocation key was rejected in review: it passed the vocabulary-application gate, which requires an identity a retry can reuse, and a failed attempt then left the reviewed decision bound to an identity nobody could present again. It would also have made every CLI write depend on a healthy replay store.
 - `_effective_idempotency_key` keeps returning no key when a caller supplies neither a key nor a scope. Credential-issuing commands clear both before key derivation so that a bearer never enters the replay store; a fallback inside the key function would bypass that rule for every internal caller.
 
-Rejected: a random per-request key for remote callers with no stable scope. Such a client can give up during the wait and resend; both attempts then commit.
+Rejected: a key the server mints for a keyless remote caller with no stable scope. Such a client can give up during the wait and resend; both attempts then commit.
 
 ### D2. The cross-process waiter signal is a shared `flock` on a sidecar
 

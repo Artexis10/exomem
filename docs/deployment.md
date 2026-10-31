@@ -769,8 +769,8 @@ committed-uncertain acknowledgement: retry only with the same identity as
 directed, or reconcile.
 
 A REST write without an `Idempotency-Key` carries no replay identity: two
-identical requests are two writes, and a busy boundary refuses it at once with a
-retryable `MUTATION_BUSY`. Send one `Idempotency-Key` per intended write to have
+identical requests are two writes, and a busy boundary refuses it with a retryable
+`MUTATION_BUSY` after one bounded acquire wait, without waiting out contention. Send one `Idempotency-Key` per intended write to have
 the server wait out ordinary contention and to let a resend attach to the first
 attempt. The bundled Studio does this for every action.
 

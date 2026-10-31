@@ -3950,7 +3950,7 @@ def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) ->
 def test_a_credential_issuing_command_keeps_no_implicit_identity(
     tmp_path: Path, name: str, kwargs: dict
 ) -> None:
-    """Every surface now passes a retry scope; a bearer in a terminal must never be cached under it."""
+    """MCP passes a retry scope for unkeyed writes; a bearer in a terminal must never be cached under it."""
     issued: list[str] = []
     command = SimpleNamespace(
         name=name,
@@ -3959,8 +3959,8 @@ def test_a_credential_issuing_command_keeps_no_implicit_identity(
     )
     manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
 
-    first = manager.invoke(command, (), dict(kwargs), implicit_idempotency_scope="invocation:one")
-    second = manager.invoke(command, (), dict(kwargs), implicit_idempotency_scope="invocation:one")
+    first = manager.invoke(command, (), dict(kwargs), implicit_idempotency_scope="session:one")
+    second = manager.invoke(command, (), dict(kwargs), implicit_idempotency_scope="session:one")
 
     assert first != second
     assert issued == ["bearer-0", "bearer-1"]

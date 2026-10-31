@@ -30,7 +30,9 @@ function actionKey() {
 export async function command(name, body = {}, {key = storedKey()} = {}) {
   if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new ApiError("Invalid command name");
   // One key per action: the server waits out a busy boundary for a keyed write,
-  // and a repeated action (a toggled selection, a re-plan) is a new write.
+  // and a repeated action (a toggled selection, a re-plan) is a new write. This key
+  // cannot be reused on retry, so never send it with an action that needs one
+  // (a vocabulary application binds its decision to the key).
   const headers = {
     "Content-Type": "application/json",
     "Accept": "application/json",
