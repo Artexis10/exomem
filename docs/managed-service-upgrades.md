@@ -221,16 +221,18 @@ runtime directory have a 104-byte limit.
 6. Copy the live vault state directory into the state leaf with the state copy command below.
 7. Set `vault_identity` in `/tmp/xr/state/KEY/.state-migration.json` to `KEY` with a JSON editor.
 8. Write `/tmp/xr/rehearsal.env` with mode 600 from the template below.
-9. Pick a free loopback port as `PORT`.
-10. Start the transient unit with the `systemd-run` command below.
-11. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
-12. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
-13. Note the time, then switch with the `service_upgrade` command below.
-14. Read `last_transition.handoff` in the printed result.
-15. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
-16. While a repair runs, send one MCP read and one MCP write to `http://127.0.0.1:PORT/mcp`.
-17. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
-18. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
+9. Pick two free loopback ports as `PORT` and `LOCAL_PORT`.
+10. Unless `/tmp/xr/home/local-token` exists from this `rehearsal.env`, issue a local session with the issue command below.
+11. Start the transient unit with the `systemd-run` command below.
+12. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
+13. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
+14. In a second terminal, start the probe loop below.
+15. Note the time, then switch with the `service_upgrade` command below.
+16. Read `last_transition.handoff` in the printed result.
+17. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
+18. Count failed calls with the check command below; expect 0.
+19. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
+20. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
 
 Expect all four checks to pass in the 45 minutes after the noted time.
 
@@ -299,6 +301,53 @@ HF_HOME=LIVE_VALUE
 EXOMEM_PRELOAD_MODELS=LIVE_VALUE
 EXOMEM_STANDBY_WARM_SECONDS=LIVE_VALUE
 EXOMEM_COLD_START_SECONDS=LIVE_VALUE
+EXOMEM_LOCAL_PORT=LOCAL_PORT
+EXOMEM_GITHUB_USER_ID=LIVE_VALUE
+EXOMEM_GITHUB_USERNAME=LIVE_VALUE
+EXOMEM_JWT_SIGNING_KEY=NEW_RANDOM_VALUE
+```
+
+Generate each `NEW_RANDOM_VALUE` separately, for example with `openssl rand -hex 32`.
+Keep `rehearsal.env` with a kept copy. A new signing key invalidates
+`/tmp/xr/home/local-token`, so delete that file when you change the key.
+When the live file sets no owner identity, use any numeric id and any login.
+
+The last four lines let the copy's own local session call MCP tools on
+`LOCAL_PORT`, so the read and write checks run as the owner. The signing key is
+new, so no live token is valid on the copy.
+
+The issue command runs in a subshell from the empty working directory, so a
+`.env` file elsewhere cannot override the copy's signing key or storage:
+
+```sh
+( cd /tmp/xr/cwd && set -a && . /tmp/xr/rehearsal.env && /tmp/xr/launcher/bin/exomem auth issue-local --client rehearsal --output /tmp/xr/home/local-token )
+```
+
+The probe loop sends one MCP read and one MCP write every 30 seconds for 50
+minutes, which covers the 45 minutes after a switch made within 5 minutes of
+its start. It writes one line per call, `TIME read|write RESPONSE`, and each
+write creates a disposable note in the copy:
+
+```sh
+TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
+while [ "$(date +%s)" -lt "$END" ]; do
+  NOW=$(date -u +%H:%M:%S)
+  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"create_note\",\"arguments\":{\"title\":\"Rehearsal probe $NOW\",\"content\":\"Disposable rehearsal write.\",\"note_type\":\"insight\"}}"; do
+    BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
+      -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":${CALL#* }}" | tr -d '\n')
+    printf '%s\n' "$NOW ${CALL%% *} ${BODY:-no-response}" >> /tmp/xr/calls.log
+  done
+  sleep 30
+done
+```
+
+A call fails when its line holds `"isError":true`, `MUTATION_BUSY`,
+`VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. The check command
+prints two counts; expect both to be 0:
+
+```sh
+grep -cE '"isError":true|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
 ```
 
 The worker also inherits the user manager's environment. Run `systemctl --user
