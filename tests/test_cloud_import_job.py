@@ -361,8 +361,8 @@ def test_job_environment_member_limit_refuses_before_vault_write(vault, tmp_path
         assert not (vault / "_Imports").exists()
 
 
-def _adopt_import(vault, tmp_path, monkeypatch, files):
-    """Run a real adopt import of `files` ({member path: bytes}); return its id."""
+def _adopt_request(vault, monkeypatch, files):
+    """The request and ciphertext of a real adopt import of `files` ({member path: bytes}); nothing is run."""
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
     import_id = str(uuid.uuid4())
@@ -378,8 +378,14 @@ def _adopt_import(vault, tmp_path, monkeypatch, files):
         import_id=import_id, cell_id=CELL, kind="adopt", declared_files=len(files),
         declared_bytes=sum(len(content) for content in files.values()),
         ciphertext_bytes=len(ciphertext), ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
+    return request, ciphertext
+
+
+def _adopt_import(vault, tmp_path, monkeypatch, files):
+    """Run a real adopt import of `files` ({member path: bytes}); return its id."""
+    request, ciphertext = _adopt_request(vault, monkeypatch, files)
     cloud_import_job.run_import(request, vault, lambda: io.BytesIO(ciphertext))
-    return import_id
+    return request.import_id
 
 
 def _receipt(vault, import_id):
@@ -407,3 +413,30 @@ def test_discard_removes_the_manifest_with_the_stage_and_keep_adoption_keeps_bot
     assert not (vault / "_Imports" / discarded).exists()
     receipt = _receipt(vault, discarded)
     assert "members" not in receipt and receipt["request"]["import_id"] == discarded
+
+
+def test_adopt_receipt_records_each_staged_files_identity_as_the_job_left_it(vault, tmp_path, monkeypatch):
+    """Catches an identity read before the Job sets the file's time, or one that carries the device number."""
+    import_id = _adopt_import(vault, tmp_path, monkeypatch, {
+        "notes/alpha.md": b"Invented alpha note\n", "scans/deep/beta.pdf": b"%PDF invented bytes"})
+    staged = vault / "_Imports" / import_id
+    members = _receipt(vault, import_id)["members"]
+    assert len(members) == 2
+    for entry in members:
+        info = (staged / entry["path"]).stat()
+        assert entry["identity"] == {
+            "inode": info.st_ino, "size": info.st_size, "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}
+
+
+def test_a_retry_that_keeps_the_earlier_stage_records_the_identity_of_the_files_it_kept(vault, monkeypatch):
+    """Catches a retry that records the identity of its deleted staging files: no kept file would then match its manifest."""
+    request, ciphertext = _adopt_request(vault, monkeypatch, {"notes/alpha.md": b"Invented alpha note\n"})
+    cloud_import_job.run_import(request, vault, lambda: io.BytesIO(ciphertext))
+    (cloud_import_job.receipt_directory(vault) / f"{request.import_id}.json").unlink()  # the first run stopped before its receipt
+
+    cloud_import_job.run_import(request, vault, lambda: io.BytesIO(ciphertext))
+
+    (entry,) = _receipt(vault, request.import_id)["members"]
+    info = (vault / "_Imports" / request.import_id / entry["path"]).stat()
+    assert entry["identity"] == {
+        "inode": info.st_ino, "size": info.st_size, "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}

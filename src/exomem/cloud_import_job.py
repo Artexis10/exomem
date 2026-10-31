@@ -23,7 +23,15 @@ from urllib.request import urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import archive_members, import_stage, state_paths, vault
+from . import (
+    adoption_run,
+    archive_members,
+    import_stage,
+    private_state,
+    rename_journal,
+    state_paths,
+    vault,
+)
 from .cell_init import _ensure_private_directory
 from .cloud_cell import CELL_ID_PATTERN
 from .cloud_import import DEFAULT_MAX_MEMBERS, ArchiveRefused, reserve_bytes_from_env, unpack_stream
@@ -163,6 +171,13 @@ def run_import(
         errors: list[BaseException] = []
         # An adopt import lists the staged files in its receipt, hashed as they are unpacked.
         members: list[dict] = []
+
+        def record_member(path: str, size: int, digest: str) -> None:
+            # `unpack_stream` has set the file's time by now, and the directory rename below keeps the
+            # file's inode, size and times. A retry that keeps an earlier stage reads its files again below.
+            staged = import_stage.Identity.of((staging / path).stat())
+            members.append(import_stage.member(path, size, digest, staged))
+
         process = subprocess.Popen(
             ["age", "-d", "-i", str(identity)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -186,10 +201,7 @@ def run_import(
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
                         max_members=int(os.environ.get("EXOMEM_IMPORT_MAX_MEMBERS", DEFAULT_MAX_MEMBERS)),
                         reserve_bytes=reserve_bytes_from_env(),
-                        on_file=(
-                            (lambda path, size, digest: members.append(import_stage.member(path, size, digest)))
-                            if request.kind == "adopt" else None
-                        ),
+                        on_file=record_member if request.kind == "adopt" else None,
                     )
             except ArchiveRefused:
                 # age can close its output before it exits, so one poll races a wrong key. Its output is
@@ -242,6 +254,13 @@ def run_import(
                         trees.append(hashes)
                     if trees[0] != trees[1]:
                         raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "committed")
+                    # The kept files stay and the new staging is deleted, so the manifest names the kept files' identity.
+                    members[:] = [
+                        import_stage.member(
+                            entry["path"], entry["size"], entry["sha256"],
+                            import_stage.Identity.of((destination / entry["path"]).stat()))
+                        for entry in members
+                    ]
                 else:
                     os.rename(staging, destination)
                 receipt[import_stage.MEMBERS_KEY] = members
@@ -330,14 +349,16 @@ def _prove_restore_collections(staging: Path) -> None:
         raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "collection_proof") from None
 
 
-def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) -> None:
+def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False, walk_stage: bool = False) -> None:
     """Remove transport/adoption material. Committed RAW sources remain governed data."""
     _id(import_id)
     if (vault_root / import_stage.STAGE_DIR).is_symlink() or (vault_root.parent / ".import-keys").is_symlink():
         raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "symlink")
+    if walk_stage and keep_adoption:
+        raise ArchiveRefused("IMPORT_REQUEST_INVALID", "walk_stage")
     if not keep_adoption:
         # First, so that a stop between the two steps leaves a stage with no manifest, which nothing consumes.
-        _drop_members(vault_root, import_id)
+        _keep_residual(vault_root, import_id, walk_stage=walk_stage)
     for path in [
         vault_root.parent / ".import-keys" / import_id,
         vault_root.parent / f".import-{import_id}",
@@ -348,15 +369,79 @@ def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) ->
             shutil.rmtree(path)
 
 
-def _drop_members(vault_root: Path, import_id: str) -> None:
-    """Remove the member manifest from the import's receipt; the receipt itself still answers a replay."""
-    receipt_path = state_paths.vault_state_dir(vault_root) / import_stage.CLOUD_RECEIPTS / f"{import_id}.json"
-    try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> None:
+    """Record which staged members adoption did not file, or refuse and leave the stage and its receipt as they are.
+
+    The record goes into the receipt in the write that drops the member manifest, so a stop leaves both changes
+    or neither. A retry finds no manifest and keeps the record. When the Job cannot read the receipt of an
+    existing stage it refuses, because a discard would erase the only sign that a member was never filed; with
+    `walk_stage` it records every staged file in a file of its own instead. Refusal comes first because a read
+    that fails once can succeed on a retry.
+    """
+    stage = vault_root / import_stage.STAGE_DIR / import_id
+    receipt = import_stage.read_receipt(vault_root, import_id)
+    if walk_stage and receipt is not None:
+        # A walk skips the settling of renamed members and records the wrong codes.
+        raise ArchiveRefused("IMPORT_REQUEST_INVALID", "walk_stage")
+    if receipt is None and stage.exists() and not walk_stage:
+        raise ArchiveRefused("IMPORT_RECEIPT_UNREADABLE", "receipt")
+    renamed = rename_journal.pending(vault_root, under=f"{import_stage.STAGE_DIR}/{import_id}")
+    if renamed:
+        # A renamed member has no stage copy and no page: its manifest entry is all that settles it. The Job does not
+        # apply from a stopped cell, so the person or agent settles it and retries, and the status names it. The paths
+        # go where the status looks for the window's record: the receipt, or the walk file when the receipt is unreadable.
+        pending = sorted(hold.path for hold in renamed)
+        if receipt is not None:
+            receipt[import_stage.RENAMES_PENDING_KEY] = pending
+            _private_json(import_stage.receipt_path(vault_root, import_id), receipt)
+        else:
+            _write_walk(vault_root, import_id, import_stage.renames_pending_record(pending))
+        raise ArchiveRefused("IMPORT_RENAMES_PENDING", "renamed members")
+    if receipt is None:
+        if walk_stage:
+            _walk(vault_root, import_id)
+    else:
+        # A window that was discarded before keeps its first record. A restore or an archive has no manifest and no
+        # stage, so it gets none. With neither, an earlier discard has removed what the record would list: it records nothing.
+        changed = False
+        if import_stage.RESIDUAL_KEY not in receipt and (import_stage.MEMBERS_KEY in receipt or stage.exists()):
+            unfiled = adoption_run.unfiled_members(vault_root, import_id)
+            # The receipt's record outranks a walk's. An empty one would say that every member was filed over the
+            # members that a walk listed, so the walk's record stands.
+            if unfiled or not import_stage.read_walk_members(vault_root, import_id):
+                receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record(unfiled)
+                changed = True
+        for key in (import_stage.MEMBERS_KEY, import_stage.RENAMES_PENDING_KEY):
+            changed |= receipt.pop(key, None) is not None
+        if changed:
+            _private_json(import_stage.receipt_path(vault_root, import_id), receipt)
+
+
+def _walk(vault_root: Path, import_id: str) -> None:
+    """Record every staged file but the series file as unfiled, in a file of its own, unless an earlier walk did.
+
+    A stage that is gone gets no record: a record with no member would say that every member was filed.
+    """
+    if not (vault_root / import_stage.STAGE_DIR / import_id).exists():
         return
-    if isinstance(receipt, dict) and receipt.pop(import_stage.MEMBERS_KEY, None) is not None:
-        _private_json(receipt_path, receipt)
+    _write_walk(vault_root, import_id, import_stage.residual_record([
+        import_stage.residual_member(path, size, import_stage.UNREADABLE_CODE)
+        for path, size in import_stage.staged_files(vault_root, import_id)
+        if path != import_stage.SERIES_FILE
+    ]))
+
+
+def _write_walk(vault_root: Path, import_id: str, record: dict) -> None:
+    """Replace the import's walk file whole and durably, unless it holds the members of a walk; the receipt stays as it was.
+
+    A walk's members are the only sign of what the stage held, so a retried walk, or a refusal that names pending
+    renames, keeps them.
+    """
+    if import_stage.read_walk_members(vault_root, import_id) is not None:
+        return
+    store = private_state.store(vault_root, import_stage.WALK_RECORDS)
+    private_state.write_record(store, import_id, record, temp_suffix=".tmp", durable=True)
+    private_state.sync_directory(store)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -367,6 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--request")
     parser.add_argument("--url")
     parser.add_argument("--keep-adoption", action="store_true")
+    parser.add_argument("--walk-stage", action="store_true")
     parser.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
     args = parser.parse_args(argv)
     try:
@@ -375,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.operation == "prepare":
             result = {"ok": True, "recipient": prepare(args.vault.parent, args.import_id, cell_id)}
         elif args.operation == "discard":
-            discard(args.vault, args.import_id, keep_adoption=args.keep_adoption)
+            discard(args.vault, args.import_id, keep_adoption=args.keep_adoption, walk_stage=args.walk_stage)
             result = {"ok": True}
         else:
             request = CloudImportRequest.model_validate_json(args.request)
