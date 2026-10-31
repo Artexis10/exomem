@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from exomem import __main__ as cli
-from exomem import adoption_run, commands, local_import
+from exomem import adoption_run, commands, import_stage, local_import, state_migration, state_paths
 from exomem.cli_progress import Progress
 from exomem.local_import import LocalImportError, stage
 
@@ -217,6 +217,65 @@ def test_a_file_the_vault_refuses_is_left_out_with_its_code_and_the_import_still
     assert _tree(vault / result["start_path"] / "Field Notes") == {"good.md": b"kept"}
     assert "1 file left out because the vault refused it" in captured.err
     assert captured.err.strip().splitlines()[-1].startswith("Next: run adoption_studio start")
+
+
+def _settled_vault(tmp_path: Path) -> Path:
+    """A vault whose state placement is settled, as it is once the server has started on it."""
+    vault = _vault(tmp_path)
+    assert state_migration.bootstrap_fresh_state(vault)
+    return vault
+
+
+def _record_path(vault: Path, import_id: str) -> Path:
+    return state_paths.vault_state_dir(vault) / "local-imports" / f"{import_id}.json"
+
+
+def test_a_finished_import_leaves_a_record_of_its_staged_files_and_an_open_one_leaves_none(tmp_path):
+    """Adoption removes staged files only from a finished import, and only the ones this record lists."""
+    vault = _settled_vault(tmp_path)
+    folder = _folder(tmp_path, {"a.txt": b"first", "sub/z.txt": b"last"})
+    announced = False
+
+    def edit_last_file_after_the_first_copy(line: str) -> None:
+        nonlocal announced
+        if line.startswith("Copying:") and not announced:
+            announced = True
+            (folder / "sub" / "z.txt").write_bytes(b"last, then edited while staging")
+
+    first = stage(folder, vault, progress=Progress(edit_last_file_after_the_first_copy, interval=0))
+
+    assert first["ok"] is False and first["stage_recorded"] is False
+    assert not _record_path(vault, first["import_id"]).exists()
+    staged_inode = (vault / first["start_path"] / "Field Notes" / "a.txt").stat().st_ino
+
+    second = stage(folder, vault)
+
+    # The rerun copied only the missing file and the record then lists every staged file as it is on disk.
+    assert second["ok"] and second["import_id"] == first["import_id"] and second["stage_recorded"] is True
+    staged = vault / second["start_path"]
+    assert (staged / "Field Notes" / "a.txt").stat().st_ino == staged_inode
+    on_disk = {path.relative_to(staged).as_posix(): (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+               for path in staged.rglob("*") if path.is_file()}
+    record = json.loads(_record_path(vault, second["import_id"]).read_text())
+    assert {entry["path"]: (entry["size"], entry["sha256"]) for entry in record["members"]} == on_disk
+    assert len(on_disk) == 2
+    assert import_stage.read(vault, second["import_id"]).proof == "local-record"
+
+
+def test_an_import_into_a_vault_with_unsettled_state_writes_no_record_and_says_adoption_keeps_the_copy(
+        tmp_path, monkeypatch, capsys):
+    """A state folder made before the vault's first start would make that start refuse, so none is made."""
+    vault = _vault(tmp_path)
+    folder = _folder(tmp_path, {"a.txt": b"kept"})
+    monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
+
+    status = cli._dispatch_main(["import", str(folder), "--vault", str(vault)])
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert status == 0 and result["ok"] and result["stage_recorded"] is False
+    assert not state_paths.vault_state_dir(vault).exists()
+    assert "adoption keeps every staged copy" in captured.err
 
 
 def test_a_file_the_disk_refuses_keeps_the_import_open_and_a_rerun_copies_it(tmp_path, monkeypatch):
