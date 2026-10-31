@@ -950,6 +950,29 @@ def _import_watchdog():
     return Observer, FileSystemEventHandler
 
 
+def _consumed_event_types() -> list[type]:
+    """The watchdog event classes the observer handler consumes.
+
+    A closed set fixed by watchdog's API: the handler implements only
+    on_created, on_modified, on_deleted and on_moved. Passed as the schedule's
+    event filter, it also narrows the Linux inotify mask, so reads (open and
+    close-without-write, for every directory and file) no longer reach this
+    process. DirModifiedEvent keeps IN_CLOSE_WRITE in that mask.
+    """
+    from watchdog import events
+
+    return [
+        events.FileCreatedEvent,
+        events.DirCreatedEvent,
+        events.FileModifiedEvent,
+        events.DirModifiedEvent,
+        events.FileDeletedEvent,
+        events.DirDeletedEvent,
+        events.FileMovedEvent,
+        events.DirMovedEvent,
+    ]
+
+
 def _graph_incompleteness_fields(vault_root: Path) -> str:
     """The state that explains an unclassified fan-out incompleteness.
 
@@ -2420,7 +2443,12 @@ class FileWatcher:
             # Watch the whole vault: freshness (vault scope) and inbound links
             # index sibling folders too. The embed dispatch in _flush stays
             # KB-filtered, so only Knowledge Base/ markdown is re-embedded.
-            self._observer.schedule(_Handler(), str(self._vault_root), recursive=True)
+            self._observer.schedule(
+                _Handler(),
+                str(self._vault_root),
+                recursive=True,
+                event_filter=_consumed_event_types(),
+            )
             self._observer.start()
         except Exception as e:  # noqa: BLE001 — watcher must never break the server
             log.warning("file watcher: observer failed to start (%s); live re-embed disabled", e)
