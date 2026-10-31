@@ -1024,9 +1024,59 @@ def test_an_apply_call_reads_the_sources_tree_once_however_many_chunks_it_commit
     )
 
     assert applied["phase"] == "applied"
-    assert walks == {"index": 1, "counts": 1}
+    assert walks == {"index": 0, "counts": 1}
     sources_index = (vault / SOURCES / "index.md").read_text(encoding="utf-8")
     assert "copied legacy-vault material with provenance (5)" in sources_index
+
+
+def test_a_continuing_apply_call_does_not_open_the_sources_an_earlier_run_filed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tiny_budget: None
+) -> None:
+    """Opening every Source page on each call made a late call of a long import file one chunk."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)
+    files = {f"Old/old-{n}.md": f"# Old {n}\n\ntext {n}\n" for n in range(4)}
+    files.update({f"New/new-{n}.md": f"# New {n}\n\ntext {n}\n" for n in range(3)})
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Old", include=["Old"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    run_id, planned = _import(vault, path="New", include=["New"])
+    own_pages = {item["target_path"] for item in planned["plan"]["items"]}
+    opened: list[str] = []
+    real_entry = adoption_plan.read_import_entry
+
+    def recording_entry(root: Path, page: Path):
+        opened.append(page.relative_to(root).as_posix())
+        return real_entry(root, page)
+
+    monkeypatch.setattr(adoption_plan, "read_import_entry", recording_entry)
+
+    applied, calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert (applied["phase"], calls) == ("applied", 3)
+    assert set(opened) <= own_pages
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 7
+
+
+def test_an_apply_finds_a_source_another_run_filed_since_the_plan_and_files_no_duplicate(
+    tmp_path: Path
+) -> None:
+    """A plan made before another run filed the same files must not file them again."""
+    vault = _vault(tmp_path, {"Coll/a.md": "# A\n\none\n", "Coll/b.md": "# B\n\ntwo\n"})
+    stale_run, stale = _import(vault, path="Coll", include=["Coll"])
+    later = TODAY + dt.timedelta(days=1)  # another day, so its Sources are named differently
+    other_run = adoption_run.start(vault, path="Coll", today=later)["run_id"]
+    adoption_run.select(vault, run_id=other_run, include=["Coll"])
+    other = adoption_run.plan(vault, run_id=other_run, today=later)
+    adoption_run.apply(vault, run_id=other_run, plan_id=other["plan"]["plan_id"], today=later)
+    filed = sorted(p.name for p in (vault / SOURCES / "Imported").glob("*.md"))
+
+    applied = adoption_run.apply(
+        vault, run_id=stale_run, plan_id=stale["plan"]["plan_id"], today=TODAY
+    )
+
+    assert {o["status"] for o in applied["outcomes"].values()} == {"already-applied"}
+    assert sorted(p.name for p in (vault / SOURCES / "Imported").glob("*.md")) == filed
+    assert len(filed) == 2
 
 
 def test_a_call_leaves_a_byte_heavy_artifact_to_the_next_call_when_it_does_not_fit_in_the_time_left(

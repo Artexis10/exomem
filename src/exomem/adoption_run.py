@@ -784,7 +784,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE, "sources_seal"})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _present(root: Path, run: dict, **extra) -> dict:
@@ -1453,8 +1453,12 @@ def plan(
                 "items": [],
                 "skipped": [],
                 "next": 0,
+                # Listed before the first index read below, so a page filed in between breaks the
+                # seal at apply instead of hiding from the plan.
+                "sources_seal": adoption_plan.sources_seal(adoption_plan.source_page_paths(root)),
             }
             run["plan"] = None
+            run["sources_seal"] = None
             run["phase"] = "selecting"
 
         collection = run.get("collection") or {"label": None, "root": ""}
@@ -1545,6 +1549,7 @@ def plan(
             },
         }
         run["plan_draft"] = None
+        run["sources_seal"] = draft.get("sources_seal")
         run["phase"] = "planned"
         reply = {"progress": progress}
         if entry is not None:
@@ -1808,17 +1813,53 @@ def _request_extraction(root: Path, planned: dict, budget: request_budget.Reques
 class _CallReads:
     """What one `apply` call reads from the vault once and keeps current across its chunks.
 
-    Walking every Source for each chunk made a re-run cost grow with the whole vault.
+    Walking every Source for each chunk made a re-run cost grow with the whole vault,
+    and walking every Source for each call made a long run's calls slower as it filed.
     Each starts empty and fills on first use; a batch that raised drops the Source
     reads, because what it left on disk is then unknown. A batch writes no note, so
     the note index stays.
+
+    The Source index is read in full only where the run's own state cannot answer. The plan
+    seals the Source pages it saw (`run["sources_seal"]`) and every call that files extends the
+    seal by its own pages. While the pages listed now carry that seal, nothing else has been
+    filed since the plan: an earlier import of a pending original is then only the Source
+    the plan froze for it, or one this run wrote, and both sit at the item's `target_path`.
     """
 
     index: list[adoption_plan.EarlierImport] | None = None
+    #: Source pages under the seal: the listing at the call's start, then the pages the call filed.
+    pages: list[str] | None = None
+    sealed: bool = False
     source_counts: dict[str, int] | None = None
     notes: adoption_plan.NoteIndex | None = None
     stage: import_stage.Stage | None = None
     stage_read: bool = False
+
+    def open_sources(self, root: Path, run: dict) -> None:
+        """List the Sources once, and read them in full only when the run's seal no longer holds."""
+        if self.pages is not None:
+            return
+        self.pages = adoption_plan.source_page_paths(root)
+        seal = run.get("sources_seal")
+        self.sealed = seal is not None and adoption_plan.sources_seal(self.pages) == seal
+        if not self.sealed and self.index is None:
+            # No seal (a plan made before the seal existed), or a Source was filed or removed by
+            # someone else since the plan or the run's last call: only the walk can answer.
+            self.index = adoption_plan.read_import_index(root)
+
+    def earlier_imports(self, root: Path, run: dict, planned: dict) -> list[adoption_plan.EarlierImport]:
+        """The earlier imports that can decide this pending original: all of them, or its own page."""
+        self.open_sources(root, run)
+        if self.index is not None:
+            return self.index
+        entry = adoption_plan.read_import_entry(root, root / planned["target_path"])
+        return [] if entry is None else [entry]
+
+    def whole_index(self, root: Path, run: dict) -> list[adoption_plan.EarlierImport]:
+        """Every earlier import, walked now: for a batch that raised, which left unknown pages."""
+        self.open_sources(root, run)
+        self.index = adoption_plan.read_import_index(root)
+        return self.index
 
     def recorded_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
         """The run's stage manifest, read once per call: a manifest can list a million files."""
@@ -1849,11 +1890,12 @@ def _commit_chunk(
         )
     except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
         reads.source_counts = None
-        reads.index = adoption_plan.read_import_index(root)
+        # The pages the batch left are unknown, so only the walk can say which items landed.
+        index = reads.whole_index(root, run)
         landed: list[dict] = []
         unlanded: list[tuple[dict, adopt_module.ImportItem]] = []
         for planned, item in survivors:
-            earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
+            earlier = _earlier_with_same_bytes(root, index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path),
@@ -1903,9 +1945,6 @@ def _apply_chunk(
     plan = run["plan"]
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
-    if reads.index is None:
-        reads.index = adoption_plan.read_import_index(root)
-    index = reads.index
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
@@ -1932,6 +1971,7 @@ def _apply_chunk(
             texts[path] = text
         if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
             continue  # an earlier call wrote its Source; only the note is owed
+        index = reads.earlier_imports(root, run, planned)
         if planned["action"] == "already-imported":
             frozen = [entry for entry in index if entry.path == planned["target_path"]]
             if _earlier_with_same_bytes(root, frozen, label, planned) is None:
@@ -1976,9 +2016,11 @@ def _apply_chunk(
         )
         for planned in landed:
             if _source_status(outcomes[planned["original_path"]]) == "applied":
-                reads.index.append(
-                    adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
-                )
+                reads.pages.append(planned["target_path"])
+                if reads.index is not None:
+                    reads.index.append(
+                        adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
+                    )
     landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
         outcome = outcomes[planned["original_path"]]
@@ -2234,9 +2276,9 @@ def _filed_and_gone(
         or adoption_consume.entry_of(stage, planned["original_path"]) is None
     ):
         return None
-    if reads.index is None:
-        reads.index = adoption_plan.read_import_index(root)
-    return _earlier_with_same_bytes(root, reads.index, (run.get("collection") or {}).get("label"), planned)
+    return _earlier_with_same_bytes(
+        root, reads.earlier_imports(root, run, planned), (run.get("collection") or {}).get("label"), planned
+    )
 
 
 def _settle_staged(
@@ -2390,6 +2432,8 @@ def apply(
             # refuses below with nothing written, as before.
             run["phase"] = "applying"
             run["inflight"] = True
+            # Read once here, before the first chunk's timer, so the pacer does not price it into items.
+            reads.open_sources(root, run)
 
         pacer = _ApplyPacer(root, budget)
         stopped = False
@@ -2468,6 +2512,8 @@ def apply(
             reply["continuation"] = _issue_cursor(run, "apply")
         if entry is not None:
             entry["state"], entry["reply"] = "used", reply
+        if reads.sealed:
+            run["sources_seal"] = adoption_plan.sources_seal(reads.pages)
         store.save(run)
     return _present(root, run, **reply)
 
