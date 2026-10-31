@@ -4439,6 +4439,7 @@ class _StoreAttempt:
     holds_ticket: bool
     resubmission: bool
     deadline: float
+    received: bool = False
     preparation_retry_wanted: bool = False
     handed_off: OpError | None = None
     deferred_refusal: Callable[[], None] | None = None
@@ -5443,6 +5444,8 @@ class LeaseManager:
                 command=command.name,
                 receipt=receipt or "none",
             )
+        if store_attempt is not None:
+            store_attempt.received = True
         from . import readiness
 
         # The graph handoff joins this gate for the reason the corpus is on it:
@@ -6757,7 +6760,7 @@ class LeaseManager:
         wait = _ContentionWait(
             self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
         )
-        routing = submitted = False
+        routing = received = False
         current: _StoreAttempt | None = None
         refusal_journal: list[Callable[[], None]] = []
 
@@ -6774,10 +6777,10 @@ class LeaseManager:
             return func(command, *injected, **call_kwargs)
 
         def attempt() -> Any:
-            nonlocal routing, submitted, current
+            nonlocal routing, received, current
             current = _StoreAttempt(
                 holds_ticket=wait.ticket is not None,
-                resubmission=submitted,
+                resubmission=received,
                 deadline=wait.deadline,
             )
             routing = True
@@ -6789,7 +6792,6 @@ class LeaseManager:
             else:
                 server = routed
             routing = False
-            submitted = True
             token = _ACTIVE_STORE_ATTEMPT.set(current)
             try:
                 if server is None:
@@ -6797,14 +6799,15 @@ class LeaseManager:
                 return server.call(run, wake_maintenance=True, read_only=False, extend=extend)
             finally:
                 _ACTIVE_STORE_ATTEMPT.reset(token)
+                received = received or current.received
 
         def absorbable(error: OpError) -> bool:
             if routing:
                 return error.code == "MUTATION_BUSY"
             if current is None or error is not current.handed_off:
                 return False
-            if current.deferred_refusal is not None:
-                refusal_journal[:] = [current.deferred_refusal]
+            # The journal row, if any, of the refusal the caller would see now.
+            refusal_journal[:] = [] if current.deferred_refusal is None else [current.deferred_refusal]
             return True
 
         def journal_refusal(_error: OpError) -> None:
@@ -6984,9 +6987,10 @@ class LeaseManager:
 
                 error = store_connection.busy("collection store handoff is in progress")
                 attempt = _ACTIVE_STORE_ATTEMPT.get()
-                if attempt is not None and not self._stop.is_set():
-                    # A request's checkout is refused before its work runs, so its thread may submit
-                    # it again; a checkout inside the work sees no attempt (`_run_store_attempt`).
+                if attempt is not None and not (self._stop.is_set() or self._store_closed):
+                    # A handoff refuses only a thread that is not already a store borrower, and the
+                    # store thread borrows for the whole request once `_serve` checks out. So a
+                    # refusal that sees an attempt came before the request's work ran.
                     attempt.handed_off = error
                 raise error
             self._store_bound = True
