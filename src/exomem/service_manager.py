@@ -16,6 +16,7 @@ import stat
 import tempfile
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -249,6 +250,17 @@ DEFAULT_STANDBY_WARM_SECONDS = 300.0
 COLD_START_ENV = "EXOMEM_COLD_START_SECONDS"
 DEFAULT_COLD_START_SECONDS = 300.0
 COLD_START_FLOOR_SECONDS = 120.0
+#: A serving worker that exits on its own is restarted in place at most this
+#: many times in any window of this length. One more exit inside the window
+#: stops the supervisor instead, so the unit's cgroup cleanup and Restart= take
+#: over, as they did for every crash before in-place restarts. Each restart
+#: counted here reached readiness, so a window holds at most a few warm cycles;
+#: the crashes that motivated this came about six minutes apart, two to a window.
+RESTART_LIMIT = 3
+RESTART_WINDOW_SECONDS = 600.0
+#: How long a stopped worker's tree gets to show that every process exited,
+#: in a handoff and after a crash alike.
+STOP_ALLOWANCE_SECONDS = 10.0
 
 
 def standby_warm_budget() -> float:
@@ -385,6 +397,9 @@ class Supervisor:
         standby_warm_timeout: float | None = None,
         cold_start_timeout: float | None = None,
         cold_start_floor: float | None = None,
+        restart_limit: int = RESTART_LIMIT,
+        restart_window: float = RESTART_WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.records = ReleaseRecords(directory)
         self.initial_target = initial_target
@@ -411,6 +426,14 @@ class Supervisor:
         self.last_transition: dict[str, Any] | None = None
         #: The loopback listener's port once it serves; None while it is closed.
         self.local_port: int | None = None
+        self.restart_limit = restart_limit
+        self.restart_window = restart_window
+        self.clock = clock
+        #: When each in-place restart began, oldest first, inside the window.
+        self._restarts: deque[float] = deque()
+        #: The exit status of the last serving worker that exited on its own;
+        #: None until one has.
+        self.last_exit_code: int | None = None
 
     def _replacement_budget(self) -> float:
         """How long a replacement may take to report ready with nothing serving."""
@@ -447,7 +470,70 @@ class Supervisor:
             "local_port": self.local_port,
             "transition": self.transition_id,
             "last_transition": self.last_transition,
+            "worker_restarts": {
+                "in_window": len(self._recent_restarts()),
+                "limit": self.restart_limit,
+                "window_seconds": self.restart_window,
+                "last_exit_code": self.last_exit_code,
+            },
         }
+
+    def _recent_restarts(self) -> deque[float]:
+        now = self.clock()
+        while self._restarts and now - self._restarts[0] >= self.restart_window:
+            self._restarts.popleft()
+        return self._restarts
+
+    async def restart_worker(self) -> str | None:
+        """Replace a worker that exited on its own while both listeners stay up.
+
+        Ingress holds new calls under its admission budget meanwhile, as it does
+        during a handoff. Returns None once a replacement serves, or when a
+        transition that held the lock already dealt with the exit. Otherwise it
+        returns why the supervisor has to stop instead: the restart budget is
+        spent, the exited worker's descendants were not proven gone, or the
+        replacement did not report ready. Stopping hands the unit's cgroup to
+        systemd, whose cleanup and restart do not depend on this process.
+        """
+        async with self.lock:
+            # The exit was seen before the lock. A transition holding it may
+            # have replaced the worker or failed into recovery meanwhile, and
+            # neither outcome is this restart's to overwrite.
+            if self.phase != "ready" or self.runtime.pid:
+                return None
+            self.last_exit_code = getattr(self.runtime, "returncode", None)
+            restarts = self._recent_restarts()
+            if len(restarts) >= self.restart_limit:
+                self.phase = "unavailable"
+                return (
+                    f"the worker exited {len(restarts) + 1} times in "
+                    f"{self.restart_window:g} seconds"
+                )
+            restarts.append(self.clock())
+            self.phase = "restarting"
+            self.ingress.pause()
+            log.warning(
+                "managed worker exited with status %s; restarting it in place (%d of %d)",
+                self.last_exit_code,
+                len(restarts),
+                self.restart_limit,
+            )
+            target = self.records.active() or self.initial_target
+            try:
+                # The same proof a handoff runs before its replacement starts:
+                # every descendant of the old worker has exited.
+                await self.runtime.stop(timeout=STOP_ALLOWANCE_SECONDS)
+            except Exception:  # noqa: BLE001 - an unproven exit is the unit's to clean
+                self.phase = "unavailable"
+                return "the exited worker's descendants were not proven stopped"
+            try:
+                client = await self.runtime.start(target, timeout=self._replacement_budget())
+            except Exception:  # noqa: BLE001 - one attempt; a full unit restart is the next
+                self.phase = "unavailable"
+                return "the restarted worker did not report ready"
+            self.ingress.resume(client)
+            self.phase = "ready"
+            return None
 
     def _environment_notes(self, handoff: dict[str, Any]) -> dict[str, Any]:
         """Carry an unreadable environment file into every handoff record.
@@ -647,7 +733,7 @@ class Supervisor:
                     # Resume always repeats the stop proof, including a timed-out
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
-                    await self.runtime.stop(timeout=deadline.remaining(10))
+                    await self.runtime.stop(timeout=deadline.remaining(STOP_ALLOWANCE_SECONDS))
                     stopped_at = time.monotonic()
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
@@ -1093,6 +1179,11 @@ class WorkerRuntime:
     def pid(self) -> int:
         return self.child.pid if self.child is not None and self.child.returncode is None else 0
 
+    @property
+    def returncode(self) -> int | None:
+        """The serving worker's exit status once it has exited, before its stop is proven."""
+        return self.child.returncode if self.child is not None else None
+
     def _note_replacement_waiting(self, response: Any) -> None:
         """Remember an unready replacement's own account of what it is doing.
 
@@ -1203,6 +1294,20 @@ class WorkerRuntime:
         if INGRESS_KEY_ENV not in inherited:
             return environment
         return {name: value for name, value in inherited.items() if name != INGRESS_KEY_ENV}
+
+    def _owned_child_environment(self, overlay: dict[str, str] | None) -> dict[str, str]:
+        """The environment of every child this manager owns: worker, standby and migrator.
+
+        A CUDA library can crash the process that initializes it, and the worker loads the models
+        that serve requests. The worker therefore sees no CUDA device; the disposable media child
+        gets the deployment's device list back from the media supervisor.
+        """
+        from . import cuda_containment
+
+        inherited = self._spawn_environment()
+        if overlay:
+            inherited = {**(os.environ if inherited is None else inherited), **overlay}
+        return cuda_containment.hide_from_worker(os.environ if inherited is None else inherited)
 
     @staticmethod
     def _parse_environment(text: str) -> dict[str, str]:
@@ -1340,9 +1445,7 @@ class WorkerRuntime:
                 raise RuntimeError("standby requires a live serving worker")
         elif _descendants(ignore_sessions=self._standby_session()):
             raise RuntimeError("previous owned process exit has not been proven")
-        inherited = self._spawn_environment()
-        if environment:
-            inherited = {**(os.environ if inherited is None else inherited), **environment}
+        inherited = self._owned_child_environment(environment)
         pending = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *command,
@@ -1962,12 +2065,25 @@ async def serve(
             )
         )
 
+        stopped_because: str | None = None
+
         async def monitor() -> None:
+            nonlocal stopped_because
             while True:
                 await asyncio.sleep(0.25)
                 if supervisor.phase == "ready" and not supervisor.runtime.pid:
-                    # A crash is not a managed handoff. Stop the supervisor so
+                    # A crash is not a managed handoff, but the listeners
+                    # outlive it: the worker is replaced in place. Only when
+                    # that cannot be done safely does the supervisor stop, so
                     # the unit cleans the whole cgroup and applies Restart=.
+                    try:
+                        stopped_because = await supervisor.restart_worker()
+                    except Exception as error:  # noqa: BLE001 - never keep serving a dead worker's queue
+                        # The type, not the text: error text can carry configuration.
+                        stopped_because = f"the worker could not be restarted ({type(error).__name__})"
+                    if stopped_because is None:
+                        continue
+                    log.error("managed service stopping: %s", stopped_because)
                     supervisor.ingress.unavailable()
                     server.should_exit = True
                     return
@@ -1999,7 +2115,15 @@ async def serve(
                     await discard(timeout=5)
                 except Exception:  # noqa: BLE001 - shutdown still has to stop the worker
                     pass
-            await supervisor.runtime.stop(timeout=5)
+            try:
+                await supervisor.runtime.stop(timeout=5)
+            except Exception:  # noqa: BLE001 - the unit's cgroup cleanup takes what is left
+                # A restart that gave up already names the reason worth reporting.
+                if stopped_because is None:
+                    raise
+        if stopped_because is not None:
+            # A failed exit status, so the journal and a Restart=on-failure unit see it.
+            raise RuntimeError(stopped_because)
 
 
 def main(argv: list[str] | None = None) -> int:

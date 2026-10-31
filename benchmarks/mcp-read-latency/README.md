@@ -51,6 +51,7 @@ complete, partial or missing. These diagnostics cover completed calls and do not
 
 Run it with `uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py ...`.
 The runner needs `gh` and a tag-bearing clone to pin the release.
+CI runs it nightly in `.github/workflows/mcp-read-latency.yml`; dispatch that workflow to measure a branch.
 
 A reduced run keeps `--max-cases N` cases per group and, with `--notes-pages N`, a corpus of N pages
 with embeddings off. A reduced run states `reduced: true` and its verdict is `reduced`, never `passed`.

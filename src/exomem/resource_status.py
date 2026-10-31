@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import mode
+from . import cuda_containment, mode
 
 
 def _mode_source() -> str:
@@ -228,7 +228,8 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
     }
 
 
-def _min_free_vram_mb() -> int:
+def min_free_vram_mb() -> int:
+    """The free VRAM, in MiB, below which a GPU counts as busy. Doctor and ASR admission share this one knob."""
     try:
         gb = float(os.environ.get("EXOMEM_GPU_MIN_FREE_GB") or "2.0")
     except ValueError:
@@ -243,7 +244,8 @@ def _min_free_vram_mb() -> int:
 _EXTRA_NVIDIA_SMI_PATHS = ("/usr/lib/wsl/lib/nvidia-smi",)
 
 
-def _find_nvidia_smi() -> str | None:
+def find_nvidia_smi() -> str | None:
+    """The one lookup of nvidia-smi, shared with `asr_runtime`: PATH, then the WSL driver location."""
     exe = shutil.which("nvidia-smi")
     if exe:
         return exe
@@ -251,7 +253,7 @@ def _find_nvidia_smi() -> str | None:
 
 
 def _probe_nvidia_smi() -> dict[str, Any]:
-    exe = _find_nvidia_smi()
+    exe = find_nvidia_smi()
     if not exe:
         return {"status": "unavailable", "reason": "nvidia-smi not found"}
     try:
@@ -292,15 +294,16 @@ def _probe_nvidia_smi() -> dict[str, Any]:
 
 def gpu_headroom() -> dict[str, Any]:
     """Non-torch GPU headroom posture for doctor/setup messaging."""
-    if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+    # The serving worker hides its devices; the deployment's own list is what the media child sees.
+    if cuda_containment.deployment_devices() == "":
         return {
             "status": "disabled",
             "usable": False,
             "reason": "CUDA_VISIBLE_DEVICES is empty",
-            "min_free_mb": _min_free_vram_mb(),
+            "min_free_mb": min_free_vram_mb(),
         }
     probe = _probe_nvidia_smi()
-    min_free = _min_free_vram_mb()
+    min_free = min_free_vram_mb()
     if probe.get("status") != "ok":
         return {
             "status": "unknown",

@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import yaml
+from cellctl.storage_config import LocalStorage
 
 from . import images, tls
 from .infra import BACKUP_BUCKET, K3S_POD_CIDR, K3S_SERVICE_CIDR, S3_PORT, Stack, docker_labels
@@ -52,6 +53,10 @@ TRUSTED_INGRESS_HEADER = "x-exomem-ingress-source"
 # These workload identities and the snapshot API are fixed by the platform chart.
 LOCAL_STORAGE_CONTROLLERS = ("exomem-platform-topolvm-controller", "snapshot-controller")
 SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
+# The chart's `cloudGateway.transferTools.enabled`, which serves `observe_transfer` and `transfer_memory` from the
+# gateway. The rehearsal leaves it off, as the chart does. The large-import run reads this to decide whether a
+# `CLOUD_GATEWAY_REQUIRED` refusal of those tools is expected or a failure.
+TRANSFER_TOOLS_ENABLED = False
 
 
 @dataclass
@@ -65,7 +70,13 @@ class PlatformConfig:
     trusted_ingress_source_value: str
     attachments_limit_fallback: int = 20
     local_storage_coexistence: bool = False
+    # Selects the local domain (design D1): new cells run on TopoLVM, their volume capped at this size.
+    local_storage_cell_gib: int | None = None
     operator_restore_abort: bool = False
+
+    @property
+    def renders_local_storage(self) -> bool:
+        return self.local_storage_coexistence or self.local_storage_cell_gib is not None
 
 
 @dataclass
@@ -74,6 +85,8 @@ class Platform:
     hetzner_class: str
     overlays: list[str] = field(default_factory=list)
     storage_evidence: dict[str, Any] = field(default_factory=dict)
+    # The StorageClass a new cell's claim names: the Hetzner class unless the local domain is selected.
+    cell_class: str = ""
 
 
 def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[str, Any]:
@@ -115,11 +128,16 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
             "trustedIngressSourceHeader": TRUSTED_INGRESS_HEADER,
             "trustedIngressSourceValue": config.trusted_ingress_source_value,
             "databaseEgressCidrs": [pg_cidr],
+            "transferTools": {"enabled": TRANSFER_TOOLS_ENABLED},
         },
         "cloudIngress": {"enabled": False},
         "cert-manager": {"enabled": False},
-        # Both P3 configurations keep existing cells on the Hetzner domain.
-        "cellStorage": {"domain": "hetzner", "local": {"enabled": config.local_storage_coexistence}},
+        # The P3 configurations keep cells on the Hetzner domain; the large-import mode selects the local one.
+        "cellStorage": (
+            {"domain": "local", "local": {"enabled": True, "maxCellGib": config.local_storage_cell_gib}}
+            if config.local_storage_cell_gib is not None
+            else {"domain": "hetzner", "local": {"enabled": config.local_storage_coexistence}}
+        ),
     }
     show_only = (
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
@@ -129,14 +147,14 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
         show_only += ("templates/operator-access.yaml",)
     rendered = render_chart(
         stack, values,
-        show_only=() if config.local_storage_coexistence else show_only,
-        dependencies=config.local_storage_coexistence,
-        api_versions=(SNAPSHOT_CLASS_API,) if config.local_storage_coexistence else (),
+        show_only=() if config.renders_local_storage else show_only,
+        dependencies=config.renders_local_storage,
+        api_versions=(SNAPSHOT_CLASS_API,) if config.renders_local_storage else (),
     )
     documents = [
         doc for source, doc in rendered
         if (source in show_only
-            or (config.local_storage_coexistence
+            or (config.renders_local_storage
                 and (source == "templates/cell-local-storage.yaml" or source.startswith("charts/topolvm/"))))
         and (source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE)
         # The opt-in runner mints the shipped break-glass identity. Applying
@@ -145,7 +163,7 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
              or (doc["kind"] == "ClusterRoleBinding" and doc["metadata"]["name"] == "exomem-break-glass"))
     ]
     hetzner = next(doc for source, doc in rendered if source == "templates/cloud-storage-class.yaml")
-    return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"])
+    return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"], cell_class=hetzner["metadata"]["name"])
 
 
 def render_chart(
@@ -299,14 +317,22 @@ def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, di
     _kubectl_apply(stack, cellctl_secret_documents(stack, cellctl_secrets))
     _apply_ingress(stack, pki, ingress_source_value, ingress_image)
     _kubectl_apply(stack, workloads)
-    if config.local_storage_coexistence:
+    if config.renders_local_storage:
         for deployment in LOCAL_STORAGE_CONTROLLERS:
             wait_rollout(stack, PLATFORM_NAMESPACE, deployment, timeout=420)
         observed = json.loads(stack.k3s.kubectl("get", "deployment", "cellctl", "-n", CLOUD_NAMESPACE, "-o", "json").stdout)
         env = observed["spec"]["template"]["spec"]["containers"][0]["env"]
         storage_config = json.loads(next(entry["value"] for entry in env if entry["name"] == "CELLCTL_CELL_STORAGE"))
-        if storage_config["domain"] != platform.hetzner_class or not storage_config.get("local"):
-            raise RuntimeError("coexistence requires local storage enabled with the Hetzner domain selected")
+        local_cells = config.local_storage_cell_gib is not None
+        domain_class = storage_config.get("local", {}).get("class_name") if local_cells else platform.hetzner_class
+        if storage_config["domain"] != domain_class or not storage_config.get("local"):
+            raise RuntimeError(
+                "local storage cells require local storage enabled with the local domain selected" if local_cells
+                else "coexistence requires local storage enabled with the Hetzner domain selected"
+            )
+        if local_cells and storage_config.get("max_cell_gib") != config.local_storage_cell_gib:
+            raise RuntimeError(f"cellctl's cell volume cap is {storage_config.get('max_cell_gib')}, not {config.local_storage_cell_gib}")
+        platform.cell_class = storage_config["domain"]
         logical = json.loads(stack.k3s.kubectl("get", "logicalvolumes.topolvm.io", "-o", "json").stdout)
         daemonsets = json.loads(stack.k3s.kubectl("get", "daemonsets", "-n", PLATFORM_NAMESPACE, "-o", "json").stdout)
         platform.storage_evidence = {
@@ -320,10 +346,34 @@ def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, di
             "node_daemonsets": {
                 doc["metadata"]["name"]: doc["status"] for doc in daemonsets["items"]
             },
-            "boundary": "no storage-labelled agent or local pool; Hetzner CSI and object storage retain their P3 doubles",
+            "boundary": (
+                "the node is labelled and holds the pool after this returns; object storage retains its P3 double"
+                if local_cells else
+                "no storage-labelled agent or local pool; Hetzner CSI and object storage retain their P3 doubles"
+            ),
         }
         platform.overlays.append(f"rendered with --api-versions {SNAPSHOT_CLASS_API}, as the existing local-storage drill")
     return platform
+
+
+def label_storage_node(stack: Stack, platform: Platform, *, timeout: float = 300) -> str:
+    """Label the one node that holds the `cells` volume group, as the k3s role does when
+    such a node joins (a kubelet cannot set this label on itself), and wait for TopoLVM
+    to publish its capacity. Returns the node's name."""
+
+    lvmd = next(doc for doc in platform.rendered
+                if doc["kind"] == "DaemonSet" and doc["metadata"]["name"].endswith("-lvmd-0"))
+    [(key, value)] = lvmd["spec"]["template"]["spec"]["nodeSelector"].items()
+    node = stack.k3s.kubectl("get", "nodes", "--output=jsonpath={.items[0].metadata.name}").stdout.strip()
+    stack.k3s.kubectl("label", "node", node, f"{key}={value}", "--overwrite")
+    annotation = LocalStorage().capacity_annotation
+
+    def published() -> bool:
+        item = json.loads(stack.k3s.kubectl("get", "node", node, "--output=json").stdout)
+        return annotation in (item["metadata"].get("annotations") or {})
+
+    wait_for(published, timeout=timeout, interval=3, description=f"TopoLVM to publish {node}'s capacity")
+    return node
 
 
 def overlay_cellctl(documents: list[dict[str, Any]]) -> str:

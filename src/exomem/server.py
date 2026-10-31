@@ -1291,7 +1291,12 @@ def run(
     standby: bool = False,
 ) -> None:
     """CLI entry: configure logging, build the server, run it."""
-    from . import service_standby
+    from . import cuda_containment, service_standby
+
+    # First, before any model can initialize CUDA: a CUDA library can crash the process that loads it, and
+    # this process serves requests. The service manager hides the devices of the workers it starts; this
+    # covers a foreground or stdio serve too. The media child gets the deployment's list back.
+    cuda_containment.hide_in_process()
     from .collection_store import connection
 
     # Serving threads import store modules lazily; load their libraries before any thread starts.
@@ -1331,10 +1336,14 @@ def run(
         # A managed worker binds privately, but its authentication decision
         # above must still use the public bind intent. UDS is not permission
         # to turn a remote endpoint into unauthenticated local MCP.
-        worker_options = (
-            {"uvicorn_config": {"uds": str(worker_socket)}}
-            if worker_socket is not None else {}
-        )
+        # Every request starts from an empty context: uvicorn otherwise runs a
+        # request in whatever context the connection's reader last kept, which
+        # can be an earlier request's (CPython issue 140947). No Exomem lifespan
+        # sets a context variable, and FastMCP sets its own again per request.
+        uvicorn_config: dict[str, object] = {"reset_contextvars": True}
+        if worker_socket is not None:
+            uvicorn_config["uds"] = str(worker_socket)
+        worker_options = {"uvicorn_config": uvicorn_config}
         mcp.run(
             transport=transport,
             host=host,

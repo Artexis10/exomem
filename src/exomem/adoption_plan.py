@@ -38,6 +38,8 @@ from .vault import (
 )
 
 IMPORTED_FOLDER = source_taxonomy.IMPORTED_PATH_LABEL
+# The code of a file above `client_artifacts.adoption_ceiling()`, on an inventory row, a skipped item and the residual.
+OVER_CEILING = "OVER_ADOPTION_CEILING"
 # A text file past this size plans as an artifact: its bytes are kept, but the
 # page never holds them in memory. A resource bound, not a vocabulary.
 INLINE_TEXT_MAX_BYTES = 4 * 1024 * 1024
@@ -49,6 +51,8 @@ _MARKDOWN_SUFFIXES = (".md", ".markdown")
 ACCEPTED_STATUSES = frozenset({"builtin", "alias", "registered"})  # nosemgrep: ep-word-set -- `Resolution.status` values that source_taxonomy._resolve assigns.
 _UNRESOLVED_NOT_FOUND = "not-found"
 _UNRESOLVED_AMBIGUOUS = "ambiguous"
+# The one file of that name is in the scan but no import holds it yet: it belongs to a later page.
+_UNRESOLVED_LATER_PAGE = "later-page"
 
 
 def nfc(value: str) -> str:
@@ -460,13 +464,14 @@ def source_failure(error: Exception) -> dict[str, str]:
 
 
 def read_facts(
-    root: Path, original_path: str, *, ceiling: int, text_hint: bool
+    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Hash one original and decide how it imports.
 
     Returns ``(facts, text)`` (``text`` is None for an artifact) or a refusal dict
     ``{"code", "reason"}``. A text-like file that is not valid UTF-8, or is too big
-    to hold, imports as an artifact so its bytes survive.
+    to hold, imports as an artifact so its bytes survive. With ``hash_artifact`` false an
+    artifact is only sized and its ``original_sha256`` is None, for a caller whose copy hashes it.
     """
     from .add import AddError, artifact_identity
 
@@ -477,15 +482,17 @@ def read_facts(
         with open_original(root, original_path, physical=True) as source:
             size = source.version.size
             if size > ceiling:
-                return {"code": "TOO_LARGE", "reason": f"original exceeds the {ceiling:,} byte artifact ceiling"}
+                return {"code": OVER_CEILING, "reason": f"original exceeds the {ceiling:,} byte adoption ceiling"}
             if text_hint and size <= INLINE_TEXT_MAX_BYTES:
                 data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
                 if len(data) != size:
                     return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
                 text = decode_text(data)
                 digest, length = hashlib.sha256(data).hexdigest(), len(data)
-            else:
+            elif hash_artifact:
                 digest, length = artifact_identity(source.stream, ceiling=ceiling)
+            else:
+                digest, length = None, size
     except AddError as error:
         return {"code": error.code, "reason": error.reason}
     except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
@@ -692,6 +699,13 @@ def note_frontmatter(item: Mapping[str, Any], collection: str | None) -> dict[st
 # --------------------------------------------------------------------------- #
 # one item
 # --------------------------------------------------------------------------- #
+def collection_path_of(original_path: str, collection_root: str) -> str:
+    """The path an original has inside its collection: the vault path without the collection root."""
+    prefix = f"{collection_root}/" if collection_root else ""
+    relative = original_path[len(prefix) :] if prefix and original_path.startswith(prefix) else original_path
+    return nfc(relative)
+
+
 def plan_item(
     root: Path,
     original_path: str,
@@ -712,11 +726,9 @@ def plan_item(
     if isinstance(read, dict):
         return {"path": original_path, **read}
     facts, text = read
-    prefix = f"{collection_root}/" if collection_root else ""
-    relative = original_path[len(prefix) :] if prefix and original_path.startswith(prefix) else original_path
     item: dict[str, Any] = {
         **facts,
-        "collection_path": nfc(relative),
+        "collection_path": collection_path_of(original_path, collection_root),
         "action": "copy-as-source",
         "classification": dict(classification) if classification else None,
     }
@@ -832,23 +844,35 @@ class LinkResolver:
     Order: the exact collection path, the path relative to the note, a unique
     basename for a bare name, then a unique front-matter alias. A step that finds
     more than one candidate leaves the link unresolved; nothing is guessed.
+
+    A paged collection passes ``whole_scan``, the collection path of every file the scan holds. A name
+    is then unique only when no other file of the scan has it, and the alias step is skipped, because
+    the aliases of later pages are not known yet. A target that no import holds yet stays unresolved.
     """
 
-    def __init__(self, entries: Iterable[Mapping[str, Any]]) -> None:
+    def __init__(
+        self, entries: Iterable[Mapping[str, Any]], *, whole_scan: Iterable[str] | None = None
+    ) -> None:
         self._by_path: dict[str, set[str]] = {}
         self._by_name: dict[str, set[str]] = {}
         self._by_alias: dict[str, set[str]] = {}
+        self._paged = whole_scan is not None
         self.pages: dict[str, dict[str, Any]] = {}
         for entry in entries:
             cp = entry["collection_path"]
             self.pages[cp] = dict(entry)
-            name = posixpath.basename(cp)
-            for variant in {cp, _strip_markdown_suffix(cp)}:
-                self._by_path.setdefault(_key(variant), set()).add(cp)
-            for variant in {name, _strip_markdown_suffix(name)}:
-                self._by_name.setdefault(_key(variant), set()).add(cp)
+            self._add(cp)
             for alias in entry.get("aliases") or ():
                 self._by_alias.setdefault(_key(alias), set()).add(cp)
+        for cp in whole_scan or ():
+            self._add(nfc(cp))
+
+    def _add(self, cp: str) -> None:
+        name = posixpath.basename(cp)
+        for variant in {cp, _strip_markdown_suffix(cp)}:
+            self._by_path.setdefault(_key(variant), set()).add(cp)
+        for variant in {name, _strip_markdown_suffix(name)}:
+            self._by_name.setdefault(_key(variant), set()).add(cp)
 
     def resolve(self, raw: str, note_path: str) -> tuple[str | None, str, str | None]:
         """``(collection_path, via, reason)``: a target, or None with why."""
@@ -864,10 +888,14 @@ class LinkResolver:
             steps.append(("note-relative", self._by_path.get(_key(relative), set())))
         if "/" not in target:
             steps.append(("basename", self._by_name.get(_key(target), set())))
-        steps.append(("alias", self._by_alias.get(_key(target), set())))
+        if not self._paged:
+            steps.append(("alias", self._by_alias.get(_key(target), set())))
         for via, candidates in steps:
             if len(candidates) == 1:
-                return next(iter(candidates)), via, None
+                found = next(iter(candidates))
+                if found not in self.pages:
+                    return None, via, _UNRESOLVED_LATER_PAGE
+                return found, via, None
             if len(candidates) > 1:
                 return None, via, _UNRESOLVED_AMBIGUOUS
         return None, "", _UNRESOLVED_NOT_FOUND
@@ -878,11 +906,13 @@ def resolve_links(
     index: Iterable[EarlierImport],
     *,
     collection: str | None,
+    whole_scan: Iterable[str] | None = None,
 ) -> None:
     """Fill every text item's ``links`` and drop its raw references.
 
     The namespace is the planned items plus the collection's earlier imports that
     this plan does not replace, each at its frozen or existing Source page.
+    ``whole_scan`` is given for a paged collection (see ``LinkResolver``).
     """
     entries: dict[str, dict[str, Any]] = {}
     if collection is not None:
@@ -899,7 +929,7 @@ def resolve_links(
             "target_path": item["target_path"],
             "aliases": item.get("aliases") or (),
         }
-    resolver = LinkResolver(entries.values())
+    resolver = LinkResolver(entries.values(), whole_scan=whole_scan)
     for item in items:
         resolved: list[dict[str, Any]] = []
         unresolved: list[dict[str, Any]] = []
@@ -989,8 +1019,10 @@ __all__ = [
     "EarlierImport",
     "LinkResolver",
     "NoteIndex",
+    "OVER_CEILING",
     "item_digest",
     "artifact_of",
+    "collection_path_of",
     "decode_text",
     "earlier_import_of",
     "earlier_with_same_bytes",

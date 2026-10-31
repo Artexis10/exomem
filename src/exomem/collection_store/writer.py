@@ -2316,7 +2316,7 @@ class CollectionWriter:
         reference = (
             resumed["held_id"]
             if resumed
-            else records._derive_held_id(manifest, candidate.get("item"))
+            else records._derive_held_id(manifest, candidate.get("item"), candidate)
         )
         path = f"{records._held_directory(manifest)}/{reference}.md"
         encoded = _json(records._encode_held_value(candidate))

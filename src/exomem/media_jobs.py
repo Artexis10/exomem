@@ -9,17 +9,19 @@ are authoritative until a durable sidecar reference replaces them; keep this dat
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import held_fs, media_brakes, reserved_paths
+from . import cloud_cell, held_fs, media_brakes, reserved_paths
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .vault import parse_frontmatter
@@ -36,6 +38,13 @@ STATUS_JOB_LIMIT = 100
 # Bump when _key's composition changes so existing stores re-key on next open.
 _JOB_KEY_VERSION = "2"
 DISCOVERY_CURSOR_KEY = "discovery_cursor"
+#: `meta` keys for the facts an operator needs while jobs look merely pending: speech work waits for a
+#: busy GPU, the media child runs without the GPU after a failed preflight, the serving worker hides
+#: CUDA from its torch models, and media children keep dying by a signal.
+GPU_WAIT_KEY = "gpu_wait"
+GPU_PREFLIGHT_KEY = "gpu_preflight"
+SERVING_CUDA_HIDDEN_KEY = "serving_worker_cuda_hidden"
+CHILD_CRASHES_KEY = "child_crashes"
 MAX_SHARING_ATTEMPTS = 3
 _SHARING_WINERRORS = frozenset({5, 32})
 _BATCH_WORKSPACE_RE = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$")
@@ -534,18 +543,31 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     return int(deleted + kept)
 
 
-def _next_pending_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+def _extraction_stage(media_types: Collection[str]) -> tuple[str, tuple[str, ...]]:
+    """SQL and parameters that select the extraction stage of these media types."""
+    return f"(do_ocr = 1 AND media_type IN ({','.join('?' * len(media_types))}))", tuple(media_types)
+
+
+def _next_pending_row(conn: sqlite3.Connection, skip_media_types: Collection[str] = ()) -> sqlite3.Row | None:
     """The job to claim next: the oldest fresh job, else the oldest resumed speech job.
 
     A resumed speech job has a progress row. It runs only when no fresh job waits, so a
     long recording that keeps advancing delays a new upload by at most one job timeout.
     Two indexed `LIMIT 1` queries keep the claim cheap on a long queue.
+
+    `skip_media_types` leaves out the extraction stage of those media types, so the caller can pass
+    over work whose engine cannot run now without holding back the jobs queued behind it.
     """
+    skip, params = "", ()
+    if skip_media_types:
+        clause, params = _extraction_stage(skip_media_types)
+        skip = f" AND NOT {clause}"
     return conn.execute(
         "SELECT * FROM jobs WHERE state = 'pending' AND NOT EXISTS "
-        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id) ORDER BY id LIMIT 1"
+        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)" + skip + " ORDER BY id LIMIT 1",
+        params,
     ).fetchone() or conn.execute(
-        "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
+        "SELECT * FROM jobs WHERE state = 'pending'" + skip + " ORDER BY id LIMIT 1", params
     ).fetchone()
 
 
@@ -1094,16 +1116,17 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def claim_next(self, admit: Any = None) -> MediaJob | None:
+    def claim_next(self, admit: Any = None, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
         """Claim the oldest pending job.
 
         `admit`, when given, sees that job before the claim and may refuse it, so a
         job the memory brakes do not admit stays pending and unclaimed.
+        `skip_media_types` passes over the extraction stage of those media types (see `_next_pending_row`).
         """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = _next_pending_row(conn)
+            row = _next_pending_row(conn, skip_media_types)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
@@ -1584,11 +1607,11 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def next_pending(self) -> MediaJob | None:
-        """The job `claim_next` would claim now, without claiming it."""
+    def next_pending(self, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
+        """The job `claim_next` would claim now with the same `skip_media_types`, without claiming it."""
         conn = self._connect(readonly=True)
         try:
-            row = _next_pending_row(conn)
+            row = _next_pending_row(conn, skip_media_types)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -1925,6 +1948,105 @@ class MediaJobStore:
                 )
         finally:
             conn.close()
+
+    def note_gpu_wait(self, reason: str) -> None:
+        """Record that speech work waits for a busy GPU; `since` keeps the start of an unbroken wait."""
+        now = time.time()
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute("SELECT value FROM meta WHERE key = ?", (GPU_WAIT_KEY,)).fetchone()
+                since = now
+                if row is not None:
+                    with contextlib.suppress(ValueError, KeyError, TypeError):
+                        since = float(json.loads(row[0])["since"])
+                self._set_meta_json(conn, GPU_WAIT_KEY, {"reason": reason, "since": since, "checked_at": now})
+        finally:
+            conn.close()
+
+    def clear_gpu_wait(self) -> None:
+        """End the record of a GPU wait; a no-op that writes nothing when none is recorded."""
+        self._clear_meta(GPU_WAIT_KEY)
+
+    def record_gpu_preflight(self, result: str, reason: str | None, *, serving_worker_cuda_hidden: bool) -> None:
+        """Record the preflight verdict ("passed", "failed" or "not tested", and why) and how CUDA is split.
+
+        The first launch of a media child records both. A supervisor that never launches one records neither,
+        so an idle serving process leaves the media store as it found it.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                self._set_meta_json(
+                    conn, GPU_PREFLIGHT_KEY, {"result": result, "reason": reason, "checked_at": time.time()}
+                )
+                self._set_meta_json(conn, SERVING_CUDA_HIDDEN_KEY, {"hidden": serving_worker_cuda_hidden})
+        finally:
+            conn.close()
+
+    def reset_runtime_status(self, *, serving_worker_cuda_hidden: bool) -> bool:
+        """Start of a worker lifetime: drop the last lifetime's verdict, crash count and orphaned wait.
+
+        It changes only what is stale, so an idle supervisor writes nothing. A recorded `hidden` fact that
+        no longer matches this process is corrected. Returns whether a GPU wait is still recorded for waiting jobs.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                self._set_meta_json(conn, GPU_PREFLIGHT_KEY, None)
+                self._set_meta_json(conn, CHILD_CRASHES_KEY, None)
+                if not _pending_speech_count(conn):
+                    self._set_meta_json(conn, GPU_WAIT_KEY, None)  # no waiting job is left to own the old wait
+                if _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY) is not None:
+                    self._set_meta_json(conn, SERVING_CUDA_HIDDEN_KEY, {"hidden": serving_worker_cuda_hidden})
+                return _read_meta_json(conn, GPU_WAIT_KEY) is not None
+        finally:
+            conn.close()
+
+    def record_child_crash(self, count: int, signal_name: str) -> None:
+        """Record that `count` media children in a row died by `signal_name`, and which job is next in the queue."""
+        conn = self._connect()
+        try:
+            with conn:
+                head = _next_pending_row(conn)
+                self._set_meta_json(
+                    conn,
+                    CHILD_CRASHES_KEY,
+                    {
+                        "count": count,
+                        "signal": signal_name,
+                        "head_job": None if head is None else str(head["binary_rel"]),
+                        "checked_at": time.time(),
+                    },
+                )
+        finally:
+            conn.close()
+
+    def clear_child_crashes(self) -> None:
+        self._clear_meta(CHILD_CRASHES_KEY)
+
+    def _clear_meta(self, key: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                self._set_meta_json(conn, key, None)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _set_meta_json(conn: sqlite3.Connection, key: str, value: dict[str, Any] | None) -> None:
+        """Write one fact, or delete it for `None`. An unchanged fact and an absent one write nothing."""
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        if value is None:
+            if row is not None:
+                conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+            return
+        text = json.dumps(value)
+        if row is None or row[0] != text:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, text),
+            )
 
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
         states = [RUNNING]
@@ -2426,7 +2548,7 @@ class MediaJobStore:
 
 def _read_status_rows(
     conn: sqlite3.Connection, *, binary_rel: str | None = None,
-) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
+) -> tuple[list[Any], Any, list[Any], list[Any], int, int, dict[str, Any]]:
     selector = " WHERE binary_rel = ?" if binary_rel is not None else ""
     parameters = (binary_rel,) if binary_rel is not None else ()
     # PRAGMA table_info rows are (cid, name, ...); read by position on any row factory.
@@ -2470,7 +2592,76 @@ def _read_status_rows(
             parameters,
         )
     )
-    return rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count
+    facts = _read_runtime_facts(conn, selector, parameters)
+    return rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts
+
+
+def _read_meta_json(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return None  # a store from before the table existed has recorded nothing
+    try:
+        value = json.loads(row[0]) if row is not None else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _utc(timestamp: object) -> str | None:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(timestamp)))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _pending_speech_count(conn: sqlite3.Connection, selector: str = "", parameters: tuple[object, ...] = ()) -> int:
+    """The pending jobs that a speech engine processes: the only jobs that can wait for the GPU."""
+    from . import media_engines
+
+    clause, kinds = _extraction_stage(media_engines.SPEECH_KINDS)
+    return int(
+        conn.execute(
+            f"SELECT count(*) FROM jobs{selector}" + (" AND " if selector else " WHERE ")
+            + f"state = 'pending' AND {clause}",
+            (*parameters, *kinds),
+        ).fetchone()[0]
+    )
+
+
+def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
+    """The facts of `status` that jobs do not show: a busy GPU, the preflight, hidden CUDA, repeated child deaths."""
+    wait = _read_meta_json(conn, GPU_WAIT_KEY)
+    waiting = 0 if wait is None else _pending_speech_count(conn, selector, parameters)
+    preflight = _read_meta_json(conn, GPU_PREFLIGHT_KEY)
+    hidden = _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY)
+    crashes = _read_meta_json(conn, CHILD_CRASHES_KEY)
+    return {
+        "waiting_count": waiting,
+        "wait": None
+        if wait is None or not waiting
+        else {
+            "reason": str(wait.get("reason", "")),
+            "since": _utc(wait.get("since")),
+            "checked_at": _utc(wait.get("checked_at")),
+        },
+        "preflight": None
+        if preflight is None
+        else {
+            "result": str(preflight.get("result", "")),
+            "reason": preflight.get("reason"),
+            "checked_at": _utc(preflight.get("checked_at")),
+        },
+        "serving_worker_cuda_hidden": None if hidden is None else bool(hidden.get("hidden")),
+        "child_crashes": None
+        if crashes is None
+        else {
+            "count": int(crashes.get("count", 0)),
+            "signal": str(crashes.get("signal", "")),
+            "head_job": crashes.get("head_job"),
+            "checked_at": _utc(crashes.get("checked_at")),
+        },
+    }
 
 
 def _sqlite_file_identity(path: Path) -> tuple[int, int, int, int]:
@@ -2491,7 +2682,7 @@ def _diagnostic_snapshot_rows(
     *,
     vault_root: Path,
     binary_rel: str | None = None,
-) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
+) -> tuple[list[Any], Any, list[Any], list[Any], int, int, dict[str, Any]]:
     target = Path(os.path.abspath(path))
     with reserved_paths._subsystem_authority_scope("media_jobs"):
         with reserved_paths._identity_coordination_scope(
@@ -2512,7 +2703,7 @@ def _diagnostic_snapshot_rows(
 
 def _diagnostic_snapshot_rows_retained(
     path: Path, *, binary_rel: str | None = None,
-) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
+) -> tuple[list[Any], Any, list[Any], list[Any], int, int, dict[str, Any]]:
     sidecars = _sqlite_sidecars(path)
     if _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database has live SQLite companions")
@@ -2555,6 +2746,11 @@ def status(
         "memory_blocked_count": 0,
         "over_budget_count": 0,
         "engine_waiting_count": 0,
+        "gpu_waiting_count": 0,
+        "gpu_wait": None,
+        "gpu_preflight": None,
+        "serving_worker_cuda_hidden": None,
+        "child_crashes": None,
         "jobs": [],
         "errors": [],
     }
@@ -2565,14 +2761,14 @@ def status(
         return empty
     try:
         if diagnostic_snapshot:
-            rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _diagnostic_snapshot_rows(
+            rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts = _diagnostic_snapshot_rows(
                 store_path, vault_root=Path(vault_root), binary_rel=path
             )
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)
             try:
-                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _read_status_rows(conn, binary_rel=path)
+                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts = _read_status_rows(conn, binary_rel=path)
             finally:
                 conn.close()
         counts = {state: 0 for state in STATES}
@@ -2601,6 +2797,12 @@ def status(
             "memory_blocked_count": reasons[MEMORY_BLOCKED],
             "over_budget_count": reasons[OVER_BUDGET],
             "engine_waiting_count": reasons[ENGINE_DISABLED],
+            # Speech jobs wait as pending while a busy GPU holds the memory; the count and the reason say so.
+            "gpu_waiting_count": facts["waiting_count"],
+            "gpu_wait": facts["wait"],
+            "gpu_preflight": facts["preflight"],
+            "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
+            "child_crashes": facts["child_crashes"],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
         }
@@ -2612,12 +2814,19 @@ def status(
 #: the per-reason counts are operator detail: a memory reason belongs on operator
 #: surfaces such as doctor, and a job row already shows waiting work as pending.
 TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
+#: Facts about the machine's GPU and media processes. On a personal install the caller owns the machine and
+#: a pending job gives no other sign of them, so the tool shows them. A Cloud cell's tenant does not own the
+#: node, so there they stay in doctor like the memory reasons (see the cloud-media runbook).
+MACHINE_STATUS_FIELDS = (
+    "gpu_waiting_count", "gpu_wait", "gpu_preflight", "serving_worker_cuda_hidden", "child_crashes",
+)
 
 
 def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str, Any]:
     """The `process_media status` view of `status`, without operator detail."""
     full = status(vault_root, path=path)
-    result = {field: full[field] for field in TOOL_STATUS_FIELDS}
+    fields = TOOL_STATUS_FIELDS if cloud_cell.cloud_mode_enabled() else TOOL_STATUS_FIELDS + MACHINE_STATUS_FIELDS
+    result = {field: full[field] for field in fields}
     result["health_scope"] = "reconciliation"
     if vault_root is not None:
         from . import media_store, originals

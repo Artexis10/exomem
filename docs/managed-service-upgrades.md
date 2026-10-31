@@ -658,6 +658,48 @@ instead of being closed on the first non-success. A replacement that refuses the
 original credential (401 or 403) is a definitive answer and still closes the
 stream.
 
+## When the worker crashes
+
+A worker that exits outside a transition no longer stops the supervisor. The
+public listener, the local listener and the control socket stay open, and the
+supervisor replaces the worker in place:
+
+1. The supervisor sets the phase to `restarting` and pauses ingress. New calls
+   queue under the admission budgets below.
+2. The supervisor proves that the exited worker and every descendant it left
+   have exited. A child that called `setsid()` is included.
+3. The supervisor starts the active release under the cold-start window.
+4. When the replacement reports ready, ingress resumes and the phase returns to
+   `ready`.
+
+A call that the dead worker was answering gets the retryable error described
+in the managed-service spec. A call that arrives during the restart is held for
+up to the 45-second queue budget. If the replacement reports ready inside that
+budget, the replacement serves the call. Otherwise the call is answered as not
+dispatched and can be retried. A production worker takes about 40 to 80 seconds
+to warm, so a call that arrives early in the restart usually gets the
+not-dispatched answer.
+
+The supervisor makes one attempt for each exit, and restarts a serving worker
+in place at most 3 times in any 10 minutes. The supervisor stops with a failed
+exit status in these cases:
+
+- A fourth exit falls inside the window.
+- A descendant of the exited worker is still alive after 10 seconds.
+- The replacement exits before it reports ready, or does not report ready
+  inside the cold-start window.
+- The restart fails with an unexpected error.
+
+systemd then cleans the unit's cgroup and applies `Restart=`, as it did for
+every crash before in-place restarts. `--status` reports the restarts inside
+the window, the limit, the window and the last exit status under
+`worker_restarts`. The journal records each restart with the worker's exit
+status. A negative status is the signal that killed the worker.
+
+The supervisor runs from the launcher venv, so a worker handoff does not
+change this behaviour. It takes effect after the offline maintenance that
+changes the stable supervisor, described above, which restarts the unit once.
+
 ## Admission budgets
 
 Admission during handoff allows at most 64 queued requests, 64 MiB total and

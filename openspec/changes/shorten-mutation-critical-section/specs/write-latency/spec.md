@@ -251,7 +251,15 @@ time (default 40 s, `EXOMEM_CAPTURE_WAIT_SECONDS`, and never past the caller's
 own request budget: the wait MUST end early enough that the last attempt,
 the delivery reserve and one guard acquire timeout still fit inside it).
 Waiting writes SHALL attempt in arrival order within one process, and a write
-arriving while others wait SHALL join behind them. Waiting parks a shared
+arriving while others wait SHALL join behind them. For a write that runs on a
+collection store thread, the store thread SHALL make each attempt once and
+SHALL NOT wait in line or between attempts: the request's own thread waits and
+submits the write again under the same bounds, order and waiter cap, while the
+store thread serves other requests. The request's thread SHALL also wait out,
+for any write, a store handoff that refused the write before its leaf started,
+a store queue that has not yet taken the write, and a busy ownership proof at
+routing, because none of them ran the write. It MUST NOT submit again a write
+that received `MUTATION_ACKNOWLEDGEMENT_PENDING`. Waiting parks a shared
 synchronous worker, so no more than half of the workers (at least one)
 MAY wait at once (the waiter cap; four at the default eight); a write past
 that cap is refused at once with `cause: capture_waiters_full`. The retry MUST run
@@ -329,6 +337,36 @@ to every keyed write.
 - **WHEN** a keyed write retries on the server and then commits
 - **THEN** `exomem_mutation_busy_total` does not increase
 - **AND** the one refusal that does reach a client increases it once
+
+#### Scenario: A store read is not held behind a store write that waits its turn
+
+- **WHEN** a keyed write routed to a collection store thread must wait for its
+  turn behind another waiting write
+- **THEN** a read routed to the same store thread completes without waiting for
+  that turn
+- **AND** the write commits once after its turn comes
+
+#### Scenario: A store write waits out a hold met at routing or on the store thread
+
+- **WHEN** a keyed `record_memory` append meets a boundary held inside its
+  allowance, while it proves ownership at routing or while it runs on the store
+  thread
+- **THEN** it commits once after the holder releases
+- **AND** neither `MUTATION_BUSY` nor `COLLECTION_STORE_BUSY` reaches the caller
+
+#### Scenario: A store write that the store has not taken never runs late
+
+- **WHEN** the store thread is still busy at a write's acceptance deadline
+- **THEN** the write keeps its place while its request budget leaves room for it
+- **AND** a write whose budget leaves no room is refused with
+  `COLLECTION_STORE_BUSY` and `committed: false`, and never runs
+
+#### Scenario: An accepted store write that misses its deadline runs once
+
+- **WHEN** the store thread took a write and the write has not finished at its
+  completion deadline
+- **THEN** the caller receives `MUTATION_ACKNOWLEDGEMENT_PENDING`
+- **AND** the write is not submitted again, so it runs once
 
 ### Requirement: Availability Republication Prepares Outside Canonical Authority
 
