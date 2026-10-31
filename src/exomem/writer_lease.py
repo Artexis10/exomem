@@ -5049,14 +5049,23 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "unknown",
+        writes_canonical: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
-        """Serialize hosted reads with mutations without requiring writer authority."""
+        """Serialize hosted reads with mutations without requiring writer authority.
+
+        Only `_mutation_boundary` sets `writes_canonical`; every other holder may borrow
+        the boundary that a long mutation lends between its units (`lend_boundary`).
+        """
         mutation = self._mutation_coordinator_for(vault_root)
+        if writes_canonical and mutation.current_thread_borrows_boundary():
+            # A loan falls between two units of another mutation, whose reads must stay valid.
+            raise RuntimeError("a canonical write cannot run on a borrowed mutation boundary")
         outermost = not mutation.current_thread_holds_boundary()
         with mutation.hold(
             request_id=request_id,
             operation=operation,
             holder_kind=holder_kind,
+            may_borrow=not writes_canonical,
         ):
             try:
                 yield mutation
@@ -5066,6 +5075,24 @@ class LeaseManager:
                     # _mutation_boundary has bumped the generation. Keep exact
                     # receipt custody visible before any waiting writer enters.
                     _timed_handoff(session)
+
+    def lend_boundary(self, vault_root: os.PathLike[str] | str, *, until: float) -> int:
+        """Let waiting borrowers hold the boundary between two committed units of a long mutation.
+
+        The holder lends only when a borrower would give up before `until`, the monotonic
+        time its next unit would end: each loan publishes what a release would, the commit
+        generation and the custody of every fast-acknowledged batch so far, and that custody
+        grows with the batches. Returns how many borrowers held the boundary.
+        """
+        mutation = self._mutation_coordinator_for(vault_root)
+        due = mutation.next_borrower_deadline()
+        if due is None or due > until or not mutation.current_thread_holds_boundary():
+            return 0
+        _bump_commit_generation(self.config.state_dir, vault_root)
+        session = _ACTIVE_FAST_ACK_SESSION.get()
+        if session is not None and active_derived_batch_custody(Path(vault_root)):
+            _timed_handoff(session)
+        return mutation.lend()
 
     @contextmanager
     def reserved_identity_guard(
@@ -5226,6 +5253,7 @@ class LeaseManager:
                 request_id=request_id,
                 operation=operation,
                 holder_kind=holder_kind,
+                writes_canonical=True,
             ) as mutation:
                 try:
                     with self.writer_authority_guard(

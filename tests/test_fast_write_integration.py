@@ -605,6 +605,79 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     assert len(outcomes) == 9 and all(row["status"] == "applied" for row in outcomes.values())
 
 
+def test_a_derived_proof_that_would_time_out_during_an_import_proves_between_two_of_its_chunks(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain's proof waiting on the boundary of a long import holds it before the import ends.
+
+    The import hands off the custody of its batches before it lends the boundary, so the proof of
+    its first batch, whose index and log pages the second batch moved, is ready, not reconcile_required.
+    """
+    from exomem import adoption_run, commands, mutation_lock
+
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)
+    folder = vault / "Collection"
+    folder.mkdir()
+    for index in range(3):
+        (folder / f"scan-{index}.dat").write_bytes(bytes([index]) * 1024)
+    run_id = commands.op_adoption_studio(vault, action="start", path="Collection")["run_id"]
+    commands.op_adoption_studio(
+        vault, action="select", run_id=run_id, include=[{"path": "Collection", "adopt_as": "source"}]
+    )
+    plan_id = commands.op_adoption_studio(vault, action="plan", run_id=run_id)["plan"]["plan_id"]
+    manager = _manager(tmp_path)
+    # A drain proves outside any invocation, on the configured manager; this one gives up after 1 s.
+    drain = writer_lease.LeaseManager(manager.config, mutation_timeout_seconds=1.0)
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: drain)
+    boundary = mutation_lock.VaultMutationCoordinator(manager.config.state_dir, vault)
+    earlier = set(_batch_ids(vault))
+    committed: list[int] = []
+    proofs: list[dict] = []
+
+    def prove_the_first_batch() -> None:
+        first = next(batch for batch in _batch_ids(vault) if batch not in earlier)
+        receipt = derived_receipts._load_receipt(vault, first)
+        try:
+            with drain.consistency_guard(
+                vault, operation="derived_receipt_proof", holder_kind="derived-worker"
+            ):
+                chunks = len(committed)
+                proof = derived_receipts.prove_committed(
+                    vault, receipt, current_generation=receipt.canonical_generation
+                )
+            proofs.append({"chunks_committed": chunks, "outcome": proof.outcome})
+        except Exception as error:  # noqa: BLE001 - a refused proof is the failure this test names
+            proofs.append({"chunks_committed": None, "outcome": getattr(error, "code", repr(error))})
+
+    proving = threading.Thread(target=prove_the_first_batch, daemon=True)
+    apply_chunk = adoption_run._apply_chunk
+
+    def chunk(*args, **kwargs):
+        if len(committed) == 1:
+            proving.start()
+            waited = time.monotonic() + 10
+            while not boundary.waiter_count():  # the second chunk starts once the proof waits
+                assert time.monotonic() < waited, "the proof never waited on the boundary"
+                time.sleep(0.005)
+        extractions = apply_chunk(*args, **kwargs)
+        if not committed:
+            time.sleep(1.5)  # a slow first chunk: the import prices each next chunk at 1.5 s
+        committed.append(1)
+        return extractions
+
+    monkeypatch.setattr(adoption_run, "_apply_chunk", chunk)
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "adoption_studio")
+    manager.invoke(
+        command, (vault,), {"action": "apply", "run_id": run_id, "plan_id": plan_id},
+        idempotency_key="lent-boundary",
+    )
+    proving.join(timeout=10)
+
+    assert proofs == [{"chunks_committed": 2, "outcome": "ready"}]
+    outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
+    assert len(outcomes) == 3 and all(row["status"] == "applied" for row in outcomes.values())
+
+
 @pytest.mark.parametrize("flag", [None, "0"])
 def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str | None

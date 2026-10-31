@@ -1746,6 +1746,10 @@ class _ApplyPacer:
             cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         return chunk if first or cost <= self._room(chunk) else []
 
+    def full_chunk_seconds(self, pending: list[dict]) -> float:
+        """The predicted cost of the next chunk before any trim to the time left."""
+        return self._cost(_take_chunk(pending, APPLY_CHUNK_ITEMS))
+
     def note_fits(self, chunk: list[dict], seconds: float) -> bool:
         """Keep the same terminal headroom between the chunk's individual notes."""
         return seconds <= self._room(chunk)
@@ -2374,6 +2378,7 @@ def apply(
     twice: every item is checked against the earlier imports before it is copied.
     """
     from . import client_artifacts
+    from .writer_lease import active_manager
 
     root = Path(root)
     run_date = _today(today)
@@ -2455,7 +2460,17 @@ def apply(
         pacer = _ApplyPacer(root, budget)
         stopped = False
         chunks = 0
+        lend_seconds = 0.0
         while pending:
+            if chunks:
+                # Each chunk is committed whole. A waiting machine holder, such as a derived proof, that
+                # would give up before the next chunk and the next lend end holds the boundary now. A lend
+                # re-proves every batch the call has committed, so the next one is priced at twice the dearest.
+                lent_at = time.monotonic()
+                active_manager().lend_boundary(
+                    root, until=lent_at + 2 * lend_seconds + pacer.full_chunk_seconds(pending)
+                )
+                lend_seconds = max(lend_seconds, time.monotonic() - lent_at)
             chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
                 stopped = True
