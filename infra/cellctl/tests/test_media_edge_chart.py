@@ -161,6 +161,19 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
     assert "exomem-media-edge-active-set" in _scope_expression(documents, "may write only the ConfigMap")
 
 
+def test_the_default_object_bound_admits_a_5_gib_file_at_the_edge_and_in_cellctl() -> None:
+    # A 5 GiB original's ciphertext is about 1.25 MiB larger. Below that bound such a file never offloads,
+    # and an edge and a cellctl that disagree would admit what the other refuses.
+    documents = _helm_template(*EDGE)
+    edge = _find(documents, "Deployment", "exomem-media-edge")["spec"]["template"]["spec"]["containers"][0]
+    cellctl = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
+    edge_env = {e["name"]: e.get("value") for e in edge["env"]}
+    cellctl_env = {e["name"]: e.get("value") for e in cellctl["env"]}
+
+    assert edge_env["EXOMEM_MEDIA_EDGE_MAX_OBJECT_BYTES"] == str(5 * 2**30 + 2 * 2**20)
+    assert cellctl_env["CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES"] == str(5 * 2**30 + 2 * 2**20)
+
+
 @pytest.mark.parametrize(
     "override",
     [

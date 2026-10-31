@@ -294,7 +294,8 @@ mediaEdge:
   cellIds: []
   allCells: false
   credentialEpochs: {}
-  maxObjectBytes: 1073741824
+  # D12: a 5 GiB original plus its age overhead (about 1.25 MiB).
+  maxObjectBytes: 5370806272
   storePolicy:
     allowance_bytes: 100000000000
   bucket: ""
