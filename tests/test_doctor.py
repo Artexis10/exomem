@@ -474,6 +474,81 @@ def test_media_runtime_compute_block_uses_runtime_remediation(vault: Path, monke
     assert "CUDA/cuBLAS/cuDNN runtime" in check.remediation
 
 
+def test_media_gpu_check_names_why_the_gpu_is_denied_busy_or_untested(vault: Path, monkeypatch) -> None:
+    from exomem import media_jobs
+
+    status: dict = {"healthy": True, "counts": {"pending": 2, "blocked": 0, "failed": 0}}
+    monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
+
+    status["gpu_preflight"] = {"result": "failed", "reason": "died with SIGSEGV during torch CUDA initialization"}
+    denied = doctor_module._check_media_gpu(vault)
+    status["gpu_preflight"] = {"result": "not tested", "reason": "no CUDA device visible"}
+    status["serving_worker_cuda_hidden"] = True
+    untested = doctor_module._check_media_gpu(vault)
+    status.update(
+        gpu_waiting_count=2,
+        gpu_wait={"reason": "insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed", "since": "2026-01-01T00:00:00Z"},
+    )
+    busy = doctor_module._check_media_gpu(vault)
+
+    assert denied is not None and (denied.status, "SIGSEGV during torch CUDA initialization" in denied.message) == ("warn", True)
+    assert busy is not None and (busy.status, "512 MiB free, 2048 MiB needed" in busy.message) == ("warn", True)
+    # An untested GPU is never reported as healthy, and a media child without a GPU is not said to use one.
+    assert untested is not None and untested.status == "pass"
+    assert "GPU preflight not tested: no CUDA device visible." in untested.message
+    assert "the media child uses the GPU" not in untested.message
+
+
+@pytest.mark.parametrize(
+    ("preflight", "hidden", "driver", "says_child_uses_gpu"),
+    [
+        ({"result": "passed", "reason": None}, True, True, True),
+        ({"result": "passed", "reason": None}, None, True, False),  # a supervisor that has not recorded the fact yet
+        (None, True, True, True),  # no media child has started yet on a host with a driver
+        (None, True, False, False),  # a host with no NVIDIA driver has no GPU to reserve
+        ({"result": "not tested", "reason": "no NVIDIA driver found"}, True, False, False),
+    ],
+)
+def test_media_gpu_check_says_the_media_child_uses_the_gpu_only_where_one_exists(
+    vault: Path, monkeypatch, preflight, hidden, driver: bool, says_child_uses_gpu: bool
+) -> None:
+    from exomem import media_jobs, resource_status
+
+    status = {
+        "healthy": True,
+        "counts": {"pending": 0, "blocked": 0, "failed": 0},
+        "gpu_preflight": preflight,
+        "serving_worker_cuda_hidden": hidden,
+    }
+    monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
+    monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "/usr/bin/nvidia-smi" if driver else None)
+
+    check = doctor_module._check_media_gpu(vault)
+
+    line = "CUDA is hidden from the serving process; the media child uses the GPU"
+    assert (check is not None and line in check.message) is says_child_uses_gpu
+
+
+def test_a_crash_loop_of_the_media_child_shows_even_while_an_old_failed_job_is_reported(
+    vault: Path, monkeypatch
+) -> None:
+    from exomem import media_jobs
+
+    status = {
+        "healthy": True,
+        "counts": {"pending": 1, "blocked": 0, "failed": 1},
+        "child_crashes": {"count": 4, "signal": "SIGSEGV", "head_job": "Rental/audio/meeting.m4a"},
+    }
+    monkeypatch.setattr(media_jobs, "status", lambda *_args, **_kwargs: status)
+
+    failed_job = doctor_module._check_media_runtime(vault)
+    crashes = doctor_module._check_media_child(vault)
+
+    assert failed_job is not None and "1 failed" in failed_job.message
+    assert crashes is not None and crashes.status == "warn"
+    assert "SIGSEGV 4 time(s) in a row" in crashes.message and "Rental/audio/meeting.m4a" in crashes.message
+
+
 def test_resource_posture_details_include_allocation_free_asr_policy() -> None:
     check = doctor_module._check_resource_posture("lean")
     assert "asr" in check.details
@@ -1481,9 +1556,13 @@ def _fake_cpu_torch() -> SimpleNamespace:
 
 @pytest.fixture
 def _cpu_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import cuda_containment
+
     monkeypatch.setattr(doctor_module, "_module_available", lambda name: True)
     monkeypatch.setitem(sys.modules, "torch", _fake_cpu_torch())
     monkeypatch.delenv("EXOMEM_ALLOW_CPU_TORCH", raising=False)
+    # These tests are about the wheel, not the driver: the throwaway CUDA process is stubbed to pass.
+    monkeypatch.setattr(cuda_containment, "preflight", lambda env, **_kwargs: cuda_containment.Preflight(True))
 
 
 def test_torch_cuda_fails_when_nvidia_present_but_torch_is_cpu_only(
@@ -1520,6 +1599,32 @@ def test_torch_cuda_escape_hatch_downgrades_the_failure_to_a_warning(
     check = doctor_module._check_torch_cuda()
 
     assert check.status == "warn"
+
+
+def test_doctor_reports_a_cuda_fault_instead_of_dying_of_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a host whose CUDA initialization segfaults, a probe in the doctor process ended doctor, the TUI and the wizard."""
+    from exomem import resource_status
+
+    (tmp_path / "torch.py").write_text("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(doctor_module, "_module_available", lambda name: True)
+
+    def in_process_cuda_probe() -> bool:
+        raise AssertionError("doctor initialized CUDA in its own process")
+
+    canary = SimpleNamespace(cuda=SimpleNamespace(is_available=in_process_cuda_probe), backends=SimpleNamespace(mps=None))
+    monkeypatch.setitem(sys.modules, "torch", canary)
+    monkeypatch.setenv("EXOMEM_DEVICE", "gpu")  # the setting that makes a device choice probe CUDA
+
+    probe = doctor_module._gpu_probe()
+    cuda = doctor_module._check_torch_cuda(probe)
+    device = doctor_module._check_torch_device(probe)
+
+    assert (probe.result, probe.reason) == ("failed", "died with SIGSEGV during importing torch")
+    assert cuda.status == "warn" and "GPU probe failed: died with SIGSEGV during importing torch" in cuda.message
+    assert "bge/CLIP embeddings will run on: cpu" in device.message
 
 
 # ------------------------------------------ the process census runs everywhere

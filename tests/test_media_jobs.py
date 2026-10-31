@@ -1915,3 +1915,18 @@ def test_cloud_job_blocked_on_an_engine_names_no_install(vault: Path, monkeypatc
     assert row["state"] == media_jobs.BLOCKED
     assert "install" not in row["next_action"]
     assert "unavailable on this deployment" in row["next_action"]
+
+
+def test_a_tool_caller_sees_the_machines_gpu_facts_on_a_personal_install_but_not_in_a_cloud_cell(
+    vault: Path, monkeypatch
+) -> None:
+    media_jobs.MediaJobStore(vault).record_gpu_preflight(
+        "failed", "died with SIGSEGV during torch CUDA initialization", serving_worker_cuda_hidden=True
+    )
+
+    personal = media_jobs.tool_status(vault)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    cloud = media_jobs.tool_status(vault)
+
+    assert personal["gpu_preflight"]["result"] == "failed"
+    assert set(cloud).isdisjoint(media_jobs.MACHINE_STATUS_FIELDS)

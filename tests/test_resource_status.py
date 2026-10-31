@@ -249,7 +249,7 @@ def test_nvidia_smi_is_found_off_path_under_wsl(monkeypatch, tmp_path: Path) -> 
     _hide_from_which(monkeypatch, "nvidia-smi")
     monkeypatch.setattr(resource_status, "_EXTRA_NVIDIA_SMI_PATHS", (str(shim),))
 
-    assert resource_status._find_nvidia_smi() == str(shim)
+    assert resource_status.find_nvidia_smi() == str(shim)
 
 
 def test_a_non_executable_fallback_is_not_treated_as_a_probe(
@@ -262,7 +262,7 @@ def test_a_non_executable_fallback_is_not_treated_as_a_probe(
     _hide_from_which(monkeypatch, "nvidia-smi")
     monkeypatch.setattr(resource_status, "_EXTRA_NVIDIA_SMI_PATHS", (str(shim),))
 
-    assert resource_status._find_nvidia_smi() is None
+    assert resource_status.find_nvidia_smi() is None
 
 
 def test_gpu_headroom_is_unknown_when_no_probe_exists(monkeypatch) -> None:

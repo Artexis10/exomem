@@ -30,7 +30,7 @@ SPEECH = "speech"
 ENGINES = (DOCUMENTS, OCR, SPEECH)
 
 _DOCUMENT_KINDS = frozenset({"pdf", *media_types.DOC_EXTS.values()})
-_SPEECH_KINDS = frozenset({"audio", "video"})
+SPEECH_KINDS = frozenset({"audio", "video"})
 
 ENABLED = "enabled"
 DISABLED = "disabled"
@@ -39,7 +39,7 @@ UNAVAILABLE = "unavailable"
 
 def engine_for(media_type: str | None) -> str | None:
     """The engine whose extractor reads `media_type`, as `extract.extract_text` dispatches."""
-    if media_type in _SPEECH_KINDS:
+    if media_type in SPEECH_KINDS:
         return SPEECH
     if media_type == "image":
         return OCR

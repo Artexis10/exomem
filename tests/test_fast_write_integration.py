@@ -541,7 +541,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Leaf-only pacing must not spend the time needed to publish committed custody."""
-    from exomem import adoption_run, commands, request_budget
+    from exomem import adopt, adoption_run, commands, request_budget
 
     monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
     folder = vault / "Collection"
@@ -557,12 +557,12 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     fake_time = SimpleNamespace(monotonic=lambda: clock["now"])
     monkeypatch.setattr(adoption_run, "time", fake_time)
     monkeypatch.setattr(request_budget, "time", fake_time)
-    create_note = adoption_run._create_note
+    create_notes = adopt.create_draft_notes
     handoff = writer_lease._handoff_derived_batches
 
-    def costly_note(*args, **kwargs):
-        result = create_note(*args, **kwargs)
-        clock["now"] += 8
+    def costly_notes(root, notes, **kwargs):
+        result = create_notes(root, notes, **kwargs)
+        clock["now"] += 8 * len(notes)
         return result
 
     def costly_custody(session):
@@ -572,7 +572,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
             clock["now"] += 20
         return result
 
-    monkeypatch.setattr(adoption_run, "_create_note", costly_note)
+    monkeypatch.setattr(adopt, "create_draft_notes", costly_notes)
     monkeypatch.setattr(writer_lease, "_handoff_derived_batches", costly_custody)
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "adoption_studio")
     leaf = command.leaf

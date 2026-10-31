@@ -857,8 +857,39 @@ def test_mcp_retry_scope_hashes_bearer_and_falls_back_to_session(monkeypatch) ->
     assert scope.startswith("bearer:")
     assert "super-secret-token" not in scope
 
-    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {"user-agent": "client/1"}
+    )
     assert command_surface.mcp_retry_scope() == "session:session-1"
+
+
+def test_mcp_retry_scope_on_stdio_ignores_the_per_call_session_id(monkeypatch) -> None:
+    monkeypatch.setattr("fastmcp.server.dependencies.get_access_token", lambda: None)
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    scopes = []
+    for per_call_id in ("call-1", "call-2"):
+        monkeypatch.setattr(
+            "fastmcp.server.dependencies.get_context",
+            lambda per_call_id=per_call_id: SimpleNamespace(session_id=per_call_id, transport="stdio"),
+        )
+        scopes.append(command_surface.mcp_retry_scope())
+    assert scopes[0] == scopes[1] and scopes[0].startswith("session:")
+    assert "call-" not in scopes[0]
+
+
+def test_an_http_call_with_only_host_and_accept_headers_keeps_its_own_session(monkeypatch) -> None:
+    from starlette.requests import Request
+
+    request = Request(
+        {"type": "http", "headers": [(b"host", b"memory.example"), (b"accept", b"application/json")]}
+    )
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_request", lambda: request)
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_context",
+        lambda: SimpleNamespace(session_id="http-session-1"),
+    )
+    assert command_surface.mcp_session_id() == "http-session-1"
+    assert command_surface.mcp_caller_identity()["transport"] == "http"
 
 
 def test_mcp_retry_scope_uses_stable_verified_principal_across_bearer_rotation(
@@ -1891,3 +1922,13 @@ def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monke
     assert result["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
     assert bound(value=7) == {"value": 7}
     assert runs == 1
+
+
+def test_an_http_call_whose_request_is_not_bound_never_gets_the_stdio_session(monkeypatch) -> None:
+    """If FastMCP stopped binding the request, HTTP callers must not share one session."""
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_context",
+        lambda: SimpleNamespace(session_id="http-session-2", transport="streamable-http"),
+    )
+    assert command_surface.mcp_session_id() == "http-session-2"

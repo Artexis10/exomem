@@ -5388,17 +5388,11 @@ class EpistemicGraphIndex:
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
         source_versions: dict[str, GraphSourceSignature] | None = None,
-        expected_membership: frozenset[str] | None = None,
     ) -> bool:
         expected_sources = source_versions or {}
         if freshness.external_pending(self.vault_root):
             return False
         if not self._source_versions_current(expected_sources):
-            return False
-        if (
-            expected_membership is not None
-            and self._recall_membership() != expected_membership
-        ):
             return False
         if _incremental_projection_identity(self.vault_root) != identity:
             return False
@@ -5415,11 +5409,6 @@ class EpistemicGraphIndex:
         if freshness.external_pending(self.vault_root):
             return False
         if not self._source_versions_current(expected_sources):
-            return False
-        if (
-            expected_membership is not None
-            and self._recall_membership() != expected_membership
-        ):
             return False
         if _incremental_projection_identity(self.vault_root) != identity:
             return False
@@ -5491,31 +5480,12 @@ class EpistemicGraphIndex:
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
 
-    def _checkpoint_membership(
-        self,
-        checkpoint: freshness.RecallFreshnessCheckpoint,
-    ) -> frozenset[str] | None:
-        """Resolve the exact vault-wide path set represented by a checkpoint."""
-        current, entries = freshness.recall_projection_snapshot(self.vault_root, "vault")
-        if current != checkpoint:
-            return None
-        rels: set[str] = set()
-        for raw_path in entries:
-            rel = _vault_rel(self.vault_root, Path(raw_path))
-            if rel is None:
-                return None
-            rels.add(rel)
-        return frozenset(rels)
-
     def _resolver_source_versions(
         self,
         resolver: vault_module.WikilinkResolver,
         expected_membership: frozenset[str],
-        *,
-        changed_rels: set[str] | None = None,
     ) -> dict[str, GraphSourceSignature] | None:
         """Bind the resolver's vault-wide paths and titles to current bytes."""
-        changed = changed_rels or set()
         resolver_paths = {rel.removesuffix(".md") for rel in expected_membership}
         if resolver.full_paths != resolver_paths:
             return None
@@ -5535,7 +5505,7 @@ class EpistemicGraphIndex:
             finally:
                 if conn is not None:
                     conn.close()
-            if (set(indexed_hashes) - changed) != (set(expected_membership) - changed):
+            if set(indexed_hashes) != set(expected_membership):
                 return None
         versions: dict[str, GraphSourceSignature] = {}
         for rel in foreground_priority.yielding_in_bulk(sorted(expected_membership)):
@@ -5556,11 +5526,7 @@ class EpistemicGraphIndex:
             )
             if page is None:
                 return None
-            if (
-                indexed_hashes is not None
-                and rel not in changed
-                and indexed_hashes.get(rel) != source_signature[3]
-            ):
+            if indexed_hashes is not None and indexed_hashes.get(rel) != source_signature[3]:
                 return None
             title = page.title.strip().lower() if page.title.strip() else None
             if resolver.title_key_for_path(rel) != title:
@@ -5883,38 +5849,6 @@ class EpistemicGraphIndex:
             )
         return entries
 
-    def _stored_full_resolver_topology(
-        self,
-        conn: sqlite3.Connection,
-        changed_rels: set[str],
-    ) -> tuple[dict[str, str], set[str], str] | None:
-        """Load whole-corpus proof inputs only for a real topology change."""
-        fingerprint_row = conn.execute(
-            "SELECT value FROM graph_meta WHERE key = ?",
-            (_RESOLVER_TOPOLOGY_KEY,),
-        ).fetchone()
-        if fingerprint_row is None or len(str(fingerprint_row[0])) != 64:
-            return None
-        indexed_sources = {
-            str(row[0]): str(row[1])
-            for row in conn.execute(
-                "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
-            ).fetchall()
-        }
-        changed_keys = [_file_key(rel) for rel in changed_rels]
-        linked_sources: set[str] = set()
-        if changed_keys:
-            placeholders = ",".join("?" for _ in changed_keys)
-            linked_sources = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT DISTINCT source_path FROM graph_edges "
-                    f"WHERE src_key IN ({placeholders}) OR dst_page_key IN ({placeholders})",
-                    (*changed_keys, *changed_keys),
-                ).fetchall()
-            }
-        return indexed_sources, linked_sources, str(fingerprint_row[0])
-
     def _dependency_index_complete(self, conn: sqlite3.Connection) -> bool:
         """Prove in one snapshot that raw dependencies cover every file row."""
         try:
@@ -6008,51 +5942,6 @@ class EpistemicGraphIndex:
         """
         sources = cls._dependency_sources_for_keys(conn, _dependency_changed_keys(rels, resolver))
         return {source for source, raw_target in sources if "#" in raw_target} - rels
-
-    def _resolver_affected_sources(
-        self,
-        indexed_sources: dict[str, str],
-        linked_sources: set[str],
-        changed_rels: set[str],
-        *,
-        old_resolver: vault_module.WikilinkResolver,
-        resolver: vault_module.WikilinkResolver,
-    ) -> tuple[set[str], dict[str, GraphSourceSignature]] | None:
-        """Find topology dependants without rereading every indexed body."""
-        indexed_paths = set(indexed_sources)
-        if not linked_sources <= indexed_paths:
-            return None
-        affected = set(linked_sources) - changed_rels
-        conn: sqlite3.Connection | None = None
-        try:
-            conn = self._connect_existing(readonly=True)
-            conn.execute("BEGIN")
-            if not self._dependency_index_complete(conn):
-                return None
-            raw_dependencies = self._dependency_sources_for_keys(
-                conn, _dependency_changed_keys(changed_rels, old_resolver, resolver)
-            )
-        except sqlite3.Error:
-            return None
-        finally:
-            if conn is not None:
-                conn.rollback()
-                conn.close()
-        for source_path, raw_target in raw_dependencies:
-            if source_path in changed_rels:
-                continue
-            try:
-                old_target, old_warning = vault_module.normalize_wikilink(
-                    raw_target, self.vault_root, resolver=old_resolver, strict=False
-                )
-                new_target, new_warning = vault_module.normalize_wikilink(
-                    raw_target, self.vault_root, resolver=resolver, strict=False
-                )
-            except Exception:  # noqa: BLE001 - uncertainty requires full repair
-                return None
-            if (old_target, old_warning is None) != (new_target, new_warning is None):
-                affected.add(source_path)
-        return affected, {}
 
     def _queue_graph_repair(
         self,
@@ -6670,27 +6559,46 @@ class EpistemicGraphIndex:
             for path in set(delta.changed | delta.deleted)
             if (rel := _vault_rel(self.vault_root, Path(path))) is not None
         }
-        indexed_sources: dict[str, str] = {}
-        linked_sources: set[str] = set()
         resolver_fingerprint: str | None = None
-        old_resolver: vault_module.WikilinkResolver | None = None
+        topology_affected: set[str] = set()
         if topology_changed:
             topology_snapshot = self._open_read_snapshot(require_current_projection=False)
             if topology_snapshot is None:
                 return fallback("topology_snapshot_unavailable")
-            full_topology = self._stored_full_resolver_topology(
-                topology_snapshot,
-                set(stored_entries),
-            )
-            topology_snapshot.close()
-            if full_topology is None:
+            refusal: str | None = None
+            try:
+                stored_row = topology_snapshot.execute(
+                    "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
+                ).fetchone()
+                stored_resolver_fingerprint = str(stored_row[0]) if stored_row is not None else ""
+                if len(stored_resolver_fingerprint) != 64:
+                    refusal = "stored_topology_unreadable"
+                elif (
+                    _resolver_topology_fingerprint(self._resolver_before(resolver, stored_entries))
+                    != stored_resolver_fingerprint
+                ):
+                    refusal = "stored_topology_fingerprint_mismatch"
+                else:
+                    # Reverting the delta's entries reproduced the stored
+                    # fingerprint, so this pass owns the topology: every
+                    # difference is a delta page. The widening reads the
+                    # dependency index for those pages alone, as an owned
+                    # drain's does, instead of reading the vault.
+                    widened = self._topology_affected_sources(
+                        topology_snapshot,
+                        set(stored_entries),
+                        resolver=resolver,
+                        owns_topology=True,
+                    )
+                    if widened is None:
+                        refusal = "stored_topology_unreadable"
+                    else:
+                        topology_affected = widened
+            finally:
+                topology_snapshot.close()
+            if refusal is not None:
                 self._mark_unavailable()
-                return fallback("stored_topology_unreadable")
-            indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
-            old_resolver = self._resolver_before(resolver, stored_entries)
-            if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
-                self._mark_unavailable()
-                return fallback("stored_topology_fingerprint_mismatch")
+                return fallback(refusal)
             resolver_fingerprint = _resolver_topology_fingerprint(resolver)
 
         delta_paths = set(delta.changed | delta.deleted)
@@ -6708,61 +6616,52 @@ class EpistemicGraphIndex:
             self._mark_unavailable()
             return fallback("caller_path_outside_delta")
         refresh_paths = set(delta_paths)
-        # A `[[Page#unit]]` relation lands on a unit key that the page's own
-        # bytes decide -- the rich key hashes the body, and an edit can add,
-        # remove or duplicate the anchor -- so the pages that point at a changed
-        # page re-derive even when no resolver topology moved.
-        fragment_dependants = self._fragment_dependants(delta_rels, resolver)
-        if fragment_dependants is None:
-            self._mark_unavailable()
-            return fallback("stored_topology_unreadable")
-        refresh_paths.update(str(self.vault_root / rel) for rel in fragment_dependants)
-        deferred_scope.update(fragment_dependants)
-        topology_versions: dict[str, GraphSourceSignature] = {}
-        resolver_versions: dict[str, GraphSourceSignature] = {}
-        expected_membership: frozenset[str] | None = None
+        def registry_describes_affected() -> bool:
+            """Whether the resolver saw the bytes of each page this pass rewrites as affected.
+
+            The delta pages are proved against the registry by
+            `_delta_target_still_current`; an affected page is outside it, and
+            a page that changed on disk ahead of its registry update would be
+            re-derived under a resolver that never saw it. Only the affected
+            pages are read, not the vault.
+            """
+            if not topology_affected:
+                return True
+            try:
+                live, recorded = freshness.recall_projection_snapshot(
+                    self.vault_root, "vault", allow_fallback=False
+                )
+            except freshness.RecallProjectionUnavailable:
+                return False
+            return live == checkpoint and self._registry_describes(
+                recorded, [self.vault_root / rel for rel in sorted(topology_affected)]
+            )
+
         if topology_changed:
-            assert old_resolver is not None
-            assert resolver_fingerprint is not None
-            expected_membership = self._checkpoint_membership(checkpoint)
-            resolver_version_result = (
-                self._resolver_source_versions(
-                    resolver, expected_membership, changed_rels=delta_rels
-                )
-                if expected_membership is not None
-                else None
-            )
-            affected_result = self._resolver_affected_sources(
-                indexed_sources,
-                linked_sources,
-                delta_rels,
-                old_resolver=old_resolver,
-                resolver=resolver,
-            )
-            if (
-                expected_membership is None
-                or resolver_version_result is None
-                or not (set(indexed_sources) | created_rels) <= expected_membership
-                or affected_result is None
-                or self._recall_membership() != expected_membership
-                or _recall_projection_identity(
-                    self.vault_root,
-                    disk_freshness=_disk_vault_freshness(self.vault_root),
-                )
-                != before
-            ):
-                if resolver_version_result is None:
-                    # Same reasoning as the rebuild's retarget: the recall
-                    # resolver is checkpoint-validated at every read, so keeping
-                    # it cannot serve stale topology, while dropping it sends the
-                    # next governed write down the whole-vault path.
-                    find_module.unload_ram_caches(keep_recall_resolver=True)
+            # The widening already holds the fragment dependants of every page
+            # whose resolution did not move, so a second dependency read would
+            # only repeat it.
+            refresh_paths.update(str(self.vault_root / rel) for rel in topology_affected)
+            deferred_scope.update(topology_affected)
+            if not registry_describes_affected():
+                # Same reasoning as the rebuild's retarget: the recall resolver
+                # is checkpoint-validated at every read, so keeping it cannot
+                # serve stale topology, while dropping it sends the next
+                # governed write down the whole-vault path.
+                find_module.unload_ram_caches(keep_recall_resolver=True)
                 self._mark_unavailable()
                 return fallback("topology_proof_moved")
-            resolver_versions = resolver_version_result
-            affected, topology_versions = affected_result
-            refresh_paths.update(str(self.vault_root / rel) for rel in affected)
-            deferred_scope.update(affected)
+        else:
+            # A `[[Page#unit]]` relation lands on a unit key that the page's own
+            # bytes decide -- the rich key hashes the body, and an edit can add,
+            # remove or duplicate the anchor -- so the pages that point at a
+            # changed page re-derive even when no resolver topology moved.
+            fragment_dependants = self._fragment_dependants(delta_rels, resolver)
+            if fragment_dependants is None:
+                self._mark_unavailable()
+                return fallback("stored_topology_unreadable")
+            refresh_paths.update(str(self.vault_root / rel) for rel in fragment_dependants)
+            deferred_scope.update(fragment_dependants)
 
         pass_started = False
         stable = False
@@ -6780,13 +6679,8 @@ class EpistemicGraphIndex:
                     _incremental_projection_identity(self.vault_root) == before
                     and self._delta_target_still_current(delta)
                     and set(indexed_versions) == expected_refresh_rels
-                    and self._source_versions_current(
-                        {**resolver_versions, **topology_versions, **indexed_versions}
-                    )
-                    and (
-                        expected_membership is None
-                        or self._recall_membership() == expected_membership
-                    )
+                    and self._source_versions_current(indexed_versions)
+                    and registry_describes_affected()
                     and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
                 ):
                     raise RuntimeError("incremental graph publication proof changed")
@@ -6807,15 +6701,10 @@ class EpistemicGraphIndex:
             if graph_checkpoint is not None:
                 self._note_graph_published()
             if graph_checkpoint is None:
-                if self._mark_incremental_available(
+                if registry_describes_affected() and self._mark_incremental_available(
                     before,
                     checkpoint=checkpoint,
-                    source_versions={
-                        **resolver_versions,
-                        **topology_versions,
-                        **indexed_versions,
-                    },
-                    expected_membership=expected_membership,
+                    source_versions=indexed_versions,
                 ):
                     stable = True
                     return report
@@ -7048,8 +6937,9 @@ class EpistemicGraphIndex:
         difference between the resolver and the stored topology is then a queued
         page, so a queued page whose existence and title the stored row already
         records moved no resolution or existence. Only the pages that moved
-        widen to every linker by key; the others widen to their fragment
-        dependants. A queued page with no row counts as moved: no row says
+        widen to every linker by key and to every page with a stored edge to
+        them; the others widen to their fragment dependants. A queued page
+        with no row counts as moved: no row says
         whether it existed, and a linker's edge to a Records page that exists
         is suppressed, so the page's later deletion moves that edge. Without
         `owns_topology` any difference may be outside `rels`, and every queued
@@ -7094,7 +6984,11 @@ class EpistemicGraphIndex:
             or self._stored_resolver_entry(conn, rel) != self._live_resolver_entry(resolver, rel)
         }
         affected: set[str] = set()
-        for rel in vanished:
+        # A stored edge to a moved page re-derives under whatever name made it:
+        # an earlier pass may have linked the page under a title that neither
+        # its stored row nor its live entry carries, so no dependency key names
+        # that linker.
+        for rel in moved:
             affected.update(
                 str(row[0])
                 for row in conn.execute(

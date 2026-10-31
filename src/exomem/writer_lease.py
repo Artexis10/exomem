@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from typing import Any, get_args
 
@@ -4426,6 +4426,30 @@ def _active_capture_preparation_retry() -> _CapturePreparationRetry | None:
     return _ACTIVE_CAPTURE_PREPARATION_RETRY.get()
 
 
+@dataclass
+class _StoreAttempt:
+    """One attempt of a write whose request thread, not the thread running it, waits out contention.
+
+    The store thread serves every store-routed request in turn, so a write running there never
+    waits in line: it makes one attempt and hands back a refusal raised before anything committed
+    (`_collection_store_thread`). The request thread sets `holds_ticket`, `resubmission` and
+    `deadline`; the attempt sets the rest.
+    """
+
+    holds_ticket: bool
+    resubmission: bool
+    deadline: float
+    received: bool = False
+    preparation_retry_wanted: bool = False
+    handed_off: OpError | None = None
+    deferred_refusal: Callable[[], None] | None = None
+
+
+_ACTIVE_STORE_ATTEMPT: ContextVar[_StoreAttempt | None] = ContextVar(
+    "exomem_store_attempt", default=None
+)
+
+
 class _FairCaptureQueue:
     """First-come-first-served order, within one process, for keyed writes
     waiting on the boundary.
@@ -4464,6 +4488,63 @@ class _FairCaptureQueue:
             if ticket in self._line:
                 self._line.remove(ticket)
             self._condition.notify_all()
+
+
+class _ContentionWait:
+    """One keyed write's bounded wait: its deadline, its place in line and its waiter slot.
+
+    Only the thread that waits uses it; an attempt on the store thread reads a `_StoreAttempt`.
+    """
+
+    def __init__(self, queue: _FairCaptureQueue, wait_seconds: float) -> None:
+        self.queue = queue
+        self.started = time.monotonic()
+        self.deadline = self.started + wait_seconds
+        self.ticket: object | None = None
+        self.holds_slot = False
+        self.absorbed = 0
+        self.last_attempt_seconds = 0.0
+
+    def take_slot(self) -> bool:
+        if not self.holds_slot:
+            self.holds_slot = _take_capture_waiter_slot()
+        return self.holds_slot
+
+    def join_line(self) -> None:
+        if self.ticket is None:
+            self.ticket = self.queue.enter_line()
+
+    def wait_turn(self) -> bool:
+        # A head ticket can return immediately even after its deadline.
+        return (
+            time.monotonic() < self.deadline
+            and self.queue.wait_turn(self.ticket, self.deadline)
+            and time.monotonic() < self.deadline
+        )
+
+    def fits_another_attempt(self) -> bool:
+        # The deadline leaves room for one guard timeout, not for a leaf whose
+        # preparation is slow; never start an attempt the budget cannot finish.
+        return request_budget.can_afford(
+            request_budget.DELIVERY_RESERVE_SECONDS + self.last_attempt_seconds
+        )
+
+    def admit_preparation_retry(self) -> bool:
+        if time.monotonic() >= self.deadline or not self.take_slot():
+            return False
+        self.join_line()
+        return self.wait_turn()
+
+    def waited_ms(self) -> int:
+        return round((time.monotonic() - self.started) * 1000)
+
+    def close(self) -> None:
+        if self.holds_slot:
+            _release_capture_waiter_slot()
+            self.holds_slot = False
+        if self.ticket is not None:
+            self.queue.leave(self.ticket)
+            self.ticket = None
 
 
 class LeaseManager:
@@ -5332,7 +5413,7 @@ class LeaseManager:
                 request_id=request_id,
                 canonical_terminal=vocabulary_replay_terminal,
             )
-        commit_state = {"observed": False}
+        commit_state = {"observed": False, "leaf_started": False}
         # Derived work the leaf hands back rather than running inside its own
         # guard. Drained by `idempotency.run`'s post-persistence acknowledgement
         # hook, strictly after the terminal is durable.
@@ -5355,12 +5436,16 @@ class LeaseManager:
             and _is_receipt_vault_root(receipt_vault_root)
             else None
         )
-        _log_mutation_event(
-            "received",
-            request_id=request_id,
-            command=command.name,
-            receipt=receipt or "none",
-        )
+        store_attempt = _ACTIVE_STORE_ATTEMPT.get()
+        if store_attempt is None or not store_attempt.resubmission:
+            _log_mutation_event(
+                "received",
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt or "none",
+            )
+        if store_attempt is not None:
+            store_attempt.received = True
         from . import readiness
 
         # The graph handoff joins this gate for the reason the corpus is on it:
@@ -5407,6 +5492,7 @@ class LeaseManager:
             )
 
         def invoke_leaf() -> Any:
+            commit_state["leaf_started"] = True
             trace_token = _ACTIVE_MUTATION_TRACE.set((request_id, command.name, receipt or "none"))
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
@@ -6287,15 +6373,18 @@ class LeaseManager:
                 error.details.pop("idempotency_key", None)
                 if effective_public_idempotency_key is not None:
                     error.details["idempotency_key"] = effective_public_idempotency_key
+            # The request thread attempts a handed-back write again and journals only its final refusal.
+            handed_off = store_attempt is not None and error is store_attempt.handed_off
             _log_mutation_event(
                 "interrupted",
-                level=logging.WARNING,
+                level=logging.DEBUG if handed_off else logging.WARNING,
                 request_id=request_id,
                 command=command.name,
                 receipt=receipt or "none",
                 error=type(error).__name__,
             )
-            self._record_mutation_journal(
+            journal_refusal = partial(
+                self._record_mutation_journal,
                 request_id=request_id,
                 command=command.name,
                 receipt=receipt,
@@ -6314,6 +6403,10 @@ class LeaseManager:
                 targets=[str(mutation_subject)],
                 wide_hold=wide_hold,
             )
+            if handed_off:
+                store_attempt.deferred_refusal = journal_refusal
+            else:
+                journal_refusal()
             raise
         _log_mutation_event(
             "returned",
@@ -6439,7 +6532,13 @@ class LeaseManager:
         re-run. A write is attempted again only while the request budget still
         fits another attempt as long as the last one.
         """
-        if key is None or not rerun_safe or not _writes_absorb_contention():
+        eligible = key is not None and rerun_safe and _writes_absorb_contention()
+        store_attempt = _ACTIVE_STORE_ATTEMPT.get()
+        if store_attempt is not None:
+            return self._run_store_attempt(
+                store_attempt, run, eligible=eligible, commit_state=commit_state
+            )
+        if not eligible:
             # An ineligible nested invocation must not borrow its parent's
             # allowance or admission callback.
             token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(None)
@@ -6447,59 +6546,66 @@ class LeaseManager:
                 return run()
             finally:
                 _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
-        started = time.monotonic()
-        deadline = started + _capture_wait_seconds(self._mutation_timeout_seconds)
-        queue = self._capture_queue
-        ticket = None
-        absorbed = 0
-        # The last busy refusal this write absorbed: a wait that runs out in line
+        wait = _ContentionWait(
+            self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+        )
+        preparation_retry = _CapturePreparationRetry(wait.deadline, wait.admit_preparation_retry)
+
+        def attempt() -> Any:
+            token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(preparation_retry)
+            try:
+                with mutation_lock.absorbing_busy():
+                    return run()
+            finally:
+                _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
+
+        def absorbable(error: OpError) -> bool:
+            if error.code != "MUTATION_BUSY":
+                return False
+            if commit_state["observed"] or error.details.get("committed") is not False:
+                mutation_lock.record_client_visible_busy()
+                return False
+            return True
+
+        return self._absorb_contention(
+            command, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
+        )
+
+    def _absorb_contention(
+        self,
+        command: Any,
+        wait: _ContentionWait,
+        attempt: Callable[[], Any],
+        *,
+        absorbable: Callable[[OpError], bool],
+        request_id: str,
+        join_on_arrival: bool,
+        on_refuse: Callable[[OpError], None] | None = None,
+    ) -> Any:
+        """Attempt a write until it returns, waiting in line after each refusal `absorbable` admits.
+
+        Only the calling thread waits. `absorbable` admits a refusal raised before anything
+        committed; every other error propagates on first sight.
+        """
+        # The last refusal this write absorbed: a wait that runs out in line
         # still names the holder that kept it waiting.
         last_busy: OpError | None = None
-        last_attempt_seconds = 0.0
-        holds_slot = False
-
-        def fits_another_attempt() -> bool:
-            # The deadline leaves room for one guard timeout, not for a leaf whose
-            # preparation is slow; never start an attempt the budget cannot finish.
-            return request_budget.can_afford(
-                request_budget.DELIVERY_RESERVE_SECONDS + last_attempt_seconds
-            )
-
-        def wait_turn() -> bool:
-            # A head ticket can return immediately even after its deadline.
-            return (
-                time.monotonic() < deadline
-                and queue.wait_turn(ticket, deadline)
-                and time.monotonic() < deadline
-            )
-
-        def admit_preparation_retry() -> bool:
-            nonlocal ticket, holds_slot
-            if time.monotonic() >= deadline:
-                return False
-            if not holds_slot:
-                if not _take_capture_waiter_slot():
-                    return False
-                holds_slot = True
-            if ticket is None:
-                ticket = queue.enter_line()
-            return wait_turn()
-
-        preparation_retry = _CapturePreparationRetry(deadline, admit_preparation_retry)
-
-        def waited_ms() -> int:
-            return round((time.monotonic() - started) * 1000)
 
         def uncounted_busy() -> OpError:
             with mutation_lock.absorbing_busy():
-                return _mutation_busy(None, wait_ms=waited_ms())
+                return _mutation_busy(None, wait_ms=wait.waited_ms())
 
         def refuse(error: OpError, cause: str, remediation: str) -> OpError:
+            if on_refuse is not None:
+                on_refuse(error)
+            if error.code != "MUTATION_BUSY":
+                # A handed-back store or preparation refusal keeps its own shape and cause.
+                return error
             # The one place a busy from this loop becomes client-visible.
             mutation_lock.record_client_visible_busy()
             # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
             error.details.pop("wait_ms", None)
-            error.details.update(cause=cause, waited_ms=waited_ms(), absorbed_attempts=absorbed)
+            error.details.update(cause=cause, waited_ms=wait.waited_ms(), absorbed_attempts=wait.absorbed)
             error.remediation = remediation
             _log_mutation_event(
                 "contention_refused",
@@ -6512,86 +6618,211 @@ class LeaseManager:
             return error
 
         try:
-            if queue.waiting():
+            if join_on_arrival and wait.queue.waiting():
                 # Arriving behind others means parking this thread as they do.
-                if not _take_capture_waiter_slot():
+                if not wait.take_slot():
                     raise refuse(
                         uncounted_busy(),
                         "capture_waiters_full",
                         _CAPTURE_WAITERS_FULL_REMEDIATION,
                     )
-                holds_slot = True
-                ticket = queue.enter_line()
+                wait.join_line()
             while True:
-                if ticket is not None and not wait_turn():
+                if wait.ticket is not None and not wait.wait_turn():
                     raise refuse(
                         last_busy or uncounted_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
-                if last_busy is not None and not fits_another_attempt():
+                if last_busy is not None and not wait.fits_another_attempt():
                     # Waiting in line can spend the budget the check below saw.
                     raise refuse(
                         last_busy, "capture_wait_exhausted", _CAPTURE_WAIT_EXHAUSTED_REMEDIATION
                     )
                 attempt_started = time.monotonic()
                 try:
-                    token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(preparation_retry)
-                    try:
-                        with mutation_lock.absorbing_busy():
-                            result = run()
-                    finally:
-                        _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
+                    result = attempt()
                 except OpError as error:
-                    if (
-                        error.code != "MUTATION_BUSY"
-                        or commit_state["observed"]
-                        or error.details.get("committed") is not False
-                    ):
-                        if error.code == "MUTATION_BUSY":
-                            mutation_lock.record_client_visible_busy()
+                    if not absorbable(error):
                         raise
                     holder = error.details.get("holder")
                     if isinstance(holder, Mapping) and holder.get("overdue") is True:
                         raise refuse(
                             error, "holder_overdue", _CAPTURE_HOLDER_OVERDUE_REMEDIATION
                         ) from None
-                    remaining = deadline - time.monotonic()
-                    last_attempt_seconds = time.monotonic() - attempt_started
-                    if remaining <= 0 or not fits_another_attempt():
+                    remaining = wait.deadline - time.monotonic()
+                    wait.last_attempt_seconds = time.monotonic() - attempt_started
+                    if remaining <= 0 or not wait.fits_another_attempt():
                         raise refuse(
                             error,
                             "capture_wait_exhausted",
                             _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                         ) from None
-                    if not holds_slot:
-                        if not _take_capture_waiter_slot():
-                            raise refuse(
-                                error,
-                                "capture_waiters_full",
-                                _CAPTURE_WAITERS_FULL_REMEDIATION,
-                            ) from None
-                        holds_slot = True
-                    absorbed += 1
+                    if not wait.take_slot():
+                        raise refuse(
+                            error,
+                            "capture_waiters_full",
+                            _CAPTURE_WAITERS_FULL_REMEDIATION,
+                        ) from None
+                    wait.absorbed += 1
                     last_busy = error
-                    if ticket is None:
-                        ticket = queue.enter_line()
+                    wait.join_line()
                     time.sleep(min(_CAPTURE_RETRY_FLOOR_SECONDS, remaining))
                     continue
-                if absorbed:
+                if wait.absorbed:
                     _log_mutation_event(
                         "contention_absorbed",
                         request_id=request_id,
                         command=command.name,
-                        attempts=absorbed + 1,
-                        waited_ms=waited_ms(),
+                        attempts=wait.absorbed + 1,
+                        waited_ms=wait.waited_ms(),
                     )
                 return result
         finally:
-            if holds_slot:
-                _release_capture_waiter_slot()
-            if ticket is not None:
-                queue.leave(ticket)
+            wait.close()
+
+    def _run_store_attempt(
+        self,
+        attempt: _StoreAttempt,
+        run: Callable[[], Any],
+        *,
+        eligible: bool,
+        commit_state: Mapping[str, bool],
+    ) -> Any:
+        """Make one attempt for a request thread that waits out contention itself.
+
+        It never waits in line or between attempts, so the store thread serves other requests
+        meanwhile. A refusal raised before anything committed is handed back for another attempt.
+        """
+        queue = self._capture_queue
+
+        def admit_preparation_retry() -> bool:
+            # Retry in place only while no other write waits; otherwise wait in line on the request thread.
+            if time.monotonic() >= attempt.deadline:
+                return False
+            if attempt.holds_ticket or not queue.waiting():
+                return True
+            attempt.preparation_retry_wanted = True
+            return False
+
+        if eligible and not attempt.holds_ticket and queue.waiting():
+            # Arriving behind waiting writes: join their line on the request thread without running.
+            with mutation_lock.absorbing_busy():
+                attempt.handed_off = _mutation_busy(None, wait_ms=0)
+            raise attempt.handed_off
+        # A nested invocation inside this one is not the request thread's attempt.
+        nested_token = _ACTIVE_STORE_ATTEMPT.set(None)
+        retry_token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(
+            _CapturePreparationRetry(attempt.deadline, admit_preparation_retry) if eligible else None
+        )
+        try:
+            with mutation_lock.absorbing_busy() if eligible else nullcontext():
+                return run()
+        except OpError as error:
+            before_commit = not commit_state["observed"]
+            if error.code == "MUTATION_BUSY":
+                if before_commit and eligible and error.details.get("committed") is False:
+                    attempt.handed_off = error
+                elif eligible:
+                    mutation_lock.record_client_visible_busy()
+            elif error.code == "COLLECTION_STORE_BUSY":
+                # A store handoff refused the guard before the leaf ran, so nothing ran, keyed or not.
+                if not commit_state["leaf_started"]:
+                    attempt.handed_off = error
+            elif error.code == "REFERENCE_PREPARATION_UNAVAILABLE":
+                if before_commit and attempt.preparation_retry_wanted:
+                    attempt.handed_off = error
+            raise
+        finally:
+            _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(retry_token)
+            _ACTIVE_STORE_ATTEMPT.reset(nested_token)
+
+    def _attempt_store_write(
+        self,
+        func: Callable[..., Any],
+        command: Any,
+        injected: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        routed: Any,
+    ) -> Any:
+        """Run a write that may route to a collection store thread, waiting out contention here.
+
+        The store thread makes each attempt once and hands back a refusal raised before anything
+        committed (`_run_store_attempt`), so it never parks while this write waits its turn.
+        Routing proves ownership under the boundary and changes nothing, so its busy is waited out too.
+        `routed` is the first routing's store server, or the busy refusal it raised.
+        """
+        from .collection_store import runtime as store_runtime
+
+        # Every attempt is one request: one id in the logs and in the one journal row.
+        request_id = kwargs.get("mutation_request_id") or str(uuid.uuid4())
+        call_kwargs = {**kwargs, "mutation_request_id": request_id}
+        wait = _ContentionWait(
+            self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+        )
+        routing = received = False
+        current: _StoreAttempt | None = None
+        refusal_journal: list[Callable[[], None]] = []
+
+        def extend(completion_deadline: float) -> float | None:
+            # The store has not taken the write, so it never ran: it keeps its place while its wait allows.
+            if not wait.take_slot():
+                return None
+            return min(
+                wait.deadline,
+                completion_deadline - max(wait.last_attempt_seconds, self._mutation_timeout_seconds),
+            )
+
+        def run() -> Any:
+            return func(command, *injected, **call_kwargs)
+
+        def attempt() -> Any:
+            nonlocal routing, received, current
+            current = _StoreAttempt(
+                holds_ticket=wait.ticket is not None,
+                resubmission=received,
+                deadline=wait.deadline,
+            )
+            routing = True
+            if wait.absorbed:
+                with mutation_lock.absorbing_busy():
+                    server = store_runtime.route(command.name, injected[0], kwargs)
+            elif isinstance(routed, OpError):
+                raise routed
+            else:
+                server = routed
+            routing = False
+            token = _ACTIVE_STORE_ATTEMPT.set(current)
+            try:
+                if server is None:
+                    return run()
+                return server.call(run, wake_maintenance=True, read_only=False, extend=extend)
+            finally:
+                _ACTIVE_STORE_ATTEMPT.reset(token)
+                received = received or current.received
+
+        def absorbable(error: OpError) -> bool:
+            if routing:
+                return error.code == "MUTATION_BUSY"
+            if current is None or error is not current.handed_off:
+                return False
+            # The journal row, if any, of the refusal the caller would see now.
+            refusal_journal[:] = [] if current.deferred_refusal is None else [current.deferred_refusal]
+            return True
+
+        def journal_refusal(_error: OpError) -> None:
+            for journal in refusal_journal:
+                journal()
+
+        return self._absorb_contention(
+            command,
+            wait,
+            attempt,
+            absorbable=absorbable,
+            request_id=request_id,
+            join_on_arrival=False,
+            on_refuse=journal_refusal,
+        )
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
         if injected and isinstance(injected[0], os.PathLike):
@@ -6754,7 +6985,14 @@ class LeaseManager:
             if self._stop.is_set() or self._store_refused():
                 from .collection_store import connection as store_connection
 
-                raise store_connection.busy("collection store handoff is in progress")
+                error = store_connection.busy("collection store handoff is in progress")
+                attempt = _ACTIVE_STORE_ATTEMPT.get()
+                if attempt is not None and not (self._stop.is_set() or self._store_closed):
+                    # A handoff refuses only a thread that is not already a store borrower, and the
+                    # store thread borrows for the whole request once `_serve` checks out. So a
+                    # refusal that sees an attempt came before the request's work ran.
+                    attempt.handed_off = error
+                raise error
             self._store_bound = True
             self._store_borrowers[thread] = self._store_borrowers.get(thread, 0) + 1
         try:
@@ -7601,15 +7839,27 @@ def _collection_store_thread(func):
             from . import foreground_priority
             from .collection_store import runtime as store_runtime
 
+            import_request = kwargs.get("import_request")
+            # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
+            import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
+                             and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
+            read_only = _store_request_is_read_only(command, kwargs)
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
+                if not (read_only or import_status) and _writes_absorb_contention():
+                    try:
+                        with mutation_lock.absorbing_busy():
+                            routed = store_runtime.route(command.name, injected[0], kwargs)
+                    except OpError as error:
+                        # Routing proves ownership under the boundary and changes nothing.
+                        if error.code != "MUTATION_BUSY":
+                            raise
+                        routed = error
+                    if routed is not None:
+                        return get_manager()._attempt_store_write(func, command, injected, kwargs, routed)
+                    return func(command, *injected, **kwargs)
                 server = store_runtime.route(command.name, injected[0], kwargs)
                 if server is not None:
-                    import_request = kwargs.get("import_request")
-                    # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
-                    import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
-                                     and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
-                    read_only = _store_request_is_read_only(command, kwargs)
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
                         # A read cannot start a job, revise a declaration or leave views pending; waking

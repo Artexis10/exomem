@@ -26,11 +26,14 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import (
     asr_runtime,
+    cuda_containment,
     deferred_index,
     embeddings,
     epistemic_graph,
@@ -45,6 +48,7 @@ from . import (
     prior_extraction,
     provenance,
     recall_policy,
+    resource_status,
     runtime_resources,
     scene_frames,
     semantic_segments,
@@ -146,6 +150,9 @@ _AUTHORITY_UNAVAILABLE_EXIT_CODE = 79
 #: started under reserves (an interrupted job it recovered, say). It ran nothing and
 #: counted no stop; the supervisor gives the slot back and asks for the right size.
 _SLOT_TOO_SMALL_EXIT_CODE = 80
+#: The child found the GPU busy for the speech engine and left only speech work pending. The
+#: jobs are still pending: nothing is blocked, and the supervisor starts the next child later.
+_GPU_BUSY_EXIT_CODE = 81
 #: Relaunch delay after consecutive authority refusals: from the follower cadence,
 #: doubling to this ceiling, so a lease that frees up still starts work within it.
 _AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
@@ -158,6 +165,13 @@ _MEMORY_WAIT_SECONDS = 15.0
 _MEMORY_RECOVERY_SECONDS = 60.0
 _MEMORY_RECOVERY_MAX_SECONDS = 1800.0
 _TRANSIENT_RECHECK_SECONDS = 5.0
+#: How long the supervisor waits before it asks again whether a busy GPU has freed up. Each ask
+#: costs one child process, and another process holding the GPU can last for hours.
+_GPU_BUSY_RECHECK_SECONDS = 60.0
+#: A media child killed by a signal it did not get from the supervisor (a native library fault, the
+#: kernel's memory killer) leaves its job to run again. The restart delay doubles from the plain
+#: failure delay to this ceiling, so a job that always kills its child costs one start per ceiling.
+_CHILD_CRASH_BACKOFF_MAX_SECONDS = 300.0
 _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: How long the supervisor sleeps between passes.  Deliberately unchanged: the
 #: cost being removed below is the store open, not the wakeup, and stretching
@@ -391,6 +405,10 @@ class MediaWorker:
         #: The anonymous bytes of the slot the next child is started under.
         self._leased_anon_bytes: int | None = None
         self._asr_runtime_failure: str | None = None
+        #: The GPU preflight verdict, taken once per worker lifetime before the first child starts.
+        self._gpu_preflight: cuda_containment.Preflight | None = None
+        #: The supervisor killed the running child itself, so its signal exit is not a crash.
+        self._child_stopped = False
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
@@ -767,7 +785,7 @@ class MediaWorker:
                 retryable=False,
             )
             return self._publication_outcome(committed, FAILED, error)
-        except runtime_resources.ModelBusyError:
+        except (runtime_resources.ModelBusyError, asr_runtime.ASRGpuBusy):
             raise
         except MemoryError:
             raise  # a memory stop returns the job to pending; never an artifact failure
@@ -1110,6 +1128,7 @@ class MediaWorker:
                 cell.anon,
                 f", brakes unavailable: {cell.problem}" if cell.problem else "",
             )
+        self._child_stopped = True
         with contextlib.suppress(OSError):
             os.killpg(child.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -1691,7 +1710,7 @@ class MediaWorker:
         if self._leased_anon_bytes is not None:
             args += ["--leased-anon-bytes", str(self._leased_anon_bytes)]
         log.info("media worker: starting disposable child")
-        env = asr_runtime.cuda_runtime_child_env(os.environ)
+        env = self._guard_gpu(asr_runtime.cuda_runtime_child_env(os.environ))
         if media_brakes.enabled():
             # OpenBLAS reserves data segment for one thread per host CPU when numpy
             # loads (about 40 MiB each), so the child's VmData limit would follow the
@@ -1705,17 +1724,63 @@ class MediaWorker:
             start_new_session=media_brakes.enabled(),
         )
 
+    def _guard_gpu(self, env: dict[str, str]) -> dict[str, str]:
+        """Give the child its GPU devices only if a throwaway process initialized CUDA without a fault.
+
+        One verdict per worker lifetime: a repaired driver needs a service restart anyway, and a probe
+        costs seconds of CUDA initialization. A failed verdict leaves the child with no device and the
+        reason, so an explicit CUDA request blocks with it and an automatic one runs on the CPU.
+        A host with no CUDA device to initialize gets the verdict "not tested", never "passed".
+        """
+        if self._gpu_preflight is None:
+            verdict = cuda_containment.check_gpu(env, driver_present=resource_status.find_nvidia_smi() is not None)
+            if not verdict.ok:
+                log.error("media worker: GPU preflight failed (%s); media runs without the GPU", verdict.reason)
+            self._gpu_preflight = verdict
+            self._record_status(
+                MediaJobStore.record_gpu_preflight,
+                verdict.result,
+                verdict.reason,
+                serving_worker_cuda_hidden=cuda_containment.hidden_from_worker(),
+            )
+        if self._gpu_preflight.ok:
+            return env
+        failure = f"GPU preflight {self._gpu_preflight.reason}; media processing runs without the GPU until the service restarts"
+        return cuda_containment.deny_gpu_to_child(env, failure)
+
+    def _record_status(self, record: Callable[..., Any], *args: object, **kwargs: object) -> Any:
+        """Write a status fact; a status record must never keep the supervisor or a child from running."""
+        if self._store is None:
+            return None
+        try:
+            return record(self._store, *args, **kwargs)
+        except Exception:  # noqa: BLE001 - see above
+            log.warning("media worker: could not record a status fact", exc_info=True)
+            return None
+
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
         eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
         eviction: threading.Thread | None = None
+        #: The last child exited because the GPU is busy, and the supervisor waits to ask again.
+        gpu_hold = False
+        #: The store signature this wait last looked at for work that needs no GPU.
+        hold_signature: tuple[object, ...] | None = None
+        #: Children in a row that died by a signal nobody here sent.
+        crashes = 0
         # The store signature this supervisor last saw answer "no work", and
         # when to stop trusting it.  `None` means "ask the store".
         idle_signature: tuple[object, ...] | None = None
         forced_recheck_at = 0.0
         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
         brakes = media_brakes.enabled()
+        #: A GPU wait is recorded that no idle pass has re-checked yet; a restart can keep one for waiting jobs.
+        gpu_wait_recorded = bool(
+            self._record_status(
+                MediaJobStore.reset_runtime_status, serving_worker_cuda_hidden=cuda_containment.hidden_from_worker()
+            )
+        )
         try:
             waits, self._engine_waits = self._engine_waits, []
             if waits:
@@ -1784,10 +1849,20 @@ class MediaWorker:
                     self._child = None
                     self._release_slot()
                     idle_signature = None
+                    gpu_hold = False
+                    crashed = returncode is not None and returncode < 0 and not self._child_stopped
+                    crashes_before, crashes = crashes, crashes + 1 if crashed else 0
                     owns_runtime = self._store.worker_pid() == child_pid
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
                         self._store.clear_worker(child_pid)
+                    if crashed:
+                        # After the recovery, so the record names the job that the next child claims.
+                        self._record_status(
+                            MediaJobStore.record_child_crash, crashes, cuda_containment.signal_name(-returncode)
+                        )
+                    elif crashes_before:
+                        self._record_status(MediaJobStore.clear_child_crashes)
                     if returncode == _MEMORY_RECYCLE_EXIT_CODE:
                         delay = 0.5
                     elif returncode == _MEMORY_WAIT_EXIT_CODE:
@@ -1803,6 +1878,11 @@ class MediaWorker:
                             "media child found no writer authority; retrying after %.1fs",
                             delay,
                         )
+                    elif returncode == _GPU_BUSY_EXIT_CODE:
+                        delay = _GPU_BUSY_RECHECK_SECONDS
+                        gpu_hold = gpu_wait_recorded = True
+                        hold_signature = _job_store_signature(self._store)  # the child ran everything it could
+                        log.info("media child found the GPU busy; retrying after %.1fs", delay)
                     elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
                             _LOCK_UNAVAILABLE_RECHECK_SECONDS
@@ -1811,6 +1891,15 @@ class MediaWorker:
                         )
                         log.info(
                             "media child deferred work; retrying after %.1fs",
+                            delay,
+                        )
+                    elif crashed:
+                        delay = min(2.0 * 2 ** (crashes - 1), _CHILD_CRASH_BACKOFF_MAX_SECONDS)
+                        log.error(
+                            "media child died with signal %d (%d in a row); recovered %d job(s); retrying after %.0fs",
+                            -returncode,
+                            crashes,
+                            recovered,
                             delay,
                         )
                     elif returncode:
@@ -1828,6 +1917,17 @@ class MediaWorker:
                         self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
                     relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                if gpu_hold:
+                    # Every path that queues work writes the store, so a changed signature is the cue to look.
+                    # Work that needs no GPU ends the wait early: the child that takes it asks the GPU once
+                    # more on the way, so one probe is the whole cost.
+                    signature = _job_store_signature(self._store)
+                    if signature is None or signature != hold_signature:
+                        if self._store.next_pending(skip_media_types=media_engines.SPEECH_KINDS) is not None:
+                            relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
+                            gpu_hold = False
+                        else:
+                            hold_signature = _job_store_signature(self._store)  # after the read: it can write the WAL
                 if self._child is None and _clock() >= relaunch_after:
                     now = _clock()
                     signature = _job_store_signature(self._store)
@@ -1865,6 +1965,7 @@ class MediaWorker:
                             relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
                         else:
                             try:
+                                self._child_stopped = False
                                 self._child = self._launch_child()
                                 self._child_started_at = _clock()
                             except OSError:
@@ -1877,6 +1978,10 @@ class MediaWorker:
                         # store, and that open writes to the WAL, so a
                         # before-signature would never match again and the skip
                         # would never engage.
+                        if gpu_wait_recorded:
+                            # No work is pending, so no speech job waits for a GPU: end the record of that wait.
+                            self._record_status(MediaJobStore.clear_gpu_wait)
+                            gpu_wait_recorded = False
                         idle_signature = _job_store_signature(self._store)
                         forced_recheck_at = _clock() + recheck_interval
                         recheck_interval = min(
@@ -2504,6 +2609,11 @@ def run_child(
     brakes = media_brakes.enabled()
     config = media_brakes.settings(cell=media_brakes.read_cell()) if brakes else None
     refusal: list[int] = []
+    #: Set once the speech engine found the GPU busy. This child then leaves speech work pending and
+    #: claims the rest, so one busy GPU neither blocks the jobs behind it nor stays on the books.
+    gpu_busy = False
+    #: The jobs this child returned to pending for that reason; it asks the GPU about each only once.
+    deferred_for_gpu: set[int] = set()
 
     def budget_of(job: _Job) -> media_brakes.Budget:
         assert config is not None
@@ -2541,11 +2651,21 @@ def run_child(
                 # Check for eligible work once more before the idle exit.
                 and now - last_work < idle_seconds
             )
-            job = None if settled else store.claim_next(admit if brakes else None)
+            job = (
+                None
+                if settled
+                else store.claim_next(
+                    admit if brakes else None,
+                    skip_media_types=media_engines.SPEECH_KINDS if gpu_busy else (),
+                )
+            )
             if refusal:
                 log.info("media worker: admission refused the next job (exit %d); child exiting", refusal[0])
                 return refusal[0]
             if job is None:
+                if gpu_busy:
+                    log.info("media worker: only speech work is left and the GPU is busy; child exiting")
+                    return _GPU_BUSY_EXIT_CODE
                 if not settled:
                     idle_signature = _job_store_signature(store)
                     forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
@@ -2554,6 +2674,10 @@ def run_child(
                     return 0
                 time.sleep(min(0.25, idle_seconds))
                 continue
+            if job.id in deferred_for_gpu:
+                # The claim skips speech work once the GPU is busy; a job back here anyway would spin.
+                store.defer(job)
+                return _GPU_BUSY_EXIT_CODE
             idle_signature = None
             last_work = _clock()
             try:
@@ -2592,6 +2716,14 @@ def run_child(
                 store.defer(job)
                 log.info("media worker: deferred %s after model admission refusal", job.binary_path)
                 return _TRANSIENT_EXIT_CODE
+            except asr_runtime.ASRGpuBusy as exc:
+                assert job.id is not None
+                store.defer(job)
+                gpu_busy = True
+                deferred_for_gpu.add(job.id)
+                store.note_gpu_wait(str(exc))
+                log.info("media worker: deferred %s while the GPU is busy: %s", job.binary_path, exc)
+                continue  # it ran nothing, so no fresh child is needed before the next job
             except OpError as exc:
                 assert job.id is not None
                 if exc.code in _TRANSIENT_OPERATION_CODES:
@@ -2629,6 +2761,8 @@ def run_child(
                 fail(job, f"{type(exc).__name__}: {exc}")
             else:
                 assert job.id is not None
+                if job.do_ocr and media_engines.engine_for(job.media_type) == media_engines.SPEECH:
+                    store.clear_gpu_wait()  # the speech engine got the GPU, so nothing waits for it
                 if outcome.state == _HANDOFF:
                     # Durable result custody now belongs to the long-lived parent.
                     # In particular, do not run later CLIP/re-embed stages or

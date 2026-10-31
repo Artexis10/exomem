@@ -15,8 +15,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import yaml
-
 from . import activation, find_corpus, lifecycle_statuses, note_types
 from . import artifact_role_review as sensor
 from .find_types import ParsedPage
@@ -36,11 +34,14 @@ def _generation(root: Path, path: str) -> list[int] | None:
 
 def _state(root: Path, parsed: Any) -> Any:
     from . import semantic_contract
+    from .vault import yaml_safe_dump_for_parse
 
+    # The text is parsed straight back and never hashed into a descriptor, so the
+    # libyaml emitter is exact here; the pure-Python one was a third of a full build.
     return semantic_contract._parse_page_state(
         root,
         parsed.rel_path,
-        "---\n" + yaml.safe_dump(parsed.frontmatter) + "---\n" + parsed.body,
+        "---\n" + yaml_safe_dump_for_parse(parsed.frontmatter) + "---\n" + parsed.body,
     )
 
 
