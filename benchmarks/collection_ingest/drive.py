@@ -128,11 +128,14 @@ class Journey:
         self.final: dict[str, Any] = {}
         self.notes: dict[str, Any] = {}
 
-    async def adoption(self, step: str, args: dict[str, Any]) -> tuple[str, Any, dict[str, Any]]:
+    async def adoption(self, step: str, args: dict[str, Any], *,
+                       detail: str = "compact") -> tuple[str, Any, dict[str, Any]]:
+        """Call one action. ``full`` carries the whole run, megabytes on a large collection,
+        so only the steps that read the run ask for it."""
         started = time.perf_counter()
-        full = {"action": step.split(":")[0], "response_detail": "full", **args}
+        request = {"action": step.split(":")[0], "response_detail": detail, **args}
         outcome, data, record = await self.session.call(
-            "adoption_studio", full, journey=self.name, step=step
+            "adoption_studio", request, journey=self.name, step=step
         )
         key = step.split(":")[0]
         self.phase_ms[key] = round(
@@ -157,21 +160,30 @@ class Journey:
                 self.refusals[key] = {"stage": "apply.failed", "path": path,
                                       "code": outcome.get("code"), "reason": outcome.get("reason")}
 
-    async def follow(self, step: str, args: dict[str, Any]) -> tuple[str, Any, int]:
-        """Call ``step`` and repeat it with the returned ``continuation`` until none comes back."""
+    async def follow(self, step: str, args: dict[str, Any]) -> tuple[str, Any, Any, int]:
+        """Call ``step`` and repeat it with the returned ``continuation`` until none comes back.
+
+        Each page asks for the compact reply. Once the last page is in, one ``status`` call
+        reads the run for the refusals and the plan. Returns the outcome, the last page,
+        that run and the page count.
+        """
         pages = 0
         outcome, data = "ok", None
         while pages < MAX_PAGES:
             pages += 1
             outcome, data, _ = await self.adoption(f"{step}:p{pages}", args)
             if outcome != "ok":
-                break
-            self.note_refusals(step, data)
+                return outcome, data, {}, pages
             token = find_field(data, "continuation")
             if token is None:
                 break
             args = {**args, "continuation": token}
-        return outcome, data, pages
+        outcome, status, _ = await self.adoption(
+            f"status:after-{step}", {"run_id": self.run_id}, detail="full")
+        if outcome != "ok":
+            return outcome, data, {}, pages
+        self.note_refusals(step, status)
+        return outcome, data, run_object(status), pages
 
     async def run(self, *, collection_label: str, rules_state: dict[str, Any],
                   probe_rules: bool, include_rules: list[dict[str, Any]]) -> dict[str, Any]:
@@ -200,7 +212,7 @@ class Journey:
             outcome, data, record = await self.adoption(
                 "select:rules", {"run_id": self.run_id,
                                  "include": include_rules,
-                                 "include_junk": False, **self._override_args()})
+                                 "include_junk": False, **self._override_args()}, detail="full")
             rules_state["folder_kind_rules"] = "explicit"
             if outcome != "ok":
                 return self._stop("select:rules", record)
@@ -213,7 +225,7 @@ class Journey:
             ]
             rule_args = {"run_id": self.run_id, "include": [*rules, {"path": self.collection}],
                          "include_junk": False, **self._override_args()}
-            outcome, data, record = await self.adoption("select:rules", rule_args)
+            outcome, data, record = await self.adoption("select:rules", rule_args, detail="full")
             if outcome == "ok":
                 rules_state["folder_kind_rules"] = "accepted"
                 selected = True
@@ -224,15 +236,15 @@ class Journey:
         if not selected:
             outcome, data, record = await self.adoption(
                 "select", {"run_id": self.run_id, "include": include, "include_junk": False,
-                           **self._override_args()})
+                           **self._override_args()}, detail="full")
             if outcome != "ok":
                 return self._stop("select", record)
         self.note_refusals("select", data)
 
-        outcome, data, pages = await self.follow("plan", {"run_id": self.run_id})
+        outcome, _data, run, pages = await self.follow("plan", {"run_id": self.run_id})
         if outcome != "ok":
             return self._stop("plan", self.session.calls[-1])
-        plan = run_object(data).get("plan") or {}
+        plan = run.get("plan") or {}
         plan_id = plan.get("plan_id")
         self.notes["plan_pages"] = pages
         self.notes["plan_items_last_page"] = len(plan.get("items") or [])
@@ -244,10 +256,10 @@ class Journey:
             args = {"run_id": self.run_id, "plan_id": plan_id}
             if retried_failed:
                 args["retry_failed"] = True
-            outcome, data, pages = await self.follow("apply", args)
+            outcome, _data, run, pages = await self.follow("apply", args)
             if outcome != "ok":
                 return self._stop("apply", self.session.calls[-1])
-            phase = run_object(data).get("phase")
+            phase = run.get("phase")
             if phase == "partial" and not retried_failed:
                 retried_failed = True  # one bounded retry of the failed subset, then move on
                 continue
@@ -257,7 +269,7 @@ class Journey:
         self.notes["retry_failed_used"] = retried_failed
 
         outcome, data, record = await self.adoption(
-            "finish", {"run_id": self.run_id, "write_manifest": False})
+            "finish", {"run_id": self.run_id, "write_manifest": False}, detail="full")
         if outcome != "ok":
             return self._stop("finish", record)
         run = run_object(data)
