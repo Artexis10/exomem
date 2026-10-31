@@ -2092,6 +2092,29 @@ def test_an_original_larger_than_the_whole_hydration_capacity_blocks_its_job(vau
     assert ledger.claim_next() is None
 
 
+@pytest.mark.parametrize("cloud", [False, True])
+def test_a_job_blocked_on_a_too_large_original_names_the_hydration_capacity(vault: Path, selected_store, monkeypatch,
+                                                                             cloud):
+    """Catches the engine-unavailable guidance on a block that only a larger hydration capacity clears."""
+    import os
+
+    from exomem import media_engines, media_jobs, media_store, media_worker
+
+    path = _stored(vault, "recording", 3_000)
+    assert media_store.evict(vault, path)
+    _configure(selected_store, vault, max_temporary_bytes=2_000)
+    job_id = media_jobs.MediaJobStore(vault).enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    if cloud:
+        monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+
+    [job] = [job for job in media_jobs.status(vault)["jobs"] if job["id"] == job_id]
+
+    assert job["state"] == media_jobs.BLOCKED and job["retryable"]
+    assert job["next_action"] != media_engines.unavailable_next_action()
+    assert "hydration capacity" in job["next_action"]
+
+
 def test_a_corrupt_stored_object_fails_its_job_as_unverified(vault: Path, selected_store):
     """Catches a verification mismatch treated as an outage, which hydrates a corrupt object again and again."""
     import os

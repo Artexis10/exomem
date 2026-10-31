@@ -92,6 +92,9 @@ ENGINE_DISABLED = "engine_disabled"
 #: the `media_brakes.context` they depended on.
 MEMORY_BLOCKED = "memory_blocked"
 OVER_BUDGET = "over_budget"
+#: The original exceeds the whole hydration capacity of the store policy; only a larger
+#: capacity and a retry clear it (`media_store.HYDRATION_TOO_LARGE_CODE`).
+HYDRATION_TOO_LARGE = "hydration_too_large"
 #: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
 _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 #: Reasons whose rows return by themselves, as a SQL list of these constants.
@@ -2815,6 +2818,15 @@ def tool_job_state(vault_root: Path, state: str, job_id: int | None) -> str:
     return state
 
 
+def _hydration_too_large_action() -> str:
+    """A Cloud tenant cannot change the store policy, so a Cloud cell names the operator."""
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        return "wait until the operator raises this deployment's hydration capacity, then retry"
+    return "raise the hydration capacity (max_temporary_bytes in the media store policy) above the file's size, then retry"
+
+
 def _status_job(row: Any) -> dict[str, Any]:
     state = str(row["state"])
     error = str(row["last_error"]) if row["last_error"] is not None else None
@@ -2863,6 +2875,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         }
     if reason == OVER_BUDGET:
         actions[BLOCKED] = OVER_BUDGET_ACTION
+    elif reason == HYDRATION_TOO_LARGE:
+        actions[BLOCKED] = _hydration_too_large_action()
     # A stopped reprocess leaves the completed transcript as it was, and a retry would
     # find that transcript complete, so only a new request runs it again.
     reprocess_stopped = (

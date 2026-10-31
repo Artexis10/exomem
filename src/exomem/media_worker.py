@@ -254,6 +254,7 @@ def _authority_recheck_seconds(code: str) -> float:
 class _ProcessOutcome:
     state: str
     error: str | None = None
+    blocked_reason: str | None = None
 
 
 def _hydration_outcome(error: Exception) -> _ProcessOutcome:
@@ -269,7 +270,7 @@ def _hydration_outcome(error: Exception) -> _ProcessOutcome:
     if error.code in media_store.RETRYABLE_HYDRATION_CODES:
         return _ProcessOutcome(_RETURNED, str(error))
     if error.code == media_store.HYDRATION_TOO_LARGE_CODE:
-        return _ProcessOutcome(BLOCKED, str(error))
+        return _ProcessOutcome(BLOCKED, str(error), media_jobs.HYDRATION_TOO_LARGE)
     raise error
 
 
@@ -2635,7 +2636,7 @@ def run_child(
                         return 0  # one job per child under the brakes
                     continue
                 if outcome.state == BLOCKED:
-                    store.mark(job, BLOCKED, outcome.error)
+                    store.mark(job, BLOCKED, outcome.error, blocked_reason=outcome.blocked_reason)
                 elif outcome.state == FAILED:
                     fail(job, outcome.error)
                 elif outcome.state == _RETURNED:
