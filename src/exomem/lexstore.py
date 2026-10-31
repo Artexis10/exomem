@@ -822,6 +822,9 @@ SCHEMA_VERSION = 15
 #: (the default drops marks, which splits Indic words at every vowel sign).
 _FTS_TOKENIZE = "tokenize=\"unicode61 remove_diacritics 0 categories 'L* N* Co M*'\""
 CATALOG_FOREGROUND_DELTA_CAP = 32
+#: Steps a lagging-delta catch-up may take beyond the ones its first lag needs.
+#: A lag that outgrows them keeps the full pass, which publishes under writes.
+_CATCH_UP_SLACK_STEPS = 2
 #: A rebuild temp untouched this long, and held open by no connection, is the
 #: leftover of a killed build; the next rebuild removes it.
 _ORPHAN_REBUILD_TEMP_AGE_SECONDS = 10 * 60
@@ -4565,6 +4568,18 @@ class _ReconcileSourceProof:
     refutation_epoch: int
 
 
+@dataclass(frozen=True)
+class _CatchUpSettled:
+    """Lagging paths that earlier steps of one catch-up applied and proved.
+
+    No registry event touched a path in `paths` between the step that applied
+    it and the checkpoints in `at`, so its row describes the registry there.
+    """
+
+    at: Mapping[str, object]
+    paths: frozenset[str]
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -6645,7 +6660,9 @@ class LexicalStore:
             self._note_pending_publication(list(paths), list(rel_paths))
         return applied
 
-    def retry_deferred_upsert(self, paths: list[Path]) -> bool:
+    def retry_deferred_upsert(
+        self, paths: list[Path], *, settled: _CatchUpSettled | None = None
+    ) -> bool:
         """Reconcile identities a contended foreground publication declined.
 
         The foreground wait is 50ms because a governed write may not block on
@@ -6658,6 +6675,9 @@ class LexicalStore:
         a sqlite error or a failed read says the store or the disk is wrong,
         and re-applying rows cannot fix either. Source movement and bounded
         publication timeouts raise instead, so the caller keeps the claim.
+
+        `settled` is the last step of a lagging-delta catch-up: what its
+        earlier steps applied counts toward the witness that blesses the scope.
         """
         if self._failed or not paths:
             return False
@@ -6666,7 +6686,9 @@ class LexicalStore:
         try:
             source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
-                return self._apply_paths_locked(paths, [], source_proofs=source_proofs)
+                return self._apply_paths_locked(
+                    paths, [], source_proofs=source_proofs, settled=settled
+                )
         except VaultLockTimeout:
             raise
         except VaultLockError as e:
@@ -6683,65 +6705,169 @@ class LexicalStore:
 
         A watcher batch that misses the barrier leaves an uncovered delta that no
         later batch can bless. When this process's registry still bridges each
-        scope's stored checkpoint with a complete, untainted delta, and the
-        union fits the foreground cap, replaying those identities is the
-        watcher's own bounded apply, deletions included. Returns whether that
-        replay committed (trivially, when nothing lags). A retired or stale
-        store, a foreign or adopted origin, lost history, a reconcile-tainted
-        delta or an oversized one returns False, logs which refusal it was and
-        keeps the full pass. A source that moves under the replay raises
-        `_SourceMoved`, and the worker keeps the lag-only claim.
+        scope's stored checkpoint with a complete, untainted delta, replaying
+        those identities is the watcher's own bounded apply, deletions included.
+        Returns whether the catalogue then stores the registry's checkpoints
+        (trivially, when nothing lags). A retired or stale store, a foreign or
+        adopted origin, lost history or a reconcile-tainted delta returns False,
+        logs which refusal it was and keeps the full pass. A source that moves
+        under the replay raises `_SourceMoved`, and the worker keeps the
+        lag-only claim.
+
+        A lag larger than the foreground cap replays in steps of at most the
+        cap, each under its own publication barrier, so writers wait no longer
+        than for one watcher batch. Only a round's last step can stamp the
+        checkpoints, and only when every lagging path is in that step or was
+        settled by an earlier one (`_settled_catch_up_paths`). A lag that keeps
+        growing past `_CATCH_UP_SLACK_STEPS` extra steps returns False.
+        """
+        from . import freshness as freshness_module
+
+        lagging = self._lagging_catch_up_paths()
+        if lagging is None:
+            return False
+        cap = CATALOG_FOREGROUND_DELTA_CAP
+        budget = -(-len(lagging) // cap) + _CATCH_UP_SLACK_STEPS
+        steps: list[tuple[dict[str, object], frozenset[str]]] = []
+        while lagging:
+            # A round replays what no earlier step settled. When every path is
+            # settled but unstamped, one more step carries the stamp.
+            pending = sorted(lagging - self._settled_catch_up_paths(steps).paths)
+            pending = pending or sorted(lagging)[:cap]
+            while pending:
+                if len(steps) >= budget:
+                    return _log_catch_up_decline(
+                        "outpaced", paths=len(lagging), steps=len(steps)
+                    )
+                chunk, pending = pending[:cap], pending[cap:]
+                last = not pending and steps
+                settled = self._settled_catch_up_paths(steps) if last else None
+                # Taken before the step reads any file: an edit after it has an
+                # event after this mark, so the path is not settled by this step.
+                marks = {
+                    scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+                    for scope in freshness_module.SCOPES
+                }
+                if not self.retry_deferred_upsert(
+                    [Path(path) for path in chunk], settled=settled
+                ):
+                    return _log_catch_up_decline("replay_failed", paths=len(chunk))
+                steps.append((marks, frozenset(chunk)))
+            lagging = self._lagging_catch_up_paths()
+            if lagging is None:
+                return False
+        return True
+
+    def _lagging_catch_up_paths(self) -> set[str] | None:
+        """The registry paths both scopes' stored checkpoints miss, or None.
+
+        None means a refusal that keeps the full pass; this logs which one.
         """
         from . import freshness as freshness_module
 
         if self._failed:
-            return _log_catch_up_decline("store_failed")
+            _log_catch_up_decline("store_failed")
+            return None
         if not self.path.exists():
-            return _log_catch_up_decline("store_missing")
+            _log_catch_up_decline("store_missing")
+            return None
         lagging: set[str] = set()
         try:
             conn = self._connect()
             try:
                 if not self._schema_is_current(conn):
-                    return _log_catch_up_decline("schema")
+                    _log_catch_up_decline("schema")
+                    return None
                 identity = catalog_semantic_identity(self.vault_root)
                 if self._meta_catalog_identity(conn) != identity:
-                    return _log_catch_up_decline("identity")
+                    _log_catch_up_decline("identity")
+                    return None
                 for scope in freshness_module.SCOPES:
                     if not freshness_module.recall_is_live(self.vault_root, scope):
-                        return _log_catch_up_decline("not_live", scope=scope)
+                        _log_catch_up_decline("not_live", scope=scope)
+                        return None
                     stored = self._meta_checkpoint(conn, scope)
                     current = freshness_module.recall_checkpoint(self.vault_root, scope)
                     if stored is None or current is None:
-                        return _log_catch_up_decline("no_checkpoint", scope=scope)
+                        _log_catch_up_decline("no_checkpoint", scope=scope)
+                        return None
                     if stored.instance_id != current.instance_id:
-                        return _log_catch_up_decline("instance", scope=scope)
+                        _log_catch_up_decline("instance", scope=scope)
+                        return None
                     delta = freshness_module.recall_delta_since(
                         self.vault_root, scope, stored
                     )
                     if not delta.complete:
-                        return _log_catch_up_decline("incomplete", scope=scope)
+                        _log_catch_up_decline("incomplete", scope=scope)
+                        return None
                     if delta.requires_source_proof:
-                        return _log_catch_up_decline(
+                        _log_catch_up_decline(
                             "source_proof",
                             scope=scope,
                             changed=len(delta.changed),
                             deleted=len(delta.deleted),
                         )
+                        return None
                     lagging |= delta.changed | delta.deleted
             finally:
                 conn.close()
         except sqlite3.Error as error:
-            return _log_catch_up_decline("store_error", error=type(error).__name__)
-        if len(lagging) > CATALOG_FOREGROUND_DELTA_CAP:
-            return _log_catch_up_decline(
-                "over_cap", paths=len(lagging), cap=CATALOG_FOREGROUND_DELTA_CAP
-            )
-        if not lagging:
-            return True
-        if not self.retry_deferred_upsert([Path(path) for path in sorted(lagging)]):
-            return _log_catch_up_decline("replay_failed", paths=len(lagging))
-        return True
+            _log_catch_up_decline("store_error", error=type(error).__name__)
+            return None
+        return lagging
+
+    def _settled_catch_up_paths(
+        self, steps: list[tuple[dict[str, object], frozenset[str]]]
+    ) -> _CatchUpSettled:
+        """The paths earlier catch-up steps applied that no later event touched.
+
+        Each step records the registry checkpoints taken before it read its
+        files. A path stays settled by that step while neither scope's delta
+        since those marks names it. A step whose marks no longer bridge (lost
+        history, a restarted registry) settles nothing. Runs off the barrier;
+        `_still_settled` re-checks the events after `at` under it.
+        """
+        from . import freshness as freshness_module
+
+        at = {
+            scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+            for scope in freshness_module.SCOPES
+        }
+        settled: set[str] = set()
+        for marks, chunk in steps:
+            touched: set[str] = set()
+            for scope in freshness_module.SCOPES:
+                mark = marks.get(scope)
+                delta = (
+                    freshness_module.recall_delta_since(self.vault_root, scope, mark)
+                    if mark is not None
+                    else None
+                )
+                if delta is None or not delta.complete:
+                    break
+                touched |= delta.changed | delta.deleted
+            else:
+                settled |= chunk - touched
+        return _CatchUpSettled(at, frozenset(settled))
+
+    def _still_settled(self, settled: _CatchUpSettled) -> set[str]:
+        """`settled.paths` less any path an event after `settled.at` touched.
+
+        Called under the publication barrier: two delta reads over the few
+        events since `at`, never a file read.
+        """
+        from . import freshness as freshness_module
+
+        touched: set[str] = set()
+        for scope in freshness_module.SCOPES:
+            at = settled.at.get(scope)
+            if at is None:
+                return set()
+            delta = freshness_module.recall_delta_since(self.vault_root, scope, at)
+            if not delta.complete:
+                return set()
+            touched |= delta.changed | delta.deleted
+        return set(settled.paths - touched)
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
@@ -6753,8 +6879,13 @@ class LexicalStore:
         rel_paths: list[str],
         *,
         source_proofs: dict[str, _ReconcileSourceProof] | None = None,
+        settled: _CatchUpSettled | None = None,
     ) -> bool:
-        """Apply a changed/deleted union with the publication barrier held."""
+        """Apply a changed/deleted union with the publication barrier held.
+
+        `settled` names paths an earlier catch-up step applied; they count as
+        requested for the witness only while no event has touched them since.
+        """
         from . import freshness as freshness_module
         from . import recall_policy
 
@@ -6779,6 +6910,8 @@ class LexicalStore:
                 for scope in ("kb", "vault")
             }
             requested_paths = self._requested_event_paths(paths, rel_paths)
+            if settled is not None:
+                requested_paths |= self._still_settled(settled)
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
             for path in paths:

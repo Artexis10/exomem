@@ -454,23 +454,141 @@ def test_a_catch_up_lock_failure_that_is_not_contention_still_rebuilds(
     assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
 
 
-def test_a_lag_over_the_foreground_cap_still_rebuilds(
+def test_a_lag_over_the_foreground_cap_catches_up_in_capped_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A bulk import must cost neither a whole-corpus pass nor a long barrier.
+
+    The worker replays the lag in steps no larger than the foreground cap, so
+    writers never wait behind more than one watcher batch's worth of rows. It
+    stamps the checkpoints only once every lagging page is in the catalogue: a
+    stamp after a partial step would admit a catalogue that misses pages.
+    """
+    store, changed, removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    bulk = []
+    for index in range(2 * cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    removed.unlink()
+    freshness.on_files_changed(tmp_path, changed=bulk, deleted=[removed])
+    rebuilds = []
+    steps = []
+    real_rebuild = store.rebuild_atomic
+    real_retry = store.retry_deferred_upsert
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    def retry(paths, **kwargs):
+        applied = real_retry(paths, **kwargs)
+        admitted = lexstore.runtime_retrieval_catalog_proof(
+            tmp_path, require_live_projection=True, schedule_repair=False
+        ) is not None
+        with closing(sqlite3.connect(store.path)) as conn:
+            indexed = conn.execute(
+                "SELECT COUNT(*) FROM pages WHERE path LIKE 'Knowledge Base/bulk-%'"
+            ).fetchone()[0]
+        steps.append((len(paths), admitted, indexed))
+        return applied
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [], "a lag over the cap was rebuilt from the whole corpus"
+    assert len(steps) >= 3
+    assert max(size for size, _admitted, _indexed in steps) <= cap
+    assert all(indexed == len(bulk) for _size, admitted, indexed in steps if admitted), (
+        "a step stamped the checkpoints before every lagging page was replayed"
+    )
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "bulkcontent", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, "beforeremoval", k=3, scope="kb") == []
+
+
+def test_a_page_edited_between_catch_up_steps_is_replayed_before_the_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """An edit to a page an earlier step replayed must not be stamped over.
+
+    The stamp attests every lagging page at the registry's checkpoint. A page
+    edited after its step holds older rows than that checkpoint, so the worker
+    replays it again before stamping, or the edit would vanish from search
+    while the catalogue is admitted.
+    """
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    bulk = []
+    for index in range(2 * cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    freshness.on_files_changed(tmp_path, changed=bulk)
+    rebuilds = []
+    edited = []
+    real_rebuild = store.rebuild_atomic
+    real_retry = store.retry_deferred_upsert
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    def retry(paths, **kwargs):
+        applied = real_retry(paths, **kwargs)
+        if not edited:
+            # Its watcher batch misses the barrier; only the registry sees it.
+            page = Path(paths[0])
+            page.write_text("# Edited\n\neditedmidway\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[page])
+            edited.append(page)
+        return applied
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == []
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "editedmidway", k=3, scope="kb"), (
+        "the catalogue was stamped over an edit made after its page was replayed"
+    )
+
+
+def test_a_tainted_lag_over_the_foreground_cap_still_rebuilds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     live_catalogue,
 ) -> None:
-    """Replaying an oversized delta under the barrier would block writers
-    longer than the detached build it replaces. The log names that refusal, so
-    an operator can tell this full pass from one a guard forced."""
+    """Pages only the safety-net walk found need its source proof, not a replay.
+
+    That walk is not an atomic snapshot, so replaying its diff in steps could
+    stamp a mixed target. The log names the refusal, so an operator can tell
+    this full pass from one a guard forced.
+    """
     caplog.set_level(logging.INFO, logger="exomem.lexstore")
-    store, changed, _removed = live_catalogue
-    bulk = []
-    for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1):
+    store, changed, removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    walked = [(str(changed), freshness.stat_signature(changed))]
+    walked.append((str(removed), freshness.stat_signature(removed)))
+    for index in range(2 * cap + 5):
         page = changed.parent / f"bulk-{index}.md"
         page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
-        bulk.append(page)
-    freshness.on_files_changed(tmp_path, changed=bulk)
+        walked.append((str(page), freshness.stat_signature(page)))
+    # No watcher event: only the reconcile walk sees the new pages.
+    for scope in freshness.SCOPES:
+        freshness.reconcile(tmp_path, scope, walked)
     rebuilds = []
     real_rebuild = store.rebuild_atomic
 
@@ -484,7 +602,7 @@ def test_a_lag_over_the_foreground_cap_still_rebuilds(
     assert _wait_for_flight_end(tmp_path)
 
     assert rebuilds == [True]
-    assert any("catch-up declined (over_cap)" in message for message in caplog.messages)
+    assert any("catch-up declined (source_proof)" in message for message in caplog.messages)
 
 
 def test_a_full_request_with_nothing_lagging_still_rebuilds_drifted_rows(
