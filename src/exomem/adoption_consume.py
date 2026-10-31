@@ -13,6 +13,13 @@ from pathlib import Path
 
 from . import adoption_plan, held_fs, import_stage
 
+# The outcome statuses of an item that is in the Knowledge Base; a run, its residual report and a discard all read them here.
+FILED_STATUSES = ("applied", "already-applied")  # nosemgrep: ep-word-set -- the statuses that `apply` writes: a closed protocol of the run object.
+#: The reasons that mean the member is in the Knowledge Base although its staged copy stays; a residual record leaves them out.
+FILED_REASONS = ("text", "kept")  # nosemgrep: ep-word-set -- two of the closed result keys that `_page_classifier` returns.
+#: Why a staged file no scan of the run covers stays.
+OUTSIDE_RUN = "outside_run"
+
 
 def recorded(root: Path, run: dict) -> import_stage.Stage | None:
     """The manifest of the stage this run started in, as it is now; None when the run has no recorded stage.
@@ -138,6 +145,26 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     return classify
 
 
+def stage_reasons(
+    root: Path, import_id: str, pages: tuple[dict, ...], filed_statuses: tuple[str, ...]
+) -> list[tuple[str, int, str]]:
+    """Each file of the stage as (path relative to the stage, bytes, why it stays); `pages` are the scans, nearest first.
+
+    A file that no page scanned (hidden, added after the scan, on a page not yet scanned) is `OUTSIDE_RUN`.
+    """
+    classifiers = [_page_classifier(page, filed_statuses) for page in pages]
+    prefix = f"{import_stage.STAGE_DIR}/{import_id}/"
+
+    def why(path: str) -> str:
+        for classify in classifiers:
+            reason = classify(prefix + path)
+            if reason is not None:
+                return reason
+        return OUTSIDE_RUN
+
+    return [(path, size, why(path)) for path, size in import_stage.staged_files(root, import_id)]
+
+
 def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = ()) -> dict | None:
     """What is still in the run's stage, by why it stays, with counts and bytes; None for a run with no stage.
 
@@ -155,26 +182,11 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     if not isinstance(recorded_stage, dict):
         return None
     folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
-    classifiers = [_page_classifier(page, filed_statuses) for page in (run, *earlier_pages)]
-
-    def why(path: str) -> str:
-        for classify in classifiers:
-            reason = classify(path)
-            if reason is not None:
-                return reason
-        return "outside_run"
-
     by_reason: dict[str, dict[str, int]] = {}
-    for directory, _names, files in os.walk(root / folder):
-        for name in files:
-            full = Path(directory) / name
-            try:
-                size = full.lstat().st_size
-            except OSError:
-                continue
-            entry = by_reason.setdefault(why(full.relative_to(root).as_posix()), {"files": 0, "bytes": 0})
-            entry["files"] += 1
-            entry["bytes"] += size
+    for _path, size, reason in stage_reasons(root, recorded_stage["stage"], (run, *earlier_pages), filed_statuses):
+        entry = by_reason.setdefault(reason, {"files": 0, "bytes": 0})
+        entry["files"] += 1
+        entry["bytes"] += size
     files = sum(entry["files"] for entry in by_reason.values())
     route = (
         f"call transfer_memory with action import_discard, import_id {recorded_stage['stage']} and confirm=true"

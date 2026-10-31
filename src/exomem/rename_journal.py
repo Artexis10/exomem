@@ -7,10 +7,11 @@ must not be cancelled, re-planned or restarted in that time either, because the 
 to no run.
 
 A record is one small file in the vault's state folder per renamed binary. It is written, and flushed,
-before the chunk's renames. It is removed once the Source page commits, the file goes back to its stage,
-or the run gives the file up. It names the renamed file by inode, so a different file that later appears
-at the same path is not held, and it names the import, the run and the staged path, so a caller can
-find the in-flight renames of a run without its plan.
+before the chunk's renames. It is removed once the Source page commits or the file goes back to its
+stage. A file that the run could neither bind nor put back keeps its record until the person moves or
+deletes it: a record whose file is gone, replaced or bound no longer holds. It names the renamed file by
+inode, so a different file that later appears at the same path is not held, and it names the import, the
+run and the staged path, so a caller can find the in-flight renames of a run, or of a stage, without its plan.
 """
 from __future__ import annotations
 
@@ -71,13 +72,6 @@ def release(vault_root: Path, relative_path: str) -> None:
         private_state.remove(_store_path(vault_root) / f"{_stem(relative_path)}.json")
     except ValueError:
         return
-
-
-def release_run(vault_root: Path, run_id: str) -> None:
-    """Drop every record of the run: the run gives its unbound files up, and the scans may bind them."""
-    for hold in _holds(vault_root):
-        if hold.run_id == run_id:
-            release(vault_root, hold.path)
 
 
 def _read(record_path: Path) -> Hold | None:

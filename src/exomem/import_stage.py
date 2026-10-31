@@ -27,6 +27,17 @@ CLOUD_PROOF = "cloud-receipt"
 LOCAL_PROOF = "local-record"
 MEMBERS_KEY = "members"
 IDENTITY_KEY = "identity"
+# What a discard leaves in the receipt, in the same write that drops the manifest (see `residual_record`).
+RESIDUAL_KEY = "residual"
+RESIDUAL_VERSION = 1
+# The renamed members that a refused discard found unsettled: their Knowledge Base paths, for the status to read.
+RENAMES_PENDING_KEY = "renames_pending"
+# Where a discard that walked the stage writes its record, when the receipt could not be read.
+WALK_RECORDS = "cloud-import-walks"
+# The code of a walked member: the receipt that would have said why it stayed was unreadable.
+UNREADABLE_CODE = "receipt_unreadable"
+# The file at a window's stage root that lists the whole series; it is never a member to file.
+SERIES_FILE = ".exomem-series.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +135,20 @@ def _load(path: Path) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
+def receipt_path(vault_root: Path, import_id: str) -> Path:
+    """Where the Cloud import Job keeps the import's receipt; raises ValueError when the vault has no state placement."""
+    return state_paths.vault_state_dir(vault_root) / CLOUD_RECEIPTS / f"{import_id}.json"
+
+
+def read_receipt(vault_root: Path, import_id: str) -> dict | None:
+    """The import's receipt, or None when it is missing, unreadable or holds no request (so it is not a receipt)."""
+    try:
+        receipt = _load(receipt_path(vault_root, import_id))
+    except ValueError:
+        return None
+    return receipt if receipt is not None and isinstance(receipt.get("request"), dict) else None
+
+
 def read(vault_root: Path, import_id: str) -> Stage | None:
     """The stage's manifest and what vouches for it, or None when it has none.
 
@@ -132,16 +157,15 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
     """
     if not vault.is_import_id(import_id):
         return None
-    try:
-        state = state_paths.vault_state_dir(vault_root)
-    except ValueError:
-        return None
-    receipt = _load(state / CLOUD_RECEIPTS / f"{import_id}.json")
-    if receipt is not None and (receipt.get("request") or {}).get("kind") == "adopt":
+    receipt = read_receipt(vault_root, import_id)
+    if receipt is not None and receipt["request"].get("kind") == "adopt":
         manifest = _read_members(receipt.get(MEMBERS_KEY))
         if manifest is not None:
             return Stage(import_id, CLOUD_PROOF, *manifest)
-    record = _load(state / LOCAL_RECORDS / f"{import_id}.json")
+    try:
+        record = _load(state_paths.vault_state_dir(vault_root) / LOCAL_RECORDS / f"{import_id}.json")
+    except ValueError:
+        return None
     if record is not None:
         manifest = _read_members(record.get(MEMBERS_KEY))
         if manifest is not None:
@@ -164,3 +188,51 @@ def write_local_record(vault_root: Path, import_id: str, members: list[dict]) ->
     except (OSError, ValueError):
         return False
     return True
+
+
+def staged_files(vault_root: Path, import_id: str) -> list[tuple[str, int]]:
+    """Each file under the stage as (path relative to the stage, bytes); a file whose size cannot be read is left out."""
+    base = vault_root / STAGE_DIR / import_id
+    found: list[tuple[str, int]] = []
+    for directory, _names, files in os.walk(base):
+        for name in files:
+            full = Path(directory) / name
+            try:
+                found.append((full.relative_to(base).as_posix(), full.lstat().st_size))
+            except OSError:
+                continue
+    return found
+
+
+def residual_member(path: str, size: int, code: str) -> dict:
+    """One member that adoption did not file: its path relative to the stage, its bytes and why it stayed."""
+    return {"path": path, "bytes": size, "code": code}
+
+
+def residual_record(members: list[dict]) -> dict:
+    """The residual record of a discarded window, one entry per member that adoption did not file.
+
+    An empty list says that every member was filed. A member is `{"path", "bytes", "code"}` with the path
+    relative to the stage, as the manifest gives it. The record is written in the receipt (`RESIDUAL_KEY`),
+    or, when the receipt could not be read, in the walk store (`WALK_RECORDS`). `read_residual` reads both.
+    """
+    return {"version": RESIDUAL_VERSION, MEMBERS_KEY: members}
+
+
+def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
+    """The members of a discarded window's residual record, or None when the window has none.
+
+    The receipt's record wins; a stage walk's record stands in for a receipt that could not be read.
+    A record of another version, or a damaged one, is none: the caller never reads a wrong list.
+    """
+    if not vault.is_import_id(import_id):
+        return None
+    try:
+        walk = _load(state_paths.vault_state_dir(vault_root) / WALK_RECORDS / f"{import_id}.json")
+    except ValueError:
+        walk = None
+    for record in ((read_receipt(vault_root, import_id) or {}).get(RESIDUAL_KEY), walk):
+        entries = record.get(MEMBERS_KEY) if isinstance(record, dict) and record.get("version") == RESIDUAL_VERSION else None
+        if isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries):
+            return entries
+    return None

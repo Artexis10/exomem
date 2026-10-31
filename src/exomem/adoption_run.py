@@ -110,7 +110,7 @@ PHASES = (
     "cancelled",
 )
 
-_APPLIED_STATUSES = ("applied", "already-applied")
+_APPLIED_STATUSES = adoption_consume.FILED_STATUSES
 # An own-note item whose Source is on disk and whose draft note is still owed. The item is
 # not complete: `apply` resumes it at the note, and the phase stays `applying` until it is.
 _SOURCE_ONLY = "source-applied"
@@ -273,6 +273,23 @@ class AdoptionRunStore:
 
     def list_runs(self) -> list[dict]:
         return self.listing()["runs"]
+
+    def runs_of_stage(self, import_id: str) -> tuple[dict, ...]:
+        """Every readable run that started in the import's stage, the most recently updated first."""
+        try:
+            names = sorted(folder.name for folder in self.base.iterdir())
+        except OSError:
+            return ()
+        runs = []
+        for name in names:
+            try:
+                run = self.load(name)
+            except AdoptionRunError:
+                continue
+            recorded = run.get("stage") if isinstance(run, dict) else None
+            if isinstance(recorded, dict) and recorded.get("stage") == import_id:
+                runs.append(run)
+        return tuple(sorted(runs, key=lambda run: str(run.get("updated") or ""), reverse=True))
 
     def listing(self, *, path: str = "") -> dict:
         rows: list[dict] = []
@@ -1065,7 +1082,8 @@ def _refuse_pending_renames(root: Path, verb: str, *, run_id: str | None = None,
         raise AdoptionRunError(
             "RENAMES_PENDING",
             f"{verb} is refused: run {runs} renamed {len(holds)} staged file(s) into the Knowledge Base "
-            "and has not committed their Source pages. Call apply on that run first.",
+            "and has not committed their Source pages. Call apply on that run first; "
+            "if apply reports a file unbound, move or delete that file.",
         )
 
 
@@ -1404,6 +1422,23 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
         pages.append(earlier)
         previous = (earlier.get("paging") or {}).get("previous")
     return tuple(pages)
+
+
+def unfiled_members(root: Path, import_id: str) -> list[dict]:
+    """The staged members of an import that adoption did not file, as a residual record lists them.
+
+    Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
+    The runs that started in the stage classify its files, the most recent first, and a file that no run scanned
+    is `outside_run`. A member that adoption filed, and the series file, are left out. A member that someone
+    removed from the stage by hand is not there to list.
+    """
+    pages = AdoptionRunStore(root).runs_of_stage(import_id)
+    return [
+        import_stage.residual_member(path, size, reason)
+        for path, size, reason in adoption_consume.stage_reasons(root, import_id, pages, _APPLIED_STATUSES)
+        # nosemgrep: ep-word-membership -- `FILED_REASONS` holds closed result keys of `_page_classifier`.
+        if reason not in adoption_consume.FILED_REASONS and path != import_stage.SERIES_FILE
+    ]
 
 
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
@@ -2057,8 +2092,8 @@ def _apply_chunk(
                 # An earlier call may have renamed the file and stopped before its Source page committed.
                 replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
                 if isinstance(replay, import_rename.Refused):
-                    # The run gives this file up: the outcome names its path, so the scans may bind it.
-                    _release_hold(root, planned)
+                    # The hold stays: the file is unbound with other bytes, and only the person's move or delete
+                    # lifts it. The scans leave it alone and a discard of its stage refuses until then.
                     outcomes[path] = _failed(replay.code, replay.reason)
                     continue
                 if replay is not None:
@@ -2959,9 +2994,6 @@ def finish(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
-        # A file that `apply` could not put back or bind stays in the Knowledge Base, named by its failed outcome;
-        # a finished run replays nothing, so the scans may bind it.
-        rename_journal.release_run(root, run_id)
         recall = _recall_check(root, run)
         coverage = _coverage(root, run, _call_budget())
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.

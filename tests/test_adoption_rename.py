@@ -553,20 +553,30 @@ def test_the_journal_record_names_the_import_the_run_the_staged_path_and_the_ino
     assert not rename_journal.pending(vault, under=f"_Imports/{import_id}/Other")
 
 
-def test_a_run_may_leave_a_record_whose_file_is_gone(vault: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("verb", _GUARDED)
+def test_a_run_verb_goes_ahead_once_the_person_moves_or_deletes_the_renamed_file(
+    vault: Path, monkeypatch, verb: str
+) -> None:
     """Catches a refusal that no `apply` can lift: the person removed the renamed file, so nothing is left to finish."""
     import_id = _job_stage(vault, {"scan.bin": BIG})
     run_id, _plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
-    (vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin").unlink()
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+    with pytest.raises(adoption_run.AdoptionRunError) as refused:
+        _GUARDED[verb](vault, run_id, import_id)
+    assert refused.value.code == "RENAMES_PENDING"
 
-    cancelled = adoption_run.cancel(vault, run_id=run_id, why=None)
+    artifact.rename(artifact.with_name("moved-away.bin"))
 
-    assert cancelled["phase"] == "cancelled"
+    try:
+        _GUARDED[verb](vault, run_id, import_id)
+    except adoption_run.AdoptionRunError as error:  # a stage with no file left has nothing to start on
+        assert error.code != "RENAMES_PENDING"
 
 
-def test_finish_gives_up_a_file_that_a_failed_batch_could_not_put_back_so_the_scans_may_bind_it(
+def test_a_file_that_a_failed_batch_could_not_put_back_stays_held_after_finish_until_the_person_moves_it(
     vault: Path, monkeypatch
 ) -> None:
+    """Catches a finish that frees a file nobody moved: a discard of the stage would then pass over an unbound binary."""
     import_id = _job_stage(vault, {"scan.bin": PDF, "other.bin": OTHER})
     staged = _staged(vault, import_id)
     run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
@@ -577,11 +587,39 @@ def test_finish_gives_up_a_file_that_a_failed_batch_could_not_put_back_so_the_sc
         vault, run_id=run_id, plan_id=plan_id, retry_failed=True, only_paths=[_original(import_id, "other.bin")],
         today=consume.TODAY)
     artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
-    assert rename_journal.is_held(vault, artifact)
 
     adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
 
-    assert not rename_journal.is_held(vault, artifact) and artifact.read_bytes() == PDF
+    assert rename_journal.is_held(vault, artifact) and artifact.read_bytes() == PDF
+    artifact.rename(artifact.with_name("moved-away.bin"))
+    assert not rename_journal.is_held(vault, artifact) and not rename_journal.pending(vault)
+
+
+def test_a_replay_that_finds_other_bytes_keeps_the_hold_until_the_person_moves_the_file(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches a refused replay that frees its file: a discard of the stage would then pass over an unbound binary."""
+    import_id = _job_stage(vault, {"scan.bin": BIG, "other.bin": OTHER})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+    with monkeypatch.context() as stopping:
+        _stop_after_the_rename(stopping)
+        with pytest.raises(_Stopped):
+            adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+    artifact.write_bytes(BIG[:-1] + b"Y")
+    reply = consume._apply(vault, run_id, plan_id)
+    assert reply["outcomes"][_original(import_id)]["code"] == "SOURCE_CHANGED"
+
+    assert rename_journal.is_held(vault, artifact)
+    with pytest.raises(adoption_run.AdoptionRunError) as refused:
+        adoption_run.start(vault, path=f"_Imports/{import_id}", today=consume.TODAY)
+    assert refused.value.code == "RENAMES_PENDING"
+
+    artifact.unlink()
+    try:
+        adoption_run.start(vault, path=f"_Imports/{import_id}", today=consume.TODAY)
+    except adoption_run.AdoptionRunError as error:  # the stage holds nothing else to start on
+        assert error.code != "RENAMES_PENDING"
 
 
 def test_a_retry_after_an_unbound_file_still_names_the_unbound_path(vault: Path, monkeypatch) -> None:
