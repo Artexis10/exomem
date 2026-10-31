@@ -5,7 +5,7 @@ Run the scoped suites a task touches during development, and the full corpus at 
 Design decisions are cited as D1 to D8.
 A case-authoring lane, never an implementation lane, owns task 4.1 and the served-text check of task 9.1.
 Its sibling, a measurement lane that is never an implementation lane, runs every arm (tasks 4.2, 4.3, 5.2 and the rerun of 8.2).
-Task 4.1 freezes the cases before groups 2 and 3 are built; tasks 4.1 and 4.2 run before any part of this change merges.
+Task 4.1 freezes the cases before groups 2 and 3 are built. PR A merges first and is the baseline (D7); task 4.2 binds the runner before the decision run, and PR B merges only after that run meets the D8 pass line or the owner rules.
 Tasks 9.1 and 9.2 cannot close the change until the shipped arm meets the D8 pass line or the owner rules.
 
 Task 1.1 is an independently approved correctness delivery for the existing O2/R3 authority contract.
