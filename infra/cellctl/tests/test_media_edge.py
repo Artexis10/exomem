@@ -6,6 +6,7 @@ import asyncio
 import base64
 import dataclasses
 import json
+import math
 import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cellctl import db, main, manifests, media_edge, reconcile
+from cellctl.decide import GROWTH_THRESHOLD_PERCENT
 from cellctl.manifests import MEDIA_STORE_CONFIG_KEY, namespace_name
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
@@ -223,6 +225,29 @@ def test_a_cell_the_edge_does_not_serve_renders_as_it_did_before_the_edge() -> N
 
     assert "media" not in rendered.replace("media_engines", "")
     assert next(m for m in plain if m["metadata"]["name"] == "runtime-ingress")["spec"]["egress"] == []
+
+
+def test_the_store_policy_carries_the_growth_threshold_cellctl_grows_the_volume_at() -> None:
+    # The cell sizes import windows below this threshold. A second copy in the cell would drift from
+    # cellctl's, and a window sized on a higher one grows the volume at the next backup.
+    secret = manifests.render_secret(_spec(media_store_policy={"max_temporary_bytes": 5 << 30, "max_hydrations": 1}))
+    store = json.loads(base64.b64decode(secret["data"][MEDIA_STORE_CONFIG_KEY]))["vaults"]["/data/vault"]
+
+    assert store["growth_threshold"] == GROWTH_THRESHOLD_PERCENT / 100
+    assert (store["max_temporary_bytes"], store["max_hydrations"]) == (5 << 30, 1)
+
+
+@pytest.mark.parametrize("policy", [
+    {"max_temporary_bytes": 5 << 30},
+    {"max_temporary_bytes": 5 << 30, "max_hydrations": True},
+    {"max_temporary_bytes": 5 << 30, "max_hydrations": 1.5},
+    {"max_temporary_bytes": math.inf, "max_hydrations": 1},
+    {"max_temporary_bytes": 5 << 30, "max_hydrations": 0},
+], ids=["half set", "a boolean", "a fraction", "infinity", "zero"])
+def test_a_hydration_capacity_the_cell_would_read_as_none_is_a_render_error(policy) -> None:
+    # The cell reads such a pair as no capacity, so every owner read of an evicted original would fail.
+    with pytest.raises(ValueError, match="hydration"):
+        _spec(media_store_policy=policy)
 
 
 # -- reconcile --

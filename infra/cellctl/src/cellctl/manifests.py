@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .backup_source import VAULT_CHECK_COMMAND
 from .storage.topolvm import FamilyRequest
-from .storage_config import LEGACY_CLASS
+from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
@@ -60,8 +60,10 @@ MEDIA_ADAPTER = "media-edge"
 # The store settings cellctl renders itself. The chart's policy may add to them and never replace one.
 MEDIA_STORE_OWNED_KEYS = frozenset(
     {"store", "enabled", "adapter", "key_version", "name_key_path", "identity_path", "recipient",
-     "max_object_bytes", "root"}
+     "max_object_bytes", "root", "growth_threshold"}
 )
+# D12: the hydration capacity the cell reads from the policy, a pair the store protocol fixes.
+MEDIA_HYDRATION_KEYS = ("max_temporary_bytes", "max_hydrations")
 MEDIA_STORE_CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
 MEDIA_EDGE_URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 MEDIA_EDGE_CREDENTIAL_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
@@ -283,6 +285,8 @@ class CellManifestSpec:
             raise ValueError("a media edge cell needs its credential, key bundle, key version and object bound")
         if self.media_edge_url and self.media_store_retained:
             raise ValueError("a cell the media edge serves does not also retain a disabled store")
+        if self.media_edge_url:
+            check_media_store_policy(self.media_store_policy)
 
     @property
     def media_store(self) -> bool:
@@ -494,6 +498,18 @@ def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
+def check_media_store_policy(policy: dict[str, bool | int | float]) -> None:
+    """D12: the hydration capacity is both keys or neither, each a positive whole number.
+
+    The cell reads any other shape as no capacity and refuses every hydration, so a render
+    refuses it here (decided 2026-10-31). `type(...) is int` refuses booleans, fractions and infinity."""
+    present = [key for key in MEDIA_HYDRATION_KEYS if key in policy]
+    if present and (len(present) != len(MEDIA_HYDRATION_KEYS)
+                    or not all(type(policy[key]) is int and policy[key] > 0 for key in present)):
+        raise ValueError("the media store policy needs max_temporary_bytes and max_hydrations together, "
+                         "each a positive whole number, for its hydration capacity")
+
+
 def _media_store_config(spec: CellManifestSpec) -> str:
     """The file #2140's runtime reads: one store per vault, keyed by the vault's path.
     The store identity is per cell, so a reference restored into another cell counts as none."""
@@ -511,6 +527,8 @@ def _media_store_config(spec: CellManifestSpec) -> str:
         "identity_path": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_IDENTITY_KEY]}",
         "recipient": spec.media_recipient,
         "max_object_bytes": spec.media_max_object_bytes,
+        # D12: the one threshold cellctl grows the volume at; the cell sizes import windows below it.
+        "growth_threshold": GROWTH_THRESHOLD_PERCENT / 100,
     }
     return json.dumps({"vaults": {CELL_VAULT_PATH: store}}, sort_keys=True, separators=(",", ":"))
 
