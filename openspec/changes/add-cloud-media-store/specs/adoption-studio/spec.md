@@ -78,20 +78,21 @@ A rollback of a failed batch SHALL rename each renamed binary back to its staged
 - **WHEN** a batch fails after a member's rename, and `finish` has removed the member's empty staged folder
 - **THEN** the rollback recreates the folder and renames the file back into it
 
-### Requirement: A discard settles renamed members first
+### Requirement: A discard refuses while a renamed member has no page
 
-Before `import_discard` asks for a window's discard, it SHALL settle each member of that window that is renamed but not committed, by the replay rule. When replay leaves a member's file unbound, the discard SHALL refuse and name the member and the file's Knowledge Base path. Once that file is moved or deleted, the discard SHALL proceed.
+`import_discard` SHALL refuse with `IMPORT_RENAMES_PENDING` while a member of the window is renamed but its Source page is not committed. The discard Job SHALL write the Knowledge Base paths of those members to the receipt's `renames_pending` field, and it SHALL keep the stage and the manifest. It SHALL NOT settle a member itself. The person or agent SHALL then run `apply` again, which settles the member by the replay rule, or move or delete the file, and retry the discard. A discard that proceeds SHALL drop `renames_pending` in the write that drops the manifest. This choice was decided on 2026-10-31 under the operator's standing rule for reversible choices; the operator may revert it.
 
 #### Scenario: A discard after a stop
 
 - **WHEN** the person discards a window, and one member is renamed but its Source page is not committed
-- **THEN** the discard commits that member's Source page first, and then discards the window
+- **THEN** the discard refuses with `IMPORT_RENAMES_PENDING`, the receipt's `renames_pending` lists the member's Knowledge Base path, and the stage and the manifest stay
+- **AND** after `apply` commits that member's Source page, the retried discard proceeds and the receipt no longer carries `renames_pending`
 
 #### Scenario: A member that cannot settle
 
 - **WHEN** a renamed but uncommitted member is above the adoption ceiling, and its identity no longer matches
-- **THEN** the discard refuses, names the member and its Knowledge Base path, and keeps the window's manifest
-- **AND** after the person deletes that file, the discard proceeds
+- **THEN** the discard refuses and names the member's Knowledge Base path in `renames_pending`, and the window's manifest stays
+- **AND** after the person moves or deletes that file, the discard proceeds
 
 ### Requirement: Links resolve against the whole series
 

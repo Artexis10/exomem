@@ -117,7 +117,8 @@
     - a stop after the commit settles as already applied with no byte read;
     - a failed batch renames the file back, recreates a removed staged folder and never removes the file;
     - the batch writer never lists the renamed binary as a destination;
-    - `import_discard` settles a renamed but uncommitted member first, or refuses and names it;
+    - `import_discard` refuses with `IMPORT_RENAMES_PENDING` and names a renamed but uncommitted member in the receipt's `renames_pending`, keeps the stage, and proceeds once the member is settled, moved or deleted;
+    - a walking discard of an unreadable receipt names that member in the walk file, and a retried walk still records the stage;
     - the discard Job keeps a residual record of the unfiled members in the receipt, in the same write that drops the manifest;
     - a retried discard keeps that record, and a discard writes an empty record when every member was filed;
     - a discard refuses with `IMPORT_RECEIPT_UNREADABLE` and keeps the stage when it cannot read the receipt;

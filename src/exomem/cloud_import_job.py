@@ -388,10 +388,15 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
     renamed = rename_journal.pending(vault_root, under=f"{import_stage.STAGE_DIR}/{import_id}")
     if renamed:
         # A renamed member has no stage copy and no page: its manifest entry is all that settles it. The Job does not
-        # apply from a stopped cell, so the person or agent settles it and retries, and the status names it.
+        # apply from a stopped cell, so the person or agent settles it and retries, and the status names it. The paths
+        # go where the status looks for the window's record: the receipt, or the walk file when the receipt is unreadable.
+        pending = sorted(hold.path for hold in renamed)
         if receipt is not None:
-            receipt[import_stage.RENAMES_PENDING_KEY] = sorted(hold.path for hold in renamed)
+            receipt[import_stage.RENAMES_PENDING_KEY] = pending
             _private_json(import_stage.receipt_path(vault_root, import_id), receipt)
+        elif import_stage.read_residual(vault_root, import_id) is None:
+            # A walk that listed its members keeps them: the contract says a retried walk keeps the first record.
+            _write_walk(vault_root, import_id, import_stage.renames_pending_record(pending))
         raise ArchiveRefused("IMPORT_RENAMES_PENDING", "renamed members")
     if receipt is None:
         if walk_stage:
@@ -419,18 +424,17 @@ def _walk(vault_root: Path, import_id: str) -> None:
         vault_root / import_stage.STAGE_DIR / import_id
     ).exists():
         return
+    _write_walk(vault_root, import_id, import_stage.residual_record([
+        import_stage.residual_member(path, size, import_stage.UNREADABLE_CODE)
+        for path, size in import_stage.staged_files(vault_root, import_id)
+        if path != import_stage.SERIES_FILE
+    ]))
+
+
+def _write_walk(vault_root: Path, import_id: str, record: dict) -> None:
+    """Replace the import's walk file whole and durably; the receipt it stands in for stays as it was."""
     store = private_state.store(vault_root, import_stage.WALK_RECORDS)
-    private_state.write_record(
-        store,
-        import_id,
-        import_stage.residual_record([
-            import_stage.residual_member(path, size, import_stage.UNREADABLE_CODE)
-            for path, size in import_stage.staged_files(vault_root, import_id)
-            if path != import_stage.SERIES_FILE
-        ]),
-        temp_suffix=".tmp",
-        durable=True,
-    )
+    private_state.write_record(store, import_id, record, temp_suffix=".tmp", durable=True)
     private_state.sync_directory(store)
 
 

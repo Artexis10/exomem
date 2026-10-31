@@ -31,6 +31,7 @@ IDENTITY_KEY = "identity"
 RESIDUAL_KEY = "residual"
 RESIDUAL_VERSION = 1
 # The renamed members that a refused discard found unsettled: their Knowledge Base paths, for the status to read.
+# A readable receipt carries them; when it is unreadable, the walk file does (see `read_walk`).
 RENAMES_PENDING_KEY = "renames_pending"
 # Where a discard that walked the stage writes its record, when the receipt could not be read.
 WALK_RECORDS = "cloud-import-walks"
@@ -219,6 +220,28 @@ def residual_record(members: list[dict]) -> dict:
     return {"version": RESIDUAL_VERSION, MEMBERS_KEY: members}
 
 
+def renames_pending_record(paths: list[str]) -> dict:
+    """The walk file of a walking discard that renamed members refused: their Knowledge Base paths and no member list.
+
+    It has no `members` key, so `read_residual` finds no record in it and a later walk still writes its own.
+    """
+    return {"version": RESIDUAL_VERSION, RENAMES_PENDING_KEY: paths}
+
+
+def read_walk(vault_root: Path, import_id: str) -> dict | None:
+    """The walk file of an import whose receipt could not be read, or None when it has none or is damaged.
+
+    The file holds the `members` of a stage walk (see `residual_record`), or only the `renames_pending` of a
+    walking discard that a renamed member refused; the two are told apart by the key.
+    """
+    if not vault.is_import_id(import_id):
+        return None
+    try:
+        return _load(state_paths.vault_state_dir(vault_root) / WALK_RECORDS / f"{import_id}.json")
+    except ValueError:
+        return None
+
+
 def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     """The members of a discarded window's residual record, or None when the window has none.
 
@@ -227,10 +250,7 @@ def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     """
     if not vault.is_import_id(import_id):
         return None
-    try:
-        walk = _load(state_paths.vault_state_dir(vault_root) / WALK_RECORDS / f"{import_id}.json")
-    except ValueError:
-        walk = None
+    walk = read_walk(vault_root, import_id)
     for record in ((read_receipt(vault_root, import_id) or {}).get(RESIDUAL_KEY), walk):
         entries = record.get(MEMBERS_KEY) if isinstance(record, dict) and record.get("version") == RESIDUAL_VERSION else None
         if isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries):

@@ -235,6 +235,29 @@ def test_a_retried_walk_keeps_the_record_that_the_first_walk_wrote(vault: Path) 
 
 
 
+def test_a_walking_discard_that_a_renamed_member_refuses_names_it_in_the_walk_file_and_a_retry_still_walks(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches a refusal that names the renamed member nowhere when the receipt cannot carry it: the status goes blind."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    _stop_after_the_rename_of(vault, monkeypatch, import_id)
+    _receipt_file(vault, import_id).write_text("{ not a receipt", encoding="utf-8")
+
+    with pytest.raises(ArchiveRefused) as refused:
+        cloud_import_job.discard(vault, import_id, walk_stage=True)
+
+    assert refused.value.code == "IMPORT_RENAMES_PENDING"
+    assert import_stage.read_walk(vault, import_id)[import_stage.RENAMES_PENDING_KEY] == [KB_SCAN]
+    assert import_stage.read_residual(vault, import_id) is None and _stage_dir(vault, import_id).is_dir()
+
+    (vault / KB_SCAN).unlink()
+    cloud_import_job.discard(vault, import_id, walk_stage=True)
+
+    assert import_stage.read_residual(vault, import_id) == []
+    assert import_stage.RENAMES_PENDING_KEY not in import_stage.read_walk(vault, import_id)
+    assert not _stage_dir(vault, import_id).exists()
+
+
 def test_a_walking_discard_of_an_import_with_no_stage_records_nothing(vault: Path) -> None:
     """Catches an empty record for an import nobody staged: the status would read it as a window filed whole."""
     import_id = str(uuid.uuid4())
