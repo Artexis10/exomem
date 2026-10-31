@@ -628,9 +628,7 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                     before = file.version()
                     if row["path"] not in force and unchanged(writer.connection, row, before):
                         continue
-                    bound = collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
-                        record_formats._MAX_LOG_BYTES if row["kind"] == "log" else record_formats._MAX_ITEM_BYTES)
-                    raw = fs.read(file, max_bytes=bound).require()
+                    raw = fs.read(file, max_bytes=_read_bound(row)).require()
                     if file.version() != before:
                         raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
             except (held_fs.HeldFsError, OSError) as error:
@@ -661,6 +659,32 @@ def _open_view(fs, stack, parents, path):
     return opened.require()
 
 
+def _read_bound(row) -> int:
+    """The most bytes a read of this view accepts, by its kind."""
+    return collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
+        record_formats._MAX_LOG_BYTES if row["kind"] == "log" else record_formats._MAX_ITEM_BYTES)
+
+
+def _own_render(conn, fs, file, row, version) -> bool:
+    """Whether a current view whose stat differs from the store's record still holds its own render.
+
+    Publication and every re-render install a view before edit-back records its new stat, so a
+    sweep in that window would count the store's own bytes as an owner edit and take the lease
+    to observe them. A held view is excluded: there its published bytes are an owner's restore,
+    which resolves the hold."""
+    from .legacy_originals import view_basis
+
+    if row["state"] != "current" or view_basis(conn, row) is not None:
+        return False
+    try:
+        raw = fs.read(file, max_bytes=_read_bound(row)).require()
+    except held_fs.HeldFsError:
+        return False  # unreadable or oversized: not provably the store's render
+    if file.version() != version:
+        return False
+    return Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(version)).own
+
+
 def unchanged(conn, row, version) -> bool:
     """Whether a view's file is the one the store recorded with its current bytes, by stat alone."""
     from .legacy_originals import view_basis
@@ -673,8 +697,9 @@ def changed_views(conn, root, *, after="", limit=None) -> tuple[dict[str, tuple]
     """The views of one page whose file differs from the store's record, found with no writer lease.
 
     ``conn`` is a plain reader of the store file, so nothing here takes the lease or the mutation
-    boundary. It applies the stat test of ``observe`` to the next ``limit`` views after ``after``
-    and claims no ownership, so a view ``observe`` would skip as unserved can appear here. A
+    boundary. It applies the stat test of ``observe`` to the next ``limit`` views after ``after``;
+    a current view whose stat differs is changed only when its bytes are not the store's own
+    render. It claims no ownership, so a view ``observe`` would skip as unserved can appear here. A
     pending view is publication work, not an edit, and is skipped. Returns each changed path with
     what the sweep saw: the file's stat (None for a file that was published and is gone) and the
     row's ``stat_identity`` and ``published_sha256``, which move when the store writes the view
@@ -702,7 +727,8 @@ def changed_views(conn, root, *, after="", limit=None) -> tuple[dict[str, tuple]
                     continue
                 with opened as file:
                     version = file.version()
-                    if not unchanged(conn, row, version):
+                    if not (unchanged(conn, row, version)
+                            or _own_render(conn, fs, file, row, version)):
                         changed[row["path"]] = (_stat(version), row["stat_identity"], row["published_sha256"])
             except (held_fs.HeldFsError, OSError):
                 continue  # a view that cannot be read now is read again by the next sweep

@@ -65,6 +65,8 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "prevalidated_commit": EventSpec(),
     "latency_ceiling_exceeded": EventSpec(),
     "recall_canary_failed": EventSpec(),
+    "lexical_repair_started": EventSpec(),
+    "lexical_repair_finished": EventSpec(),
 }
 
 

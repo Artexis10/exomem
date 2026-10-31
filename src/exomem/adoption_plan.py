@@ -507,9 +507,14 @@ def read_facts(
 
 
 def text_facts(original_path: str, text: str) -> dict[str, Any]:
-    """Title, tags, aliases and raw link references of a text original."""
+    """Title, tags, aliases and raw link references of a text original.
+
+    The tags are the front matter's and then the body's inline `#tags`, normalized together.
+    """
     frontmatter, body, _raw = parse_frontmatter(text)
-    tags, rejected_tags = normalize_tags(frontmatter.get("tags"))
+    tags, rejected_tags = normalize_tags(
+        [*_tag_values(frontmatter.get("tags")), *markdown_regions.inline_tags(body)]
+    )
     aliases, rejected_aliases = normalize_aliases(frontmatter.get("aliases"))
     return {
         "title": title_from_text(original_path, text),

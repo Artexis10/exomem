@@ -6069,10 +6069,8 @@ def _validate_batch_write_access(
     roles = vocabulary_auxiliaries.validate(
         vault_root, vocabulary_auxiliaries.planned_images(vault_root, full_plan), auxiliary_manifest,
     )
-    # The sealed manifest schema fixes the two primary-bound auxiliary roles.
     primary_bound_paths = {
-        path for path, role in roles.items()
-        if role == "lifecycle-review" or role == "compiled-history"
+        path for path, role in roles.items() if role in vocabulary_auxiliaries.PRIMARY_BOUND_ROLES
     }
     primary_admission = None
     if primary_bound_paths:
@@ -6655,6 +6653,9 @@ def in_append_only_tree(rel_path: str) -> str | None:
 # parse_frontmatter, scalar rendering + find's page parser) — one-off config
 # loads keep safe_load.
 _YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# The emitter counterpart, for text that is only parsed again. Its bytes can
+# differ from SafeDumper's, so never use it for text that is hashed or stored.
+_YAML_SAFE_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 
 class _DuplicateYamlKey(yaml.YAMLError):
@@ -6712,6 +6713,15 @@ def yaml_safe_load(text: str):
     Pinned by tests/test_yaml_loader_safety.py — do not widen the loader.
     """
     return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
+
+
+def yaml_safe_dump_for_parse(value: Any) -> str:
+    """`yaml.safe_dump` via libyaml, for text that only `yaml_safe_load` reads back.
+
+    Loading the result gives the same value as loading `yaml.safe_dump`'s, but
+    the bytes may differ, so a fingerprint or stored text keeps `yaml.safe_dump`.
+    """
+    return yaml.dump(value, Dumper=_YAML_SAFE_DUMPER)
 
 
 def read_frontmatter_header(
@@ -8643,6 +8653,68 @@ def _plan_log_content(
     return LogWritePlan(tuple(writes))
 
 
+@dataclass(frozen=True, slots=True)
+class LogEntry:
+    """One entry of a combined log.md update.
+
+    `operation_token` and `provenance` go together: the token names the operation that
+    wrote the entry, and it is bound into the provenance's `operation_id`.
+    """
+
+    date_iso: str
+    op: str
+    rel_path_no_ext: str
+    body: str
+    operation_token: str = ""
+    provenance: Mapping[str, Any] | None = None
+
+
+def plan_log_entries(
+    vault_root: Path,
+    entries: Iterable[LogEntry],
+    *,
+    operation_token: str,
+    machine_generated: bool = False,
+) -> LogWritePlan:
+    """Plan one combined log update carrying one entry per item, oldest first.
+
+    One read, one rewrite and one rotation decision for the whole batch, so a bulk write
+    is a single log publication rather than one per entry. `operation_token` names the
+    whole batch for the deterministic rotation archive.
+    """
+    log_file = kb_root(vault_root) / "log.md"
+    if not log_file.is_file():
+        return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
+    current, live_guard = read_guarded_text(vault_root, log_file)
+    updated = current
+    for entry in entries:
+        provenance = entry.provenance
+        if provenance is not None:
+            provenance = {
+                **provenance,
+                "version": 1,
+                "operation_id": hashlib.sha256(json.dumps(
+                    [entry.operation_token, provenance.get("before_hash"), provenance.get("after_hash")],
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest(),
+            }
+        updated = prepend_log_entry(
+            updated,
+            date_iso=entry.date_iso,
+            op=entry.op,
+            rel_path_no_ext=entry.rel_path_no_ext,
+            body=entry.body,
+            provenance=provenance,
+            machine_generated=machine_generated,
+        )
+    return _plan_log_content(
+        vault_root,
+        log_text=updated,
+        live_guard=live_guard,
+        operation_token=operation_token,
+    )
+
+
 def plan_log_writes(
     vault_root: Path,
     *,
@@ -8655,33 +8727,11 @@ def plan_log_writes(
     machine_generated: bool = False,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
-    log_file = kb_root(vault_root) / "log.md"
-    if not log_file.is_file():
-        return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
-    current, live_guard = read_guarded_text(vault_root, log_file)
-    if provenance is not None:
-        provenance = {
-            **provenance,
-            "version": 1,
-            "operation_id": hashlib.sha256(json.dumps(
-                [operation_token, provenance.get("before_hash"), provenance.get("after_hash")],
-                separators=(",", ":"),
-            ).encode("utf-8")).hexdigest(),
-        }
-    updated = prepend_log_entry(
-        current,
-        date_iso=date_iso,
-        op=op,
-        rel_path_no_ext=rel_path_no_ext,
-        body=body,
-        provenance=provenance,
-        machine_generated=machine_generated,
-    )
-    return _plan_log_content(
+    return plan_log_entries(
         vault_root,
-        log_text=updated,
-        live_guard=live_guard,
+        [LogEntry(date_iso, op, rel_path_no_ext, body, operation_token, provenance)],
         operation_token=operation_token,
+        machine_generated=machine_generated,
     )
 
 
@@ -8744,30 +8794,12 @@ def plan_log_writes_many(
     operation_token: str,
     machine_generated: bool = False,
 ) -> LogWritePlan:
-    """Plan one combined log update carrying one entry per body, oldest first.
-
-    One read, one rewrite and one rotation decision for the whole batch, so a
-    bulk write is a single log publication rather than one per entry.
-    """
-    log_file = kb_root(vault_root) / "log.md"
-    if not log_file.is_file():
-        return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
-    current, live_guard = read_guarded_text(vault_root, log_file)
-    updated = current
-    for body in bodies:
-        updated = prepend_log_entry(
-            updated,
-            date_iso=date_iso,
-            op=op,
-            rel_path_no_ext=rel_path_no_ext,
-            body=body,
-            machine_generated=machine_generated,
-        )
-    return _plan_log_content(
+    """Plan one combined log update carrying one entry per body, oldest first."""
+    return plan_log_entries(
         vault_root,
-        log_text=updated,
-        live_guard=live_guard,
+        (LogEntry(date_iso, op, rel_path_no_ext, body) for body in bodies),
         operation_token=operation_token,
+        machine_generated=machine_generated,
     )
 
 

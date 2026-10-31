@@ -3207,7 +3207,12 @@ class IdempotencyStore:
             if stat.S_IMODE(info.st_mode) != desired_mode:
                 os.chmod(path, desired_mode)
         for owner_lock in owners_dir.glob("*.lock"):
-            info = owner_lock.lstat()
+            # Another process releases its owner lock at any time; one that vanished
+            # after the listing has nothing left to harden.
+            try:
+                info = owner_lock.lstat()
+            except FileNotFoundError:
+                continue
             if (
                 stat.S_ISLNK(info.st_mode)
                 or not stat.S_ISREG(info.st_mode)
@@ -3216,7 +3221,10 @@ class IdempotencyStore:
             ):
                 raise RuntimeError("idempotency owner lock cannot be upgraded safely")
             if stat.S_IMODE(info.st_mode) != 0o600:
-                os.chmod(owner_lock, 0o600)
+                try:
+                    os.chmod(owner_lock, 0o600)
+                except FileNotFoundError:
+                    continue
 
     def _connect(self) -> sqlite3.Connection:
         if self._runtime_state_error is not None:
@@ -4736,7 +4744,8 @@ class LeaseManager:
             marker = self._collection_file_marker(self._file_store_acquisition)
             return marker is not None and marker == self._file_store_marker
         # A standalone writer re-proves the acquire predicate on every renew, so a
-        # changed marker mid-guard is refused by the coordinator, not assumed.
+        # marker removed, or a create still pending, mid-guard is refused by the
+        # coordinator, not assumed.
         return not self._serves_collection_store and self._offers_collection_store_capability()
 
     def _collection_file_marker(self, acquired=None, *, vault_root=None):
@@ -6915,7 +6924,6 @@ class LeaseManager:
         raise OpError(
             "WRITER_FENCED",
             f"writer lease fencing token {fencing_token} is no longer current",
-            "Retry the mutation on the current writer.",
         )
 
     def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:

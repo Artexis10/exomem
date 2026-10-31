@@ -43,7 +43,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -674,7 +674,7 @@ def _markdown_text(body: str) -> str:
 class _CasefoldView:
     original: str
     folded: str
-    owners: tuple[int, ...]
+    owners: Sequence[int]
 
     def group(self, match: re.Match[str], name: str) -> str:
         start, end = match.span(name)
@@ -686,6 +686,12 @@ class _CasefoldView:
 def _casefold_view(value: str) -> _CasefoldView:
     """NFKC-casefold text while retaining exact display-span boundaries."""
     original = unicodedata.normalize("NFKC", value)
+    folded = original.casefold()
+    if len(folded) == len(original):
+        # Case folding maps each character to one or more characters and never
+        # deletes one, so equal lengths mean every character folded to exactly
+        # one: each folded position is owned by the same original position.
+        return _CasefoldView(original, folded, range(len(original)))
     folded_parts: list[str] = []
     owners: list[int] = []
     for index, char in enumerate(original):
@@ -798,22 +804,41 @@ def _context(
     )
 
 
-def extract_identity_frames(
-    body: str,
-    *,
-    path: str,
-    origin: str,
-    entity_types: EntityTypeRegistry,
-    registry: RegistryIndex,
-) -> tuple[EvidenceContext, ...]:
-    """Extract only the five closed ``identity-frames-v1`` frame shapes."""
+@dataclass(frozen=True, slots=True)
+class FrameGrammar:
+    """The ``identity-frames-v1`` patterns for one registry, compiled once per sweep.
+
+    Every input is constant across a sweep. Building the patterns per page
+    re-sorted and re-escaped every registry anchor for every page, and handed
+    `re` a fresh pattern string to hash on every clause.
+    """
+
+    cue_snapshot: Mapping[str, tuple[tuple[str, str], ...]]
+    cue_nouns: frozenset[str]
+    resolved_anchors: Mapping[str, RegistryEntry]
+    field: re.Pattern[str]
+    copula: re.Pattern[str] | None
+    label: re.Pattern[str] | None
+    subject: re.Pattern[str]
+    object_frame: re.Pattern[str] | None
+
+
+def _alternation(values: Iterable[str]) -> str:
+    """Longest-first escaped alternation, so a longer phrase wins over its prefix."""
+    return "|".join(
+        re.escape(value) for value in sorted(values, key=lambda item: (-len(item), item))
+    )
+
+
+def frame_grammar(
+    entity_types: EntityTypeRegistry, registry: RegistryIndex
+) -> FrameGrammar | None:
+    """Compile the frame patterns, or None when no cue and no anchor can match."""
     cue_snapshot = _cue_snapshot(entity_types)
     cue_nouns = frozenset(cue_snapshot)
     if not cue_nouns and not registry.entries:
-        return ()
-    cue_pattern = "|".join(
-        re.escape(value) for value in sorted(cue_snapshot, key=lambda item: (-len(item), item))
-    )
+        return None
+    cue_pattern = _alternation(cue_snapshot)
     anchor_entries: dict[str, list[RegistryEntry]] = {}
     for entry in registry.entries:
         for name in entry.identities:
@@ -823,16 +848,65 @@ def extract_identity_frames(
         for name, values in anchor_entries.items()
         if len(values) == 1
     }
-    anchor_pattern = "|".join(
-        re.escape(value)
-        for value in sorted(resolved_anchors, key=lambda item: (-len(item), item))
+    anchor_pattern = _alternation(resolved_anchors)
+    relation_pattern = _alternation(_RELATIONS)
+    field_pattern = _alternation(_BODY_FIELDS)
+    subject_options = "i|we" + (f"|{anchor_pattern}" if anchor_pattern else "")
+    return FrameGrammar(
+        cue_snapshot=cue_snapshot,
+        cue_nouns=cue_nouns,
+        resolved_anchors=resolved_anchors,
+        # body-field owns comma separation; ordinary clauses use comma as a stop.
+        field=re.compile(rf"(?P<label>{field_pattern})\s*:\s*(?P<values>.+?)\s*[.;!?]?"),
+        copula=(
+            # nosemgrep: ep-word-search -- the versioned identity-frames-v1 grammar fixes these tokens.
+            re.compile(
+                rf"(?P<candidate>.+?)\s+(?P<copula>is|was|are|were)\s+"
+                rf"(?:(?:a|an|the)\s+)?(?P<cue>{cue_pattern})"
+            )
+            if cue_pattern
+            else None
+        ),
+        label=(
+            re.compile(rf"(?P<cue>{cue_pattern})\s*(?P<delimiter>:|—)\s*(?P<candidate>.+)")
+            if cue_pattern
+            else None
+        ),
+        subject=re.compile(
+            rf"(?P<subject>{subject_options})\s+(?P<predicate>{relation_pattern})\s+"
+            rf"(?P<candidate>.+)"
+        ),
+        object_frame=(
+            re.compile(
+                rf"(?P<candidate>.+?)\s+(?P<predicate>{relation_pattern})\s+"
+                rf"(?P<object>{anchor_pattern})"
+            )
+            if anchor_pattern
+            else None
+        ),
     )
-    relation_pattern = "|".join(
-        re.escape(value) for value in sorted(_RELATIONS, key=lambda item: (-len(item), item))
-    )
-    field_pattern = "|".join(
-        re.escape(value) for value in sorted(_BODY_FIELDS, key=lambda item: (-len(item), item))
-    )
+
+
+def extract_identity_frames(
+    body: str,
+    *,
+    path: str,
+    origin: str,
+    entity_types: EntityTypeRegistry,
+    registry: RegistryIndex,
+    grammar: FrameGrammar | None = None,
+) -> tuple[EvidenceContext, ...]:
+    """Extract only the five closed ``identity-frames-v1`` frame shapes.
+
+    A sweep passes the `grammar` it compiled once for `entity_types` and
+    `registry`; without one, this call compiles its own.
+    """
+    grammar = grammar or frame_grammar(entity_types, registry)
+    if grammar is None:
+        return ()
+    cue_snapshot = grammar.cue_snapshot
+    cue_nouns = grammar.cue_nouns
+    resolved_anchors = grammar.resolved_anchors
     text = _markdown_text(body)
     found: dict[tuple[str, str, str], EvidenceContext] = {}
 
@@ -872,11 +946,7 @@ def extract_identity_frames(
         if not line or line.startswith("#"):
             continue
         line_view = _casefold_view(line)
-        # body-field owns comma separation; ordinary clauses use comma as a stop.
-        field = re.fullmatch(
-            rf"(?P<label>{field_pattern})\s*:\s*(?P<values>.+?)\s*[.;!?]?",
-            line_view.folded,
-        )
+        field = grammar.field.fullmatch(line_view.folded)
         if field is not None:
             label = identity_key(field.group("label"))
             predicate_id = _BODY_FIELDS[label]
@@ -895,12 +965,8 @@ def extract_identity_frames(
         clauses = [part.strip() for part in re.split(r"[.,;!?]+", line) if part.strip()]
         for clause in clauses:
             clause_view = _casefold_view(clause)
-            if cue_pattern:
-                copula = re.fullmatch(
-                    rf"(?P<candidate>.+?)\s+(?P<copula>is|was|are|were)\s+"
-                    rf"(?:(?:a|an|the)\s+)?(?P<cue>{cue_pattern})",
-                    clause_view.folded,
-                )
+            if grammar.copula is not None and grammar.label is not None:
+                copula = grammar.copula.fullmatch(clause_view.folded)
                 if copula is not None:
                     cue = identity_key(copula.group("cue"))
                     pairs = cue_snapshot[cue]
@@ -916,10 +982,7 @@ def extract_identity_frames(
                         excerpt=clause,
                     )
 
-                label = re.fullmatch(
-                    rf"(?P<cue>{cue_pattern})\s*(?P<delimiter>:|—)\s*(?P<candidate>.+)",
-                    clause_view.folded,
-                )
+                label = grammar.label.fullmatch(clause_view.folded)
                 if label is not None:
                     cue = identity_key(label.group("cue"))
                     pairs = cue_snapshot[cue]
@@ -935,12 +998,7 @@ def extract_identity_frames(
                         excerpt=clause,
                     )
 
-            subject_options = "i|we" + (f"|{anchor_pattern}" if anchor_pattern else "")
-            subject = re.fullmatch(
-                rf"(?P<subject>{subject_options})\s+(?P<predicate>{relation_pattern})\s+"
-                rf"(?P<candidate>.+)",
-                clause_view.folded,
-            )
+            subject = grammar.subject.fullmatch(clause_view.folded)
             if subject is not None:
                 subject_name = identity_key(subject.group("subject"))
                 anchor = resolved_anchors.get(subject_name)
@@ -957,12 +1015,8 @@ def extract_identity_frames(
                     excerpt=clause,
                 )
 
-            if anchor_pattern:
-                object_frame = re.fullmatch(
-                    rf"(?P<candidate>.+?)\s+(?P<predicate>{relation_pattern})\s+"
-                    rf"(?P<object>{anchor_pattern})",
-                    clause_view.folded,
-                )
+            if grammar.object_frame is not None:
+                object_frame = grammar.object_frame.fullmatch(clause_view.folded)
                 if object_frame is not None:
                     object_name = identity_key(object_frame.group("object"))
                     anchor = resolved_anchors[object_name]
@@ -1221,6 +1275,7 @@ def collect(
     from . import provenance
 
     bodies: dict[str, str] = {}
+    grammar = frame_grammar(entity_types, registry)
     for page in eligible_pages:
         rel_path = str(page.rel_path)
         pages_by_path[rel_path] = page
@@ -1229,12 +1284,13 @@ def collect(
             identity_key(page.title),
             identity_key(Path(rel_path).stem),
         }
-        for context in extract_identity_frames(
+        for context in () if grammar is None else extract_identity_frames(
             body,
             path=rel_path,
             origin=_origin_ref(page),
             entity_types=entity_types,
             registry=registry,
+            grammar=grammar,
         ):
             if context.identity and context.identity not in self_identities:
                 ordinary.setdefault(context.identity, []).append(context)

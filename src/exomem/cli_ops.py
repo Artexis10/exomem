@@ -79,7 +79,10 @@ _REMEDIATION: dict[str, str] = {
         "Point the writer-lease URL at a service that implements /v1/vaults/<id>/lease, "
         "or disable coordination; retrying cannot change this answer."
     ),
-    "WRITER_FENCED": "Retry the mutation on the current writer.",
+    "WRITER_FENCED": (
+        "Retry the mutation; the retry runs under whichever lease is current now, "
+        "which may be this process's own renewed lease."
+    ),
     "INGRESS_BYPASSED": (
         "Public traffic must enter via the HA edge hostname; check DNS, tunnel ingress, "
         "and worker route coverage, or set EXOMEM_EDGE_STAMP_ENFORCE=0 to break glass."

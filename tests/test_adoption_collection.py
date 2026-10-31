@@ -15,6 +15,7 @@ from exomem import (
     adopt,
     adoption_plan,
     adoption_run,
+    capabilities,
     epistemic_graph,
     find,
     held_fs,
@@ -425,6 +426,69 @@ def test_recall_check_accepts_only_the_exact_target_page(
     wrong = adoption_run.finish(vault, run_id=run_id, today=TODAY)
     assert wrong["finish"]["recall_check"]["ok"] is False
     assert wrong["coverage"]["recall"] == {"sampled": 1, "found": 0, "missed": [target]}
+    # The search answered without the page, so a question about it is not ready.
+    assert "first_question" not in wrong["finish"]
+    assert wrong["finish"]["indexing"]["state"] == "missed"
+
+
+def test_a_finished_run_names_the_reconcile_tool_of_the_surface_that_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/one/plan.md": "# Plan\n\ntext\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/one/plan.md"]["target_path"]
+
+    class Hit:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    # The search answers without the imported page, so finish names a reconcile.
+    monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+    with capabilities.active_surface(nested):
+        finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    read_later = adoption_run.status(vault, run_id=run_id)
+
+    assert finished["finish"]["recall_check"]["next_action"] == {
+        "tool": "repair_memory", "args": {"operation": {"kind": "reconcile"}},
+    }
+    assert read_later["finish"]["recall_check"]["next_action"] == {
+        "tool": "maintain_memory", "args": {"mode": "reconcile"},
+    }
+
+
+def test_a_stored_route_that_no_longer_spells_still_lets_the_run_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/one/plan.md": "# Plan\n\ntext\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/one/plan.md"]["target_path"]
+
+    class Hit:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
+    adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    # A later release retires the operation that the stored route names.
+    store = adoption_run.AdoptionRunStore(vault)
+    run = store.load(run_id)
+    retired = {"tool": "maintain_memory", "args": {"mode": "retired-mode"}}
+    run["finish"]["recall_check"]["next_action"] = retired
+    store.save(run)
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+
+    with capabilities.active_surface(nested):
+        read = adoption_run.status(vault, run_id=run_id)
+
+    assert read["phase"] == "done"
+    assert read["finish"]["recall_check"]["next_action"] == retired
 
 
 @pytest.mark.parametrize("read_state", ["pending", "failed"])
@@ -459,6 +523,32 @@ def test_finish_does_not_report_incomplete_recall_as_missing(
     assert "- Recall check: needs attention" not in manifest
     if read_state == "pending":
         assert recall["warming"]["components"] == ["pending_visibility"]
+
+
+def test_finish_offers_no_first_question_while_the_imported_pages_are_not_yet_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {
+        "Coll/alpha.md": "# Alpha\n\nAn alpha observation.\n",
+        "Coll/beta.md": "# Beta\n\nA beta observation.\n",
+    })
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    def index_still_catching_up(*_args, degraded_out=None, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+        if degraded_out is not None:
+            degraded_out.append("pending_visibility")
+        return []
+
+    monkeypatch.setattr(find, "find", index_still_catching_up)
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert finished["phase"] == "done"
+    assert "first_question" not in finished["finish"]
+    assert "route" not in finished["finish"]
+    assert finished["finish"]["indexing"] == {
+        "state": "pending", "sampled": 2, "found": None, "missed": 0, "pending": 2, "failed": 0,
+    }
 
 
 def test_finish_retains_confirmed_hits_when_other_recall_is_pending(

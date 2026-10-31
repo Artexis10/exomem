@@ -115,6 +115,9 @@ class ArmSpec:
     profile: str = DEFAULT_PROFILE
     #: ``False`` for the arm with no Exomem server, state or hook (arm N).
     exomem: bool = True
+    #: Hook events that the arm's own settings wire besides the push, for a
+    #: harness that renders those settings itself. No switch-evaluation arm has one.
+    wired_hooks: frozenset[str] = frozenset()
 
     def allowed_tools_flag(self, server_name: str) -> str:
         return " ".join(f"mcp__{server_name}__{tool}" for tool in self.tools)
