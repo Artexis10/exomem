@@ -600,7 +600,10 @@ class NoteIndex:
     listed on the first lookup: a call without an own-note item never reads the notes.
     The process remembers what each page said with the page's file signature, so a later
     call reads again only the pages that were added or changed since, by any writer, and
-    forgets the pages that are gone.
+    forgets the pages that are gone. A page is read again when its mtime, ctime, size or
+    file id moved. On POSIX every write moves ctime. On native Windows `st_ctime` is the
+    creation time, so the guarantee there is "mtime, size or file id moved": an in-place
+    edit that keeps the size and restores the exact mtime is served as it was.
     """
 
     def __init__(self, root: Path) -> None:
