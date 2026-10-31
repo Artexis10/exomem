@@ -1920,6 +1920,13 @@ class _LocalLockState:
     #: Threads of this process inside `hold()` that do not hold the boundary
     #: yet. Read by work that can step aside between units (`waiter_count`).
     waiters: int = 0
+    #: The boundary's lock file, from which the waiters sidecar is named. `None`
+    #: for a bare state that has no boundary behind it.
+    lock_path: Path | None = None
+    #: The open waiters sidecar holding this process's shared lock. Only the one
+    #: thread that holds `guard` and polls for the OS lock sets it, and it
+    #: clears it before leaving `_waiting`, so it is set only while `waiters > 0`.
+    signal_handle: BinaryIO | None = None
 
 
 _LOCAL_STATES: dict[Path, _LocalLockState] = {}
@@ -1934,6 +1941,71 @@ def _note_acquire_attempt(state: _LocalLockState) -> None:
     """
     with state.metadata_guard:
         state.acquire_attempts += 1
+
+
+def _waiters_lock_path(lock_path: Path) -> Path:
+    """The sidecar that carries a boundary's cross-process waiter signal."""
+    return lock_path.with_name(f"{lock_path.stem}.waiters.lock")
+
+
+def _raise_waiter_signal(state: _LocalLockState) -> None:
+    """Hold a shared lock on the waiters sidecar while this process polls for the boundary.
+
+    A background holder in any process on the host reads it through
+    `waiter_count`. The kernel drops the lock when the process exits, so a crashed
+    waiter leaves no signal. A wait that the first try ends never raises it, so an
+    uncontended hold pays nothing. The signal is a hint: if it cannot be published,
+    the holder does not step aside for this process, as before, and the waiting
+    write must not fail for it. Windows has no shared advisory lock here, so there
+    the signal stays process-local.
+    """
+    if os.name == "nt" or state.lock_path is None or state.signal_handle is not None:
+        return
+    handle = None
+    try:
+        handle = _open_lock_handle(_waiters_lock_path(state.lock_path))
+        # Blocking, though only a probe's momentary exclusive lock can make it wait.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+    except OSError:
+        if handle is not None:
+            handle.close()
+        return
+    state.signal_handle = handle
+
+
+def _drop_waiter_signal(state: _LocalLockState) -> None:
+    handle, state.signal_handle = state.signal_handle, None
+    if handle is None:
+        return
+    try:
+        _release_os_lock(handle)
+    except OSError:
+        pass
+    finally:
+        handle.close()
+
+
+def _another_process_waits(lock_path: Path) -> bool:
+    """Whether some process holds the waiters sidecar's shared lock.
+
+    The caller holds no shared lock of its own, so an exclusive try fails only for
+    another process. A success is released at once by closing the descriptor. A
+    sidecar that does not exist or cannot be probed reports no waiter, which keeps
+    today's behaviour for an advisory signal.
+    """
+    try:
+        descriptor = os.open(
+            _waiters_lock_path(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except OSError:
+        return False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        return exc.errno in _BUSY_ERRNOS
+    finally:
+        os.close(descriptor)
+    return False
 
 
 @contextmanager
@@ -2023,7 +2095,7 @@ def _state_for(lock_path: Path) -> _LocalLockState:
     with _LOCAL_STATES_GUARD:
         state = _LOCAL_STATES.get(lock_path)
         if state is None:
-            state = _LocalLockState()
+            state = _LocalLockState(lock_path=lock_path)
             _LOCAL_STATES[lock_path] = state
         return state
 
@@ -2049,11 +2121,14 @@ def _reset_in_forked_child() -> None:
     """
     global _LOCAL_STATES, _LOCAL_STATES_GUARD
     for state in _LOCAL_STATES.values():
-        if state.handle is not None:
-            try:
-                state.handle.close()
-            except OSError:
-                pass
+        # Close, never unlock: an unlock would drop the parent's own shared lock,
+        # which lives on the descriptor both processes inherited.
+        for inherited in (state.handle, state.signal_handle):
+            if inherited is not None:
+                try:
+                    inherited.close()
+                except OSError:
+                    pass
     _LOCAL_STATES = {}
     _LOCAL_STATES_GUARD = threading.Lock()
     _reset_hold_summary()
@@ -2061,6 +2136,18 @@ def _reset_in_forked_child() -> None:
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_in_forked_child)
+
+
+def _open_lock_handle(path: Path) -> BinaryIO:
+    """Open one lock file, creating it with a single byte for the OS lock to cover."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    handle.seek(0)
+    return handle
 
 
 class VaultMutationCoordinator:
@@ -2102,14 +2189,22 @@ class VaultMutationCoordinator:
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
 
     def waiter_count(self) -> int:
-        """Threads of this process now waiting to acquire this boundary.
+        """Waiters for this boundary, in this process or another on the host.
 
-        Process-local, like the contention counters: a waiter in another
-        process is invisible here.
+        A positive count is the number of threads of this process now waiting.
+        With none, it is 1 when another process waits (that process holds a
+        shared lock on the boundary's waiters sidecar) and 0 otherwise. The
+        contention counters stay process-local. On Windows only this process's
+        threads count.
         """
         state = _state_for(self.lock_path)
         with state.metadata_guard:
-            return state.waiters
+            local = state.waiters
+        if local or os.name == "nt":
+            return local
+        # This process holds its shared lock only while `waiters > 0`, so the
+        # probe cannot meet it here.
+        return int(_another_process_waits(self.lock_path))
 
     @contextmanager
     def hold(
@@ -2205,11 +2300,16 @@ class VaultMutationCoordinator:
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
             try:
                 with _waiting(state):
-                    self._acquire_boundary(
-                        handle, metadata_handle, deadline, request_id, operation, holder_kind,
-                        wait_start=wait_start,
-                        publish_holder_metadata=publish_holder_metadata,
-                    )
+                    try:
+                        self._acquire_boundary(
+                            handle, metadata_handle, deadline, request_id, operation, holder_kind,
+                            wait_start=wait_start,
+                            publish_holder_metadata=publish_holder_metadata,
+                            waiter_state=state,
+                        )
+                    finally:
+                        # Before `_waiting` ends, so the signal never outlives the count.
+                        _drop_waiter_signal(state)
             except Exception:
                 handle.close()
                 metadata_handle.close()
@@ -2465,14 +2565,7 @@ class VaultMutationCoordinator:
     def _open_lock_file(self, path: Path) -> BinaryIO:
         try:
             prepare_windows_private_state_root(self.state_root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle = path.open("a+b")
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-            handle.seek(0)
-            return handle
+            return _open_lock_handle(path)
         except OSError as exc:
             _bump_boundary_metric(
                 "exomem_mutation_busy_total", {"code": "MUTATION_LOCK_UNAVAILABLE"}
@@ -2494,8 +2587,13 @@ class VaultMutationCoordinator:
         *,
         wait_start: float,
         publish_holder_metadata: bool,
+        waiter_state: _LocalLockState,
     ) -> None:
-        """Acquire and publish with the metadata mutex held for one generation."""
+        """Acquire and publish with the metadata mutex held for one generation.
+
+        The first failed try raises this process's cross-process waiter signal;
+        the caller drops it.
+        """
         while True:
             try:
                 metadata_locked = _acquire_os_lock_until(
@@ -2544,6 +2642,7 @@ class VaultMutationCoordinator:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise self._refused(wait_start)
+            _raise_waiter_signal(waiter_state)
             time.sleep(min(self.poll_interval_seconds, remaining))
 
     def _publish_holder_metadata(self, holder: dict[str, object]) -> None:

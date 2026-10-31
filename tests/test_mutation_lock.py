@@ -1336,6 +1336,74 @@ def test_process_exit_releases_os_mutation_lock(tmp_path: Path) -> None:
     with recovered.hold(timeout_seconds=1.0):
         assert recovered.lock_path.exists()
 
+def _process_try_boundary(
+    state_root: str, vault_root: str, attempting, finished, linger, timeout_seconds: float
+) -> None:
+    """Try the boundary once, then stay alive.
+
+    The parent can then tell a signal this process dropped from one that vanished
+    because the process exited.
+    """
+    coordinator = VaultMutationCoordinator(Path(state_root), Path(vault_root))
+    attempting.set()
+    try:
+        with coordinator.hold(timeout_seconds=timeout_seconds):
+            finished.set()
+            linger.wait(_HOLD_SECONDS)
+    except OpError:
+        finished.set()
+        linger.wait(_HOLD_SECONDS)
+
+
+def _wait_until(condition, seconds: float = _OBSERVE_SECONDS) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the cross-process waiter signal is a POSIX shared lock")
+@pytest.mark.parametrize("ending", ["acquires", "gives_up", "is_killed"])
+def test_a_holder_sees_a_waiter_in_another_process_only_while_it_waits(
+    tmp_path: Path, ending: str
+) -> None:
+    """Background work that holds the boundary must see a write that waits in another process."""
+    context = multiprocessing.get_context("spawn")
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = VaultMutationCoordinator(state_root, vault)
+    attempting, finished, linger = context.Event(), context.Event(), context.Event()
+    waiter = context.Process(
+        target=_process_try_boundary,
+        args=(
+            str(state_root), str(vault), attempting, finished, linger,
+            0.5 if ending == "gives_up" else _HOLD_SECONDS,
+        ),
+    )
+    try:
+        with holder.hold(timeout_seconds=_OBSERVE_SECONDS):
+            assert holder.waiter_count() == 0
+            waiter.start()
+            assert attempting.wait(_OBSERVE_SECONDS)
+            assert _wait_until(lambda: holder.waiter_count() > 0), "the foreign waiter was not seen"
+            if ending == "is_killed":
+                waiter.kill()
+                waiter.join(timeout=_OBSERVE_SECONDS)
+            elif ending == "gives_up":
+                assert finished.wait(_OBSERVE_SECONDS)
+        if ending == "acquires":
+            assert finished.wait(_OBSERVE_SECONDS)
+        # Still alive when it acquired or gave up, so the signal was dropped, not orphaned.
+        assert waiter.is_alive() == (ending != "is_killed")
+        assert holder.waiter_count() == 0
+    finally:
+        linger.set()
+        _join_or_terminate([waiter])
+
+
 def test_sequential_holds_on_one_thread_reacquire_the_os_boundary(
     tmp_path: Path,
 ) -> None:
