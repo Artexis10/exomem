@@ -550,7 +550,11 @@ def test_review_page_reports_warming_when_existing_json_has_no_projection(tmp_pa
     assert page == {
         "state": "warming",
         "reason": "review_projection_rebuild_required",
-        "recovery": {"operator_required": True, "command": "exomem maintain --reconcile"},
+        "recovery": {
+            "operator_required": True,
+            "command": "exomem maintain --reconcile",
+            "remote": 'check_memory operation.kind="reconcile" dry_run=true, then repair_memory with the plan_id and a why',
+        },
         "items": [],
         "continuation": None,
         "coverage": {

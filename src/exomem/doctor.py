@@ -80,7 +80,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: parses, runs, and exits 0 without repairing anything, which is the worse of
 #: the two failure modes — an operator who follows it sees success and concludes
 #: the diagnosis was wrong. Every remediation that asks for repair routes
-#: through this constant so no site can drift back to the audit.
+#: through this constant so no site can drift back to the audit. A remote
+#: owner reconciles through a governed job instead (`repair_memory`, vault care).
 _REBUILD_VECTORS_CMD = "exomem maintain --reconcile"
 
 #: Absolute deferred-queue FAIL threshold (total semantic_upserts + full_upserts
@@ -952,7 +953,8 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
             "fast_ack_custody",
             "fail",
             message,
-            'Run `exomem maintain --reconcile` (maintain_memory mode="reconcile") to '
+            "Run `exomem maintain --reconcile` on the host, or start a remote reconcile job "
+            "(`repair_memory` with the preview's `plan_id`), to "
             "re-converge stranded batches from their current bytes. Setting "
             "EXOMEM_FAST_DURABLE_ACK=0 stops new ones but does not repair these.",
             details=details,
@@ -963,7 +965,8 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
             "warn",
             message,
             "Managed recall answers warming until pending visibility proves. If it "
-            "persists, run `exomem maintain --reconcile`.",
+            "persists, run `exomem maintain --reconcile` on the host or start a remote "
+            "reconcile job.",
             details=details,
         )
     return _check("fast_ack_custody", "pass", message, details=details)

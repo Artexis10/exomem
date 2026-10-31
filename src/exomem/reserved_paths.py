@@ -136,6 +136,10 @@ class InternalStateDescriptor:
     placement: StatePlacement
     owning_command: str | None = None
     authority_enabled: bool = True
+    #: Whether the family once lived inside the vault. Only such a family has legacy state for the
+    #: one-time migration to move, so only its id joins the migration manifest's descriptor set. A
+    #: family born external adds no migration: an upgrade stays seamless and an older reader accepts it.
+    migrates_from_vault: bool = True
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -506,6 +510,13 @@ _REGISTRY = (
             ".media-jobs.json",
             ".media-worker.lock",
         ),
+    ),
+    InternalStateDescriptor(
+        "maintenance-jobs-store",
+        "maintenance_jobs",
+        StatePlacement.EXTERNAL_STATE,
+        migrates_from_vault=False,
+        exact=_sqlite_family(".maintenance-jobs.sqlite"),
     ),
     InternalStateDescriptor(
         "idempotency-store",

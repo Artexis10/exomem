@@ -645,6 +645,23 @@ def _posthoc_relative_path(root: Path, path: Path | str) -> str | None:
     return vault.canonical_vault_rel(root, value)
 
 
+def build_posthoc_corpus(
+    vault_root: Path, *, status_basis: lifecycle_statuses.Basis
+) -> tuple[semantic_contract.SemanticCorpusContext, semantic_language_registry.SemanticLanguageRegistry]:
+    """The corpus and language registry a posthoc pass reads.
+
+    A caller that needs the corpus before it evaluates builds it here, then passes both back to
+    `evaluate_posthoc_batch`, so one pass reads the vault once.
+    """
+    root = Path(vault_root)
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language, status_basis=status_basis
+    )
+    return corpus, language
+
+
 def evaluate_posthoc_batch(
     vault_root: Path,
     *,
@@ -664,12 +681,8 @@ def evaluate_posthoc_batch(
         )
     root = Path(vault_root)
     if corpus is None:
-        registry = relation_registry.load_registry(root)
-        language = semantic_language_registry.load_registry(root)
+        corpus, language = build_posthoc_corpus(root, status_basis=status_basis)
         resolved_saved_contracts = memory_schema.load_saved_contracts(root)
-        corpus = semantic_contract.build_corpus_context(
-            root, registry=registry, language_registry=language, status_basis=status_basis
-        )
     else:
         language = language_registry or semantic_language_registry.load_registry(root)
         resolved_saved_contracts = (

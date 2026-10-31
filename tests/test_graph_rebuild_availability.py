@@ -1566,7 +1566,7 @@ def test_a_pass_that_fails_while_a_newer_registration_arrives_builds_that_regist
         (
             "unavailable",
             "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
-            "to recover the derived graph.",
+            "to recover the derived graph; a remote client adds the preview's plan_id and a why.",
         ),
     ],
 )
@@ -1716,7 +1716,7 @@ def test_registered_unavailable_lineage_failure_projects_explicit_reset_without_
     assert stopped.value.code == "GRAPH_SYNC_LINEAGE_CONFLICT"
     assert stopped.value.remediation == (
         "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
-        "to recover the derived graph."
+        "to recover the derived graph; a remote client adds the preview's plan_id and a why."
     )
     assert sentinel not in str(stopped.value)
     assert sentinel in caplog.text

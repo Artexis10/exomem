@@ -14,6 +14,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -388,6 +389,16 @@ def binding_facts(vault: Path, *, surfaces: list[str]) -> dict:
         identity = package_identity("installed", role=role)
     except ValueError:
         identity = package_identity("source", role=role)
+        # A revision names only committed code; ``None`` when git cannot say.
+        status = subprocess.run(  # noqa: S603 - git on the loaded package's own directory
+            ["git", "-C", str(Path(exomem.__file__).parent), "status", "--porcelain", "--", "."],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        identity["uncommitted_paths"] = (
+            status.stdout.splitlines() if status.returncode == 0 else None
+        )
     return {
         "interpreter": {"path": sys.executable, "version": sys.version},
         "loaded_source_path": str(Path(exomem.__file__).resolve()),
