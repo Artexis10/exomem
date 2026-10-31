@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.153.1](https://github.com/Artexis10/exomem/compare/v0.153.0...v0.153.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **auth:** keep a refresh grant when a slow response makes the client retry ([#2278](https://github.com/Artexis10/exomem/issues/2278)) ([459e487](https://github.com/Artexis10/exomem/commit/459e487822d42861b38ac2d8782a23d3405674ad))
+* **collections:** route structured-files maintenance on store collections to the store thread ([#2276](https://github.com/Artexis10/exomem/issues/2276)) ([db59abd](https://github.com/Artexis10/exomem/commit/db59abd471de06826733e8d850399e6e17c21a8f))
+
 ## [0.153.0](https://github.com/Artexis10/exomem/compare/v0.152.0...v0.153.0) (2026-10-31)
 
 
