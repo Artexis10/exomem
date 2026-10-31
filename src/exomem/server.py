@@ -40,6 +40,7 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
     SingleUserGitHubVerifier,
     build_oauth,
 )
+from .server_media_worker import register_media_worker_routes
 from .server_rest import register_rest_facade
 from .server_runtime import LocalRuntimeActivation, initialize_runtime
 from .server_transfer import (
@@ -813,6 +814,8 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         transfer_config = register_transfer_routes(
             mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
         )
+        # Remote media workers lease speech jobs here; each route admits a worker credential itself.
+        register_media_worker_routes(mcp, vault_root=runtime.vault_root)
         from fastmcp.exceptions import ResourceError
         from fastmcp.resources import ResourceContent, ResourceResult
 

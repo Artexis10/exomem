@@ -157,11 +157,15 @@ def referenced_binding(
     return binary, reference
 
 
-def configuration(vault: Path) -> dict[str, object] | None:
-    """Read explicit per-vault configuration, retaining identity while disabled.
+#: The per-vault key that configures remote media workers. An entry that holds only this key
+#: configures no media store, so it does not need a store identity.
+REMOTE_WORKERS_KEY = "remote_workers"
 
-    Configuration errors propagate: silently losing a selected store identity
-    would turn every evicted original into an apparent deletion.
+
+def vault_entry(vault: Path) -> object | None:
+    """The per-vault entry of the media configuration file as written, or None when the vault has none.
+
+    The entry is not validated here: each reader checks the keys it owns.
     """
     configured = os.environ.get(CONFIG_ENV)
     if not configured:
@@ -169,8 +173,19 @@ def configuration(vault: Path) -> dict[str, object] | None:
     value = json.loads(Path(configured).read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("vaults"), dict):
         raise ValueError("media store configuration requires vaults")
-    selected = value["vaults"].get(str(Path(vault).resolve()))
+    return value["vaults"].get(str(Path(vault).resolve()))
+
+
+def configuration(vault: Path) -> dict[str, object] | None:
+    """Read explicit per-vault configuration, retaining identity while disabled.
+
+    Configuration errors propagate: silently losing a selected store identity
+    would turn every evicted original into an apparent deletion.
+    """
+    selected = vault_entry(vault)
     if selected is None:
+        return None
+    if isinstance(selected, dict) and set(selected) == {REMOTE_WORKERS_KEY}:
         return None
     if not isinstance(selected, dict) or not isinstance(selected.get("store"), str) or not selected["store"]:
         raise ValueError("media store configuration requires a stable store identity")

@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import cloud_cell, held_fs, media_brakes, reserved_paths
+from . import cloud_cell, held_fs, media_brakes, media_worker_credentials, reserved_paths
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .vault import parse_frontmatter
@@ -210,6 +210,16 @@ def _validated_result_payload(kind: str, payload: object) -> dict[str, object] |
             validated["presented_state"] = PENDING
         return validated
     return None
+
+
+def _lease_payload(snapshot: LeaseSnapshot, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """The payload as recorded: the lease, not the worker, names the extraction a result replaces."""
+    if kind != "extraction":
+        return payload
+    payload = {key: value for key, value in payload.items() if key != "replaces"}
+    if snapshot.replaces is not None:
+        payload["replaces"] = snapshot.replaces
+    return payload
 
 
 def is_compute_runtime_error(error: object) -> bool:
@@ -879,6 +889,8 @@ class MediaJobStore:
                 conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_end_lease AFTER UPDATE OF state ON jobs "
                              "WHEN NEW.state != 'running' "
                              "BEGIN DELETE FROM media_leases WHERE job_id = NEW.id; END")
+                # The credentials that admit remote workers; a worker's lease names its credential's id (D6).
+                conn.execute(media_worker_credentials.SCHEMA)
                 # How far the engine had transcribed a speech job at its last stop; the row goes with the job.
                 conn.execute(
                     """
@@ -1478,7 +1490,7 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def _held_lease(self, job_id: int, claim_revision: int, worker: str) -> MediaLease | None:
+    def held_lease(self, job_id: int, claim_revision: int, worker: str) -> MediaLease | None:
         """The lease if this worker holds it under this revision and has handed in no result."""
         lease = self.get_lease(job_id)
         if lease is None or lease.worker != worker or lease.claim_revision != claim_revision or lease.result_recorded:
@@ -1516,7 +1528,7 @@ class MediaJobStore:
         original at all gives `HYDRATION_TOO_LARGE`, which blocks the job instead, with `error` as its text.
         Returns False when this worker does not hold the lease under this revision.
         """
-        lease = self._held_lease(job_id, claim_revision, worker)
+        lease = self.held_lease(job_id, claim_revision, worker)
         if lease is None:
             return False
         if reason == HYDRATION_TOO_LARGE:
@@ -1574,14 +1586,19 @@ class MediaJobStore:
         after the lease expired but before the sweep still records, because the claim revision fences it.
         Returns False when this worker does not hold the lease under this revision, or `record_result` refuses.
         """
-        lease = self._held_lease(job_id, claim_revision, worker)
+        lease = self.held_lease(job_id, claim_revision, worker)
         if lease is None or not isinstance(payload, dict):
             return False
         snapshot = lease.snapshot
-        if kind == "extraction":
-            payload = {key: value for key, value in payload.items() if key != "replaces"}
-            if snapshot.replaces is not None:
-                payload["replaces"] = snapshot.replaces
+        payload = _lease_payload(snapshot, kind, payload)
+        if kind == "failure" and snapshot.replaces is not None and terminal_state is not None:
+            # A failed re-extraction must not damage the transcript it would replace, so the job fails on the
+            # ledger alone, as a local one does.
+            validated = _validated_result_payload(kind, payload)
+            return validated is not None and self.mark(
+                lease.job, terminal_state, str(validated["error"]),
+                blocked_reason=blocked_reason, blocked_context=blocked_context,
+            )
         return self.record_result(
             replace(lease.job, claim_revision=lease.claim_revision, ocr_generation=lease.ocr_generation),
             kind=kind,
@@ -1593,6 +1610,30 @@ class MediaJobStore:
             blocked_reason=blocked_reason,
             blocked_context=blocked_context,
         )
+
+    def remote_result_matches(
+        self, job_id: int, claim_revision: int, worker: str, kind: str, payload: dict[str, Any]
+    ) -> bool:
+        """Whether this worker's lease already holds exactly this result, so a retried post can succeed.
+
+        A result is idempotent while the parent has not yet published it: the lease and the stored result
+        outlive the post. Once the parent publishes, the lease is gone and a late retry is a lost lease.
+        """
+        lease = self.get_lease(job_id)
+        if lease is None or lease.worker != worker or lease.claim_revision != claim_revision or not lease.result_recorded:
+            return False
+        validated = _validated_result_payload(kind, _lease_payload(lease.snapshot, kind, payload))
+        if validated is None:
+            return False
+        digest = hashlib.sha256(_canonical_json(validated).encode("utf-8")).hexdigest()
+        conn = self._connect(readonly=True)
+        try:
+            return conn.execute(
+                "SELECT 1 FROM media_job_results WHERE job_id = ? AND claim_revision = ? AND payload_hash = ?",
+                (job_id, claim_revision, digest),
+            ).fetchone() is not None
+        finally:
+            conn.close()
 
     def complete(self, job: MediaJob) -> None:
         """Clear stages this claim processed, preserving stages added mid-flight."""

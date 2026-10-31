@@ -772,6 +772,25 @@ def _resolve_language(requested: str | None, multilingual: bool) -> tuple[str | 
     return None, LANGUAGE_DETECTED
 
 
+#: The transcript of a timed extraction that found no speech.
+NO_SPEECH_TIMED_TEXT = "[0:00] (no speech detected)"
+#: What the sidecar records for an extraction whose text is empty.
+NO_TEXT_PLACEHOLDER = "(no text detected)"
+
+
+def render_timed_transcript(segments: Iterable[tuple[float, float, str]]) -> str:
+    """The `[m:ss]` lines of ASR segments given as (start, end, text).
+
+    The one renderer of timed speech: a local extraction and a remote worker's segments both use it,
+    so the two transcripts have the same format. It may be empty when no segment holds text.
+    """
+    return (
+        _semantic_segments_module()
+        .render_timed_lines([(start, end, text, None) for start, end, text in segments])
+        .strip()
+    )
+
+
 def _transcribe(
     path: Path,
     media_type: str,
@@ -852,25 +871,17 @@ def _transcribe(
     if timestamps or _semantic_segments_enabled():
         if timestamps and not seg_list:
             return ExtractResult(
-                text="[0:00] (no speech detected)",
+                text=NO_SPEECH_TIMED_TEXT,
                 media_type=media_type,
                 engine=f"{engine}+timed",
                 speaker_verification="unavailable" if _diarize_enabled() else None,
                 asr=asr,
             )
         try:
-            semantic_segments = _semantic_segments_module()
-            timed_text = semantic_segments.render_timed_lines(
-                [
-                    (
-                        float(getattr(seg, "start", 0.0) or 0.0),
-                        float(getattr(seg, "end", 0.0) or 0.0),
-                        seg.text,
-                        None,
-                    )
-                    for seg in seg_list
-                ]
-            ).strip()
+            timed_text = render_timed_transcript(
+                (float(getattr(seg, "start", 0.0) or 0.0), float(getattr(seg, "end", 0.0) or 0.0), seg.text)
+                for seg in seg_list
+            )
             if timed_text:
                 return ExtractResult(
                     text=timed_text,

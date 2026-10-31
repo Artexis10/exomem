@@ -31,6 +31,8 @@ Subcommands:
   (or EXOMEM_INDEX_SCOPE=vault) makes notes OUTSIDE Knowledge Base/ semantically searchable
 - `enroll-speaker` / `list-speakers` / `remove-speaker` — manage named-speaker voice profiles
   for opt-in diarization (desk-side admin; never an MCP tool)
+- `media-worker credential issue|list|revoke` — manage the credentials of remote media workers
+  (desk-side admin; the token goes to a 0600 file and is never printed)
 """
 
 from __future__ import annotations
@@ -118,6 +120,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "enroll-speaker",
         "list-speakers",
         "remove-speaker",
+        "media-worker",
         "trace",
         "logs",
         "lease",
@@ -280,6 +283,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _list_speakers_main(raw[1:])
     if raw and raw[0] == "remove-speaker":
         return _remove_speaker_main(raw[1:])
+    if raw and raw[0] == "media-worker":
+        return _media_worker_main(raw[1:])
     if raw and raw[0] == "trace":
         return _trace_main(raw[1:])
     if raw and raw[0] == "logs":
@@ -2142,6 +2147,86 @@ def _remove_speaker_main(argv: list[str]) -> int:
         print(f"exomem remove-speaker: {e}", file=sys.stderr)
         return 1
     print(f"Removed {args.name!r}." if removed else f"No profile named {args.name!r}.")
+    return 0
+
+
+def _media_worker_main(argv: list[str]) -> int:
+    """`exomem media-worker credential issue|list|revoke`: the credentials of remote media workers."""
+    from . import media_jobs
+    from . import media_worker_credentials as credentials
+
+    parser = argparse.ArgumentParser(
+        prog="exomem media-worker credential",
+        description=(
+            "Issue, list and revoke the credentials of remote media workers. A credential admits the "
+            "media worker routes and nothing else; the service stores only its hash."
+        ),
+    )
+    parser.add_argument("noun", choices=["credential"])
+    parser.add_argument("action", choices=["issue", "list", "revoke"])
+    parser.add_argument("--name", help="the worker's name (issue, revoke)")
+    parser.add_argument("--days", type=int, default=credentials.DEFAULT_DAYS, help="days until expiry (issue)")
+    parser.add_argument(
+        "--max-leases", type=int, default=credentials.DEFAULT_MAX_LEASES, help="most jobs held at once (issue)"
+    )
+    parser.add_argument("--out", help="new file for the token, created owner-only (issue)")
+    parser.add_argument(
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+    )
+    args = parser.parse_args(argv)
+    if args.action != "list" and not args.name:
+        parser.error(f"{args.action} needs --name")
+    if args.action == "issue" and not args.out:
+        parser.error("issue needs --out, the file that receives the token")
+
+    try:
+        store = media_jobs.MediaJobStore(_speaker_vault(args))
+    except RuntimeError as error:
+        print(f"exomem media-worker: {error}", file=sys.stderr)
+        return 1
+    if args.action == "list":
+        listed = credentials.list_credentials(store)
+        now = time.time()
+        for credential in listed:
+            seen = (
+                "never"
+                if credential.last_seen_at is None
+                else time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(credential.last_seen_at))
+            )
+            expires = time.strftime("%Y-%m-%d", time.gmtime(credential.expires_at))
+            print(
+                f"{credential.id}  {credential.name}  {credential.status(now)}  expires {expires}  "
+                f"max-leases {credential.max_leases}  last-seen {seen}"
+            )
+        if not listed:
+            print("No media worker credentials.")
+        return 0
+    if args.action == "revoke":
+        revoked = credentials.revoke(store, args.name)
+        print(f"Revoked {revoked} credential(s) named {args.name!r}." if revoked else f"No live credential named {args.name!r}.")
+        return 0 if revoked else 1
+    output = Path(args.out).expanduser()
+    token = credentials.new_token()
+    try:
+        # The file first: a credential whose token was never written cannot be used, so a failed write leaves none.
+        _write_private_token(output, token)
+    except OSError as error:
+        print(f"exomem media-worker: cannot create {output}: {error.strerror or type(error).__name__}", file=sys.stderr)
+        return 2
+    try:
+        credential = credentials.issue(
+            store, token, name=args.name, days=args.days, max_leases=args.max_leases
+        )
+    except credentials.CredentialError as error:
+        output.unlink(missing_ok=True)
+        print(f"exomem media-worker: {error}", file=sys.stderr)
+        return 2
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
+    print(f"Issued {credential.id} for {args.name!r}; the token is in {output}.")
     return 0
 
 

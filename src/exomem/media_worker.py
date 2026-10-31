@@ -77,6 +77,7 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
+    parse_frontmatter,
     post_commit_batch_fanout,
     read_guarded_text,
 )
@@ -374,6 +375,104 @@ def _result_binary_identity(
     identity: tuple[tuple[int, int, int, int, int], str | None]
 ) -> dict[str, object]:
     return {"stat": list(identity[0]), "sha256": identity[1]}
+
+
+def _language_pin(job: _Job, sidecar_content: str) -> tuple[str | None, bool]:
+    """The language and the multilingual flag an extraction decodes with.
+
+    A request names the language or the multilingual mode; failing that, the sidecar keeps the last request's.
+    """
+    if job.language is not None or job.language_mode == LANGUAGE_MODE_MULTILINGUAL:
+        return job.language, job.language_mode == LANGUAGE_MODE_MULTILINGUAL
+    return preserve.asr_language_pin(sidecar_content)
+
+
+def extraction_payload(
+    *,
+    text: str,
+    engine: str,
+    speakers: list[dict] | None = None,
+    speaker_verification: str | None = None,
+    asr: AsrFacts | None = None,
+    replaces: str | None = None,
+) -> dict[str, object]:
+    """The result payload of one extraction: what a child hands the parent and a remote lease records."""
+    payload: dict[str, object] = {
+        "text": preserve._cap_extracted_text(text),
+        "engine": engine,
+        "speakers": speakers or [],
+        "speaker_verification": speaker_verification or "unavailable",
+    }
+    if asr is not None and asr.reported:
+        payload["asr"] = asr.as_payload()
+    if replaces is not None:
+        payload["replaces"] = replaces
+    return payload
+
+
+@dataclass(frozen=True)
+class LeaseGrant:
+    """A remote worker's grant for one job: the snapshot the lease stores and the original it must verify."""
+
+    snapshot: media_jobs.LeaseSnapshot
+    original_sha256: str
+    original_size: int
+
+
+def lease_grant(vault_root: Path, job: media_jobs.MediaJob) -> LeaseGrant | None:
+    """What the vault owner reads to grant `job` to a remote worker (D4, D5), or None when it may not have it.
+
+    This is the read a local child makes at its claim, plus the release gate of an original download.
+    It runs inside the claim transaction, so it is a few small reads and never hashes the original: the
+    worker verifies the original against the digest that the sidecar already records for its binary.
+    Not granted: a sidecar that recall policy no longer admits, one whose transcript is complete and is
+    not being reprocessed, an original the gate withholds, one without a recorded digest, one that is
+    absent from the volume (an evicted original keeps its local claim, because its identity cannot be
+    read before it is hydrated) and one the sidecar describes differently from the file.
+    """
+    from . import media_processing
+    from .governance import egress
+    from .governance import principal as principal_module
+
+    if not recall_policy.is_recall_candidate(vault_root, job.sidecar_path):
+        return None
+    try:
+        content, guard = read_guarded_text(vault_root, job.sidecar_path)
+        fields, _body, _raw = parse_frontmatter(content, strict=True)
+    except Exception:  # noqa: BLE001 - safe YAML scalars raise mixed errors; an unreadable sidecar is not granted
+        return None
+    completed = media_processing.has_completed_transcript(content, media_type=job.media_type)
+    reprocessing = completed and job.reprocess and job.do_ocr
+    if completed and not reprocessing:
+        return None
+    identity = _binary_identity(job.binary_path)
+    digest, recorded_size = fields.get("binary_sha256"), fields.get("binary_size")
+    if (
+        guard.expected_content_hash is None
+        or identity is None
+        or not media_jobs._is_sha256(digest)
+        or (recorded_size is not None and recorded_size != identity[0][2])
+    ):
+        return None
+    relative = job.binary_path.relative_to(vault_root).as_posix()
+    # The owner's identity: the remote worker computes on the owner's behalf, as an owner's download does.
+    if not egress.release_allows_download(
+        vault_root, relative, principal=principal_module.owner_principal(surface="transfer")
+    ):
+        return None
+    language, multilingual = _language_pin(job, content)
+    return LeaseGrant(
+        snapshot=media_jobs.LeaseSnapshot(
+            sidecar_before_hash=guard.expected_content_hash,
+            binary_identity=_result_binary_identity(identity),
+            sidecar_before_evidence_version=_evidence_version_or_none(content),
+            language=language,
+            language_mode=LANGUAGE_MODE_MULTILINGUAL if multilingual else None,
+            replaces=prior_extraction.extraction_digest(content) if reprocessing else None,
+        ),
+        original_sha256=str(digest),
+        original_size=identity[0][2],
+    )
 
 
 class MediaWorker:
@@ -689,11 +788,7 @@ class MediaWorker:
         if completed and not reprocessing:
             return _ProcessOutcome(_COMPLETE)
         replaces = prior_extraction.extraction_digest(claimed_content) if reprocessing else None
-        # A request names the language or the multilingual mode; failing that, the sidecar keeps the last request's.
-        if job.language is not None or job.language_mode == LANGUAGE_MODE_MULTILINGUAL:
-            language, multilingual = job.language, job.language_mode == LANGUAGE_MODE_MULTILINGUAL
-        else:
-            language, multilingual = preserve.asr_language_pin(claimed_content)
+        language, multilingual = _language_pin(job, claimed_content)
         expected_sidecar = guard.expected_content_hash
         expected_evidence_version = _evidence_version_or_none(claimed_content)
         expected_binary = _binary_identity(job.binary_path)
@@ -816,7 +911,7 @@ class MediaWorker:
                 next_action=_FAILED_ACTION,
             )
             return self._publication_outcome(committed, FAILED, error)
-        text = result.text.strip() or "(no text detected)"
+        text = result.text.strip() or extract.NO_TEXT_PLACEHOLDER
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
                 BLOCKED,
@@ -1178,23 +1273,16 @@ class MediaWorker:
         replaces: str | None = None,
     ) -> bool:
         if self._store is not None:
-            payload: dict[str, object] = {
-                "text": preserve._cap_extracted_text(text),
-                "engine": engine,
-                "speakers": speakers or [],
-                "speaker_verification": speaker_verification or "unavailable",
-            }
-            if asr is not None and asr.reported:
-                payload["asr"] = asr.as_payload()
-            if replaces is not None:
-                payload["replaces"] = replaces
             return self._store.record_result(
                 job,
                 kind="extraction",
                 sidecar_before_hash=expected_sidecar,
                 sidecar_before_evidence_version=expected_evidence_version,
                 binary_identity=_result_binary_identity(expected_binary),
-                payload=payload,
+                payload=extraction_payload(
+                    text=text, engine=engine, speakers=speakers, speaker_verification=speaker_verification,
+                    asr=asr, replaces=replaces,
+                ),
             )
         with get_manager().mutation_guard(
             self._vault_root,
