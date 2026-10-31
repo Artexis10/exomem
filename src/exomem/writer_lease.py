@@ -4414,6 +4414,59 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     return wait
 
 
+_WARMUP_POLL_SECONDS = 0.25
+
+
+def _wait_out_write_warmup(
+    *, refuse_cause: str | None, deadline: float
+) -> tuple[str | None, str | None, float]:
+    """The component still warming when the wait ends, why it was not waited out, and seconds waited.
+
+    Warm-up ends by itself within seconds (5-20 s per restart on a personal vault,
+    2026-10-25..30), so a keyed write waits it out until `deadline`, the same
+    deadline its busy-boundary wait uses, and on the same parked-worker cap,
+    instead of handing the client a refusal it can only retry. An unkeyed write
+    keeps the immediate refusal: a client that gave up during the wait and resent
+    it would run it twice, and so does an attempt on a collection store's thread,
+    which never parks. `refuse_cause` names either case. The cause is None when
+    nothing was warming, and the seconds are 0 unless this write actually parked.
+    """
+    from . import readiness
+
+    def still_warming() -> str | None:
+        # Readiness components, a closed set that readiness.COMPONENTS fixes.
+        return next(
+            (c for c in ("graph_handoff", "semantic_corpus") if readiness.should_defer(c)),
+            None,
+        )
+
+    warming = still_warming()
+    if warming is None:
+        return None, None, 0.0
+    if refuse_cause is not None:
+        return warming, refuse_cause, 0.0
+    if not _writes_absorb_contention():
+        return warming, "absorb_disabled", 0.0
+    if time.monotonic() >= deadline:
+        return warming, "warm_wait_exhausted", 0.0
+    if not _take_capture_waiter_slot():
+        return warming, "capture_waiters_full", 0.0
+    started = time.monotonic()
+    try:
+        while warming is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Polled, not one long wait: a warm that finishes without marking
+            # this component also ends the gate (should_defer turns false).
+            readiness.wait(warming, min(remaining, _WARMUP_POLL_SECONDS))
+            warming = still_warming()
+    finally:
+        _release_capture_waiter_slot()
+    waited = time.monotonic() - started
+    return warming, None if warming is None else "warm_wait_exhausted", waited
+
+
 @dataclass(frozen=True)
 class _CapturePreparationRetry:
     """The invocation's existing allowance and admission for precommit retries."""
@@ -4504,10 +4557,19 @@ class _ContentionWait:
     Only the thread that waits uses it; an attempt on the store thread reads a `_StoreAttempt`.
     """
 
-    def __init__(self, queue: _FairCaptureQueue, wait_seconds: float) -> None:
+    def __init__(
+        self,
+        queue: _FairCaptureQueue,
+        wait_seconds: float,
+        *,
+        started: float | None = None,
+        deadline: float | None = None,
+    ) -> None:
         self.queue = queue
-        self.started = time.monotonic()
-        self.deadline = self.started + wait_seconds
+        # A write that already waited out warm-up keeps the clock `invoke` started,
+        # so its busy wait neither restarts the bound nor under-reports waited_ms.
+        self.started = time.monotonic() if started is None else started
+        self.deadline = self.started + wait_seconds if deadline is None else deadline
         self.ticket: object | None = None
         self.holds_slot = False
         self.absorbed = 0
@@ -5455,21 +5517,31 @@ class LeaseManager:
             )
         if store_attempt is not None:
             store_attempt.received = True
-        from . import readiness
-
         # The graph handoff joins this gate for the reason the corpus is on it:
         # a write admitted before its delta origin exists does not merely run
         # slower, it registers a whole-vault rebuild for a lineage it could
         # have adopted in the first seconds of the warm. Both refusals are the
         # same retryable shape, and reads are untouched either way.
-        warming = next(
-            (
-                component
-                for component in ("graph_handoff", "semantic_corpus")
-                if readiness.should_defer(component)
+        # One clock for every wait this write makes before it runs: warm-up here,
+        # then a busy boundary, so neither restarts the bound or under-reports it.
+        wait_started = time.monotonic()
+        wait_deadline = wait_started + _capture_wait_seconds(self._mutation_timeout_seconds)
+        warming, warm_cause, warm_waited = _wait_out_write_warmup(
+            refuse_cause=(
+                "unkeyed" if key is None else "store_thread" if store_attempt is not None else None
             ),
-            None,
+            deadline=wait_deadline,
         )
+        warm_waited_ms = round(warm_waited * 1000)
+        if warm_waited_ms > 0:
+            _log_mutation_event(
+                "warmup_waited",
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt or "none",
+                waited_ms=warm_waited_ms,
+                outcome="admitted" if warming is None else warm_cause,
+            )
         if warming is not None:
             details: dict[str, Any] = {
                 "status": "retryable",
@@ -5477,6 +5549,8 @@ class LeaseManager:
                 "retry_after_ms": 750,
                 "request_id": request_id,
                 "receipt_id": receipt,
+                "cause": warm_cause,
+                "waited_ms": warm_waited_ms,
             }
             if effective_public_idempotency_key is not None:
                 details["idempotency_key"] = effective_public_idempotency_key
@@ -6340,6 +6414,8 @@ class LeaseManager:
                 key=key,
                 commit_state=commit_state,
                 request_id=request_id,
+                wait_started=wait_started,
+                wait_deadline=wait_deadline,
                 # A narrow leaf meets the busy only after its own preparation. When
                 # that preparation fetched caller-supplied temporary handles, the
                 # server cannot fetch them again; only the caller can retry.
@@ -6527,6 +6603,8 @@ class LeaseManager:
         key: str | None,
         commit_state: Mapping[str, bool],
         request_id: str,
+        wait_started: float | None = None,
+        wait_deadline: float | None = None,
         rerun_safe: bool = True,
     ) -> Any:
         """Run one keyed write, waiting out an ordinary busy boundary.
@@ -6555,8 +6633,12 @@ class LeaseManager:
                 return run()
             finally:
                 _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
+        # The request's wait clock when `invoke` started it before a warm-up wait.
         wait = _ContentionWait(
-            self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+            self._capture_queue,
+            _capture_wait_seconds(self._mutation_timeout_seconds),
+            started=wait_started,
+            deadline=wait_deadline,
         )
         preparation_retry = _CapturePreparationRetry(wait.deadline, wait.admit_preparation_retry)
 

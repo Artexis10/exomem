@@ -2031,6 +2031,21 @@ def test_a_write_during_a_store_handoff_that_outlasts_the_mutation_timeout_commi
     assert titles(service.root, CID) == ["After handoff", "Canonical"]
 
 
+def test_a_keyed_store_write_during_warm_up_does_not_park_the_store_thread(service, monkeypatch):
+    """Defect: a keyed write routed to a collection store waited out warm-up on the store thread,
+    which never parks, so every other write and read of that store stalled behind it."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "3")
+    monkeypatch.setattr("exomem.readiness.should_defer", lambda component: component == "semantic_corpus")
+    started = time.monotonic()
+    with pytest.raises(OpError) as warming:
+        call(service.root, "record_memory", action="append", collection=CID, item={"title": "Warm"},
+             item_key=LATER, why="during warm-up", idempotency_key="during-warm")
+    assert time.monotonic() - started < 1.5
+    assert warming.value.code == "MUTATION_WARMING"
+    assert warming.value.details["cause"] == "store_thread"
+    assert titles(service.root, CID) == ["Canonical"]
+
+
 def test_a_store_busy_raised_after_the_write_started_reaches_the_caller_once(service, monkeypatch):
     """Only a refusal raised before the write's leaf ran is safe to submit again: an unkeyed write
     submitted again after its leaf ran could write twice."""
