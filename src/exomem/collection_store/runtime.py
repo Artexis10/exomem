@@ -778,8 +778,9 @@ class CollectionStoreRuntime:
 
 #: The facades whose collection selectors the vault's marker can route to the store.
 _STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
-#: The commands that carry a curation or episode Records step. They go to the store thread only
-#: when a step they run or seal writes a collection the marker routes to the store (``route``).
+#: The commands that carry a curation or episode Records step, or structured-files maintenance. They go
+#: to the store thread only when a step they run or seal, or the maintenance, writes a collection the
+#: marker routes to the store (``route``).
 # nosemgrep: ep-word-set -- the two command names the command registry fixes for curation steps.
 _CURATION_COMMANDS = frozenset({"maintain_memory", "episode_memory"})
 #: How long the idle store thread waits for a request before it looks for import jobs again.
@@ -831,8 +832,8 @@ def route(command, vault_root, arguments):
     """The store thread a request must run on, or None when file collections answer it.
 
     A selector the vault's marker routes to the store, a NEW summary collection's create,
-    Records discovery, and a curation or episode command that runs a Records step on a
-    store collection run on the store thread of the service serving this vault;
+    Records discovery, and a curation or episode command that runs a Records step or
+    structured-files maintenance on a store collection run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
@@ -883,7 +884,8 @@ def route(command, vault_root, arguments):
 
 
 def _curation_route(command, root, arguments):
-    """The store thread for a curation or episode command that runs a Records step on a store collection.
+    """The store thread for a curation or episode command that runs a Records step on a store collection,
+    or for structured-files maintenance on one.
 
     A step on a collection the store owns commits through the store writer, which only the store
     thread holds, so the whole command runs there. Every other curation, in a vault with a store

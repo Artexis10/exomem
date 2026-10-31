@@ -457,6 +457,9 @@ def test_structured_files_maintenance_reaches_a_store_collection_through_the_ser
     # The store writer answers for its collection: summary C keeps one aggregate view, not one per item.
     with pytest.raises(collections.CollectionError, match="UNSUPPORTED_STORAGE"):
         call(service.root, "maintain_memory", mode="structured-files", collection=CID)
+    with pytest.raises(collections.CollectionError, match="UNSUPPORTED_STORAGE"):
+        call(service.root, "maintain_memory", mode="structured-files", collection=CID, apply=True,
+             plan_id="0" * 64, source_snapshot="0" * 64, why="apply reaches the store writer")
 
 
 def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote_export_apply_does_not(service):
