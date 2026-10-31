@@ -70,12 +70,26 @@ identity, the lease expiry and the snapshot from D4. `claim_revision` stays the
 fencing token: a heartbeat, a byte read or a result with another revision is
 refused with `409 MEDIA_LEASE_LOST`.
 
-The lease length and the heartbeat interval come from configuration (D7). The
-supervisor sweeps expired leases on its existing loop. The sweep moves an
-expired job from `running` to `pending`, which releases the pin through the
-existing `jobs_release_pin` trigger. An expiry counts against the job's existing
-timeout-stop budget, so a job that keeps losing its worker becomes `blocked`
-with `over_budget` instead of looping.
+The claim sets the `hydrated` flag as a local claim does. The lease length and
+the heartbeat interval come from configuration (D7). Heartbeats renew the
+lease, but never past the job timeout that bounds a local child, so a lease
+cannot hold a hydration slot without limit. At `max_hydrations` 1 a held slot
+stalls every other hydration, which makes this bound load-bearing.
+
+The supervisor sweeps expired leases on its existing loop. In one write, the
+sweep moves an expired job from `running` to `pending` and clears its pin and
+`hydrated` flag. An expiry counts against the job's existing timeout-stop
+budget, so a job that keeps losing its worker becomes `blocked` with
+`over_budget` instead of looping.
+
+A worker that cannot run a job now, for example because its device is busy,
+hands it back with `release` and a reason. A hand-back follows the B6 semantics
+of `add-cloud-media-store`: the job keeps its pin, frees its hydration slot,
+increments `returns` and gets a `retry_at` that doubles from 1 to 15 minutes.
+Keeping the pin avoids a full re-download on every retry. A person's retry
+resets `returns`, and media status shows the return reason. A worker that finds
+the original too large for its space hands it back with `hydration_too_large`,
+which blocks the job with that reason, as for a local claim.
 
 ### D4. The service takes the snapshot at grant
 
@@ -98,7 +112,9 @@ store credential.
 
 The route applies the same release gate as an original download. A job whose
 original the gate does not release is not eligible for a remote claim, so it
-stays with the local worker.
+stays with the local worker. A job with `do_offload` is never eligible either:
+offload writes to the media store and needs the store credential, which only
+the vault owner holds.
 
 ### D6. A worker credential is owner-issued, per worker, and narrow
 
@@ -124,12 +140,16 @@ already holds the media store policy, gains a `remote_workers` block:
 - `lease_seconds`, `heartbeat_seconds` and `presence_seconds`.
 
 A remote worker is present when its credential made a claim or heartbeat within
-`presence_seconds`. While one is present, or whenever `local_fallback` is
-false, the local child claims with `skip_media_types` set to the routed kinds.
-The claim route admits only routed kinds that the worker's declared
-capabilities cover. Remote claims follow the same claim order and hydration cap
-as local claims. The defaults route nothing, so a vault without the block
-behaves as today.
+`presence_seconds`. `skip_media_types` stays the only routing mechanism:
+
+- While a worker is present, or whenever `local_fallback` is false, the local
+  child claims with `skip_media_types` set to the routed kinds.
+- A remote claim calls `claim_next` with `skip_media_types` set to every kind
+  that is not routed or that the worker's declared capabilities do not cover.
+
+Remote claims therefore follow the same claim order and hydration cap as local
+claims. The defaults route nothing, so a vault without the block behaves as
+today.
 
 ### D8. The worker returns structure; the service renders
 

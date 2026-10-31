@@ -1,8 +1,8 @@
 ## 1. Ledger and lease
 
 - [ ] 1.1 Add the lease table and migration to `media_jobs.py`: worker identity, expiry and the grant snapshot (sidecar hash, evidence version, binary identity, language pin, replaced digest).
-- [ ] 1.2 Add the remote claim on top of `claim_next`, with an include-kinds filter, the release-gate eligibility check, and the claim order and hydration cap of `add-cloud-media-store`.
-- [ ] 1.3 Add heartbeat, release and the expiry sweep. Count an expiry against the timeout-stop budget.
+- [ ] 1.2 Add the remote claim on top of `claim_next`: `skip_media_types` for unrouted or uncovered kinds, no `do_offload` jobs, the release-gate eligibility check, and the claim order and hydration cap of `add-cloud-media-store`.
+- [ ] 1.3 Add heartbeat (capped at the job timeout), the B6 hand-back (`returns`, `retry_at`, return reason in status) and the expiry sweep, which clears pin and `hydrated` in one write and counts against the timeout-stop budget.
 - [ ] 1.4 Record a remote result through `record_result` with the stored snapshot.
 
 ## 2. Service routes and credential

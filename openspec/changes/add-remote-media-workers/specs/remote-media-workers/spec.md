@@ -25,15 +25,25 @@ names another revision with `409 MEDIA_LEASE_LOST`.
 ### Requirement: An expired lease returns its job
 
 A lease SHALL expire when the worker sends no heartbeat within the configured
-lease length. The media supervisor SHALL return each job with an expired lease
-from `running` to `pending` and release its pin and hydration slot. An expiry
+lease length, and SHALL NOT be renewed past the job timeout. The media
+supervisor SHALL return each job with an expired lease from `running` to
+`pending` and clear its pin and `hydrated` flag in the same write. An expiry
 SHALL count against the job's timeout-stop budget, and a job that exhausts the
 budget SHALL become `blocked` with `over_budget`.
+
+A worker that hands a job back because it cannot run it now SHALL leave the
+job pinned with its hydration slot freed, `returns` incremented and a `retry_at`
+that doubles from 1 to 15 minutes. A person's retry SHALL reset `returns`.
 
 #### Scenario: A worker disappears mid-job
 - **WHEN** a worker holds a lease and stops sending heartbeats past the lease length
 - **THEN** the job returns to `pending` and its pin is released
 - **AND** another executor can claim it
+
+#### Scenario: A hand-back keeps the original
+- **WHEN** a worker releases a hydrated job because its device is busy
+- **THEN** the job is `pending` with its pin kept, its hydration slot free and a `retry_at` in the future
+- **AND** the next claim does not download the original again
 
 #### Scenario: A late result is refused
 - **WHEN** a worker hands in a result after its lease expired and the job was claimed again
@@ -62,7 +72,8 @@ The service SHALL stream a leased job's original through
 `Range` support. A store-backed original SHALL hydrate under the lease's pin and
 hydration slot. The claim response SHALL carry the original's size and SHA-256.
 The route SHALL apply the release gate of an original download. A job whose
-original the gate does not release SHALL NOT be eligible for a remote claim.
+original the gate does not release, and a job with `do_offload`, SHALL NOT be
+eligible for a remote claim.
 
 #### Scenario: A worker resumes a broken download
 - **WHEN** a worker's download of a leased original breaks and it requests the remaining range
