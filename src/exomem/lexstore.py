@@ -71,7 +71,7 @@ import threading
 import time
 import uuid
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -4591,14 +4591,14 @@ class _ReconcileSourceProof:
 
 
 @dataclass(frozen=True)
-class _CatchUpSettled:
-    """Lagging paths that earlier steps of one catch-up applied and proved.
+class _CatchUpStep:
+    """One committed step of a lagging-delta catch-up.
 
-    No registry event touched a path in `paths` between the step that applied
-    it and the checkpoints in `at`, so its row describes the registry there.
+    `marks` holds each scope's registry checkpoint, taken before the step read
+    any file; `paths` holds the registry paths the step applied.
     """
 
-    at: Mapping[str, object]
+    marks: Mapping[str, object]
     paths: frozenset[str]
 
 
@@ -6687,7 +6687,7 @@ class LexicalStore:
         return applied
 
     def retry_deferred_upsert(
-        self, paths: list[Path], *, settled: _CatchUpSettled | None = None
+        self, paths: list[Path], *, earlier_steps: Sequence[_CatchUpStep] = ()
     ) -> bool:
         """Reconcile identities a contended foreground publication declined.
 
@@ -6702,8 +6702,8 @@ class LexicalStore:
         and re-applying rows cannot fix either. Source movement and bounded
         publication timeouts raise instead, so the caller keeps the claim.
 
-        `settled` is the last step of a lagging-delta catch-up: what its
-        earlier steps applied counts toward the witness that blesses the scope.
+        `earlier_steps` makes this the last step of a lagging-delta catch-up:
+        what those steps applied counts toward the witness that blesses a scope.
         """
         if self._failed or not paths:
             return False
@@ -6713,7 +6713,7 @@ class LexicalStore:
             source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
                 return self._apply_paths_locked(
-                    paths, [], source_proofs=source_proofs, settled=settled
+                    paths, [], source_proofs=source_proofs, earlier_steps=earlier_steps
                 )
         except VaultLockTimeout:
             raise
@@ -6744,8 +6744,9 @@ class LexicalStore:
         cap, each under its own publication barrier, so writers wait no longer
         than for one watcher batch. Only a round's last step can stamp the
         checkpoints, and only when every lagging path is in that step or was
-        settled by an earlier one (`_settled_catch_up_paths`). A lag that keeps
-        growing past `_CATCH_UP_SLACK_STEPS` extra steps returns False.
+        settled by an earlier one (`_settled_catch_up_paths`, re-read under the
+        last step's barrier). A lag that keeps growing past
+        `_CATCH_UP_SLACK_STEPS` extra steps returns False.
         """
         from . import freshness as freshness_module
 
@@ -6754,11 +6755,11 @@ class LexicalStore:
             return False
         cap = CATALOG_FOREGROUND_DELTA_CAP
         budget = -(-len(lagging) // cap) + _CATCH_UP_SLACK_STEPS
-        steps: list[tuple[dict[str, object], frozenset[str]]] = []
+        steps: list[_CatchUpStep] = []
         while lagging:
             # A round replays what no earlier step settled. When every path is
             # settled but unstamped, one more step carries the stamp.
-            pending = sorted(lagging - self._settled_catch_up_paths(steps).paths)
+            pending = sorted(lagging - self._settled_catch_up_paths(steps))
             pending = pending or sorted(lagging)[:cap]
             while pending:
                 if len(steps) >= budget:
@@ -6766,8 +6767,6 @@ class LexicalStore:
                         "outpaced", paths=len(lagging), steps=len(steps)
                     )
                 chunk, pending = pending[:cap], pending[cap:]
-                last = not pending and steps
-                settled = self._settled_catch_up_paths(steps) if last else None
                 # Taken before the step reads any file: an edit after it has an
                 # event after this mark, so the path is not settled by this step.
                 marks = {
@@ -6775,10 +6774,11 @@ class LexicalStore:
                     for scope in freshness_module.SCOPES
                 }
                 if not self.retry_deferred_upsert(
-                    [Path(path) for path in chunk], settled=settled
+                    [Path(path) for path in chunk],
+                    earlier_steps=() if pending else tuple(steps),
                 ):
                     return _log_catch_up_decline("replay_failed", paths=len(chunk))
-                steps.append((marks, frozenset(chunk)))
+                steps.append(_CatchUpStep(marks, frozenset(chunk)))
             lagging = self._lagging_catch_up_paths()
             if lagging is None:
                 return False
@@ -6842,28 +6842,22 @@ class LexicalStore:
             return None
         return lagging
 
-    def _settled_catch_up_paths(
-        self, steps: list[tuple[dict[str, object], frozenset[str]]]
-    ) -> _CatchUpSettled:
+    def _settled_catch_up_paths(self, steps: Sequence[_CatchUpStep]) -> set[str]:
         """The paths earlier catch-up steps applied that no later event touched.
 
-        Each step records the registry checkpoints taken before it read its
-        files. A path stays settled by that step while neither scope's delta
-        since those marks names it. A step whose marks no longer bridge (lost
-        history, a restarted registry) settles nothing. Runs off the barrier;
-        `_still_settled` re-checks the events after `at` under it.
+        A path stays settled by its step while neither scope's delta since the
+        step's marks names it. A step whose marks no longer bridge (lost
+        history, a restarted registry) settles nothing. The catch-up plans with
+        this off the barrier; the last step re-reads it under the barrier, so
+        an edit while that step waits for the barrier still counts.
         """
         from . import freshness as freshness_module
 
-        at = {
-            scope: freshness_module.recall_checkpoint(self.vault_root, scope)
-            for scope in freshness_module.SCOPES
-        }
         settled: set[str] = set()
-        for marks, chunk in steps:
+        for step in steps:
             touched: set[str] = set()
             for scope in freshness_module.SCOPES:
-                mark = marks.get(scope)
+                mark = step.marks.get(scope)
                 delta = (
                     freshness_module.recall_delta_since(self.vault_root, scope, mark)
                     if mark is not None
@@ -6873,27 +6867,8 @@ class LexicalStore:
                     break
                 touched |= delta.changed | delta.deleted
             else:
-                settled |= chunk - touched
-        return _CatchUpSettled(at, frozenset(settled))
-
-    def _still_settled(self, settled: _CatchUpSettled) -> set[str]:
-        """`settled.paths` less any path an event after `settled.at` touched.
-
-        Called under the publication barrier: two delta reads over the few
-        events since `at`, never a file read.
-        """
-        from . import freshness as freshness_module
-
-        touched: set[str] = set()
-        for scope in freshness_module.SCOPES:
-            at = settled.at.get(scope)
-            if at is None:
-                return set()
-            delta = freshness_module.recall_delta_since(self.vault_root, scope, at)
-            if not delta.complete:
-                return set()
-            touched |= delta.changed | delta.deleted
-        return set(settled.paths - touched)
+                settled |= step.paths - touched
+        return settled
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
@@ -6905,12 +6880,12 @@ class LexicalStore:
         rel_paths: list[str],
         *,
         source_proofs: dict[str, _ReconcileSourceProof] | None = None,
-        settled: _CatchUpSettled | None = None,
+        earlier_steps: Sequence[_CatchUpStep] = (),
     ) -> bool:
         """Apply a changed/deleted union with the publication barrier held.
 
-        `settled` names paths an earlier catch-up step applied; they count as
-        requested for the witness only while no event has touched them since.
+        Paths that `earlier_steps` applied count as requested for the witness
+        only while no event has touched them since their step's marks.
         """
         from . import freshness as freshness_module
         from . import recall_policy
@@ -6936,8 +6911,8 @@ class LexicalStore:
                 for scope in ("kb", "vault")
             }
             requested_paths = self._requested_event_paths(paths, rel_paths)
-            if settled is not None:
-                requested_paths |= self._still_settled(settled)
+            if earlier_steps:
+                requested_paths |= self._settled_catch_up_paths(earlier_steps)
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
             for path in paths:

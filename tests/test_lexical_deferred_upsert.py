@@ -513,26 +513,28 @@ def test_a_lag_over_the_foreground_cap_catches_up_in_capped_steps(
     assert lexstore.search_bm25(tmp_path, "beforeremoval", k=3, scope="kb") == []
 
 
-def test_a_page_edited_between_catch_up_steps_is_replayed_before_the_stamp(
+def test_a_page_edited_while_the_last_catch_up_step_waits_is_replayed_before_the_stamp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
     """An edit to a page an earlier step replayed must not be stamped over.
 
-    The stamp attests every lagging page at the registry's checkpoint. A page
-    edited after its step holds older rows than that checkpoint, so the worker
-    replays it again before stamping, or the edit would vanish from search
-    while the catalogue is admitted.
+    The last step can wait long for the barrier behind an import's watcher
+    batches, and an edit can land in that wait. The stamp attests every
+    lagging page at the registry's checkpoint, so the step must see the edit
+    under the barrier and replay that page again first. Otherwise the edit
+    vanishes from search while the catalogue is admitted.
     """
     store, changed, _removed = live_catalogue
     cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
     bulk = []
-    for index in range(2 * cap + 5):
+    # One full step and a short last step.
+    for index in range(cap + 5):
         page = changed.parent / f"bulk-{index}.md"
         page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
         bulk.append(page)
     freshness.on_files_changed(tmp_path, changed=bulk)
     rebuilds = []
-    edited = []
+    steps = []
     real_rebuild = store.rebuild_atomic
     real_retry = store.retry_deferred_upsert
 
@@ -541,14 +543,13 @@ def test_a_page_edited_between_catch_up_steps_is_replayed_before_the_stamp(
         return real_rebuild()
 
     def retry(paths, **kwargs):
-        applied = real_retry(paths, **kwargs)
-        if not edited:
+        steps.append(list(paths))
+        if len(steps) == 2:
             # Its watcher batch misses the barrier; only the registry sees it.
-            page = Path(paths[0])
+            page = Path(steps[0][0])
             page.write_text("# Edited\n\neditedmidway\n", encoding="utf-8")
             freshness.on_files_changed(tmp_path, changed=[page])
-            edited.append(page)
-        return applied
+        return real_retry(paths, **kwargs)
 
     monkeypatch.setattr(store, "rebuild_atomic", rebuild)
     monkeypatch.setattr(store, "retry_deferred_upsert", retry)
