@@ -997,6 +997,8 @@ def _log_repair_finished(
     """Name one repair pass's result and the stage that produced it.
 
     Every field is a closed token or a count, so a hosted cell keeps the line.
+    `excused` counts the distinct paths that the pass's source censuses
+    excused, across both scopes and every census in the pass.
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -2641,7 +2643,7 @@ def _schedule_repair(
                     if full_pass
                     else RepairStage.TARGETED,
                     pass_started,
-                    excused=getattr(store, "_last_census_excused", 0) if full_pass else 0,
+                    excused=len(getattr(store, "_last_census_excused", ())) if full_pass else 0,
                     promoted=promoted,
                 )
                 pass_kind = None
@@ -4587,10 +4589,11 @@ class LexicalStore:
         self._stranded_scopes: set[str] = set()
         self._failed = False  # runtime-retired for this process
         self._last_rebuild_result: str | None = None
-        # The step that produced `_last_rebuild_result`, and how many paths the
-        # pass's source census excused because its own replay re-proved them.
+        # The step that produced `_last_rebuild_result`, and the path keys the
+        # pass's source censuses excused because their own replay re-proved
+        # them. A set, so a path excused by two censuses in one pass counts once.
         self._last_rebuild_stage = RepairStage.BUILD
-        self._last_census_excused = 0
+        self._last_census_excused: set[str] = set()
         # Per-path build signatures of a detached catalogue this process
         # adopted, awaiting the one heal that reconciles it (single use).
         self._adopted_rows: dict[str, tuple] | None = None
@@ -7327,7 +7330,7 @@ class LexicalStore:
         freshness_module.note_custody_rebuild(_CATALOGUE_CUSTODY_SEAM)
         self._last_rebuild_result = None
         self._last_rebuild_stage = RepairStage.BUILD
-        self._last_census_excused = 0
+        self._last_census_excused = set()
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
         try:
@@ -7532,7 +7535,7 @@ class LexicalStore:
                     self._last_rebuild_result = "source_changed"
                     return False
                 excused |= agreed
-            self._last_census_excused += len(excused)
+            self._last_census_excused |= excused
             return True
 
         if not source_matches_targets():
@@ -8249,20 +8252,12 @@ class LexicalStore:
         if replayed_delta is None or after_walk is None:
             return None
         registry_checkpoint, registry_entries = after_walk
-        target = replayed_delta.to
         if not (
             replayed_delta.complete
             and replayed_delta.from_ == temp_checkpoint
-            and (
-                registry_checkpoint.instance_id,
-                registry_checkpoint.policy_version,
-                registry_checkpoint.access_policy_fingerprint,
+            and LexicalStore._replayed_between(
+                temp_checkpoint, registry_checkpoint, replayed_delta.to
             )
-            == (target.instance_id, target.policy_version, target.access_policy_fingerprint)
-            and temp_checkpoint.instance_id == target.instance_id
-            and temp_checkpoint.generation
-            <= registry_checkpoint.generation
-            <= target.generation
         ):
             return None
         # Path keys as the freshness digest spells them, so a Windows alias of

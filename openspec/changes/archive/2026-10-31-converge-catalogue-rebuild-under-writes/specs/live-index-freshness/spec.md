@@ -15,7 +15,7 @@ validation.
   live checkpoints is retained
 - **THEN** the system applies that delta to the completed replacement under the
   publication barrier
-- **AND** publishes only after the replacement proves the current checkpoints
+- **AND** publishes only after the replacement proves its target checkpoints
 - **AND** managed retrieval can become ready without a process restart
 
 #### Scenario: Large batch landing during publication wait catches up off-barrier
