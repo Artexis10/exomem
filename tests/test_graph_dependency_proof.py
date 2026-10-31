@@ -337,3 +337,66 @@ def test_rows_committed_without_the_record_are_proved_again_not_trusted(vault: P
 
     assert not _recorded(vault)
     assert _check(vault) == (True, True)
+
+
+def test_a_writer_that_finds_no_record_proves_the_whole_table_before_it_records(
+    vault: Path,
+) -> None:
+    """`delete_paths` runs no completeness probe first, so it cannot assume the other pages agree."""
+    _sql(vault, f"DELETE FROM graph_dependency_coverage WHERE source_path = '{OTHER}';")
+
+    EpistemicGraphIndex(vault).delete_paths([SOURCE])
+
+    assert not _recorded(vault)
+    assert _check(vault) == (False, True)
+
+
+def test_a_writer_reads_whether_a_record_exists_only_after_it_holds_the_write_lock(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read earlier, another writer could change a page after the read and be recorded over."""
+    real_recorded = EpistemicGraphIndex._dependency_proof_recorded
+
+    def recorded_while_another_writer_is_refused(conn: sqlite3.Connection) -> bool:
+        other = sqlite3.connect(epistemic_graph.sidecar_path(vault), timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute(
+                    "DELETE FROM graph_dependency_coverage WHERE source_path = ?", (OTHER,)
+                )
+        finally:
+            other.close()
+        return real_recorded(conn)
+
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_dependency_proof_recorded",
+        staticmethod(recorded_while_another_writer_is_refused),
+    )
+    index = EpistemicGraphIndex(vault)
+    connection = index._connect()
+    try:
+        with connection, index._keeping_dependency_proof(connection, {SOURCE}):
+            pass
+    finally:
+        connection.close()
+
+    assert _recorded(vault)
+
+
+def test_a_writer_does_not_record_into_a_database_that_lost_a_retiring_trigger(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database restored from a release without the triggers could not retire what is recorded."""
+    real_index_path = EpistemicGraphIndex._index_path
+    trigger_name = epistemic_graph._dependency_proof_triggers()[0][0]
+
+    def index_after_the_trigger_is_lost(self, conn: sqlite3.Connection, *args, **kwargs) -> bool:
+        conn.execute(f"DROP TRIGGER {trigger_name}")
+        return real_index_path(self, conn, *args, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_index_path", index_after_the_trigger_is_lost)
+
+    EpistemicGraphIndex(vault).drain_paths([_edit(vault, SOURCE)])
+
+    assert not _recorded(vault)

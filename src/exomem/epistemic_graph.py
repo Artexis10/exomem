@@ -312,6 +312,12 @@ _GRAPH_SYNC_CHECKPOINT_KEY = "graph_sync_checkpoint"
 #: writer can leave a stale one; a writer that keeps the index complete records
 #: it again, in its own transaction, after proving the sources it changed.
 _DEPENDENCY_PROOF_KEY = "dependency_index_complete"
+#: Names the triggers and joins the record's value. Raise it when a trigger body, the
+#: rule in `_dependency_rows_agree` or an input of that rule changes: triggers are created
+#: once per name, and a record of the old rule must not be read as one of the new rule.
+_DEPENDENCY_PROOF_VERSION = 1
+#: SQLite's default cap on bound variables is 999; a batch of `IN (?, ...)` stays below it.
+_SQL_PARAMETER_BATCH = 900
 #: The tables the proof describes, each with whether only its file rows count.
 _DEPENDENCY_PROOF_TABLES = (
     ("graph_nodes", True),
@@ -2031,8 +2037,13 @@ def _dependency_records(
     return records
 
 
-def _dependency_proof_triggers() -> list[str]:
-    """Triggers that retire the recorded proof when a row it describes changes.
+def _dependency_proof_value() -> str:
+    """What a recorded proof says: the dependency format and the rule version it was proved in."""
+    return f"{_DEPENDENCY_FORMAT}.{_DEPENDENCY_PROOF_VERSION}"
+
+
+def _dependency_proof_triggers() -> list[tuple[str, str]]:
+    """Name and SQL of the triggers that retire the recorded proof when a row it describes changes.
 
     A row-level trigger fires for every writer on every connection, including a
     process of an older release and a repair that edits rows directly, which no
@@ -2040,7 +2051,7 @@ def _dependency_proof_triggers() -> list[str]:
     the proof, so unit rows do not retire it.
     """
     retire = f"DELETE FROM graph_meta WHERE key = '{_DEPENDENCY_PROOF_KEY}'"
-    statements: list[str] = []
+    triggers: list[tuple[str, str]] = []
     for table, file_rows_only in _DEPENDENCY_PROOF_TABLES:
         for event, rows in (("INSERT", ("NEW",)), ("UPDATE", ("OLD", "NEW")), ("DELETE", ("OLD",))):
             when = (
@@ -2048,11 +2059,13 @@ def _dependency_proof_triggers() -> list[str]:
                 if file_rows_only
                 else ""
             )
-            statements.append(
-                f"CREATE TRIGGER IF NOT EXISTS trg_{table}_retire_dependency_proof_"
-                f"{event.lower()} AFTER {event} ON {table} {when} BEGIN {retire}; END"
+            name = f"trg_{table}_dependency_proof_v{_DEPENDENCY_PROOF_VERSION}_{event.lower()}"
+            statement = (
+                f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {event} ON {table} {when} "
+                f"BEGIN {retire}; END"
             )
-    return statements
+            triggers.append((name, statement))
+    return triggers
 
 
 def _dependency_changed_keys(
@@ -2415,7 +2428,7 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
             "ON graph_dependencies(lookup_key, source_path)"
         )
-        for statement in _dependency_proof_triggers():
+        for _name, statement in _dependency_proof_triggers():
             conn.execute(statement)
 
     def _connect_existing(
@@ -5909,7 +5922,7 @@ class EpistemicGraphIndex:
             return (
                 conn.execute(
                     "SELECT 1 FROM graph_meta WHERE key = ? AND value = ?",
-                    (_DEPENDENCY_PROOF_KEY, str(_DEPENDENCY_FORMAT)),
+                    (_DEPENDENCY_PROOF_KEY, _dependency_proof_value()),
                 ).fetchone()
                 is not None
             )
@@ -5917,12 +5930,30 @@ class EpistemicGraphIndex:
             return False
 
     @staticmethod
+    def _dependency_triggers_present(conn: sqlite3.Connection) -> bool:
+        """A proof is recorded only where a later row change is certain to retire it."""
+        names = [name for name, _statement in _dependency_proof_triggers()]
+        try:
+            (present,) = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+                f"AND name IN ({','.join('?' for _ in names)})",
+                names,
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        return present == len(names)
+
+    @staticmethod
     def _dependency_rows_agree(
         files: dict[str, str],
         coverage: dict[str, tuple[str, int, int]],
         counts: dict[str, int],
     ) -> bool:
-        """The one rule: each file row has a coverage row for its bytes and as many dependencies."""
+        """The one rule: each file row has a coverage row for its bytes and as many dependencies.
+
+        A change to this rule must raise `_DEPENDENCY_PROOF_VERSION`, and a table that the rule
+        starts to read must join `_DEPENDENCY_PROOF_TABLES`, or a stored proof outlives it.
+        """
         if set(files) != set(coverage) or not set(counts) <= set(coverage):
             return False
         return all(
@@ -5966,8 +5997,8 @@ class EpistemicGraphIndex:
         counts: dict[str, int] = {}
         ordered = sorted(rels)
         try:
-            for start in range(0, len(ordered), 900):
-                batch = ordered[start : start + 900]
+            for start in range(0, len(ordered), _SQL_PARAMETER_BATCH):
+                batch = ordered[start : start + _SQL_PARAMETER_BATCH]
                 marks = ",".join("?" for _ in batch)
                 files.update(
                     (str(path), str(source_hash))
@@ -6009,21 +6040,23 @@ class EpistemicGraphIndex:
         because the writer may change any source, the whole table is proved,
         which is the cost the record saves a later reader. Recorded last but
         before any publication hook, so a hook that edited a row outside
-        `touched` would retire it again. A failure leaves nothing recorded, and
-        the rows roll back with the caller's transaction.
+        `touched` would retire it again. It records only where all the retiring
+        triggers exist, so a record never sits in a database that cannot retire
+        it. A failure leaves nothing recorded, and the rows roll back with the
+        caller's transaction.
         """
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
         was_recorded = touched is not None and self._dependency_proof_recorded(conn)
         yield
-        if (
+        if self._dependency_triggers_present(conn) and (
             self._prove_dependency_sources(conn, set(touched or ()))
             if was_recorded
             else self._prove_dependency_index(conn)
         ):
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                (_DEPENDENCY_PROOF_KEY, str(_DEPENDENCY_FORMAT)),
+                (_DEPENDENCY_PROOF_KEY, _dependency_proof_value()),
             )
 
     @staticmethod
@@ -6033,8 +6066,8 @@ class EpistemicGraphIndex:
         if not keys:
             return set()
         rows: set[tuple[str, str]] = set()
-        for start in range(0, len(keys), 900):
-            batch = sorted(keys)[start : start + 900]
+        for start in range(0, len(keys), _SQL_PARAMETER_BATCH):
+            batch = sorted(keys)[start : start + _SQL_PARAMETER_BATCH]
             placeholders = ",".join("?" for _ in batch)
             rows.update(
                 (str(source_path), str(raw_target))
@@ -7523,8 +7556,8 @@ class EpistemicGraphIndex:
                             "DELETE FROM graph_parent_refs WHERE path = ?", (path,)
                         ).rowcount
                     for column, raw_values in values.items():
-                        for start in range(0, len(raw_values), 900):
-                            batch = raw_values[start : start + 900]
+                        for start in range(0, len(raw_values), _SQL_PARAMETER_BATCH):
+                            batch = raw_values[start : start + _SQL_PARAMETER_BATCH]
                             placeholders = ",".join("?" for _ in batch)
                             changed += conn.execute(
                                 f"DELETE FROM graph_edges WHERE {column} IN ({placeholders})",

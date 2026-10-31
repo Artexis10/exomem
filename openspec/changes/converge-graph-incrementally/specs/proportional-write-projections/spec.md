@@ -15,7 +15,8 @@ proof that the sidecar records, and SHALL read the whole index only when none is
 recorded. Any change to the file rows or the dependency rows SHALL retire the recorded
 proof in the same transaction, whichever writer made it. A writer that keeps the index
 complete SHALL record the proof again in its own transaction, after proving the sources
-it changed, or the whole index when it cannot name them. The publication proof and the
+it changed when the proof was recorded at the start of its transaction, otherwise the whole
+index. The publication proof and the
 source-version proof remain required for every page the pass rewrites, independently of
 discovery.
 
@@ -61,3 +62,7 @@ state and SHALL retain its established unresolved-link presentation.
 #### Scenario: A cold start does not read the whole dependency index
 - **WHEN** an owned refresh or drain runs first after a process start, with the sidecar pages absent from the page cache, and the last writer recorded the completeness proof
 - **THEN** the completeness check reads no dependency rows
+
+#### Scenario: A writer that starts without a recorded proof does not record one for pages it did not touch
+- **WHEN** a page that the writer does not change has no dependency coverage, and the writer finds no recorded proof when its transaction starts
+- **THEN** the writer proves the whole index, finds the gap, and records no proof
