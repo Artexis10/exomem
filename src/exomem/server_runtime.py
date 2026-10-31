@@ -960,6 +960,13 @@ def _start_compute_runtime(
 
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
+    from . import media_store
+
+    try:
+        # A stop leaves each hydration's reservation row and temporary file (D12, choice 3).
+        media_store.clear_dead_reservations(vault_root)
+    except Exception:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media reservations not cleared at start; the next reservation clears them", exc_info=True)
     worker = _create_media_worker(vault_root)
     unavailable_reason: str | None = None
     unavailable_action: str | None = None

@@ -497,6 +497,18 @@ _RECOVERY_HEADERS = {
 }
 
 
+def _hydration_too_large(error: BaseException | None) -> JSONResponse | None:
+    """The final refusal for an original larger than the whole hydration capacity (D3, M4).
+
+    A 4xx status and no `retry-after`: waiting never clears it, so no client retries it.
+    """
+    if not isinstance(error, media_store.MediaStoreError) or error.code != media_store.HYDRATION_TOO_LARGE_CODE:
+        return None
+    return JSONResponse({"code": media_store.HYDRATION_TOO_LARGE_CODE,
+                         "reason": "the original is larger than this cell can bring back from its store"},
+                        status_code=409, headers=_RECOVERY_HEADERS)
+
+
 class _OriginalDownloadResponse(Response):
     """Starlette sends only a private verified spool; this response owns its lifetime."""
 
@@ -705,6 +717,8 @@ class _CloudOriginalDownloadResponse(Response):
             if isinstance(error, artifact_recovery.RecoveryBusy):
                 refusal = JSONResponse({"code": "ORIGINAL_BUSY", "reason": "other downloads are in progress; retry shortly"},
                     status_code=503, headers={**_RECOVERY_HEADERS, "retry-after": "5"})
+            elif too_large := _hydration_too_large(error.__cause__):
+                refusal = too_large
             elif isinstance(error.__cause__, media_store.MediaStoreError):
                 refusal = JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "the original is stored off this cell and the store is unreachable"},
                     status_code=503, headers=_RECOVERY_HEADERS)
@@ -1379,12 +1393,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             try:
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
-                with media_store.local_originals(vault_root, (rel,)):
+                with media_store.local_originals(vault_root, (rel,), read=True):
                     snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
-            except media_store.MediaStoreError:
-                return JSONResponse(
+            except media_store.MediaStoreError as error:
+                return _hydration_too_large(error) or JSONResponse(
                     {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},
                     status_code=503,
                 )
