@@ -4581,7 +4581,7 @@ def hold_candidate(
             "held candidates cannot live under the collection's item source",
             {"held_directory": directory, "source": manifest.storage.source},
         )
-    reference = held_id or _derive_held_id(manifest, key_values)
+    reference = held_id or _derive_held_id(manifest, key_values, candidate)
     relative = f"{directory}/{reference}.md"
     # The held file is a write into the vault, so it is subject to the same full
     # release the collection's own paths are. A caller who cannot see the held
@@ -4594,14 +4594,7 @@ def hold_candidate(
             "held candidates cannot be written into a withheld path",
             {"held_directory": directory},
         )
-    body = json.dumps(
-        _encode_held_value(candidate),
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-        allow_nan=False,
-        default=_held_json_default,
-    )
+    body = _held_candidate_body(candidate)
     diagnostics = [dict(issue) for issue in list(issues)[:_MAX_HELD_DIAGNOSTICS]]
     frontmatter: dict[str, Any] = {
         "type": _HELD_TYPE,
@@ -4633,6 +4626,10 @@ def hold_candidate(
             )
         ],
         vault_root=root,
+        # The held file is bookkeeping for a write that did not happen. The
+        # caller's refusal follows, and a commit point here would report that
+        # refusal as a committed write the caller must not retry.
+        commit_point=False,
     )
     return {"held_id": reference, "path": relative, "diagnostics": diagnostics}
 
@@ -4743,10 +4740,29 @@ def _portable_key(path: str) -> str:
     )
 
 
+def _held_candidate_body(candidate: Mapping[str, Any]) -> str:
+    """The canonical JSON text a held file stores for `candidate`."""
+    return json.dumps(
+        _encode_held_value(candidate),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+        default=_held_json_default,
+    )
+
+
 def _derive_held_id(
-    manifest: collections.CollectionManifest, values: Mapping[str, Any] | None
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any],
 ) -> str:
-    """The identity a complete natural key implies, so a re-hold replays one file."""
+    """The identity a re-hold replays onto, so a retry rewrites one file.
+
+    A complete natural key names the item. Without one, the candidate's own
+    canonical bytes name it within the collection: an identical retry reaches
+    the same file and a different candidate gets its own.
+    """
     if isinstance(values, Mapping):
         try:
             derived = collections.derived_item_key(manifest, values)
@@ -4754,7 +4770,8 @@ def _derive_held_id(
             derived = None
         if derived is not None:
             return derived
-    return str(uuid.uuid4())
+    digest = hashlib.sha256(_held_candidate_body(candidate).encode("utf-8")).hexdigest()
+    return collections.inferred_item_key(manifest.collection_id, f"held-candidate:{digest}")
 
 
 def _held_json_default(value: Any) -> str:
