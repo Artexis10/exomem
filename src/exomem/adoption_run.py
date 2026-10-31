@@ -89,6 +89,11 @@ BYTE_RATE_MIN_ITEM_MIB = 1.0
 # call; once the first had run, each further sidecar cost about 0.1 s; reply
 # handling took about 2.4 s for 456 written paths (0.005 s each).
 TERMINAL_WORK_RESERVE_SECONDS = 20.0
+# What a fast-acknowledgement call reserves for its custody handoff is the handoff time measured on
+# this vault, between two bounds. The floor is the acknowledgement's own wait bound, which a short
+# call's tail can spend whatever the handoff measured; the ceiling is the whole reserve above,
+# which also stands until a handoff has been measured.
+CUSTODY_RESERVE_FLOOR_SECONDS = 2.0
 TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
 REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
@@ -1667,6 +1672,7 @@ class _ApplyPacer:
     def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
         from .writer_lease import active_derived_batch_custody
 
+        self._root = root
         self._budget = budget
         self._item_seconds: float | None = None
         self._mib_seconds: float | None = None
@@ -1680,9 +1686,20 @@ class _ApplyPacer:
     def _tracked(rate: float | None, seen: float) -> float:
         return seen if rate is None else max(rate, seen)
 
-    def _owed_after_loop(self, artifacts: int) -> float:
-        if not self._owes_fanout:
+    def _custody_reserve(self, chunk: list[dict]) -> float:
+        """Seconds the end of the call needs to hand off custody of the batches so far and this chunk's."""
+        from .writer_lease import owed_custody_handoff_seconds
+
+        measured = owed_custody_handoff_seconds(
+            self._root, more_batches=1 + sum(_owes_note(planned) for planned in chunk)
+        )
+        if measured is None:
             return TERMINAL_WORK_RESERVE_SECONDS
+        return min(max(measured, CUSTODY_RESERVE_FLOOR_SECONDS), TERMINAL_WORK_RESERVE_SECONDS)
+
+    def _owed_after_loop(self, chunk: list[dict], artifacts: int) -> float:
+        if not self._owes_fanout:
+            return self._custody_reserve(chunk)
         if not artifacts:
             return 0.0
         return TERMINAL_WORK_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
@@ -1716,7 +1733,7 @@ class _ApplyPacer:
         return (
             self._budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
             - REPLY_SECONDS_PER_ITEM * (self._started_items + len(chunk))
-            - self._owed_after_loop(self._deferred_artifacts + self._media(chunk))
+            - self._owed_after_loop(chunk, self._deferred_artifacts + self._media(chunk))
         )
 
     def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:

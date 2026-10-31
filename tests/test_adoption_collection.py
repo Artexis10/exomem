@@ -24,6 +24,7 @@ from exomem import (
     request_budget,
     reserved_paths,
     source_taxonomy,
+    writer_lease,
 )
 from exomem import (
     vault as vault_module,
@@ -1077,6 +1078,56 @@ def test_an_apply_finds_a_source_another_run_filed_since_the_plan_and_files_no_d
     assert {o["status"] for o in applied["outcomes"].values()} == {"already-applied"}
     assert sorted(p.name for p in (vault / SOURCES / "Imported").glob("*.md")) == filed
     assert len(filed) == 2
+
+
+def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_between_a_floor_and_a_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flat 20 s reserve cost a call that hands off custody in about a second most of its budget."""
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", fake_time.monotonic)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 5.0)
+    monkeypatch.setattr(adoption_run, "INITIAL_ITEM_SECONDS", 1.0)
+    monkeypatch.setattr(adoption_run, "REPLY_SECONDS_PER_ITEM", 0.0)
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_BUDGET_SHARE", 1.0)
+    vault = _vault(tmp_path, {})
+    batch = types.SimpleNamespace(handoff_outcome=None, handoff_error=None)
+    session = writer_lease._FastAcknowledgementSession(
+        vault_root=vault, request_id="r", mutation_attempt_digest="d",
+        terminal_replay_until=0.0, advisory_required=False, batches=[batch],
+    )
+    pending = [{"original_bytes": 0, "form": "note"} for _ in range(10)]
+
+    def items_admitted(budget_seconds: float) -> int:
+        budget = request_budget.RequestBudget(seconds=budget_seconds, entry=clock["now"])
+        return len(adoption_run._ApplyPacer(vault, budget).next_chunk(pending, first=False))
+
+    def measure_handoff(seconds: float) -> None:
+        def handoff(_session) -> None:
+            clock["now"] += seconds
+            batch.handoff_outcome = "ready"
+
+        monkeypatch.setattr(writer_lease, "_handoff_derived_batches", handoff)
+        batch.handoff_outcome = None
+        writer_lease._timed_handoff(session)
+
+    token = writer_lease._ACTIVE_FAST_ACK_SESSION.set(session)
+    try:
+        # Nothing measured yet: the whole 20 s reserve stands.
+        assert (items_admitted(12), items_admitted(27)) == (0, 2)
+        # A handoff near zero still reserves the floor (2 s), not nothing.
+        measure_handoff(0.0)
+        assert items_admitted(12) == 5
+        # A 3 s handoff reserves 3 s.
+        measure_handoff(3.0)
+        assert items_admitted(12) == 4
+        # A 100 s handoff reserves no more than the ceiling (20 s).
+        measure_handoff(100.0)
+        assert (items_admitted(12), items_admitted(27)) == (0, 2)
+    finally:
+        writer_lease._ACTIVE_FAST_ACK_SESSION.reset(token)
 
 
 def test_a_call_leaves_a_byte_heavy_artifact_to_the_next_call_when_it_does_not_fit_in_the_time_left(

@@ -546,7 +546,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
     folder = vault / "Collection"
     folder.mkdir()
-    for index in range(6):
+    for index in range(9):
         (folder / f"note-{index}.md").write_text(f"# Note {index}\n\nRetain observation {index}.\n")
     run_id = commands.op_adoption_studio(vault, action="start", path="Collection")["run_id"]
     commands.op_adoption_studio(vault, action="select", run_id=run_id, include=[
@@ -558,6 +558,9 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     monkeypatch.setattr(adoption_run, "time", fake_time)
     monkeypatch.setattr(request_budget, "time", fake_time)
     create_notes = adopt.create_draft_notes
+    # The pacer sizes its custody reserve from the handoff time the writer measures on this clock.
+    monkeypatch.setattr(vault_module, "_fast_ack_monotonic", fake_time.monotonic)
+    monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", fake_time.monotonic)
     handoff = writer_lease._handoff_derived_batches
 
     def costly_notes(root, notes, **kwargs):
@@ -599,7 +602,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     else:
         pytest.fail("the bounded continuations did not complete the import")
     outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
-    assert len(outcomes) == 6 and all(row["status"] == "applied" for row in outcomes.values())
+    assert len(outcomes) == 9 and all(row["status"] == "applied" for row in outcomes.values())
 
 
 @pytest.mark.parametrize("flag", [None, "0"])

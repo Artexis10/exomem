@@ -27,6 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
@@ -516,6 +517,50 @@ def active_derived_batch_custody(vault_root: Path) -> bool:
     )
 
 
+#: Seconds one committed batch took to hand off its custody, per vault: the last few, kept in
+#: memory only, so a new process starts unmeasured. A bulk operation reads them to size the
+#: time it leaves for its own handoff.
+_HANDOFF_SAMPLES_KEPT = 8
+_handoff_samples: dict[Path, deque[float]] = {}
+_handoff_samples_lock = threading.Lock()
+
+
+def _pending_handoff_batches(session: _FastAcknowledgementSession) -> int:
+    return sum(1 for b in session.batches if b.handoff_outcome is None and b.handoff_error is None)
+
+
+def _timed_handoff(session: _FastAcknowledgementSession) -> None:
+    """Hand off the session's pending batches and keep the seconds each one took."""
+    pending = _pending_handoff_batches(session)
+    began = _fast_ack_monotonic()
+    _handoff_derived_batches(session)
+    if pending:
+        per_batch = max(0.0, _fast_ack_monotonic() - began) / pending
+        with _handoff_samples_lock:
+            _handoff_samples.setdefault(
+                _fast_ack_root_key(session.vault_root), deque(maxlen=_HANDOFF_SAMPLES_KEPT)
+            ).append(per_batch)
+
+
+def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> float | None:
+    """Seconds the custody handoff will take once `more_batches` more batches have committed.
+
+    The dearest recent per-batch time, times the batches the active session has not handed off yet
+    plus `more_batches`. None when no handoff has been measured for this vault.
+    """
+    with _handoff_samples_lock:
+        samples = _handoff_samples.get(_fast_ack_root_key(vault_root))
+        dearest = max(samples) if samples else None
+    if dearest is None:
+        return None
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    pending = (
+        _pending_handoff_batches(session)
+        if session is not None and active_derived_batch_custody(vault_root) else 0
+    )
+    return dearest * (pending + more_batches)
+
+
 #: What the running leaf declared about its default duplicate/overlap sweep:
 #: unset (the leaf declared nothing), ``None`` (the leaf's write has no sweep),
 #: or the route's exact `corpus_aware.WriteAdvisoryInputs`.
@@ -985,7 +1030,7 @@ def _acknowledge_derived_batches_timed(
             deadline = min(deadline, budget_deadline)
         # Direct leaves without a matching vault hold keep the guarded fallback.
         # Held writes reuse their exact handoff, including a cached failure.
-        _handoff_derived_batches(session)
+        _timed_handoff(session)
         for batch in session.batches:
             if batch.handoff_error is not None:
                 raise batch.handoff_error
@@ -5020,7 +5065,7 @@ class LeaseManager:
                 if outermost and session is not None and active_derived_batch_custody(vault_root):
                     # _mutation_boundary has bumped the generation. Keep exact
                     # receipt custody visible before any waiting writer enters.
-                    _handoff_derived_batches(session)
+                    _timed_handoff(session)
 
     @contextmanager
     def reserved_identity_guard(
