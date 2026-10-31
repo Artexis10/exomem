@@ -21,6 +21,7 @@ A command that holds the boundary across several committed units MAY lend it bet
 #### Scenario: A derived proof runs between two units of an import
 
 - **WHEN** an import holds the boundary across several chunks
+- **AND** this process has measured a custody handoff earlier
 - **AND** a derived receipt proof waits on it that would give up before the import ends
 - **THEN** the import hands off the custody of its committed batches, advances the commit generation and lends the boundary between two chunks
 - **AND** the proof runs and returns the boundary before the next chunk starts
