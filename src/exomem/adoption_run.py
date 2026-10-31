@@ -106,8 +106,15 @@ _APPLIED_STATUSES = ("applied", "already-applied")
 # An own-note item whose Source is on disk and whose draft note is still owed. The item is
 # not complete: `apply` resumes it at the note, and the phase stays `applying` until it is.
 _SOURCE_ONLY = "source-applied"
-# The run-object key for the dearest time per made note of the run's last call that made one.
-_NOTE_PRICE = "note_price_ms"
+# The run-object key for the dearest time per made note of the run's last call that made
+# one, with the wall-clock time it was recorded.
+_NOTE_PRICE = "note_price"
+# An agent continues a run within seconds of the last reply. A run resumed later may meet
+# another load or another host, so its next call times a note again instead.
+_NOTE_PRICE_FRESH_SECONDS = 300.0
+# A carried price sizes a call's first batch at this share of the room, so notes that cost
+# up to twice the carried price still fit; the call re-prices from that batch.
+_CARRIED_PRICE_ROOM_SHARE = 0.5
 # The values of a rule's `adopt_as` are fixed by the rule schema, not by the vault.
 _ADOPT_AS = ("source", "note")  # nosemgrep: ep-word-set -- the closed values of the rule schema's `adopt_as`.
 # Per-item failures that mean "the original is not what the plan read".
@@ -2012,10 +2019,11 @@ def _create_notes(
     The identity check runs first: an item whose note exists settles as found, and one
     whose note cannot be placed fails. The other items commit in batches through the
     governed two-phase creation (`adopt.create_draft_notes`). A call's first batch holds as
-    many notes as fit in the time left at the price that the run's last call to make a note
-    recorded; with no such call, it holds one note, to time it. While the call has made no
-    note, it makes one note at a time; after that a batch holds as many notes as fit at the
-    dearest cost per made note this call has seen, which the call records for the next one.
+    many notes as fit in half the time left at the price that the run's last call to make a
+    note recorded, when that call was recent; otherwise it holds one note, to time it. While
+    the call has made no note, it makes one note at a time; after that a batch holds as many
+    notes as fit at the dearest cost per made note this call has seen, which the call
+    records for the next one.
     A refused note does not lower that cost, because a quick refusal would make the next
     batch look free. A batch that refuses makes its notes alone only while one more note fits
     at the price that sized it. The items a batch leaves or does not reach keep their
@@ -2035,7 +2043,8 @@ def _create_notes(
     while due:
         first_try = not stats["notes_started"]
         if first_try:
-            price_ms = run.get(_NOTE_PRICE) or 0
+            # Pricing each note at the carried price over the share fills only that share of the room.
+            price_ms = _carried_note_price_ms(run) / _CARRIED_PRICE_ROOM_SHARE
             size = max(1, _notes_that_fit(pacer, chunk, price_ms, len(due))) if price_ms else 1
         elif not stats["notes_created"]:
             # No note made yet, so nothing prices a batch: one note, paced on the dearest try.
@@ -2071,7 +2080,7 @@ def _create_notes(
         if made:
             # The dearest cost per made note: a batch's time, its refusals included, over the notes it made.
             stats["note_ms_max"] = max(stats["note_ms_max"], int(elapsed_ms / made))
-            run[_NOTE_PRICE] = stats["note_ms_max"]
+            run[_NOTE_PRICE] = {"ms": stats["note_ms_max"], "at": dt.datetime.now(dt.UTC).timestamp()}
         for planned, result in zip(batch, results, strict=True):
             if result.reached:
                 _settle_draft_note(
@@ -2088,7 +2097,14 @@ def _create_notes(
         store.save(run)
 
 
-def _notes_that_fit(pacer: _ApplyPacer, chunk: list[dict], price_ms: int, most: int) -> int:
+def _carried_note_price_ms(run: dict) -> float:
+    """The price per made note that the run's last call recorded, or 0 when it is stale."""
+    carried = run.get(_NOTE_PRICE) or {}
+    age = dt.datetime.now(dt.UTC).timestamp() - carried.get("at", 0.0)
+    return carried.get("ms", 0) if 0 <= age <= _NOTE_PRICE_FRESH_SECONDS else 0
+
+
+def _notes_that_fit(pacer: _ApplyPacer, chunk: list[dict], price_ms: float, most: int) -> int:
     """How many notes, up to `most`, fit in the time the call has left at `price_ms` each."""
     size = most
     while size and not pacer.note_fits(chunk, price_ms * size / 1000):

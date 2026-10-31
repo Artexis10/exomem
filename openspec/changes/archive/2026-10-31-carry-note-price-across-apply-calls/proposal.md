@@ -4,8 +4,9 @@ Each own-note `apply` call makes its first note alone to price a batch of notes.
 
 ## What Changes
 
-- The run records the dearest time per made note of the last call that made a note. The record is internal and does not appear in the run that a caller reads.
-- A call's first batch holds as many notes as fit in its time at the recorded price, and at least one note. A run with no recorded price still makes its first note alone.
+- The run records the dearest time per made note of the last call that made a note, with the time of the record. The record is internal and does not appear in the run that a caller reads.
+- A call's first batch holds as many notes as fit in half its time at the recorded price, and at least one note. The half leaves room for notes that cost up to twice the recorded price, and the call prices the rest of its notes from that batch.
+- A run with no recorded price, or with a price recorded more than five minutes before, makes its first note alone. A run resumed later can meet another load or another host.
 - A refused note still does not lower the price. A refused first batch makes its notes alone, and each note after the first still checks that it fits.
 
 ## Impact

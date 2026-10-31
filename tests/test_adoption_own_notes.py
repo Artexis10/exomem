@@ -472,9 +472,17 @@ def test_a_call_stops_between_notes_when_the_next_would_not_fit_and_the_continua
     assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 3
 
 
+@pytest.mark.parametrize(
+    ("fresh_seconds", "continuation_starts_alone"),
+    [(None, False), (0.0, True)],  # 0.0: every pause counts as long
+    ids=["right-after", "after-a-long-pause"],
+)
 def test_a_continuation_starts_with_a_batch_of_notes_priced_on_the_call_before(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    fresh_seconds: float | None, continuation_starts_alone: bool,
 ) -> None:
+    if fresh_seconds is not None:
+        monkeypatch.setattr(adoption_run, "_NOTE_PRICE_FRESH_SECONDS", fresh_seconds)
     clock = {"now": 1000.0}
     fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
     monkeypatch.setattr(adoption_run, "time", fake_time)
@@ -507,10 +515,48 @@ def test_a_continuation_starts_with_a_batch_of_notes_priced_on_the_call_before(
         elapsed.append(clock["now"] - began)
 
     assert batch_sizes[0][0] == 1  # nothing has priced a note yet
-    assert batch_sizes[1][0] > 1
+    assert (batch_sizes[1][0] == 1) is continuation_starts_alone
     assert max(elapsed) <= 60.0 - 2.0
     assert last["progress"] == {"applied": 16, "failed": 0, "remaining": 0, "total": 16}
     assert len(_notes(vault)) == 16
+
+
+def test_a_continuation_whose_notes_cost_more_than_the_carried_price_stays_inside_its_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "60")
+    request_budget.reset_resolution_cache()
+    real_create = adopt.create_draft_notes
+    seconds_per_note_by_call = [4.0, 6.0, 6.0, 6.0, 6.0, 6.0]  # the host slows down after call 1
+    calls = {"made": 0}
+
+    def notes_that_slow_down(root, notes, **kwargs):
+        clock["now"] += seconds_per_note_by_call[calls["made"]] * len(notes)
+        return real_create(root, notes, **kwargs)
+
+    monkeypatch.setattr(adopt, "create_draft_notes", notes_that_slow_down)
+    files = {f"Coll/Journal/entry-{n:02d}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(24)}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+
+    elapsed: list[float] = []
+    last: dict = {}
+    while not elapsed or last.get("continuation"):
+        began = clock["now"]
+        last = adoption_run.apply(
+            vault, run_id=run_id, plan_id=planned["plan"]["plan_id"],
+            continuation=last.get("continuation"), today=TODAY,
+        )
+        elapsed.append(clock["now"] - began)
+        calls["made"] += 1
+
+    assert max(elapsed) <= 60.0 - 2.0
+    assert last["progress"] == {"applied": 24, "failed": 0, "remaining": 0, "total": 24}
 
 
 def test_a_quick_refusal_does_not_make_the_next_batch_of_notes_look_free(
