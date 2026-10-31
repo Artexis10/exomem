@@ -413,7 +413,7 @@ def test_the_oracle_sees_a_replay_drain_that_does_not_widen(
     monkeypatch.setattr(
         EpistemicGraphIndex,
         "_topology_affected_sources",
-        lambda self, conn, rels, *, resolver: set(),
+        lambda self, conn, rels, *, resolver, owns_topology=False: set(),
         raising=True,
     )
 

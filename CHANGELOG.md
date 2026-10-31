@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.152.0](https://github.com/Artexis10/exomem/compare/v0.151.1...v0.152.0) (2026-10-31)
+
+
+### Features
+
+* **collections:** run structured-files filename maintenance on store collections ([#2218](https://github.com/Artexis10/exomem/issues/2218)) ([655075f](https://github.com/Artexis10/exomem/commit/655075f126f44e660bd783f6d859ae0e3de0755f))
+* **import:** file large imports with one copy, paging and agent guidance ([#2205](https://github.com/Artexis10/exomem/issues/2205)) ([3c78ac4](https://github.com/Artexis10/exomem/commit/3c78ac4e72c6c30dafd8a8d55075ec07cb09b1c0))
+* **studio:** show relation labels in graph and queue views ([#2235](https://github.com/Artexis10/exomem/issues/2235)) ([eb059b7](https://github.com/Artexis10/exomem/commit/eb059b7134df6bbf31c20205eca8cb060e027004))
+
+
+### Bug Fixes
+
+* **collections:** keep the store's background work off the lease after an idle release ([#2219](https://github.com/Artexis10/exomem/issues/2219)) ([32b69df](https://github.com/Artexis10/exomem/commit/32b69dfda7afc19395551b2aa9e9e9d331acca0d))
+* **ingress:** keep a local grant out of later requests on its connection ([#2239](https://github.com/Artexis10/exomem/issues/2239)) ([aaca427](https://github.com/Artexis10/exomem/commit/aaca42725b9c8f59289d647b89fe48733908e844))
+* **readiness:** keep a proven runtime ready while its recall catalogue lags ([#2216](https://github.com/Artexis10/exomem/issues/2216)) ([81f1ab7](https://github.com/Artexis10/exomem/commit/81f1ab7757f5926c4ee7abadaae2cad28256c6ef))
+* **recall:** prove lexical custody on every stored eligibility column ([#2222](https://github.com/Artexis10/exomem/issues/2222)) ([821d77b](https://github.com/Artexis10/exomem/commit/821d77bb83a3650f38c70c33f27bdfb6f9a359b4))
+* **records:** report a held schema refusal as a refusal, not a committed write ([#2251](https://github.com/Artexis10/exomem/issues/2251)) ([c82170c](https://github.com/Artexis10/exomem/commit/c82170c27a4e4b2d6510a425b12192ae2a6a5a55))
+* **service:** keep the listener up and restart a crashed worker in place ([#2231](https://github.com/Artexis10/exomem/issues/2231)) ([a5e579c](https://github.com/Artexis10/exomem/commit/a5e579c9cdfbc4c38a086f601e04ac4cee53995d))
+* **writes:** keep the due-state delta from rebuilding the vault resolver under a held boundary ([#2227](https://github.com/Artexis10/exomem/issues/2227)) ([9c18a4f](https://github.com/Artexis10/exomem/commit/9c18a4f1499e871db4457373c244fde610bb7ecb))
+* **writes:** keep the self-write echo suppression under derived batch custody ([#2217](https://github.com/Artexis10/exomem/issues/2217)) ([b6eb2fa](https://github.com/Artexis10/exomem/commit/b6eb2faa68958d84acfd2f90d58b55f7099f7708))
+
+
+### Performance
+
+* **collections:** re-admit an unchanged store without copying its replica ([#2225](https://github.com/Artexis10/exomem/issues/2225)) ([39ecf26](https://github.com/Artexis10/exomem/commit/39ecf26e684453ce61f7a15de40a8c62e6f4e8d6))
+* **collections:** size derived row batches to a time budget ([#2226](https://github.com/Artexis10/exomem/issues/2226)) ([1c1c1a2](https://github.com/Artexis10/exomem/commit/1c1c1a277d92a6a2883061395fb1f04a2e0b4608))
+* **graph:** keep the drain's work under the boundary proportional to what changed ([#2223](https://github.com/Artexis10/exomem/issues/2223)) ([9da7443](https://github.com/Artexis10/exomem/commit/9da74431ee635b0e71aa536e91eef6fbe200c57a))
+* open the resolution scope on collection writes and background drains ([#2214](https://github.com/Artexis10/exomem/issues/2214)) ([28c6560](https://github.com/Artexis10/exomem/commit/28c6560afa17f9479c03d4848c94d4d4b3c84272))
+* **relations:** resolve suggestion wikilinks with one vault index per call ([#2229](https://github.com/Artexis10/exomem/issues/2229)) ([039cdc3](https://github.com/Artexis10/exomem/commit/039cdc321914e3c208aa413fe7c58d006cb1b2b4))
+* **store:** keep the render-equality proof across page decisions and narrow the tombstone generation ([#2249](https://github.com/Artexis10/exomem/issues/2249)) ([4566d17](https://github.com/Artexis10/exomem/commit/4566d176c90b358ab1c03be8b27d35d69d45959d))
+
 ## [0.151.1](https://github.com/Artexis10/exomem/compare/v0.151.0...v0.151.1) (2026-10-30)
 
 

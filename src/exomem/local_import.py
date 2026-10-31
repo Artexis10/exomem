@@ -27,7 +27,7 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 from platformdirs import user_state_dir
 
-from . import held_fs, import_selection
+from . import held_fs, import_selection, import_stage
 from .cli_progress import Progress, files_are, files_phrase, human_bytes
 from .import_selection import Kept
 
@@ -206,20 +206,20 @@ def _checks_before_copy(root: Path, vault: Path) -> None:
         raise LocalImportError("FOLDER_NAME_UNUSABLE", "the folder needs a name that does not start with a dot")
 
 
-def _advice(selection: import_selection.Selection, name: str, free_after: int, progress: Progress) -> None:
+def _advice(selection: import_selection.Selection, free_after: int, progress: Progress) -> None:
     """Warnings that do not stop the copy: limits the adoption engine applies after the files are staged."""
     from . import adoption_run, client_artifacts
 
     if len(selection.kept) > adoption_run.MAX_CANDIDATES_DEFAULT:
-        progress.say(f"Note: adoption lists up to {adoption_run.MAX_CANDIDATES_DEFAULT:,} files per start; "
-                     f"this folder has {len(selection.kept):,}. Start on subfolders of the printed path to cover the rest, "
-                     f'and pass collection="{name}" to each start so that they stay one collection.')
-    ceiling = client_artifacts.fetch_budget().max_file_bytes
+        progress.say(f"Note: adoption lists up to {adoption_run.MAX_CANDIDATES_DEFAULT:,} files per page; "
+                     f"this folder has {len(selection.kept):,}. Each page reply carries next_after: "
+                     "call start again with it until a reply has none.")
+    ceiling = client_artifacts.adoption_ceiling()
     large = sum(1 for item in selection.kept if item.size > ceiling)
     if large:
         progress.say(f"Note: {files_are(large)} over {human_bytes(ceiling)}; "
                      f"{'it stages' if large == 1 else 'they stage'} here, "
-                     f"and adoption refuses {'it' if large == 1 else 'them'} with TOO_LARGE.")
+                     f"and adoption leaves {'it' if large == 1 else 'them'} out as OVER_ADOPTION_CEILING.")
     progress.say(f"Note: adoption copies each file again into Sources, which needs about "
                  f"{human_bytes(selection.kept_bytes)} more; {human_bytes(free_after)} will be free after staging.")
 
@@ -322,6 +322,7 @@ class _Run:
     def __init__(self, claim: _Claim, root: Path, vault: Path, stage_dir: str, selection: import_selection.Selection,
                  journal: _Journal, progress: Progress):
         self.claim, self.root, self.selection, self.journal, self.progress = claim, root, selection, journal, progress
+        self.vault = vault
         self.start_path = f"{stage_dir}/{claim.import_id}"
         self.staged_rel = f"{self.start_path}/{root.name}"
         self.staged_root = vault / self.staged_rel
@@ -425,11 +426,16 @@ class _Run:
         kept = [item for item in self.selection.kept if item.rel in self.done]
         staged = {"files": len(kept), "bytes": sum(item.size for item in kept)}
         manifest = self.journal.path
+        recorded = False
         if not self.failures:
             self.journal.add({"kind": "done", **staged, "finished": datetime.now(UTC).isoformat()})
             self.journal.close()
             manifest = journals / f"{self.claim.import_id}{_DONE_SUFFIX}"
             os.replace(self.journal.path, manifest)
+            # Last: the record lets adoption remove staged files, so it exists only for a finished import.
+            recorded = import_stage.write_local_record(self.vault, self.claim.import_id, [
+                import_stage.member(f"{self.root.name}/{item.rel}", item.size, self.verified[item.rel]["sha256"])
+                for item in kept])
         for rel, code in [*self.failures, *self.refused][:_SHOWN_FAILURES]:
             self.progress.say(f"Not copied: {rel} ({code}).")
         result = {
@@ -437,7 +443,7 @@ class _Run:
             "start_path": self.start_path, "include_hidden": include_hidden, "staged": staged,
             "failed_while_copying": len(self.failures), "refused_by_vault": len(self.refused),
             **self.selection.summary(), "manifest": str(manifest),
-            "staged_folder": str(self.staged_root),
+            "staged_folder": str(self.staged_root), "stage_recorded": recorded,
         }
         if self.failures:
             result["code"] = "COPY_INCOMPLETE"
@@ -494,7 +500,7 @@ def stage(folder: Path, vault: Path, *, include_hidden: bool = False, use_gitign
                 for skipped in selection.skipped:
                     journal.add({"kind": "left_out", "path": skipped.rel, "code": skipped.reason.name,
                                  "dir": skipped.is_dir, "files": skipped.files, "bytes": skipped.bytes})
-            _advice(selection, root.name, free - run.needed, progress)
+            _advice(selection, free - run.needed, progress)
             try:
                 filesystem = held_fs.acquire(vault).require()
             except held_fs.HeldFsError as error:
@@ -524,7 +530,10 @@ def _closing_lines(result: dict) -> list[str]:
         refused = result["refused_by_vault"]
         note = [f"{files_phrase(refused)} left out because the vault refused {'it' if refused == 1 else 'them'}: "
                 "the manifest gives each a code."] if refused else []
-        return [*lines, *note, f"Manifest: {result['manifest']}", f"Next: run {start}."]
+        consume = ("Adoption removes each staged file once its copy in the Knowledge Base matches."
+                   if result["stage_recorded"] else
+                   "The vault's state folder is not set up yet, so adoption keeps every staged copy.")
+        return [*lines, consume, *note, f"Manifest: {result['manifest']}", f"Next: run {start}."]
     return [*lines, f"Manifest: {result['manifest']}",
             f"The import is not finished: {files_phrase(result['failed_while_copying'])} could not be copied. "
             f"Run the same command again to retry only those under import {result['import_id']}.",

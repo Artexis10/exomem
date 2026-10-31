@@ -2977,3 +2977,42 @@ A changed source snapshot or failed transaction SHALL NOT commit an event or ove
 
 - **WHEN** a correction fails while applying its transaction
 - **THEN** the original source classification, history, bytes, and references remain intact
+
+### Requirement: Process Media Offers An Explicit Reprocess Operation
+
+The single `process_media` registry entry, and the `change_media` operation that wraps it, SHALL accept `operation=reprocess` with a required path or paths and an optional `language` code. MCP, `/api/process_media`, OpenAPI and the CLI SHALL expose it through the same leaf and return the shared envelope. It SHALL run under the same per-artifact commit guard, writer-lease classification and egress classification as `process` and `retry`. `language` SHALL be refused on any other operation, and on media that has no speech stage.
+
+#### Scenario: Reprocess appears on every surface
+
+- **WHEN** the command registry is built
+- **THEN** `reprocess` and `language` appear for `process_media` in MCP, REST, OpenAPI and CLI without per-surface business logic
+
+#### Scenario: Reprocess requires a path
+
+- **WHEN** a caller invokes `reprocess` without a path
+- **THEN** the call fails with an actionable error and queues nothing
+
+#### Scenario: A language on another operation is refused
+
+- **WHEN** a caller passes `language` with `operation=retry`
+- **THEN** the call fails with an actionable error
+
+### Requirement: Media Processing Accepts A Language Mode
+
+`process_media` SHALL accept `language` and `multilingual` on the `process` and `reprocess` operations, with the same meaning on MCP, REST and CLI. A language or mode applies to speech media only; on other media the request SHALL be refused with a reason.
+
+#### Scenario: Parity across surfaces
+
+- **WHEN** a caller sends `process` with `multilingual: true` through MCP, REST or CLI
+- **THEN** each surface queues the same job with the multilingual mode
+
+#### Scenario: A language mode on a document
+
+- **WHEN** a caller sends `process` with a language for a PDF
+- **THEN** the request is refused with a reason that a language applies to speech media only
+
+#### Scenario: A declaration on a completed transcript
+
+- **WHEN** a caller sends `process` with a language or the multilingual mode for media whose transcript is already complete
+- **THEN** the request is refused with a reason that `reprocess` replaces a complete transcript
+- **AND** no job is queued

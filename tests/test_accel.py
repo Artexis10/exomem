@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from exomem import accel
+from exomem import accel, cuda_containment
 
 _ENV_KEYS = (
     "EXOMEM_DEVICE",
@@ -159,6 +159,40 @@ def test_legacy_torch_device_alias_forces_cuda(monkeypatch: pytest.MonkeyPatch) 
     _set_hw(monkeypatch, cuda=True, mps=False, free_gb=0.1)  # verbatim ignores headroom
     monkeypatch.setenv("EXOMEM_TORCH_DEVICE", "cuda")
     assert accel.select_device() == "cuda"
+
+
+def test_a_process_with_no_visible_cuda_device_loads_an_explicit_cuda_model_on_the_cpu_and_says_so_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The serving worker and a media child denied the GPU both list no device; a CUDA model would fail to load."""
+    _set_hw(monkeypatch, cuda=True, mps=False)
+    monkeypatch.setenv("EXOMEM_DEVICE", "cuda:1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    accel._warn_cuda_unavailable.cache_clear()
+
+    with caplog.at_level("WARNING", logger=accel.log.name):
+        assert [accel.select_device(), accel.select_device()] == ["cpu", "cpu"]
+
+    assert [record.getMessage().count("EXOMEM_DEVICE=cuda:1") for record in caplog.records] == [1]
+
+
+def test_a_media_child_denied_the_gpu_says_why_when_it_loads_a_cuda_model_on_the_cpu(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _set_hw(monkeypatch, cuda=True, mps=False)
+    monkeypatch.setenv("EXOMEM_DEVICE", "cuda")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv(
+        cuda_containment.PREFLIGHT_FAILURE_ENV, "GPU preflight died with SIGSEGV during torch CUDA initialization"
+    )
+    accel._warn_cuda_unavailable.cache_clear()
+
+    with caplog.at_level("WARNING", logger=accel.log.name):
+        assert accel.select_device() == "cpu"
+
+    [message] = [record.getMessage() for record in caplog.records]
+    assert "denied this process the GPU: GPU preflight died with SIGSEGV during torch CUDA initialization" in message
+    assert "reserved" not in message
 
 
 def test_device_gpu_sentinel_is_probe_gated(monkeypatch: pytest.MonkeyPatch) -> None:

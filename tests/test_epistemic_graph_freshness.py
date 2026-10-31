@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from test_graph_replay_currency import _assert_matches_a_fresh_rebuild
 
 from exomem import (
     audit,
@@ -968,11 +969,8 @@ def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
         lambda *_args: pytest.fail("body-only refresh copied the whole resolver"),
     )
     for method_name in (
-        "_checkpoint_membership",
         "_recall_membership",
         "_resolver_source_versions",
-        "_resolver_affected_sources",
-        "_stored_full_resolver_topology",
     ):
         monkeypatch.setattr(
             index,
@@ -1162,84 +1160,44 @@ def test_indirect_source_edit_before_publication_cannot_publish_stale_graph(
     assert index.relation_participants(["links_to"]).paths == frozenset()
 
 
-def test_topology_scan_input_edit_before_refresh_cannot_publish_stale_graph(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault = tmp_path / "vault"
-    source = _write(vault, A, "# A\n\nNo link yet.\n")
-    _write(vault, B, "# Existing B\n")
-    _seed_live_freshness(vault)
-    index = epistemic_graph.EpistemicGraphIndex(vault)
-    index.rebuild_all()
-    created_rel = "Knowledge Base/Notes/Insights/future.md"
-    created = _write(
-        vault,
-        created_rel,
-        "---\ntype: insight\nstatus: active\ntitle: Future Target\n---\n# Future\n",
-    )
-    freshness.on_files_changed(vault, changed=[created])
-    find_module.on_resolver_files_changed(vault, [created_rel], [])
-    real_refresh_pass = index._refresh_paths_pass
-
-    def edit_before_refresh(*args, **kwargs):
-        source.write_text("# A\n\nNow links to [[Future Target]].\n", encoding="utf-8", newline="\n")
-        return real_refresh_pass(*args, **kwargs)
-
-    monkeypatch.setattr(index, "_refresh_paths_pass", edit_before_refresh)
-
-    report = index.refresh_paths([created], created_paths=[created])
-
-    assert report["indexed_files"] == 3
-    assert index.available() is True
-    assert index.relation_participants(["links_to"]).paths == frozenset({A, created_rel})
-
-
-def test_topology_membership_change_before_refresh_cannot_publish_stale_graph(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault = tmp_path / "vault"
-    _write(vault, A, "# A\n\nLinks to [[Future Target]].\n")
-    _write(vault, B, "# Existing B\n")
-    _seed_live_freshness(vault)
-    index = epistemic_graph.EpistemicGraphIndex(vault)
-    index.rebuild_all()
-    created_rel = "Knowledge Base/Notes/Insights/future.md"
-    created = _write(
-        vault,
-        created_rel,
-        "---\ntype: insight\nstatus: active\ntitle: Future Target\n---\n# Future\n",
-    )
-    freshness.on_files_changed(vault, changed=[created])
-    find_module.on_resolver_files_changed(vault, [created_rel], [])
-    duplicate_rel = "Knowledge Base/Notes/Insights/future-duplicate.md"
-    real_refresh_pass = index._refresh_paths_pass
-
-    def create_ambiguous_target_before_refresh(*args, **kwargs):
-        _write(
-            vault,
-            duplicate_rel,
+@pytest.mark.parametrize(
+    ("changed_rel", "body", "is_new"),
+    [
+        pytest.param(
+            "Knowledge Base/Notes/Insights/unrelated.md",
+            "# Unrelated\n\nEdited with no event.\n",
+            False,
+            id="an-unrelated-page-is-edited",
+        ),
+        pytest.param(
+            "Knowledge Base/Notes/Insights/future-duplicate.md",
             "---\ntype: insight\nstatus: active\ntitle: Future Target\n---\n# Duplicate\n",
-        )
-        return real_refresh_pass(*args, **kwargs)
-
-    monkeypatch.setattr(
-        index, "_refresh_paths_pass", create_ambiguous_target_before_refresh
-    )
-
-    report = index.refresh_paths([created], created_paths=[created])
-
-    assert report["indexed_files"] == 4
-    assert index.available() is True
-    assert next(node for node in index.nodes(path=duplicate_rel) if node["kind"] == "file")
-    assert index.relation_participants(["links_to"]).paths == frozenset()
-
-
-def test_topology_resolver_membership_change_outside_kb_forces_rebuild(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+            True,
+            id="a-page-takes-the-created-title",
+        ),
+        pytest.param(
+            "Reference/shadow.md",
+            "---\ntitle: Future Target\n---\n# Shadow\n",
+            True,
+            id="a-page-outside-the-knowledge-base-takes-the-created-title",
+        ),
+    ],
+)
+def test_a_change_no_event_recorded_converges_when_its_event_arrives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed_rel: str, body: str, is_new: bool
 ) -> None:
+    """A topology refresh trusts the registry for pages outside the delta.
+
+    A change the registry never heard of (a missed filesystem event) lands while
+    a created page refreshes. The refresh publishes what the registry
+    describes; when the change's own event arrives, its refresh must still see
+    the topology move and converge on a fresh rebuild. A refresh that stored a
+    topology fingerprint covering the unrecorded page would hide that move.
+    """
     vault = tmp_path / "vault"
     _write(vault, A, "# A\n\nLinks to [[Future Target]].\n")
     _write(vault, B, "# Existing B\n")
+    _write(vault, "Knowledge Base/Notes/Insights/unrelated.md", "# Unrelated\n\nBefore.\n")
     _seed_live_freshness(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
@@ -1251,27 +1209,25 @@ def test_topology_resolver_membership_change_outside_kb_forces_rebuild(
     )
     freshness.on_files_changed(vault, changed=[created])
     find_module.on_resolver_files_changed(vault, [created_rel], [])
-    shadow_rel = "Reference/shadow.md"
     real_refresh_pass = index._refresh_paths_pass
 
-    def create_ambiguous_target_before_refresh(*args, **kwargs):
-        _write(
-            vault,
-            shadow_rel,
-            "---\ntitle: Future Target\n---\n# Shadow\n",
-        )
+    def change_with_no_event(*args, **kwargs):
+        _write(vault, changed_rel, body)
         return real_refresh_pass(*args, **kwargs)
 
-    monkeypatch.setattr(
-        index, "_refresh_paths_pass", create_ambiguous_target_before_refresh
-    )
+    monkeypatch.setattr(index, "_refresh_paths_pass", change_with_no_event)
 
-    report = index.refresh_paths([created], created_paths=[created])
+    index.refresh_paths([created], created_paths=[created])
 
-    assert report["indexed_files"] == 3
     assert index.available() is True
-    assert index.nodes(path=shadow_rel) == []
-    assert index.relation_participants(["links_to"]).paths == frozenset()
+    monkeypatch.undo()
+    changed = vault / changed_rel
+    freshness.on_files_changed(vault, changed=[changed])
+    find_module.on_resolver_files_changed(vault, [changed_rel], [])
+    index.refresh_paths([changed], created_paths=[changed] if is_new else [])
+
+    assert index.available() is True
+    _assert_matches_a_fresh_rebuild(vault)
 
 
 def test_topology_resolver_title_mismatch_outside_kb_forces_rebuild(
@@ -1372,56 +1328,6 @@ def test_observed_external_edit_defers_body_refresh_until_watcher_publication(
     assert repaired["indexed_files"] == 3
     assert index.available() is True
     assert index.relation_participants(["links_to"]).paths == frozenset()
-
-
-def test_topology_scan_rejects_source_hash_mismatch_hidden_by_file_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault = tmp_path / "vault"
-    _write(vault, A, "# A\n\nLinks to [[Future Target]].\n")
-    _write(vault, B, "# Existing B\n")
-    unrelated_rel = "Knowledge Base/Notes/Insights/unrelated.md"
-    unrelated = _write(vault, unrelated_rel, "# Unrelated\n\nBefore.\n")
-    _seed_live_freshness(vault)
-    index = epistemic_graph.EpistemicGraphIndex(vault)
-    index.rebuild_all()
-    unrelated.write_text("# Unrelated\n\nAfter!.\n", encoding="utf-8", newline="\n")
-    created_rel = "Knowledge Base/Notes/Insights/future.md"
-    created = _write(
-        vault,
-        created_rel,
-        "---\ntype: insight\nstatus: active\ntitle: Future Target\n---\n# Future\n",
-    )
-    freshness.on_files_changed(vault, changed=[created])
-    find_module.on_resolver_files_changed(vault, [created_rel], [])
-    stale_disk_identity = freshness.recall_checkpoint(vault, "vault")
-    assert stale_disk_identity is not None
-    real_disk_freshness = epistemic_graph._disk_vault_freshness
-    calls = 0
-
-    def windows_style_disk_freshness(root: Path):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            # Model a filesystem whose path/mtime/ctime/size identity did not
-            # expose the same-length in-place edit during the topology proof.
-            return stale_disk_identity.triple
-        return real_disk_freshness(root)
-
-    monkeypatch.setattr(
-        epistemic_graph, "_disk_vault_freshness", windows_style_disk_freshness
-    )
-
-    report = index.refresh_paths([created], created_paths=[created])
-
-    assert report["indexed_files"] == 4
-    assert index.available() is True
-    current = next(
-        node for node in index.nodes(path=unrelated_rel) if node["kind"] == "file"
-    )
-    assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        unrelated.read_bytes().decode("utf-8")
-    )
 
 
 def test_direct_index_sync_delete_publishes_before_graph_fanout(tmp_path: Path) -> None:
