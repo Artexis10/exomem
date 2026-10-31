@@ -6655,6 +6655,9 @@ def in_append_only_tree(rel_path: str) -> str | None:
 # parse_frontmatter, scalar rendering + find's page parser) — one-off config
 # loads keep safe_load.
 _YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# The emitter counterpart, for text that is only parsed again. Its bytes can
+# differ from SafeDumper's, so never use it for text that is hashed or stored.
+_YAML_SAFE_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 
 class _DuplicateYamlKey(yaml.YAMLError):
@@ -6712,6 +6715,15 @@ def yaml_safe_load(text: str):
     Pinned by tests/test_yaml_loader_safety.py — do not widen the loader.
     """
     return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
+
+
+def yaml_safe_dump_for_parse(value: Any) -> str:
+    """`yaml.safe_dump` via libyaml, for text that only `yaml_safe_load` reads back.
+
+    Loading the result gives the same value as loading `yaml.safe_dump`'s, but
+    the bytes may differ, so a fingerprint or stored text keeps `yaml.safe_dump`.
+    """
+    return yaml.dump(value, Dumper=_YAML_SAFE_DUMPER)
 
 
 def read_frontmatter_header(
