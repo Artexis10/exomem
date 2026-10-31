@@ -31,6 +31,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
@@ -2007,9 +2008,11 @@ def _create_notes(
     governed two-phase creation (`adopt.create_draft_notes`). A call makes one note at a
     time until it has made and timed one; after that a batch holds as many notes as fit in
     the time left at the dearest cost per made note this call has seen. A refused note does
-    not lower that cost, because a quick refusal would make the next batch look free. The
-    items a batch leaves keep their `source-applied` outcome and the continuation resumes at
-    them. A call always tries at least one note, so a budget below one note's cost still moves.
+    not lower that cost, because a quick refusal would make the next batch look free. A batch
+    that refuses makes its notes alone only while one more note fits at the price that sized
+    it. The items a batch leaves or does not reach keep their `source-applied` outcome and the
+    continuation resumes at them. A call always tries at least one note, so a budget below
+    one note's cost still moves.
     """
     outcomes = run["outcomes"]
     owed = [
@@ -2035,6 +2038,12 @@ def _create_notes(
             stats["notes_deferred"] += 1
             break
         batch, due = due[:size], due[size:]
+        # A refused batch makes its notes alone; each must still fit at the price that sized it.
+        # A call's first note always runs, so a budget below one note's cost still moves.
+        price_ms = stats["note_ms_max"] if stats["notes_created"] else stats["note_try_ms_max"]
+        fits_one_note = (
+            partial(pacer.note_fits, chunk, price_ms / 1000) if stats["notes_started"] else None
+        )
         started = time.monotonic()
         results = adopt_module.create_draft_notes(
             root,
@@ -2045,20 +2054,27 @@ def _create_notes(
                 )
                 for planned in batch
             ],
-            collection=label, date_iso=run["plan"]["date"],
+            collection=label, date_iso=run["plan"]["date"], fits_one_note=fits_one_note,
         )
         elapsed_ms = (time.monotonic() - started) * 1000
+        reached = sum(result.reached for result in results)
         stats["notes_started"] += size
-        stats["note_try_ms_max"] = max(stats["note_try_ms_max"], int(elapsed_ms / size))
+        if reached:
+            stats["note_try_ms_max"] = max(stats["note_try_ms_max"], int(elapsed_ms / reached))
         made = sum(result.created is not None for result in results)
         if made:
             # The dearest cost per made note: a batch's time, its refusals included, over the notes it made.
             stats["note_ms_max"] = max(stats["note_ms_max"], int(elapsed_ms / made))
         for planned, result in zip(batch, results, strict=True):
-            _settle_draft_note(
-                root, planned, result, outcomes[planned["original_path"]],
-                label=label, notes=notes, stats=stats, written=written,
-            )
+            if result.reached:
+                _settle_draft_note(
+                    root, planned, result, outcomes[planned["original_path"]],
+                    label=label, notes=notes, stats=stats, written=written,
+                )
+        if reached < size:
+            # The fallback ran out of time: the notes it did not reach stay `source-applied`.
+            stats["notes_deferred"] += 1
+            break
     if owed:
         # The outcomes are committed with the chunk's Sources and again here, so a
         # crash costs the identity check at most one chunk of notes.

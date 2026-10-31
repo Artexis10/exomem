@@ -20,3 +20,4 @@
 - [x] 3.2 Give a note whose target another writer took `TARGET_OCCUPIED` and commit the others (`test_a_target_taken_by_another_writer_refuses_that_note_and_commits_the_others`).
 - [x] 3.3 Call `adopt.create_draft_notes` from `adoption_run`, making notes one at a time until one is made and timed (`test_apply_times_one_note_then_commits_the_rest_of_the_chunk_in_one_batch`, `test_a_quick_refusal_does_not_make_the_next_batch_of_notes_look_free`).
 - [x] 3.4 Fall back only when the batch raised before it wrote, and log the refusal code once per refused batch.
+- [x] 3.5 Stop the per-note fallback when the call has no time for one more note, and keep the notes it did not reach owed (`test_a_refused_batch_creates_its_notes_alone_only_while_the_call_has_time`).

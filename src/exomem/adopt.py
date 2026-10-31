@@ -13,7 +13,7 @@ import datetime as dt
 import hashlib
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -602,10 +602,18 @@ class DraftNote:
 
 @dataclass(frozen=True)
 class DraftNoteOutcome:
-    """What became of one `DraftNote`: the note leaf's result, or the error that failed it."""
+    """What became of one `DraftNote`: the note leaf's result, or the error that failed it.
+
+    An outcome with neither is a note that the per-note fallback stopped before: nothing was
+    written for it, and the caller still owes it.
+    """
 
     created: Any | None = None
     error: Exception | None = None
+
+    @property
+    def reached(self) -> bool:
+        return self.created is not None or self.error is not None
 
 
 def create_draft_notes(
@@ -614,6 +622,7 @@ def create_draft_notes(
     *,
     collection: str | None,
     date_iso: str,
+    fits_one_note: Callable[[], bool] | None = None,
 ) -> list[DraftNoteOutcome]:
     """Create the draft notes of a chunk, one outcome per note, in `notes` order.
 
@@ -621,7 +630,9 @@ def create_draft_notes(
     `create_draft_note` does. The notes that pass commit as one canonical batch, with one
     index and one log update, which is the per-note guarantees at a fraction of the cost.
     When the batch refuses before it writes, each of its notes is created alone, so every
-    note gets the outcome `create_draft_note` gives it. Once the batch is on disk it is never
+    note gets the outcome `create_draft_note` gives it. Before each of those notes the
+    fallback asks `fits_one_note`; once it answers False, that note and the rest come back
+    unreached (`DraftNoteOutcome.reached` is False). Once the batch is on disk it is never
     created again: every note is created, and a step that fails after the write fails the
     notes it ran for, as it would when each note is created alone. One note's own step fails
     that note; the write failing after its commit point fails every note, and the caller's
@@ -656,6 +667,8 @@ def create_draft_notes(
                 len(prepared),
             )
             for index in prepared:
+                if fits_one_note is not None and not fits_one_note():
+                    break
                 item = notes[index]
                 try:
                     settled[index] = DraftNoteOutcome(created=create_draft_note(
@@ -664,6 +677,8 @@ def create_draft_notes(
                     ))
                 except Exception as error:  # noqa: BLE001 - a refused note is its own outcome
                     settled[index] = DraftNoteOutcome(error=error)
+            for index in prepared:
+                settled.setdefault(index, DraftNoteOutcome())
         else:
             for index, result in zip(prepared, committed, strict=True):
                 settled[index] = (
