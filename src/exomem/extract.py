@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import accel, asr_runtime, runtime_resources
+from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
 from .asr_facts import (
     DECODING_BATCHED,
     DECODING_SEQUENTIAL,
@@ -926,7 +926,7 @@ def _is_timed_text(text: str) -> bool:
 
 # ---------------- optional: ASR speaker diarization (EXOMEM_DIARIZE, default OFF) ----
 #
-# pyannote's who-spoke-when pipeline runs in an ISOLATED CPU-torch sidecar venv (sidecar/diarizer/)
+# pyannote's who-spoke-when pipeline runs in an ISOLATED sidecar venv (`diarizer_sidecar`)
 # as a subprocess, NOT in this process: the main service runs a custom torch-2.12+cu132 (Blackwell)
 # build for whisper/CLIP/bge, which is fundamentally incompatible with the pyannote/torchaudio
 # ecosystem (torchcodec native-lib load failure, torchaudio AudioMetaData / list_audio_backends
@@ -956,24 +956,12 @@ def _diarize_enabled() -> bool:
 
 
 def _diarizer_sidecar_python() -> Path | None:
-    """Locate the isolated diarization sidecar's interpreter, or None if unprovisioned.
-
-    `EXOMEM_DIARIZE_SIDECAR_PYTHON` overrides; else the conventional
-    `sidecar/diarizer/.venv/{Scripts/python.exe|bin/python}` under the repo root. Returns None
-    (→ plain transcript) when the venv isn't built — never auto-builds at runtime.
-    """
-    override = os.environ.get("EXOMEM_DIARIZE_SIDECAR_PYTHON")
-    if override:
-        p = Path(override)
-        return p if p.is_file() else None
-    root = Path(__file__).resolve().parents[2]  # src/exomem/extract.py → repo root
-    rel = "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    py = root / "sidecar" / "diarizer" / ".venv" / rel
-    return py if py.is_file() else None
+    """The diarization sidecar's interpreter, or None when unprovisioned (→ plain transcript)."""
+    return diarizer_sidecar.python()
 
 
 def _diarizer_worker_script() -> Path:
-    return Path(__file__).resolve().parents[2] / "sidecar" / "diarizer" / "worker.py"
+    return diarizer_sidecar.worker_script()
 
 
 def _diarizer_timeout(path: Path) -> float:

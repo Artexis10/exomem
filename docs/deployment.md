@@ -1547,7 +1547,12 @@ re-runs ASR; combine with `--rediarize` to gain both markers in one pass).
 
 **Install:** `uv sync --extra media --extra diarization`, then build the isolated
 sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
-`sh scripts/setup-diarizer.sh --prewarm` on Linux/macOS.
+`sh scripts/setup-diarizer.sh --prewarm` on Linux/macOS. On a managed service, run
+`<active release python> -m exomem.diarizer_sidecar --prewarm` once, with the
+service's `EXOMEM_STATE_ROOT` when its unit sets one. The sidecar
+venv lives under the machine-local state root, keyed by the sidecar's lock, so a
+release switch keeps it. `scripts/upgrade.sh` builds a new one after a switch to a
+release that changes the lock, while `EXOMEM_DIARIZE` is on.
 
 Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
 torch and follows the same precedent: it defaults to **CPU when ASR is active** (and
