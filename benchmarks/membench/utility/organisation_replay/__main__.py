@@ -8,9 +8,11 @@ the seed builder and the readback then all load the arm's own package.
 2. ``run`` runs each situation file through that binding.
 3. ``check`` reports each way a run file departs from ``SCHEMA.md``.
 
-Exit codes are switch evaluation's: 0 done, 2 refused or aborted, 75 paused on
-a quota. Rerun the same ``run`` command to resume: it skips each finished
-situation and resumes a paused or aborted one.
+Exit codes are switch evaluation's: 0 done, 2 refused, aborted or stopped after
+a struck situation, 75 paused on a quota. Rerun the same ``run`` command to
+resume: it skips each finished or struck situation and resumes a paused or
+aborted one. A situation that aborted on a fault the lane judges its own is
+closed with ``run --strike ID --reason TEXT``.
 """
 
 from __future__ import annotations
@@ -96,7 +98,7 @@ def cmd_run(args) -> int:
     from membench.utility.switch_eval.__main__ import EXIT_PAUSED, EXIT_REFUSED
     from membench.utility.switch_eval.session import RunAborted, RunPaused
 
-    from .runner import arm_parity, run_situation
+    from .runner import arm_parity, finished_run, run_situation, strike_situation
     from .situation import load_situation
 
     out = Path(args.out)
@@ -127,7 +129,22 @@ def cmd_run(args) -> int:
     # Every file is checked before the first session starts.
     situations = [load_situation(Path(path), manifest=manifest) for path in args.situation]
     config = _config(args, binding)
+    if args.strike is not None:
+        chosen = [situation for situation in situations if situation.id == args.strike]
+        if not chosen or not args.reason:
+            print(
+                "refused: --strike names one of the situation files and needs --reason",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        path = strike_situation(config, binding, chosen[0], args.reason)
+        print(f"{args.strike} {config.arm}: struck by the lane -> {path}")
+        return 0
     for situation in situations:
+        done = finished_run(config, binding, situation)
+        if done is not None:
+            print(f"{situation.id} {config.arm}: {done['status']}, finished earlier")
+            continue
         try:
             path = run_situation(config, binding, situation)
         except RunPaused as pause:
@@ -138,6 +155,13 @@ def cmd_run(args) -> int:
             return EXIT_REFUSED
         run = json.loads(path.read_text(encoding="utf-8"))
         print(f"{situation.id} {config.arm}: {run['status']} -> {path}")
+        if run["status"] == "struck":
+            # More than two strikes void an f34 run, so one cause must not strike them all.
+            print(
+                f"stopped: {situation.id} is struck; read its faults, then rerun to continue",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
     return 0
 
 
@@ -187,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--manifest", help="the custody manifest (sha256sum format); required for held-out files"
     )
+    p.add_argument(
+        "--strike", metavar="ID", help="close this aborted situation as struck, and run nothing"
+    )
+    p.add_argument("--reason", help="why the lane judges the strike's fault the situation's own")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("check", help="check a run directory's run.json against SCHEMA.md")

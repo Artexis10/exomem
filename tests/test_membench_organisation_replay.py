@@ -19,6 +19,7 @@ import pytest
 import yaml
 from epistemic.journeys.f27_replay import AgentEnvelope
 from membench.utility.organisation_replay import runner
+from membench.utility.organisation_replay.__main__ import main as replay_main
 from membench.utility.organisation_replay.readback import edge_review_reasons
 from membench.utility.organisation_replay.runfile import call_records, check_run
 from membench.utility.organisation_replay.runner import RunConfig, bind, refuse_api_keys
@@ -28,6 +29,7 @@ from membench.utility.organisation_replay.situation import SituationRefused, loa
 from membench.utility.switch_eval.arms import arm_specs
 from membench.utility.switch_eval.session import (
     API_KEY_VARIABLES,
+    CLIENT_START,
     SERVER_START,
     AttemptResult,
     RunPaused,
@@ -440,10 +442,11 @@ class Crash(BaseException):
     """The runner process dying: nothing in the runner catches it."""
 
 
-def stub_runner(tmp_path, monkeypatch, execute, readback=None):
-    """One toy situation on stubs: a seed that writes a page, an install that marks a
+def stub_runner(tmp_path, monkeypatch, execute, readback=None, ids=("x01",)):
+    """Toy situations on stubs: a seed that writes a page, an install that marks a
     hook restart pending, ``execute(inputs, attempt_dir, slot)`` as the client and
-    ``readback()`` as the end-state readback. Returns a rerunnable ``run()``."""
+    ``readback()`` as the end-state readback. ``run()`` reruns the first situation;
+    ``run.cli(*flags)`` runs the ``run`` command over all of them."""
 
     for name in API_KEY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
@@ -477,7 +480,8 @@ def stub_runner(tmp_path, monkeypatch, execute, readback=None):
     monkeypatch.setattr(runner, "files_digests", lambda paths, slot: {})
     monkeypatch.setattr(runner, "ClaudeSessionExecutor", Executor)
     monkeypatch.setattr(runner, "_child", lambda *args: (readback or (lambda: {"read": {}}))())
-    situation = load_situation(write_situation(tmp_path, "x01.yaml", TOY))
+    files = [write_situation(tmp_path, f"{id_}.yaml", {**TOY, "id": id_}) for id_ in ids]
+    situation = load_situation(files[0])
     config = RunConfig(
         out=tmp_path / "out", arm="arm-x", profile="neutral-lexical", model="m",
         client=AgentEnvelope(Path("claude"), "1.0.0 (Claude Code)"), launcher=(),
@@ -485,16 +489,41 @@ def stub_runner(tmp_path, monkeypatch, execute, readback=None):
     )  # fmt: skip
     binding = {
         "binding_ref": "arm-x-aaaaaaaaaaaa",
+        "arm": "arm-x",
+        "revision": "a" * 40,
+        "base_revision": "a" * 40,
+        "profile": "neutral-lexical",
+        "client": {"executable": "claude", "version": "1.0.0", "launcher": [], "model": "m",
+                   "standin": True},
         "reason_capable": False,
         "shapes": {"hookless": {"tools": [], "wired_hooks": [], "surface": {}}},
-    }
+    }  # fmt: skip
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "binding-arm-x.json").write_text(json.dumps(binding), encoding="utf-8")
 
     def run():
         path = runner.run_situation(config, binding, situation)
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def cli(*flags):
+        situations = [arg for path in files for arg in ("--situation", str(path))]
+        return replay_main(["run", "--out", str(tmp_path / "out"), "--arm", "arm-x", *situations, *flags])  # fmt: skip
+
     run.seed_builds = seed_builds
+    run.cli = cli
     return run
+
+
+def ended(pid):
+    """Gone, or a zombie that no longer runs."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+def run_file(tmp_path, id_):
+    return json.loads((tmp_path / "out" / id_ / "arm-x" / "run.json").read_text(encoding="utf-8"))
 
 
 def test_a_situation_paused_on_a_quota_resumes_where_it_stopped(tmp_path, monkeypatch):
@@ -546,18 +575,27 @@ def test_a_rerun_skips_a_finished_situation_instead_of_refusing_the_whole_run(
     assert attempts == ["capture", "fresh"]
 
 
-def test_a_runner_killed_mid_attempt_ends_its_server_and_keeps_that_attempt(tmp_path, monkeypatch):
+def test_a_runner_killed_mid_attempt_ends_its_client_and_server_and_keeps_that_attempt(
+    tmp_path, monkeypatch
+):
     # Failure caught: a resumed attempt overwriting the killed draw's transcript and
-    # not counting it, or a server the dead runner left writing into the restored slot.
-    server = subprocess.Popen(["sleep", "60"])  # noqa: S607 - a stand-in orphan server
+    # not counting it, or the dead runner's client and server writing into the restored slot.
     attempts = []
+    client = {}
 
     def execute(inputs, attempt_dir, slot):
         attempts.append((inputs.tree, attempt_dir.name))
         if len(attempts) == 1:
             (attempt_dir / "transcript.jsonl").write_text("the killed draw", encoding="utf-8")
-            started = {"event": "server_started", "pid": server.pid}
-            started["start_ticks"] = process_start_ticks(server.pid)
+            # As the executor starts it: a session of its own, in the slot's directory,
+            # with its server as a child.
+            client["process"] = subprocess.Popen(
+                ["sh", "-c", "sleep 30 & echo $!; wait"],  # noqa: S607 - a stand-in client
+                cwd=slot.cwd, start_new_session=True, stdout=subprocess.PIPE, text=True,
+            )  # fmt: skip
+            client["server"] = int(client["process"].stdout.readline())
+            started = {"event": "server_started", "pid": client["server"]}
+            started["start_ticks"] = process_start_ticks(client["server"])
             (slot.runtime / "tap.jsonl").write_text(json.dumps(started) + "\n", encoding="utf-8")
             raise Crash
         return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "fine"}])
@@ -567,12 +605,13 @@ def test_a_runner_killed_mid_attempt_ends_its_server_and_keeps_that_attempt(tmp_
         with pytest.raises(Crash):
             run()
         result = run()
-        killed = server.wait(timeout=5)
+        killed = client["process"].wait(timeout=5)
     finally:
-        server.kill()
+        client["process"].kill()
 
     capture = tmp_path / "out" / "x01" / "arm-x" / "sessions" / "capture"
     assert killed == -signal.SIGKILL
+    assert ended(client["server"])
     assert (capture / "attempt-1" / "transcript.jsonl").read_text() == "the killed draw"
     assert (capture / "attempt-1" / "runtime" / "tap.jsonl").exists()
     assert attempts[1:] == [("capture", "attempt-2"), ("fresh", "attempt-1")]
@@ -612,18 +651,67 @@ def test_a_resume_after_capture_shows_the_fresh_session_the_hook_state_capture_l
     assert seen == ["consumed"]
 
 
-def test_a_start_fault_past_its_retries_strikes_the_situation(tmp_path, monkeypatch):
-    # Failure caught: a server that never starts on this situation's seed aborting
+def test_an_environment_wide_start_fault_aborts_the_run_at_the_first_situation(
+    tmp_path, monkeypatch
+):
+    # Failure caught: a client that never starts striking every situation in turn,
+    # which voids an f34 run once more than two are struck.
+    attempts = []
+
+    def execute(inputs, attempt_dir, slot):
+        attempts.append(inputs.planned.case_id)
+        return AttemptResult(outcome="harness_fault", kind=CLIENT_START, detail="no init event")
+
+    run = stub_runner(tmp_path, monkeypatch, execute, ids=("x01", "x02", "x03", "x04"))
+
+    assert run.cli() == 2
+    assert attempts == ["x01", "x01", "x01"]
+    assert not list((tmp_path / "out").glob("*/arm-x/run.json"))
+
+
+def test_the_lane_strikes_an_aborted_situation_with_its_reason_and_the_rerun_moves_on(
+    tmp_path, monkeypatch
+):
+    # Failure caught: a start fault that only this situation's seed causes aborting
     # every rerun, with no way to close the situation.
     def execute(inputs, attempt_dir, slot):
-        return AttemptResult(outcome="harness_fault", kind=SERVER_START, detail="no handshake")
+        if inputs.planned.case_id == "x01":
+            return AttemptResult(outcome="harness_fault", kind=SERVER_START, detail="no handshake")
+        return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "fine"}])
 
-    run = stub_runner(tmp_path, monkeypatch, execute)
-    result = run()
+    run = stub_runner(tmp_path, monkeypatch, execute, ids=("x01", "x02"))
+    assert run.cli() == 2
 
-    assert result["status"] == "struck"
-    assert [(f["session"], f["attempt"]) for f in result["faults"]] == [
+    assert run.cli("--strike", "x01", "--reason", "the seed's page breaks the server") == 0
+    struck = run_file(tmp_path, "x01")
+    assert struck["status"] == "struck"
+    assert struck["interruptions"][-1]["detail"] == "the seed's page breaks the server"
+    assert [(f["session"], f["attempt"]) for f in struck["faults"]] == [
         ("capture", 1),
         ("capture", 2),
         ("capture", 3),
     ]
+
+    assert run.cli() == 0
+    assert run_file(tmp_path, "x02")["status"] == "ok"
+
+
+def test_a_struck_situation_stops_the_run_and_keeps_its_vault(tmp_path, monkeypatch):
+    # Failure caught: one cause striking situation after situation in one run, or a
+    # struck situation's vault wiped with its slot, so its fault cannot be read.
+    def execute(inputs, attempt_dir, slot):
+        if inputs.planned.case_id == "x01":
+            (slot.vault / "half-written.md").write_text("partial", encoding="utf-8")
+            return AttemptResult(outcome="harness_fault", kind="transport", detail="dropped")
+        return AttemptResult(outcome="ok", turns=[{"index": 0, "answer": "fine"}])
+
+    run = stub_runner(tmp_path, monkeypatch, execute, ids=("x01", "x02"))
+
+    assert run.cli() == 2
+    assert run_file(tmp_path, "x01")["status"] == "struck"
+    assert not (tmp_path / "out" / "x02").exists()
+    attempt = tmp_path / "out" / "x01" / "arm-x" / "sessions" / "capture" / "attempt-3"
+    assert (attempt / "vault" / "half-written.md").read_text() == "partial"
+
+    assert run.cli() == 0
+    assert run_file(tmp_path, "x02")["status"] == "ok"
