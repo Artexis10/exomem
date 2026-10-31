@@ -52,7 +52,13 @@ _REFRESH_TOKEN_VERSION = "exo_r2"
 _SCHEMA_VERSION = 1
 _ACCESS_SCHEMA_VERSION = 2
 ACCESS_TOKEN_TTL_SECONDS = 3600
-REFRESH_RETRY_GRACE_SECONDS = 30
+# How long a retried refresh still gets the rotation it already earned. A retry
+# is the same request sent again after the response was lost or slow; outside
+# this window a second redemption is reuse and revokes the family. It must
+# outlast the slowest response a client or the edge proxy waits for, plus one
+# retry: Cloudflare gives an origin 100 s, and a busy service can answer a
+# refresh later than a client's 30 s timeout.
+REFRESH_RETRY_GRACE_SECONDS = 300
 _TOKEN_PATTERN = re.compile(
     rf"^{_TOKEN_VERSION}\.(?P<session_id>[A-Za-z0-9_-]{{16,64}})\."
     r"(?P<secret>[A-Za-z0-9_-]{43,128})$"
