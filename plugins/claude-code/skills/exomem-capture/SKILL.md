@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 81315c782d9593c47d8f6e9ed7690ae9a9118e04abb0459422a827a916fea3b3
+  skill_contract: 73d84346daa5d4a3862de9e39a5435d275113fe9cff39ab5bddf941139b12c8a
   version: "0.1.0"
 ---
 
@@ -138,7 +138,9 @@ and the returned restore route. Use only exposed operations.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
+joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
+them), or choose no edge. Durable recurring
 meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 

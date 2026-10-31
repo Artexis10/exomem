@@ -2,7 +2,7 @@
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
 metadata:
-  skill_contract: 81315c782d9593c47d8f6e9ed7690ae9a9118e04abb0459422a827a916fea3b3
+  skill_contract: 73d84346daa5d4a3862de9e39a5435d275113fe9cff39ab5bddf941139b12c8a
   version: "0.1.0"
 ---
 
