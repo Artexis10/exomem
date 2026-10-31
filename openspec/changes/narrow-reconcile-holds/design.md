@@ -1,24 +1,32 @@
 ## Context
 
-`reconcile.reconcile` runs these phases in order: planning (the census),
-purging, units, lifecycle, indexes, embeddings, lexical, graph, orphans,
-references, derived receipts, drift and rebaseline. Each phase already calls
-`maintenance_jobs.checkpoint`. The CLI and a remote job both reach the leaf
-through `writer_lease.invoke_command`, which takes the wide mutation guard for
-the whole leaf. A remote job releases that guard before the graph join that
-follows the leaf.
+`reconcile.reconcile` runs these phases in order: planning (the census, only for
+a preview or a planned write), purging, units, lifecycle, indexes, embeddings,
+lexical, graph, orphans, references, derived receipts, drift, rebaseline and
+receipts. Each phase calls `maintenance_jobs.checkpoint`.
 
-The measured holds (830 s cold, 1,005 s warm) cover the whole run. No per-phase
-measurement exists yet, so the design does not assume which phase dominates.
+The CLI and a remote job both reach the leaf through
+`writer_lease.invoke_command`. It takes the wide mutation guard for the whole
+leaf, because reconcile has no narrowing row and is in `WHOLE_RUN_MODES`. A
+remote job releases that guard before the graph join that follows the leaf.
+
+Facts the design relies on:
+
+- The lexical store serializes its publication with a cross-process lock.
+- The graph has no coordinator of its own. It builds privately and takes short
+  canonical holds to publish. The graph phase also isolates lineage, recovers a
+  checkpoint and sweeps temporaries, which move durable state.
+- The reference rebuild scans the corpus, then replaces its table, under an
+  in-process lock only. It therefore stays inside a hold.
+- The receipts phase repairs the receipt chain after the derived phases, under
+  its own lock, and depends on running last.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- No foreground writer waits for the whole reconcile. A writer waits at most for
-  the current canonical phase.
-- A canonical phase never applies on inputs that moved since the census.
-- One census per run.
+- No foreground writer waits for a whole reconcile.
+- Nothing applies on inputs that moved since they were read.
 
 **Non-Goals:**
 
@@ -28,37 +36,47 @@ measurement exists yet, so the design does not assume which phase dominates.
 
 ## Decisions
 
-### D1. Measure each phase's hold before grouping phases
+### D1. Profile before grouping
 
-Profile one cold and one warm write-mode reconcile on a disposable copy of a
-real-sized vault, and record each phase's wall time. The phases that write
-canonical state get their own hold. A derived phase moves outside the boundary
-only if its coordinator already serializes it against ordinary writes.
+A disposable copy of a real-sized vault gives each phase's wall time, cold and
+warm. The profile decides which phases share a hold. A phase leaves the
+boundary only when a coordinator already serializes it against ordinary writes.
+If most of the time sits in phases that must stay inside a hold, this change
+stops at the profile and reports that.
 
-Alternative: split every phase without measuring first. Rejected, because a
-phase that is cheap and canonical gains nothing from its own hold.
+### D2. Re-read inside the hold, then apply what is current
 
-### D2. Re-check inputs inside each canonical hold
+Most phases already read their inputs and apply them in one pass, so they
+re-read inside their own hold. The purge is the exception: it applies the
+planned isolation census. Inside its hold, it reads the census again and
+applies only the entries present in both. It reports the other entries and
+marks the repair incomplete, so the isolation cursors do not advance.
 
-Each canonical phase records the census inputs that it acts on, for example the
-indexed paths for the purges and the page hashes for the index counts. Inside
-its hold, the phase compares those inputs with disk. When they differ, it skips
-the phase and records the skip in the report and the job receipt. The next
-reconcile converges the skipped phase.
+Run-long values cross phases and go stale once the boundary is released between
+them: `semantic_states`, `suppressed_paths`, the unit inclusion sets and
+`initial_graph_drift`. Each phase that reads one of them re-reads it inside its
+own hold.
 
-Alternative: re-plan the whole run when any input moves. Rejected, because a
-busy vault would never finish a reconcile.
+Alternative: skip a whole phase when any input moved. Rejected, because a busy
+vault would never converge, and a job needs a new preview to run again.
 
-### D3. Keep the job's plan binding
+### D3. One narrowing rule for the CLI and the job
 
-The job still re-plans before its first write and fails with
-`STALE_MAINTENANCE_PLAN` when the destructive census changed. D2 applies after
-that check, to inputs that move during the run.
+Reconcile gets a narrowing row in `writer_lease`, as a chunked job has. The
+`EXOMEM_WIDE_MUTATION_BOUNDARY` switch widens it again. Both the CLI and the job
+then run the leaf without a whole-run hold, and reconcile leaves
+`WHOLE_RUN_MODES`. The graph join and handoff composition in `invoke_command`
+must still find no hold held at the join.
+
+### D4. Bounded waits inside the run
+
+Each hold waits out a busy boundary for a bounded time and checks for a stop
+between attempts, as `chunk_hold` does. A busy boundary in the middle of a run
+no longer fails a half-finished job.
 
 ## Risks / Trade-offs
 
-- A phase that reads derived state another phase wrote may see a foreground
-  write in between. → D2's input check covers canonical inputs; derived phases
-  converge on the next run, as they do after any ordinary write.
-- More holds cost more total wall time. → The cost falls on the reconcile, not
-  on foreground writers. The phase profile records the before and after.
+- A foreground write between holds can change what a later phase reads. → D2
+  re-reads inside each hold.
+- More holds cost more total wall time. → The reconcile pays it, not
+  foreground writers. The profile records the before and after.

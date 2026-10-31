@@ -1,17 +1,20 @@
 ## 1. Measure
 
-- [ ] 1.1 Profile a cold and a warm write-mode reconcile on a disposable copy of a real-sized vault, and record each phase's wall time and boundary hold.
-- [ ] 1.2 From the profile, list the phases that write canonical state and the derived phases whose coordinator already serializes them against ordinary writes.
+- [ ] 1.1 Profile each phase of a cold and a warm reconcile on a disposable copy of a real-sized vault.
+- [ ] 1.2 From the profile, group the phases into holds under design D1, or stop and report.
 
 ## 2. Implement
 
-- [ ] 2.1 Compute the census once per write-mode run.
-- [ ] 2.2 Give each canonical phase its own boundary hold, with the input re-check from design D2 and a skip record in the report and the job receipt.
-- [ ] 2.3 Run the derived phases from 1.2 outside the canonical boundary.
-- [ ] 2.4 Drop reconcile from `WHOLE_RUN_MODES` in `maintenance_jobs.py`, so that a reconcile job no longer takes the wide guard for the whole leaf.
+- [ ] 2.1 Add a reconcile narrowing row in `writer_lease`, honouring `EXOMEM_WIDE_MUTATION_BOUNDARY`.
+- [ ] 2.2 Remove reconcile from `WHOLE_RUN_MODES` and keep the graph join outside every hold.
+- [ ] 2.3 Give each group from 1.2 its own hold, with a bounded busy wait and stop checks.
+- [ ] 2.4 Re-read each phase's inputs inside its hold under design D2.
+- [ ] 2.5 Apply only the purge entries that the plan and the fresh read share, and report the rest.
 
 ## 3. Verify
 
-- [ ] 3.1 Prove that a foreground write commits between two reconcile phases, and that a phase whose inputs moved is skipped and reported.
-- [ ] 3.2 Repeat the profile from 1.1 and record the longest hold before and after.
-- [ ] 3.3 Run Ruff, the privacy gate, `openspec validate --all --strict` and the full suite, then obtain an independent review and merge.
+- [ ] 3.1 Prove that a foreground write commits between two holds of a CLI reconcile and of a job.
+- [ ] 3.2 Prove that a purge entry that moved is reported and left unchanged.
+- [ ] 3.3 Repeat the profile from 1.1 and record the longest hold before and after.
+- [ ] 3.4 Run Ruff, the privacy gate, `openspec validate --all --strict` and the full suite.
+- [ ] 3.5 Obtain an independent review, then merge.
