@@ -13,11 +13,13 @@ source. A value that could not be read stays unknown; it is never recorded as ze
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import gzip
 import json
 import shutil
 import time
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -26,7 +28,7 @@ from typing import Any
 from cellctl.manifests import namespace_name
 from kubernetes.utils.quantity import parse_quantity
 
-from . import drill_cluster
+from . import drill_cluster, platform
 from . import large_import_fixture as fixture
 from .infra import docker_labels
 from .mcp_client import TenantClient, ToolResult
@@ -44,6 +46,7 @@ SAMPLE_SECONDS = 10
 DRAIN_POLLS, DRAIN_SECONDS, DRAIN_TIMEOUT = 3, 15, 900
 INDEX_LAPS = {"notes": 1, "media": 3}
 GATEWAY_REQUIRED = "CLOUD_GATEWAY_REQUIRED"  # the cell's documented refusal of a control-plane tool
+APP_LOG_TAIL_BYTES = 20 << 20  # kept per file of the cell's app log; the pod's /tmp holds at most 64 MiB
 TRANSIENT_ATTEMPTS = 8
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
@@ -140,13 +143,28 @@ try:
         body = json.loads(refused.read())
     # What readiness waits on, so a slow start shows its cause in the samples.
     ready = {key: body.get(key) for key in ('status', 'reasons')}
-    ready['retrieval'] = {key: (body.get('retrieval') or {}).get(key) for key in ('state',)}
+    ready['retrieval'] = {key: (body.get('retrieval') or {}).get(key) for key in ('state', 'catalogue_unchanged_seconds', 'lagging_scopes')}
     ready['repair'] = {key: (body.get('repair') or (body.get('retrieval') or {}).get('repair') or {}).get(key)
-                       for key in ('phase', 'age_seconds')}
+                       for key in ('phase', 'age_seconds', 'last_result', 'last_duration_seconds')}
 except Exception:  # a stopped or starting server leaves the sample without readiness, never without memory
     pass
 print(json.dumps({'memory_current': current, 'memory_anon': anon, 'memory_peak': peak, 'memory_limit': limit,
                   'volume_total': total, 'volume_used': used, 'ready': ready}))
+"""
+# The last bytes of each file in the cell's log folder (EXOMEM_LOG_DIR, set by the cell's manifest), compressed
+# and encoded so that any byte survives the text channel of `kubectl exec`.
+APP_LOG_SCRIPT = """import base64, gzip, json, os, sys
+root = os.environ.get('EXOMEM_LOG_DIR') or '/tmp/exomem-logs'
+found = {}
+for name in sorted(os.listdir(root)):
+    full = os.path.join(root, name)
+    if not os.path.isfile(full):
+        continue
+    with open(full, 'rb') as handle:
+        size = os.fstat(handle.fileno()).st_size
+        handle.seek(max(0, size - int(sys.argv[1])))
+        found[name] = {'size': size, 'tail': base64.b64encode(gzip.compress(handle.read())).decode()}
+print(json.dumps(found))
 """
 
 
@@ -227,6 +245,37 @@ def reported_states(value: Any) -> set[str]:
     return found
 
 
+def tolerated_refusals() -> frozenset[str]:
+    """The refusals of a control-plane tool that the run reports without failing.
+
+    A cell refuses `observe_transfer` and `transfer_memory` with `CLOUD_GATEWAY_REQUIRED` while the chart leaves
+    the Cloud transfer tools off. The rehearsal sets that chart value (`platform.TRANSFER_TOOLS_ENABLED`); with the
+    tools on, the same refusal means the tools are broken and fails the call.
+    """
+    return frozenset() if platform.TRANSFER_TOOLS_ENABLED else frozenset({GATEWAY_REQUIRED})
+
+
+def apply_step(reply: Mapping[str, Any], seconds: float, *, before: int | None) -> dict[str, Any]:
+    """One apply call as the page report keeps it: the reply's counts, the files this call filed, and whether it stopped.
+
+    The reply's `applied` count is cumulative, so `before` is the count after the call before. A count that a
+    reply does not carry leaves what depends on it unknown (None), never 0.
+    """
+    progress = reply.get("progress") or {}
+    applied = progress.get("applied")
+    return {"seconds": round(seconds, 2), "applied": applied, "remaining": progress.get("remaining"),
+            "failed": progress.get("failed"), "stopped": bool(reply.get("apply_stop")),
+            "files": applied - before if applied is not None and before is not None else None}
+
+
+def files_per_second(steps: Sequence[Mapping[str, Any]]) -> float | None:
+    """Files filed over the seconds of the apply calls that filed them; None when a call's files are unknown."""
+    seconds = sum(step["seconds"] for step in steps)
+    if not seconds or any(step["files"] is None for step in steps):
+        return None
+    return round(sum(step["files"] for step in steps) / seconds, 2)
+
+
 def is_drained(polls: Sequence[Mapping[str, int | None]], needed: int = DRAIN_POLLS) -> bool:
     """The index queues were all empty on the last `needed` readings. A failed reading is not empty."""
     last = polls[-needed:]
@@ -240,6 +289,9 @@ def peaks(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         values = [row[key] for row in rows if row.get(key) is not None]
         return function(values) if values else None
 
+    retrieval = [(row.get("ready") or {}).get("retrieval") or {} for row in rows]
+    lag_ages = [item["catalogue_unchanged_seconds"] for item in retrieval
+                if item.get("catalogue_unchanged_seconds") is not None]
     return {
         "ticks": len(rows),
         "ticks_with_cell_reading": sum(1 for row in rows if row.get("volume_used") is not None),
@@ -252,6 +304,9 @@ def peaks(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "peak_thin_pool_allocated_bytes": high("thin_pool_allocated"),
         "peak_thin_volume_allocated_bytes": high("thin_volume_allocated"),
         "min_runner_free_bytes": high("runner_free", min),
+        # Ticks per retrieval state of /health/ready; a tick that could not read it counts as "unread".
+        "retrieval_states": dict(Counter(item.get("state") or "unread" for item in retrieval)),
+        "peak_catalogue_unchanged_seconds": max(lag_ages) if lag_ages else None,
     }
 
 
@@ -513,15 +568,15 @@ async def prove_stage(ctx: Context, agent: Agent, folder: Folder, row: Mapping[s
     folder.proof = receipt["proof"]
     states: set[str] = set()
     for _ in range(4):
-        # The chart serves observe_transfer from the gateway only when cloudGateway.transferTools is on, and it
-        # is off by default; the CLI already waited for `done`, so a cell's documented refusal is reported, not fatal.
+        # The chart serves observe_transfer from the gateway only when cloudGateway.transferTools is on; the CLI
+        # already waited for `done`, so while the rehearsal leaves the tools off, the refusal is reported, not fatal.
         body, seconds = await agent.call("observe_transfer", {"action": "status", "import_id": folder.import_id},
-                                         tolerated=frozenset({GATEWAY_REQUIRED}))
+                                         tolerated=tolerated_refusals())
         if body.get("error_code") == GATEWAY_REQUIRED:
             folder.report["observe_transfer"] = {"seconds": seconds, "served": False, "error_code": GATEWAY_REQUIRED}
             return problems
         states = reported_states(body)
-        folder.report["observe_transfer"] = {"seconds": seconds, "states_reported": sorted(states),
+        folder.report["observe_transfer"] = {"seconds": seconds, "served": True, "states_reported": sorted(states),
                                              "reply_head": json.dumps(body, sort_keys=True)[:1200]}
         if "done" in states:
             break
@@ -531,17 +586,34 @@ async def prove_stage(ctx: Context, agent: Agent, folder: Folder, row: Mapping[s
     return problems
 
 
-async def apply_calls(agent: Agent, plan: LargeImportPlan, run_id: str, plan_id: str, **first: Any) -> dict[str, Any]:
-    """Call apply until a reply carries no continuation, or stops for lack of space."""
+async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
+    """The run as `read_import` status reports it, with what the compact `import_memory` replies leave out.
+
+    The flow reads its control fields from the compact replies, as an agent does. The measurements also need
+    the inventory, the recorded stage and the finish count. A read changes nothing and keeps those replies
+    compact, where `response_detail: "full"` would wrap each reply in the terminal envelope and add a payload per call.
+    """
+    body, _ = await agent.call("read_import", {"operation": {"kind": "status", "run_id": run_id}}, kind="status")
+    return body
+
+
+async def apply_calls(agent: Agent, plan: LargeImportPlan, run_id: str, plan_id: str, *, applied_before: int | None = 0,
+                      **first: Any) -> dict[str, Any]:
+    """Call apply until a reply carries no continuation, or stops for lack of space.
+
+    `applied_before` is the files already filed in the run, so the first call's own count is its difference.
+    """
     fields: dict[str, Any] = {"run_id": run_id, "plan_id": plan_id, **first}
-    seconds, calls = 0.0, 0
+    seconds, steps = 0.0, []
     while True:
         plan.require_time("the page was filed")
         reply, took = await agent.import_op("apply", **fields)
-        seconds, calls = seconds + took, calls + 1
+        seconds += took
+        steps.append(apply_step(reply, took, before=steps[-1]["applied"] if steps else applied_before))
         token = reply.get("continuation")
         if reply.get("apply_stop") or not token:
-            return {"reply": reply, "seconds": round(seconds, 2), "calls": calls, "stop": reply.get("apply_stop")}
+            return {"reply": reply, "seconds": round(seconds, 2), "calls": len(steps), "stop": reply.get("apply_stop"),
+                    "steps": steps}
         fields = {"run_id": run_id, "plan_id": plan_id, "continuation": token}
 
 
@@ -549,7 +621,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
     """Page through the stage as the tool text says. Returns the problems found, by criterion."""
     stage_path = f"{fixture.STAGE_DIR}/{folder.import_id}"
     pages: list[dict[str, Any]] = folder.report.setdefault("pages", [])
-    problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": []}
+    problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": [], "compact_reply": []}
     consumed = 0
     fields: dict[str, Any] = {"path": stage_path, "collection": CELL_COLLECTION[folder.name],
                               "initialize_kb": folder.name == "notes"}
@@ -557,15 +629,19 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         plan.require_time(f"page {len(pages) + 1} of the {folder.name} folder was filed")
         reply, start_seconds = await agent.import_op("start", **fields)
         run_id = reply["run_id"]
-        rows = reply.get("inventory") or []
+        stored = await read_run(agent, run_id)
+        rows = stored.get("inventory") or []
         page: dict[str, Any] = {"page": len(pages) + 1, "run_id": run_id, "rows": len(rows),
                                 "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
-                                "hidden_files_skipped": reply.get("hidden_files_skipped"),
+                                "hidden_files_skipped": stored.get("hidden_files_skipped"),
                                 "start_seconds": round(start_seconds, 2)}
         pages.append(page)
-        if reply.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
-            problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {reply.get('stage')}, not its manifest proof")
+        if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
+            problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
         next_after = reply.get("next_after")
+        if next_after != stored.get("next_after"):
+            problems["compact_reply"].append(
+                f"page {page['page']}: the compact start reply carried next_after {next_after!r}, the run holds {stored.get('next_after')!r}")
         await agent.import_op("select", run_id=run_id, include=[stage_path])
         planned, plan_seconds = await agent.import_op("plan", run_id=run_id)
         while planned.get("continuation"):
@@ -578,7 +654,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         eligible = {row["path"] for row in rows if row.get("eligible")}
         large = [entry for entry in folder.entries if entry.disposition == fixture.FILED_ARTIFACT
                  and entry.size >= fixture.LARGE_MIN_BYTES and f"{stage_path}/{entry.path}" in eligible]
-        applied = {"seconds": 0.0, "calls": 0}
+        solo: dict[str, Any] = {"seconds": 0.0, "calls": 0, "steps": []}
         if large and "large_binaries" not in folder.report:
             # Applied alone first, so that their copy and hash time is measured on its own.
             solo = await apply_calls(agent, plan, run_id, plan_id, only_paths=[f"{stage_path}/{e.path}" for e in large])
@@ -589,14 +665,17 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
                 "what": "bytes of the large files over the seconds of the apply calls that handled only them, "
                         "which hash, copy, write the Source and remove the staged copy",
             }
-            applied = {"seconds": solo["seconds"], "calls": solo["calls"]}
             if solo["stop"]:
                 problems["no_space_failure"].append(f"page {page['page']}: apply stopped for lack of space: {json.dumps(solo['stop'])[:400]}")
-                page["apply_stop"] = solo["stop"]
+                page["apply_stop"], page["apply_steps"] = solo["stop"], solo["steps"]
                 break
-        rest = await apply_calls(agent, plan, run_id, plan_id)
-        page["apply_seconds"] = round(applied["seconds"] + rest["seconds"], 2)
-        page["apply_calls"] = applied["calls"] + rest["calls"]
+        rest = await apply_calls(agent, plan, run_id, plan_id,
+                                 applied_before=solo["steps"][-1]["applied"] if solo["steps"] else 0)
+        steps = [*solo["steps"], *rest["steps"]]
+        page["apply_seconds"] = round(solo["seconds"] + rest["seconds"], 2)
+        page["apply_calls"] = solo["calls"] + rest["calls"]
+        page["apply_steps"] = steps
+        page["files_per_second"] = files_per_second(steps)
         page["progress"] = rest["reply"].get("progress")
         failed = (page["progress"] or {}).get("failed")
         if failed:
@@ -607,12 +686,16 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
             break
         finished, finish_seconds = await agent.import_op("finish", run_id=run_id)
         finish = finished.get("finish") or {}
+        recorded = (await read_run(agent, run_id)).get("finish") or {}
+        if finish.get("residual") != recorded.get("residual"):
+            problems["compact_reply"].append(
+                f"page {page['page']}: the compact finish reply carried residual {finish.get('residual')!r}, the run holds {recorded.get('residual')!r}")
         folder.residual = finish.get("residual")
-        consumed += int(finish.get("consumed") or 0)
-        page.update({"finish_seconds": round(finish_seconds, 2), "consumed": finish.get("consumed"),
+        consumed += int(recorded.get("consumed") or 0)
+        page.update({"finish_seconds": round(finish_seconds, 2), "consumed": recorded.get("consumed"),
                      "residual_files": (finish.get("residual") or {}).get("files")})
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
-              f"apply {page['apply_seconds']}s, consumed {page['consumed']}", flush=True)
+              f"apply {page['apply_seconds']}s ({page['files_per_second']} files/s), consumed {page['consumed']}", flush=True)
         if not next_after:
             break
         fields = {"after": next_after}
@@ -660,6 +743,35 @@ def save_cell_logs(ctx: Context) -> None:
     (ctx.stack.workdir / "diagnostics" / "cell-pod.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
 
 
+def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
+    """Keep the tail of each file in the cell's app log folder with the diagnostics, next to the pod log.
+
+    The folder sits on the pod's memory-backed /tmp, so a replaced pod takes its logs with it; this reads the
+    live pod. `label` (a folder name, or "end") keeps one copy from overwriting another. Returns each file's
+    size and the bytes kept, so a cut tail shows as one.
+    """
+    found = exec_json(ctx, APP_LOG_SCRIPT, str(APP_LOG_TAIL_BYTES), attempts=2)
+    diagnostics = ctx.stack.workdir / "diagnostics"
+    diagnostics.mkdir(exist_ok=True)
+    kept = {}
+    for name, item in found.items():
+        tail = gzip.decompress(base64.b64decode(item["tail"]))
+        (diagnostics / f"cell-app-{label}-{Path(name).name}").write_bytes(tail)
+        kept[name] = {"file_bytes": item["size"], "kept_bytes": len(tail)}
+    return kept
+
+
+async def keep_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
+    """Save the app log, or report why not: a log that could not be read never fails the run's verdict.
+
+    A hung exec can still delay the run by up to the exec's own timeout.
+    """
+    try:
+        return await asyncio.to_thread(save_cell_app_logs, ctx, label)
+    except Exception as error:  # noqa: BLE001 - reported in the result, as an unread value stays unknown
+        return {"error": f"{type(error).__name__}: {str(error)[:300]}"}
+
+
 async def wait_import_state(ctx: Context, import_id: str, state: str, timeout: float) -> dict:
     deadline = time.monotonic() + timeout
     while True:
@@ -680,9 +792,12 @@ async def discard(ctx: Context, agent: Agent, plan: LargeImportPlan, folder: Fol
     listing = await asyncio.to_thread(exec_json, ctx, STAGE_SCRIPT, folder.import_id)
     leftover = fixture.check_stage(folder.entries, {path: (size, digest) for path, (size, digest) in listing.items()})
     folder.report["stage_left_files"] = len(listing)
+    # The discard replaces the cell's pod, and its log folder with it, so the folder's log is kept first.
+    folder.report["cell_app_logs_before_discard"] = await keep_cell_app_logs(ctx, folder.name)
     body, seconds = await agent.call("transfer_memory", {"action": "import_discard", "import_id": folder.import_id,
-                                                         "confirm": True}, tolerated=frozenset({GATEWAY_REQUIRED}))
-    folder.report["discard_call"] = {"seconds": seconds, "reply_head": json.dumps(body, sort_keys=True)[:600]}
+                                                         "confirm": True}, tolerated=tolerated_refusals())
+    folder.report["discard_call"] = {"seconds": seconds, "route": "transfer_memory import_discard",
+                                     "reply_head": json.dumps(body, sort_keys=True)[:600]}
     if body.get("error_code") == GATEWAY_REQUIRED:
         # Without the gateway's transfer tools, make the one write Substrate's discard route makes
         # (cloud-imports.ts: requested_state = 'discard_requested'); cellctl then runs the real cleanup Job.
@@ -752,6 +867,8 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
         folder = await generate(ctx, plan, name)
     out["folders"][name] = folder.report
     criteria: dict[str, list[str]] = {}
+    # The import Job holds the volume, so the upload replaces the cell pod and its log folder.
+    folder.report["cell_app_logs_before_upload"] = await keep_cell_app_logs(ctx, f"{name}-before-upload")
     with phase("upload"):
         row = await upload(ctx, plan, folder)
     folder.report["import_row"] = import_summary(row)
@@ -763,6 +880,7 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
     folder.report["pod_after_paging"] = await asyncio.to_thread(pod_health, ctx)
     criteria["manifest_proof"] += paging["manifest_proof"]
     criteria["filing"], criteria["no_space_failure"] = paging["filing"], paging["no_space_failure"]
+    criteria["compact_reply"] = paging["compact_reply"]
     if criteria["no_space_failure"]:
         # The stage is still on the volume; going on to the next folder would only repeat the failure.
         raise StepFailure(f"the {name} folder could not be filed: {criteria['no_space_failure'][0]}")
@@ -836,6 +954,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
         "sizing": asdict(plan.sizing), "runner_free_bytes_at_sizing": plan.free_bytes,
         "volume": {"gib": plan.volume_gib, "boundary": "TopoLVM thin volume on a loop-device pool; the chart caps "
                    "growth at this size, so the claim cannot be enlarged"},
+        "transfer_tools_enabled": platform.TRANSFER_TOOLS_ENABLED,
         "phases": {}, "folders": {}, "findings": [], "measurements": {}, "verdict": None,
     })
     ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
@@ -873,6 +992,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
             handle.writelines(json.dumps(row) + "\n" for row in sampler.rows)
         with contextlib.suppress(Exception):
             await asyncio.to_thread(save_cell_logs, ctx)
+        out["cell_app_logs"] = await keep_cell_app_logs(ctx, "end")
     expected = plan.volume_gib
     # Design D7: a local-storage cell publishes no import limits and legacy admission never grows its volume.
     problems = [f"the volume claim was {state['pvc_request']} at the {when}, not {expected}Gi"

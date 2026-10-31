@@ -53,6 +53,10 @@ TRUSTED_INGRESS_HEADER = "x-exomem-ingress-source"
 # These workload identities and the snapshot API are fixed by the platform chart.
 LOCAL_STORAGE_CONTROLLERS = ("exomem-platform-topolvm-controller", "snapshot-controller")
 SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
+# The chart's `cloudGateway.transferTools.enabled`, which serves `observe_transfer` and `transfer_memory` from the
+# gateway. The rehearsal leaves it off, as the chart does. The large-import run reads this to decide whether a
+# `CLOUD_GATEWAY_REQUIRED` refusal of those tools is expected or a failure.
+TRANSFER_TOOLS_ENABLED = False
 
 
 @dataclass
@@ -124,6 +128,7 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
             "trustedIngressSourceHeader": TRUSTED_INGRESS_HEADER,
             "trustedIngressSourceValue": config.trusted_ingress_source_value,
             "databaseEgressCidrs": [pg_cidr],
+            "transferTools": {"enabled": TRANSFER_TOOLS_ENABLED},
         },
         "cloudIngress": {"enabled": False},
         "cert-manager": {"enabled": False},

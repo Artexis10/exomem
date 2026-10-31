@@ -118,7 +118,7 @@ A person's agent brings a large, realistic folder into a Cloud cell, then a seco
 For each folder the run does what an agent does:
 1. Run `exomem cloud import <folder>` in the CLI container, as in the native import above.
 2. Poll `observe_transfer` until the import is `done`.
-3. Page with `import_memory`: `start` (then `start(after=...)`), `select`, `plan`, `apply`, `finish`.
+3. Page with `import_memory`: `start` (then `start(after=...)`), `select`, `plan`, `apply`, `finish`. Every call keeps the default, compact reply, and the run reads its control fields from it. The compact reply omits the inventory, the recorded stage and the filed count, so the run also reads `read_import` status after `start` and after `finish`. If a compact reply drops a control field that the run holds, the `compact_reply` criterion fails.
 4. Read the residual, then call `transfer_memory` with `import_discard` and `confirm=true`.
 5. Wait for the index queues to empty, then read the Sources back.
 
@@ -130,9 +130,13 @@ The fixture generator (`large_import_fixture.py`) is deterministic. It writes it
 - `consumed` equals the count of filed artifacts;
 - the volume claim and the cell row stay at the fixed size (design D7: a local-storage cell publishes no limits and never grows).
 
+The platform chart leaves `cloudGateway.transferTools` off, and so does the rehearsal (`platform.TRANSFER_TOOLS_ENABLED`). While it is off, the cell refuses `observe_transfer` and `transfer_memory` with `CLOUD_GATEWAY_REQUIRED`. The run reports that refusal and makes the discard through the Substrate route instead. With the setting on, the same refusal fails the run. The step summary prints `observe_transfer.served` and `discard_call.route` for each folder, so a pass shows when the transfer tools were not exercised.
+
 The first folder holds about 80 percent of the bytes, and the file count is fixed at 70,000 by default. The byte total comes from the runner's free disk. The generator shrinks bytes before it shrinks the file count, and the report records the size chosen and why. The volume is 1.6 times the first folder, so two copies of it cannot fit.
 
 The exit code is 0 for `pass` (or `smoke_only` with `--large-import-smoke`), 1 for a recorded product finding or a failed criterion, and 2 for a harness failure. `--large-import-minutes` (default 115) is a soft deadline that is checked between calls. When it passes, the run stops and reports what it finished as a failure.
+
+Each page in the report keeps the counts and seconds of every `apply` call (`apply_steps`) and the files filed per second. The sampler also records the lexical repair result and duration from `/health/ready`. The run saves the last 20 MiB of each file in the cell's app log folder to `cell-app-<label>-<file>` in the diagnostics artifact, next to `cell-pod.log`. It saves them before each pod replacement the run causes: before each folder's upload (label `<folder>-before-upload`) and before its discard (label `notes` or `media`). It saves them again at the end of the stage or on failure (label `end`). A replaced pod takes its log folder with it, so together the copies cover every pod that serves the run's tool calls. The short-lived pod between the import's prepare and import Jobs is not kept. A label names when a copy was taken: `media-before-upload` holds the pod that drained the notes folder after its discard.
 
 The report records, under `stages.large_import.measurements`: peak volume use, the cell's memory during the index build, `read_import_index` time per call, wall time per phase, and apply MiB/s for the large binaries. Each states its window and source. The volume and memory peaks are lower bounds from a 10-second sampler, and the sampler cannot read the cell while an import or discard Job holds its volume.
 

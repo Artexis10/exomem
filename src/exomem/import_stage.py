@@ -8,7 +8,6 @@ none, so nothing in them is consumable.
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,15 +34,6 @@ class Stage:
     import_id: str
     proof: str
     members: dict[str, tuple[int, str]]
-
-
-def _is_import_id(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        return str(uuid.UUID(value)) == value
-    except ValueError:
-        return False
 
 
 def _read_members(entries: object) -> dict[str, tuple[int, str]] | None:
@@ -76,7 +66,7 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
     Nothing here raises: a missing, unreadable or malformed manifest leaves the stage unrecorded,
     which only means adoption keeps its staged copies.
     """
-    if not _is_import_id(import_id):
+    if not vault.is_import_id(import_id):
         return None
     try:
         state = state_paths.vault_state_dir(vault_root)

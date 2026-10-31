@@ -345,6 +345,16 @@ def is_lexical_rebuild_runtime_file_name(name: str) -> bool:
     return _LEXICAL_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
+def is_import_id(value: object) -> bool:
+    """True for a canonical lowercase UUID string, the only spelling an import id takes."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
 def in_import_stage(rel_path: str) -> bool:
     """True when a vault-relative path is, or lies inside, a staged import `_Imports/<import_id>`.
 
@@ -355,12 +365,7 @@ def in_import_stage(rel_path: str) -> bool:
     indexed.
     """
     segments = rel_path.replace("\\", "/").strip("/").split("/")
-    if len(segments) < 2 or segments[0] != IMPORT_STAGE_DIRNAME:
-        return False
-    try:
-        return str(uuid.UUID(segments[1])) == segments[1]
-    except ValueError:
-        return False
+    return len(segments) >= 2 and segments[0] == IMPORT_STAGE_DIRNAME and is_import_id(segments[1])
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
