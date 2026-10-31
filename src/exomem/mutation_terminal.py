@@ -1528,21 +1528,29 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
-def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The specific-relation options the semantic writer built for this committed write.
+def _relation_advisory_context(leaf: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The semantic writer's lookup context for this committed write.
 
-    The writer nests them with the advisory context, so a creation or an edit carries them one
-    level down. It has already bounded the list and shaped each entry.
+    The writer nests it with the advisory facts, so a creation carries it under `creation`, an
+    edit under `semantic`, and a bare result at the top. The first container that holds one wins.
     """
-    options: Any = None
     for container_key in ("creation", "semantic", None):
         container = leaf if container_key is None else leaf.get(container_key)
         context = (
             container.get("_relation_advisory_context") if isinstance(container, Mapping) else None
         )
-        options = context.get("specific_options") if isinstance(context, Mapping) else None
-        if options:
-            break
+        if isinstance(context, Mapping):
+            return context
+    return None
+
+
+def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The specific-relation options the semantic writer built for this committed write.
+
+    It has already bounded the list and shaped each entry.
+    """
+    context = _relation_advisory_context(leaf)
+    options = context.get("specific_options") if context is not None else None
     if not isinstance(options, (list, tuple)):
         return []
     return [dict(option) for option in options if isinstance(option, Mapping)]
@@ -1559,12 +1567,12 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
     """
     if not isinstance(leaf, Mapping):
         return None
-    context = leaf.get("_relation_advisory_context")
+    context = _relation_advisory_context(leaf)
     labels: set[str] = set()
     facts_truncated = False
     registry_hash: str | None = None
     vault_hint: str | None = None
-    if isinstance(context, Mapping):
+    if context is not None:
         candidate_hash = context.get("registry_hash")
         if isinstance(candidate_hash, str) and 0 < len(candidate_hash) <= 256:
             registry_hash = candidate_hash
