@@ -28,7 +28,7 @@ from typing import Any
 from cellctl.manifests import namespace_name
 from kubernetes.utils.quantity import parse_quantity
 
-from . import drill_cluster, platform
+from . import drill_cluster, host_speed, platform
 from . import large_import_fixture as fixture
 from .infra import docker_labels
 from .mcp_client import TenantClient, ToolResult
@@ -908,7 +908,34 @@ async def volume_state(ctx: Context) -> dict[str, Any]:
             "pvc_storage_class": pvc["spec"].get("storageClassName"), "cell_row_storage_gib": cell.get("storage_gib")}
 
 
-def measurements(out: dict, sampler: Sampler) -> dict[str, Any]:
+def calibrated_timings(out: Mapping[str, Any], calibration_seconds: float | None) -> dict[str, Any]:
+    """The phases' seconds and each folder's page 1 apply seconds, raw and divided by the host's calibration ratio.
+
+    The ratio is the host's calibration over the reference (`host_speed`), so a `_per_calibration` value is
+    what the same work would take on a host as fast as the reference, and two runs on different runners compare.
+    A run with no calibration, or a folder with no page 1, stays None; it is never scaled to 0.
+    """
+
+    def scaled(seconds: float | None) -> float | None:
+        return host_speed.per_calibration(seconds, calibration_seconds)
+
+    ratio = host_speed.calibration_ratio(calibration_seconds)
+    first_pages = {name: (folder.get("pages") or [{}])[0] for name, folder in out["folders"].items()}
+    return {
+        "host_calibration": {
+            "host_calibration_seconds": calibration_seconds, "reference_seconds": host_speed.REFERENCE_SECONDS,
+            "calibration_ratio": None if ratio is None else round(ratio, 3), "workload_id": host_speed.WORKLOAD_ID,
+            "what": "seconds of the fixed single-threaded workload that the run took before the scenario, over the "
+                    "reference; the workload's definition is in environment.host_calibration",
+        },
+        "phase_seconds_per_calibration": {label: scaled(seconds) for label, seconds in out["phases"].items()},
+        "page_1_apply": {name: {"apply_seconds": page.get("apply_seconds"),
+                                "apply_seconds_per_calibration": scaled(page.get("apply_seconds"))}
+                         for name, page in first_pages.items()},
+    }
+
+
+def measurements(out: dict, sampler: Sampler, calibration_seconds: float | None) -> dict[str, Any]:
     """The five figures the packet asks for, each with what it is and where it came from."""
     summary = sampler.summary()
     every = summary["all"]
@@ -943,6 +970,7 @@ def measurements(out: dict, sampler: Sampler) -> dict[str, Any]:
         "read_import_index": final,
         "apply_throughput_large_binaries": dict(large) or {"measured": False, "why": "no page listed an eligible large file"},
         "phase_seconds": out["phases"],
+        **calibrated_timings(out, calibration_seconds),
     }
 
 
@@ -985,7 +1013,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
         out["volume"].update(volume)
         out["enospc_log_counts"] = space
         out["agent_calls"] = agent.stats()
-        out["measurements"] = measurements(out, sampler)
+        out["measurements"] = measurements(out, sampler, ctx.report.environment.get("host_calibration_seconds"))
         out["sampler"] = sampler.summary()
         (ctx.stack.workdir / "diagnostics").mkdir(exist_ok=True)
         with gzip.open(ctx.stack.workdir / "diagnostics" / "large-import-samples.jsonl.gz", "wt") as handle:

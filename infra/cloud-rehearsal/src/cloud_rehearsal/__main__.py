@@ -32,6 +32,7 @@ from . import (
     build,
     drill,
     drill_cluster,
+    host_speed,
     images,
     infra,
     k3s_link,
@@ -143,6 +144,9 @@ async def _run(args: argparse.Namespace) -> int:
     args.cache.mkdir(parents=True, exist_ok=True)
     report = Report(run_id=run_id)
     report.environment = infra.environment_facts()
+    if args.large_import:
+        # Before any image build or cluster work loads the CPU, so the number is the host's alone.
+        report.environment.update(host_speed.calibrate())
     report.inputs = {
         "exomem_commit": run(["git", "-C", str(images.REPO_ROOT), "rev-parse", "HEAD"]).stdout.strip(),
         "exomem_worktree_clean": run(["git", "-C", str(images.REPO_ROOT), "status", "--porcelain"]).stdout.strip() == "",

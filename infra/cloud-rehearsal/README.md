@@ -140,6 +140,8 @@ Each page in the report keeps the counts and seconds of every `apply` call (`app
 
 The report records, under `stages.large_import.measurements`: peak volume use, the cell's memory during the index build, `read_import_index` time per call, wall time per phase, and apply MiB/s for the large binaries. Each states its window and source. The volume and memory peaks are lower bounds from a 10-second sampler, and the sampler cannot read the cell while an import or discard Job holds its volume.
 
+Runners differ in CPU speed by 2 to 2.4 times, so a timing from one run does not compare with a timing from another. The report's `environment` records `cpu_model`, `cpu_count_lscpu` and `cpu_mhz` from `lscpu` (`null` where `lscpu` does not give one). It also records `host_calibration_seconds`: the seconds of a fixed single-threaded SHA-256 and zlib workload, with its definition, that runs for a few seconds before any build (`host_speed.py`). Under `measurements`, `phase_seconds` and the page 1 `apply_seconds` of each folder stay raw, and `phase_seconds_per_calibration` and `apply_seconds_per_calibration` divide them by the calibration ratio (the host's seconds over the reference), so they show the time on a host of reference speed. Without a calibration, the scaled values are `null`.
+
 To run it from a workstation with Docker, sudo and enough free disk, use the `--large-import` flag of `exomem-cloud-rehearsal run`. Dispatch it on GitHub with `gh workflow run cloud-rehearsal.yml -f mode=large-import`.
 
 ## Owner export
