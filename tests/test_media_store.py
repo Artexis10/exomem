@@ -1900,6 +1900,26 @@ def test_eviction_reads_past_a_candidate_it_keeps(vault: Path, selected_store, m
     assert damaged.exists() and not sound.exists()
 
 
+def test_a_store_outage_ends_the_eviction_pass_at_its_first_head(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that asks an unreachable store once per candidate, which holds its caller for one timeout each."""
+    from exomem import media_store
+
+    stored = [_stored(vault, f"recording-{index}", 100 + index) for index in range(3)]
+    heads = []
+
+    def unreachable(self, name, version):
+        heads.append(name)
+        raise OSError("the store is unreachable")
+
+    monkeypatch.setattr(media_store.FilesystemStore, "head", unreachable)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, *stored))
+
+    assert media_store.evict_to_target(vault) == 0
+
+    assert len(heads) == 1
+    assert all(path.exists() for path in stored)
+
+
 def test_a_demand_that_only_rows_of_moved_originals_could_meet_evicts_nothing(vault: Path, selected_store, monkeypatch):
     """Catches room counted from rows that moves left, which evicts real originals for a demand eviction cannot meet."""
     from exomem import media_store

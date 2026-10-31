@@ -1707,6 +1707,7 @@ class MediaWorker:
         assert self._store is not None
         relaunch_after = 0.0
         eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
+        eviction: threading.Thread | None = None
         # The store signature this supervisor last saw answer "no work", and
         # when to stop trusting it.  `None` means "ask the store".
         idle_signature: tuple[object, ...] | None = None
@@ -1722,7 +1723,11 @@ class MediaWorker:
                     log.warning("media worker: engine convergence deferred", exc_info=True)
             while not self._stop_event.is_set():
                 if _clock() >= eviction_at:
-                    _evict(self._vault_root)
+                    # A pass may wait on the store, so it runs beside this watchdog, one pass at a time.
+                    if eviction is None or not eviction.is_alive():
+                        eviction = threading.Thread(target=_evict, args=(self._vault_root,),
+                                                    name="exomem-media-eviction", daemon=True)
+                        eviction.start()
                     eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
                 child = self._child
                 running = child is not None and child.poll() is None
