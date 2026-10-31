@@ -20,6 +20,7 @@ from test_adoption_collection import (
 
 from exomem import (
     adopt,
+    adoption_plan,
     adoption_run,
     commands,
     context_refs,
@@ -271,6 +272,81 @@ def test_an_unchanged_re_import_creates_nothing_and_reports_the_notes_as_already
     assert replanned["plan"]["notes"] == {"to_create": 0, "existing": 2, "previous": 0}
     assert {o["status"] for o in second["outcomes"].values()} == {"already-applied"}
     assert sorted(str(p) for p in vault.rglob("*.md") if "_Imports" not in str(p)) == pages_before
+
+
+def test_a_continuation_reads_again_only_the_pages_that_changed_since_the_last_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tiny_budget: None,  # noqa: F811 - the imported fixture
+) -> None:
+    files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n" for n in range(3)}
+    vault = _vault(tmp_path, files)
+    earlier = [f"Knowledge Base/Notes/Insights/earlier-{n}.md" for n in range(12)]
+    for rel in earlier:
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text("---\ntype: insight\ntitle: Earlier\n---\n\nText.\n", encoding="utf-8")
+    # Every write here is older than a timestamp tick by the time a later call lists it.
+    monkeypatch.setattr(adoption_plan, "_RACY_NS", 0)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    plan_id = planned["plan"]["plan_id"]
+    read_pages: list[str] = []
+    real_read = adoption_plan._leading_frontmatter
+
+    def recording_read(root, page):
+        read_pages.append(page.relative_to(root).as_posix())
+        return real_read(root, page)
+
+    monkeypatch.setattr(adoption_plan, "_leading_frontmatter", recording_read)
+
+    first = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    read_by_first = set(read_pages)
+    read_pages.clear()
+    second = adoption_run.apply(
+        vault, run_id=run_id, plan_id=plan_id, continuation=first["continuation"], today=TODAY
+    )
+
+    made_first = [o for o in first["outcomes"].values() if o.get("note", {}).get("status") == "applied"]
+    assert len(made_first) == 1
+    assert set(earlier) <= read_by_first
+    assert not set(earlier) & set(read_pages)
+    assert second["progress"]["applied"] == 2
+    collection_path = next(
+        item["collection_path"] for item in planned["plan"]["items"]
+        if first["outcomes"].get(item["original_path"], {}).get("note", {}).get("status") == "applied"
+    )
+    assert adoption_plan.NoteIndex(vault).find(
+        collection="Coll", collection_path=collection_path
+    ) == made_first[0]["note"]["target_path"]
+
+
+def test_a_note_that_another_writer_files_between_calls_is_found_and_not_made_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tiny_budget: None,  # noqa: F811 - the imported fixture
+) -> None:
+    vault = _vault(tmp_path, {"Coll/Journal/a.md": "# A\n", "Coll/Journal/b.md": "# B\n"})
+    monkeypatch.setattr(adoption_plan, "_RACY_NS", 0)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    plan_id = planned["plan"]["plan_id"]
+    first = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    owed = next(
+        item for item in planned["plan"]["items"]
+        if first["outcomes"].get(item["original_path"], {}).get("note", {}).get("status") != "applied"
+    )
+    # Another writer, outside Exomem, files that item's note under a name of its own.
+    by_hand = "Knowledge Base/Notes/Insights/filed-by-hand.md"
+    (vault / by_hand).write_text(
+        "---\ntype: insight\ntitle: Filed by hand\nimport_collection: Coll\n"
+        f"collection_path: {owed['collection_path']}\n---\n\nText.\n",
+        encoding="utf-8",
+    )
+
+    last, _calls = _apply_from(vault, run_id, plan_id, first)
+
+    note = last["outcomes"][owed["original_path"]]["note"]
+    assert (note["status"], note["target_path"]) == ("already-applied", by_hand)
+    assert last["progress"] == {"applied": 2, "failed": 0, "remaining": 0, "total": 2}
+    assert len(_notes(vault)) == 2
 
 
 def test_a_re_import_finds_a_note_the_user_moved_without_rewriting_links(

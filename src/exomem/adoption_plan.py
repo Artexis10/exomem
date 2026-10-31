@@ -15,7 +15,10 @@ import hashlib
 import json
 import os
 import posixpath
+import threading
+import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -546,47 +549,115 @@ def _is_note_of(
     )
 
 
+@dataclass(frozen=True)
+class _NotePage:
+    """What one non-Source page told the note index, and the file state it was read at.
+
+    `signature` is None when the page must be read again on the next refresh: it was
+    unreadable, or it changed too recently for its timestamps to prove a later change.
+    `identity` is `(import_collection, collection_path, type)`, or None for a page that
+    carries no import identity.
+    """
+
+    signature: tuple[int, int, int, int] | None
+    identity: tuple[str, str, Any] | None
+
+
+# A page whose timestamps are this close to the refresh may change again within the same
+# timestamp tick, which a later stat cannot see; FAT keeps timestamps at 2 s granularity.
+_RACY_NS = 2_000_000_000
+# The knowledge bases whose note pages this process remembers. A process serves one vault;
+# a test process makes many, so the oldest is dropped.
+_KNOWN_VAULTS = 4
+_NOTE_PAGES: OrderedDict[str, dict[str, _NotePage]] = OrderedDict()
+_NOTE_PAGES_LOCK = threading.Lock()
+
+
+def _known_note_pages(root: Path) -> dict[str, _NotePage]:
+    """The note pages this process last read under `root`, as of the last refresh."""
+    with _NOTE_PAGES_LOCK:
+        return _NOTE_PAGES.get(os.path.realpath(root), {})
+
+
+def _remember_note_pages(root: Path, pages: dict[str, _NotePage]) -> None:
+    key = os.path.realpath(root)
+    with _NOTE_PAGES_LOCK:
+        _NOTE_PAGES[key] = pages
+        _NOTE_PAGES.move_to_end(key)
+        while len(_NOTE_PAGES) > _KNOWN_VAULTS:
+            _NOTE_PAGES.popitem(last=False)
+
+
+def _page_signature(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino)
+
+
 class NoteIndex:
-    """The notes that earlier imports made, by import identity, read once per plan or apply call.
+    """The notes that earlier imports made, by import identity, as of this call's first lookup.
 
     A note carries the `import_collection` and `collection_path` of its original wherever
     the user has since moved it, so the index finds a moved note. The knowledge base is
-    walked on the first lookup: a call without an own-note item never reads the notes.
+    listed on the first lookup: a call without an own-note item never reads the notes.
+    The process remembers what each page said with the page's file signature, so a later
+    call reads again only the pages that were added or changed since, by any writer, and
+    forgets the pages that are gone.
     """
 
     def __init__(self, root: Path) -> None:
         self._root = root
         self._paths: dict[tuple[str, str], str] | None = None
 
-    def _read(self) -> dict[tuple[str, str], str]:
+    def _refresh(self) -> dict[str, _NotePage]:
+        """Every non-Source page and what it says, reading only pages whose signature moved."""
         from .find_corpus import walk_md
 
-        found: dict[tuple[str, str], str] = {}
         kb = kb_root(self._root)
         if not kb.is_dir():
-            return found
-        basis = note_types.Basis(self._root)
+            return {}
+        known = _known_note_pages(self._root)
+        settled_before = time.time_ns() - _RACY_NS
         # A compiled page cannot be in Sources/: the mover refuses moves into it, and
         # `read_import_index` already reads its pages for their own identities.
         sources = kb / "Sources"
+        pages: dict[str, _NotePage] = {}
         # Sorted, so the first of two pages that carry one identity is always the same page.
         for page in sorted(walk_md(kb)):
             if page.is_relative_to(sources):
                 continue
+            rel = page.relative_to(self._root).as_posix()
+            try:
+                info = page.lstat()
+            except OSError:
+                continue
+            signature = _page_signature(info)
+            seen = known.get(rel)
+            if seen is not None and seen.signature == signature:
+                pages[rel] = seen
+                continue
+            # The signature is taken before the read, so a change during the read shows next time.
+            settled = max(info.st_mtime_ns, info.st_ctime_ns) < settled_before
             try:
                 frontmatter = _leading_frontmatter(self._root, page)
             except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                pages[rel] = _NotePage(None, None)
                 continue
-            if frontmatter is None:
-                continue
-            collection = _text_field(frontmatter.get("import_collection"))
-            collection_path = _text_field(frontmatter.get("collection_path"))
-            if collection is None or collection_path is None:
-                continue
-            if basis.selects(frontmatter.get("type"), note_types.compiled):
-                found.setdefault(
-                    (collection, collection_path), page.relative_to(self._root).as_posix()
-                )
+            identity = None
+            if frontmatter is not None:
+                collection = _text_field(frontmatter.get("import_collection"))
+                collection_path = _text_field(frontmatter.get("collection_path"))
+                if collection is not None and collection_path is not None:
+                    identity = (collection, collection_path, frontmatter.get("type"))
+            pages[rel] = _NotePage(signature if settled else None, identity)
+        _remember_note_pages(self._root, pages)
+        return pages
+
+    def _read(self) -> dict[tuple[str, str], str]:
+        found: dict[tuple[str, str], str] = {}
+        basis = note_types.Basis(self._root)
+        for rel, page in self._refresh().items():
+            # The type is judged on every call, because the vault's registry can change.
+            if page.identity is not None and basis.selects(page.identity[2], note_types.compiled):
+                found.setdefault(page.identity[:2], rel)
         return found
 
     def find(self, *, collection: str, collection_path: str) -> str | None:
