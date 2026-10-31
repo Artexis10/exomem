@@ -7800,7 +7800,7 @@ class LexicalStore:
         # carry its damage into every later repair, so check the copy once.
         if conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             return "integrity"
-        fresh = sqlite3.connect(":memory:")
+        fresh = _sqlite_connect(":memory:")
         try:
             self._ensure_schema(fresh)
             if self._catalog_declarations(conn) != self._catalog_declarations(fresh):
