@@ -365,7 +365,7 @@ class LocalRuntimeActivation:
 
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
-        maintenance_jobs.stop_all()
+        maintenance_jobs.stop_all(self.vault_root)
         with self._lock:
             # The retry lock prevents any later repair scheduling after stop.
             self._catalogue_stop.set()

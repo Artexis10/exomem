@@ -822,10 +822,14 @@ def _finish(live: _Live, state: str, error_code: str | None, outcome: dict[str, 
             _LIVE.pop(live.run_id, None)
 
 
-def stop_all(*, wait: float = SHUTDOWN_JOIN_SECONDS) -> None:
-    """Ask every live job to stop at its next checkpoint and wait for them, for a service stopping."""
+def stop_all(vault_root: Path, *, wait: float = SHUTDOWN_JOIN_SECONDS) -> None:
+    """Ask every live job of one vault to stop at its next checkpoint and wait for them, for its runtime stopping.
+
+    One process can serve several vault runtimes, so a runtime stops only its own vault's jobs.
+    """
+    root = Path(vault_root).resolve()
     with _LIVE_LOCK:
-        jobs = list(_LIVE.values())
+        jobs = [live for live in _LIVE.values() if live.vault_root == root]
     for live in jobs:
         live.reason = live.reason or SHUTDOWN_CODE
         live.stop.set()

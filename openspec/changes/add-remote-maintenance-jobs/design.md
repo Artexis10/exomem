@@ -56,6 +56,11 @@ service's drain. A separate process would leave the service's state stale.
 machine-local state directory (WAL), registered as external state in
 `reserved_paths.py`. The media ledger's columns are media-specific.
 
+The store never lived inside the vault, so its descriptor is marked
+`migrates_from_vault=False` and stays out of the migration manifest's
+descriptor set. Otherwise, the first release with the store would need a state
+migration at upgrade, and an older release would refuse the vault on rollback.
+
 - States form a closed set: `running`, `completed`, `failed`, `cancelled` and
   `interrupted`. A `cancel_requested` flag sits beside the state.
 - One write job runs per vault. The claim runs under `BEGIN IMMEDIATE`.

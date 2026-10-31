@@ -41,7 +41,7 @@ from exomem.cli_ops import OpError
 from exomem.governance import principal as principal_module
 from exomem.memory_refs import ID_FIELD
 
-_DEADLINE_SECONDS = 60.0
+_DEADLINE_SECONDS = 50.0
 _OTHER_ID = "0" * 64
 
 
@@ -430,7 +430,7 @@ def test_a_service_stopping_ends_a_running_job_interrupted_with_nothing_written(
         preview = await _preview(client)
         with _boundary_held(vault):
             handle = await _start(client, preview["plan_id"])
-            maintenance_jobs.stop_all(wait=0.0)
+            maintenance_jobs.stop_all(vault, wait=0.0)
         return await _until_terminal(client, handle["run_id"])
 
     before = _page_ids(vault)
@@ -698,7 +698,7 @@ def test_the_wide_boundary_switch_makes_a_job_hold_the_boundary_for_its_run(serv
     preview, refused, final = _session(server, scenario)
 
     assert refused["error"]["code"] == "MUTATION_BUSY"
-    assert final["state"] == "completed"
+    assert (final["state"], final["error_code"]) == ("completed", None)
     assert all(_page_ids(vault)[path] is not None for path in preview["would_update"])
 
 
