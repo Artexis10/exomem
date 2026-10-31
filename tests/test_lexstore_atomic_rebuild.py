@@ -227,6 +227,8 @@ def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
 
     Page P is edited before the census walk reads it, page Q after.
     """
+    # An unreported edit waits this long for its event before it refuses the replay.
+    monkeypatch.setattr(lexstore, "_REPLAY_OBSERVATION_WAIT_SECONDS", 0.2)
     p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
     q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
     _seed(tmp_path, [p, q])
@@ -331,6 +333,110 @@ def test_a_replay_survives_an_observed_write_to_another_page(
     assert "pbefore" not in contents and "qbefore" not in contents
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+def test_a_replay_waits_for_a_rewrite_whose_event_is_still_on_its_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A governed write changes a page on disk before its event reaches the
+    registry. A page that every write rewrites is often in that gap when the
+    build replays it. The replay must wait for the event and replay the newer
+    page. Before, it saw the page differ from its target and discarded the
+    whole build.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    late_events: list[threading.Timer] = []
+
+    def rewrite(token: str) -> None:
+        p.write_text(_page_text("p", f"- [config] {token} ^u1"), encoding="utf-8")
+        _touch_future(p)
+
+    def materialize_then_rewrite_p_twice(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        if not late_events:
+            rewrite("pfirst")
+            freshness.on_files_changed(tmp_path, changed=[p])
+            rewrite("psecond")
+            late = threading.Timer(
+                1.0, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [p]}
+            )
+            late_events.append(late)
+            late.start()
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p_twice)
+    published = store.rebuild_atomic()
+    late_events[0].join()
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "psecond" in contents
+    assert "pbefore" not in contents and "pfirst" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer that rewrites P each time the build's replay reads it keeps P
+    from ever proving its target, although the registry observes each write
+    soon after. The replay must stop after a bounded number of retargets and
+    keep the live catalogue, not follow the writer for as long as it writes.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    real_apply_rows = store._apply_delta_rows
+    writer_stopped = threading.Event()
+    late_events: list[threading.Timer] = []
+    rewrites = 0
+
+    def rewrite_p() -> None:
+        nonlocal rewrites
+        rewrites += 1
+        p.write_text(_page_text("p", f"- [config] prewrite{rewrites} ^u1"), encoding="utf-8")
+        _touch_future(p)
+
+    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        rewrite_p()
+        freshness.on_files_changed(tmp_path, changed=[p])
+        return built
+
+    def apply_rows_then_rewrite_p_with_a_late_event(conn: sqlite3.Connection, delta: Any) -> None:
+        real_apply_rows(conn, delta)
+        if writer_stopped.is_set():
+            return
+        rewrite_p()
+        late = threading.Timer(
+            0.2, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [p]}
+        )
+        late_events.append(late)
+        late.start()
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p_with_a_late_event)
+    outcome: dict[str, bool] = {}
+    build = threading.Thread(target=lambda: outcome.setdefault("published", store.rebuild_atomic()))
+    build.start()
+    build.join(timeout=10)
+    finished = not build.is_alive()
+    writer_stopped.set()
+    build.join()
+    for late in late_events:
+        late.join()
+    assert finished, "the replay kept chasing a page that never stopped changing"
+    assert outcome["published"] is False
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pbefore" in contents and "prewrite" not in contents
 
 
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(

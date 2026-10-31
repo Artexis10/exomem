@@ -708,6 +708,21 @@ validation.
 - **THEN** the census excuses no path
 - **AND** publishes only when the whole walk matches the rebased target
 
+#### Scenario: A write still publishing during a detached replay is replayed, not discarded
+
+- **WHEN** a governed write changes a replayed page on disk before its event
+  reaches the registry
+- **AND** the detached replay runs off the publication barrier
+- **THEN** the replay waits a bounded time for the registry to observe the
+  newer state of that page, and then replays the newer delta
+- **AND** retargets at most a bounded number of times in one replay
+- **AND** declines the pass as `source_changed` when the registry does not
+  observe the newer state in time, or when the page changes again after each
+  retarget
+- **AND** a replay under the publication barrier never waits and declines as
+  before
+- **AND** the repair telemetry counts the retargets of each pass
+
 ### Requirement: Bounded write-time index maintenance
 
 A component deferral that has already durably recorded path-exact receipts covering the batch SHALL count as batch-report success and SHALL NOT seed a full-component refresh demand. The system SHALL mint a durable full-component refresh demand from a write-time outcome only for a component whose incomplete work has no durable path coverage, and SHALL count both outcomes — covered deferrals accepted and uncovered deferrals escalated — in stable content-free telemetry.
