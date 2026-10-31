@@ -1081,32 +1081,83 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             yield source
 
 
+# The outcomes of one eviction attempt, a closed set that `evict_to_target` branches on (D3, M3).
+EVICTED, KEPT, PRUNED = "evicted", "kept", "pruned"
+# A claimed job keeps its original until it completes, fails or is blocked (D3, M4).
+_JOB_PINS = "jobs.pinned = 1 AND jobs.state IN ('pending', 'running')"
+_PINNING_JOB = f"SELECT 1 FROM jobs WHERE jobs.binary_rel = ? AND {_JOB_PINS}"
+
+
 def evict(vault: Path, path: Path) -> bool:
     """Confirm outside the boundary, then exclude pins/jobs through the unlink."""
-    vault = Path(vault).resolve()
+    return _evict_one(Path(vault).resolve(), path) == EVICTED
+
+
+def _cached_original(vault: Path, ledger: MediaJobStore, path: Path) -> OriginalSnapshot | str:
+    """The cached original that the path's cache row records, else what became of the row (D3, M3).
+
+    A row whose path no longer holds that original, after a move or a deletion, is
+    pruned, so it neither stays a candidate nor counts as room.
+    """
+    try:
+        snapshot = original_state(vault, path)
+        if snapshot.state == "cached" and cache_matches(vault, path, snapshot=snapshot):
+            return snapshot if snapshot.offloadable else KEPT
+    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return KEPT  # An unreadable path keeps its row; a later pass reads it again.
+    return PRUNED if _prune(vault, ledger, path, snapshot) else KEPT
+
+
+def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSnapshot) -> bool:
+    """Drop the cache row of a path that no longer holds the original it records.
+
+    Every writer of the row pins the path or holds the vault guard, so the guard and
+    the write exclusion keep them all out. An evicted path keeps its row, marked.
+    """
+    relative = ledger._relative(path)
+    with _guard(vault, "media_store_prune"):
+        conn = ledger._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if (conn.execute("SELECT 1 FROM media_access WHERE binary_rel = ?", (relative,)).fetchone()
+                    or original_state(vault, path) != snapshot
+                    or snapshot.state == "cached" and cache_matches(vault, path, snapshot=snapshot)):
+                conn.rollback()
+                return False
+            if snapshot.state == "evicted":
+                # The flag orders the claims of the original's jobs (D3, M4).
+                conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
+            else:
+                conn.execute("DELETE FROM media_cache WHERE binary_rel = ?", (relative,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+
+def _evict_one(vault: Path, path: Path) -> str:
     config = _settings(vault)
     if config.get("enabled") is not True or config.get("eviction_enabled") is not True:
-        return False
+        return KEPT
     ledger = MediaJobStore(vault)
-    snapshot = original_state(vault, path)
-    if (snapshot.state != "cached" or snapshot.reference is None or not snapshot.offloadable
-            or not cache_matches(vault, path, snapshot=snapshot)):
-        return False
+    snapshot = _cached_original(vault, ledger, path)
+    if isinstance(snapshot, str):
+        return snapshot
     bounds = media_capacity.bounds_for(config, vault)
-    assert snapshot.binary_size is not None
+    assert snapshot.binary_size is not None and snapshot.reference is not None
     if bounds is None or not bounds.hydration_fits(snapshot.binary_size):
-        return False  # An original that could not come back stays (D3).
+        return KEPT  # An original that could not come back stays (D3).
     identity = _identity(vault, path)
     try:
         confirmed = _confirmed(store_for(vault), snapshot.reference)
     except (held_fs.HeldFsError, OSError, MediaStoreError):
-        return False  # An unavailable or unverified version cannot authorize removal.
+        return KEPT  # An unavailable or unverified version cannot authorize removal.
     if not confirmed:
         with _guard(vault, "media_store_absent_version"):
             if original_state(vault, path) == snapshot:
                 _publish_reference(vault, snapshot, None)
                 enqueue_offload(vault, path)
-        return False
+        return KEPT
     with _guard(vault, "media_store_evict"):
         conn = ledger._connect()
         try:
@@ -1121,7 +1172,7 @@ def evict(vault: Path, path: Path) -> bool:
                     or conn.execute(_PINNING_JOB, (relative,)).fetchone()
                     or original_state(vault, path) != snapshot or _identity(vault, path) != identity):
                 conn.rollback()
-                return False
+                return KEPT
             # Pin admission and enqueue use this same SQLite write exclusion.
             # Retained parent/file handles prevent an exchanged ancestor redirect.
             target = path.relative_to(vault)
@@ -1130,35 +1181,33 @@ def evict(vault: Path, path: Path) -> bool:
                     with filesystem.file(parent, target.name, access="mutate").require() as file:
                         if _identity(vault, path) != identity:
                             conn.rollback()
-                            return False
+                            return KEPT
                         filesystem.unlink(file).require()
                         filesystem.flush_directory(parent).require()
             conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
             conn.commit()
-            return True
+            return EVICTED
         finally:
             conn.close()
 
 
-# A claimed job keeps its original until it completes, fails or is blocked (D3, M4).
-_PINNING_JOB = "SELECT 1 FROM jobs WHERE binary_rel = ? AND pinned = 1 AND state IN ('pending', 'running')"
 # A demand lapses 15 minutes after its series last renewed it (D3).
 DEMAND_LEASE_SECONDS = 15 * 60
-# Each pass reads at most this many candidates, so eviction never walks the whole cache.
+# Each read takes at most this many candidates, so a pass never loads the whole cache at once.
 _EVICTION_BATCH = 64
 _ELIGIBLE = (
     "FROM media_cache WHERE evicted = 0 AND size IS NOT NULL AND size <= :hydration "
     "AND (owner_read IS NULL OR owner_read <= :idle_before) "
     "AND NOT EXISTS (SELECT 1 FROM media_access WHERE media_access.binary_rel = media_cache.binary_rel) "
-    "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
-    "AND jobs.pinned = 1 AND jobs.state IN ('pending', 'running'))"
+    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel AND {_JOB_PINS})"
 )
 # Unread originals first, those with no pending job before those with one, each largest first;
-# then owner-read originals, largest first and longest idle on ties (D3, M4).
+# then owner-read originals, largest first and longest idle on ties (D3, M4). The path makes the
+# order total, so a pass reads past the candidates it keeps by their count.
 _EVICTION_ORDER = (
     "ORDER BY owner_read IS NOT NULL, "
     "CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
-    "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read"
+    "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read, binary_rel"
 )
 
 
@@ -1216,19 +1265,51 @@ def _fill_missing_sizes(conn, ledger: MediaJobStore) -> None:
             conn.execute("UPDATE media_cache SET size = ? WHERE binary_rel = ?", (size, row["binary_rel"]))
 
 
-def _eviction_candidates(ledger: MediaJobStore, parameters: dict[str, object]) -> tuple[list[str], int]:
+def _refresh_candidates(ledger: MediaJobStore) -> None:
+    """Clear dead reservations, and size a batch of rows from before the size column."""
     conn = ledger._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
         _clear_dead_access(conn, ledger, conn.execute("SELECT * FROM media_access").fetchall())
         _fill_missing_sizes(conn, ledger)
         conn.commit()
-        eligible = conn.execute("SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE, parameters).fetchone()[0]
-        rows = conn.execute("SELECT binary_rel " + _ELIGIBLE + " " + _EVICTION_ORDER + " LIMIT :batch",
-                            {**parameters, "batch": _EVICTION_BATCH}).fetchall()
-        return [row["binary_rel"] for row in rows], int(eligible)
     finally:
         conn.close()
+
+
+def _candidates(ledger: MediaJobStore, parameters: dict[str, object], offset: int) -> list[tuple[str, int]]:
+    conn = ledger._connect()
+    try:
+        rows = conn.execute("SELECT binary_rel, size " + _ELIGIBLE + " " + _EVICTION_ORDER + " LIMIT :batch OFFSET :offset",
+                            {**parameters, "batch": _EVICTION_BATCH, "offset": offset}).fetchall()
+        return [(row["binary_rel"], int(row["size"])) for row in rows]
+    finally:
+        conn.close()
+
+
+def _room_covers(vault: Path, ledger: MediaJobStore, parameters: dict[str, object], shortfall: int) -> bool:
+    """Whether the evictable originals hold `shortfall` bytes; rows of moved originals are pruned on the way.
+
+    The sum over the rows bounds the room from above, so a demand that it cannot cover
+    reads no original.
+    """
+    conn = ledger._connect()
+    try:
+        if conn.execute("SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE, parameters).fetchone()[0] < shortfall:
+            return False
+    finally:
+        conn.close()
+    room = remaining = 0
+    while page := _candidates(ledger, parameters, remaining):
+        for relative, size in page:
+            verdict = _cached_original(vault, ledger, vault / relative)
+            if verdict == PRUNED:
+                continue  # The pruned row left the candidates, so the next page starts no later.
+            remaining += 1
+            room += 0 if verdict == KEPT else size
+            if room >= shortfall:
+                return True
+    return False
 
 
 def evict_to_target(vault: Path) -> int:
@@ -1256,18 +1337,20 @@ def evict_to_target(vault: Path) -> int:
     # `size <= :hydration` is the SQL form of `Bounds.hydration_fits`, which `evict` checks again.
     parameters = {"hydration": bounds.hydration_bytes,
                   "idle_before": time.time() - float(config["minimum_idle_seconds"])}
-    count = 0
-    while any(needed(shutil.disk_usage(vault).used)):
-        candidates, eligible = _eviction_candidates(ledger, parameters)
-        above_target, _short = needed(shutil.disk_usage(vault).used)
-        if not above_target and demand is not None and demand[1] - shutil.disk_usage(vault).used + eligible < demand[0]:
-            break  # A demand that the eligible originals cannot cover yet evicts nothing.
-        evicted = 0
-        for relative in candidates:
+    _refresh_candidates(ledger)
+    used = shutil.disk_usage(vault).used
+    above_target, short = needed(used)
+    if not above_target and short:
+        assert demand is not None
+        if not _room_covers(vault, ledger, parameters, demand[0] - (demand[1] - used)):
+            return 0  # A demand that the evictable originals cannot cover yet evicts nothing.
+    count = kept = 0
+    while any(needed(shutil.disk_usage(vault).used)) and (page := _candidates(ledger, parameters, kept)):
+        for relative, _size in page:
             if not any(needed(shutil.disk_usage(vault).used)):
                 break
-            evicted += int(evict(vault, vault / relative))
-        count += evicted
-        if not evicted:
-            break
+            outcome = _evict_one(vault, vault / relative)
+            # An evicted or pruned row leaves the candidates; a kept one stays, so the next page starts after it.
+            count += outcome == EVICTED
+            kept += outcome == KEPT
     return count

@@ -1744,9 +1744,12 @@ def test_eviction_takes_unread_originals_first_and_among_them_those_with_no_pend
         pass
     media_jobs.MediaJobStore(vault).enqueue(media_jobs.MediaJob(queued, queued.with_name(queued.name + ".md"), "text"))
     monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 7_500, played, queued, idle))
+    # Each eviction confirms its stored copy once, so the store's reads give the order.
     order: list[Path] = []
-    actual = media_store.evict
-    monkeypatch.setattr(media_store, "evict", lambda vault, path: order.append(path) or actual(vault, path))
+    paths = {originals.original_state(vault, path).reference.object: path for path in (played, queued, idle)}
+    head = media_store.FilesystemStore.head
+    monkeypatch.setattr(media_store.FilesystemStore, "head",
+                        lambda store, name, version: order.append(paths[name]) or head(store, name, version))
 
     media_store.evict_to_target(vault)
 
@@ -1855,27 +1858,60 @@ def test_two_series_keep_separate_demands_and_eviction_serves_the_larger(vault: 
         assert {row[0] for row in connection.execute("SELECT series FROM media_demands")} == {"series-a", "series-b"}
 
 
-def test_eviction_reads_a_bounded_candidate_set_and_no_sidecar(vault: Path, selected_store, monkeypatch):
-    """Catches eviction that walks every sidecar, or every cached original, on each check."""
+def _rows_of_moved_originals(vault: Path, *sizes: int) -> None:
+    """Cache rows that a move or a deletion left behind: the path no longer holds an original."""
+    from exomem import media_jobs
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.executemany(
+            "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size) VALUES (?, '{}', ?, '', 0, ?)",
+            [(f"Knowledge Base/Evidence/moved-{index}.bin", "0" * 64, size) for index, size in enumerate(sizes)])
+
+
+def test_rows_of_moved_originals_neither_stop_eviction_nor_stay(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that ends at candidates it cannot evict, so rows that moves left keep a real original
+    cached for good, or eviction that walks every sidecar."""
     from exomem import media_jobs, media_store
 
-    ledger = media_jobs.MediaJobStore(vault)
-    with sqlite3.connect(ledger.path) as connection:
-        connection.executemany(
-            "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size) VALUES (?, '{}', ?, '', 0, 100)",
-            [(f"Knowledge Base/Evidence/{index}.bin", "0" * 64) for index in range(500)])
-    monkeypatch.setattr(media_store, "bound_originals", lambda *a, **k: pytest.fail("eviction reads no sidecar"))
-    considered: list[Path] = []
+    real = _stored(vault, "real", 50)
+    _rows_of_moved_originals(vault, *[100] * 200)
+    monkeypatch.setattr(media_store, "bound_originals", lambda *a, **k: pytest.fail("eviction walks no sidecars"))
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, real))
 
-    def refuse(_vault, path):
-        considered.append(path)
-        return False
+    assert media_store.evict_to_target(vault) == 1
 
-    monkeypatch.setattr(media_store, "evict", refuse)
-    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000))
+    assert originals.original_state(vault, real).state == "evicted"
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM media_cache WHERE binary_rel LIKE '%moved-%'").fetchone()[0] == 0
 
+
+def test_eviction_reads_past_a_candidate_it_keeps(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that ends at a page of originals it must keep, here one whose stored copy fails verification."""
+    from exomem import media_store
+
+    damaged, sound = _stored(vault, "damaged", 1_000), _stored(vault, "sound", 500)
+    reference = originals.original_state(vault, damaged).reference
+    (Path(selected_store[0]["root"]) / reference.object / reference.version).write_bytes(b"corrupt")
+    monkeypatch.setattr(media_store, "_EVICTION_BATCH", 1)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, damaged, sound))
+
+    assert media_store.evict_to_target(vault) == 1
+
+    assert damaged.exists() and not sound.exists()
+
+
+def test_a_demand_that_only_rows_of_moved_originals_could_meet_evicts_nothing(vault: Path, selected_store, monkeypatch):
+    """Catches room counted from rows that moves left, which evicts real originals for a demand eviction cannot meet."""
+    from exomem import media_store
+
+    large, small = _stored(vault, "large", 1_000), _stored(vault, "small", 500)
+    _rows_of_moved_originals(vault, 3_000)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, small))
+
+    assert media_store.record_demand(vault, "series-a", 4_000, budget=0, reachable_budget=6_000)
     assert media_store.evict_to_target(vault) == 0
-    assert 0 < len(considered) <= 64
+
+    assert large.exists() and small.exists()
 
 
 def test_eviction_follows_an_offload_without_a_restart_and_offload_records_no_read(vault: Path, selected_store, monkeypatch):
