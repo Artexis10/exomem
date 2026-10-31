@@ -223,10 +223,12 @@ def test_a_continuation_that_stopped_before_removing_a_chunk_s_staged_copies_rem
     usage = collections.namedtuple("usage", "total used free")
     monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage(capacity[0] * 2, 0, free_bytes()))
     stage = _stage(vault, {f"scans/{n}.bin": bytes([65 + n]) * size for n in range(2)})
-    # A rename leaves no staged copy to remove, so these files sit on another device and file by copy.
+    # A rename leaves no staged copy to remove, so these files sit on another device and file by copy,
+    # which the space check prices at their full size.
     monkeypatch.setattr(
         _held_fs_posix, "_rename_noreplace",
         consume._rename_across_devices(_held_fs_posix._rename_noreplace, "0.bin", "1.bin"))
+    monkeypatch.setattr(adoption_run.import_rename, "_device_of", lambda _root, _relative_path: -1)
     run = adoption_run.start(vault, path=stage, today=TODAY)
     plan_id = _plan(vault, run, stage)
     stopped = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)

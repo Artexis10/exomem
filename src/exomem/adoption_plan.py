@@ -29,6 +29,7 @@ from . import (
     context_refs,
     find_results,
     held_fs,
+    import_stage,
     markdown_regions,
     note_types,
     reserved_paths,
@@ -494,7 +495,8 @@ def source_failure(error: Exception) -> dict[str, str]:
 
 
 def read_facts(
-    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True
+    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True,
+    vouched: tuple[import_stage.Identity, str] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Hash one original and decide how it imports.
 
@@ -502,6 +504,8 @@ def read_facts(
     ``{"code", "reason"}``. A text-like file that is not valid UTF-8, or is too big
     to hold, imports as an artifact so its bytes survive. With ``hash_artifact`` false an
     artifact is only sized and its ``original_sha256`` is None, for a caller whose copy hashes it.
+    An artifact whose identity equals ``vouched`` (a stage manifest's identity and SHA-256) takes that
+    SHA-256, is not bound by the ceiling and is not read: adoption files it by rename, not by copy.
     """
     from .add import AddError, artifact_identity
 
@@ -511,14 +515,20 @@ def read_facts(
 
         with open_original(root, original_path, physical=True) as source:
             size = source.version.size
-            if size > ceiling:
+            reads_as_text = text_hint and size <= INLINE_TEXT_MAX_BYTES
+            stands_for_bytes = (
+                vouched is not None and not reads_as_text and import_stage.Identity.of_version(source.version) == vouched[0]
+            )
+            if size > ceiling and not stands_for_bytes:
                 return {"code": OVER_CEILING, "reason": f"original exceeds the {ceiling:,} byte adoption ceiling"}
-            if text_hint and size <= INLINE_TEXT_MAX_BYTES:
+            if reads_as_text:
                 data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
                 if len(data) != size:
                     return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
                 text = decode_text(data)
                 digest, length = hashlib.sha256(data).hexdigest(), len(data)
+            elif stands_for_bytes:
+                digest, length = vouched[1], size
             elif hash_artifact:
                 digest, length = artifact_identity(source.stream, ceiling=ceiling)
             else:
@@ -826,9 +836,10 @@ def plan_item(
     index: Iterable[EarlierImport],
     notes: NoteIndex,
     ceiling: int,
+    vouched: tuple[import_stage.Identity, str] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Facts, identity and a frozen destination for one original; or a refusal dict."""
-    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint)
+    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
         return {"path": original_path, **read}
     facts, text = read

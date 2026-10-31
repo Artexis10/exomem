@@ -54,12 +54,37 @@ def renamable(stage: import_stage.Stage | None, planned: dict) -> bool:
     )
 
 
-def _fields(version: held_fs.FileVersion, identity: import_stage.Identity, *, with_ctime: bool) -> bool:
-    expected = (identity.inode, identity.size, identity.mtime_ns)
-    found = (version.identity.inode, version.size, version.mtime_ns)
-    if with_ctime:
-        expected, found = (*expected, identity.ctime_ns), (*found, version.change_time_ns)
-    return expected == found
+def _same(version: held_fs.FileVersion, identity: import_stage.Identity, *, with_ctime: bool) -> bool:
+    seen = import_stage.Identity.of_version(version)
+    return seen == identity if with_ctime else seen.after_rename() == identity.after_rename()
+
+
+def written_bytes(root: Path, stage: import_stage.Stage | None, planned: dict) -> int:
+    """The bytes that filing this member writes to the vault's volume: none when a rename files it on one device.
+
+    A member whose staged file is gone is already on the volume (an earlier call renamed it, or it
+    never was there), so it adds nothing either.
+    """
+    if not renamable(stage, planned):
+        return planned["original_bytes"]
+    try:
+        staged_device = os.lstat(root / planned["original_path"]).st_dev
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return planned["original_bytes"]
+    return 0 if staged_device == _device_of(root, planned["artifact_path"]) else planned["original_bytes"]
+
+
+def _device_of(root: Path, relative_path: str) -> int | None:
+    """The device of a vault-relative path, or of its nearest folder that exists (a rename creates the rest)."""
+    path = root / relative_path
+    for candidate in (path, *path.parents):
+        try:
+            return os.lstat(candidate).st_dev
+        except OSError:
+            continue
+    return None
 
 
 def _hash_within(
@@ -78,18 +103,19 @@ def _hash_within(
 
 def _prove_staged(file: held_fs.HeldFile, stage: import_stage.Stage, planned: dict, ceiling: int) -> Refused | None:
     identity = adoption_consume.identity_of(stage, planned["original_path"])
-    if identity is not None and _fields(file.version(), identity, with_ctime=True):
+    if identity is not None and _same(file.version(), identity, with_ctime=True):
         return None  # the manifest SHA-256 stands for the bytes; none is read
     return _hash_within(file, planned, ceiling, where="the staged file")
 
 
 def place(
-    root: Path, filesystem: held_fs.HeldFilesystem, stage: import_stage.Stage, planned: dict, *, ceiling: int
+    root: Path, filesystem: held_fs.HeldFilesystem, stage: import_stage.Stage, planned: dict, *,
+    ceiling: int, inode: int,
 ) -> Placed | Refused | None:
     """Rename the member's staged file to its Knowledge Base path; None when the copy route must file it.
 
-    The journal record goes first, so a scan that sees the renamed file before the Source page commits
-    leaves it alone. A rename that fails across devices returns None.
+    `inode` is the one the journal recorded for this member before the rename. The record is the caller's:
+    this function neither writes nor releases it. A rename that fails across devices returns None.
     """
     staged_parent, staged_leaf = _split(planned["original_path"])
     artifact_parent, artifact_leaf = _split(planned["artifact_path"])
@@ -99,14 +125,13 @@ def place(
                 refusal = _prove_staged(staged, stage, planned, ceiling)
                 if refusal is not None:
                     return refusal
-                inode = staged.version().identity.inode
-                rename_journal.hold(root, planned["artifact_path"], inode)
+                if staged.version().identity.inode != inode:
+                    return Refused("SOURCE_CHANGED", "the staged file was replaced while it was being filed")
                 with filesystem.parent(artifact_parent, create=True, access="mutate").require() as target_directory:
                     moved = filesystem.rename(staged, target_directory, artifact_leaf)
                 if moved.ok or _is_at_target(filesystem, artifact_parent, artifact_leaf, inode):
                     # An error after the rename took place (a failed sync) still leaves the file there.
                     return Placed(planned["original_path"], planned["artifact_path"], inode)
-                rename_journal.release(root, planned["artifact_path"])
                 code = moved.error.code  # held_fs's closed error codes, so a comparison is sound here
                 if code == "CROSS_DEVICE":
                     return None
@@ -114,7 +139,6 @@ def place(
                     return Refused("TARGET_OCCUPIED", f"{planned['artifact_path']} already exists and is not this file")
                 return Refused(**adoption_plan.source_failure(moved.error))
     except (held_fs.HeldFsError, OSError) as error:
-        rename_journal.release(root, planned["artifact_path"])
         if getattr(error, "code", None) == "MISSING":
             return None  # nothing staged to rename; the copy route reports it as it always did
         return Refused(**adoption_plan.source_failure(error))
@@ -130,17 +154,36 @@ def _is_at_target(filesystem: held_fs.HeldFilesystem, parent: str, leaf: str, in
 
 
 def place_all(
-    root: Path, stage: import_stage.Stage, members: list[dict], *, ceiling: int
-) -> dict[str, Placed | Refused | None]:
-    """`place` for each member, by the member's staged path. A filesystem that cannot be held files by copy."""
+    root: Path, stage: import_stage.Stage, members: list[dict], *, ceiling: int, run_id: str
+) -> dict[str, Placed | Refused]:
+    """`place` for each member, by the member's staged path, after one flushed journal write for all of them.
+
+    A filesystem that cannot be held, or a journal that cannot be written, files by copy. A member that
+    is not renamed keeps no record.
+    """
+    holds: dict[str, rename_journal.Hold] = {}
+    for planned in members:
+        try:
+            inode = os.lstat(root / planned["original_path"]).st_ino
+        except OSError:
+            continue  # nothing staged to rename; the copy route reports it
+        holds[planned["original_path"]] = rename_journal.Hold(
+            planned["artifact_path"], inode, stage.import_id, run_id, planned["original_path"])
     verdicts: dict[str, Placed | Refused | None] = {}
     try:
+        rename_journal.hold_all(root, list(holds.values()))
         with held_fs.acquire(root).require() as filesystem:
             for planned in members:
-                verdicts[planned["original_path"]] = place(root, filesystem, stage, planned, ceiling=ceiling)
+                hold = holds.get(planned["original_path"])
+                if hold is not None:
+                    verdicts[planned["original_path"]] = place(
+                        root, filesystem, stage, planned, ceiling=ceiling, inode=hold.inode)
     except (held_fs.HeldFsError, OSError):
         pass
-    return verdicts
+    for original_path, hold in holds.items():
+        if not isinstance(verdicts.get(original_path), Placed):
+            rename_journal.release(root, hold.path)
+    return {path: verdict for path, verdict in verdicts.items() if isinstance(verdict, Placed | Refused)}
 
 
 def settle(root: Path, stage: import_stage.Stage, planned: dict, *, ceiling: int) -> Placed | Refused | None:
@@ -160,7 +203,7 @@ def settle(root: Path, stage: import_stage.Stage, planned: dict, *, ceiling: int
                 with filesystem.file(directory, artifact_leaf).require() as binary:
                     inode = binary.version().identity.inode
                     identity = adoption_consume.identity_of(stage, planned["original_path"])
-                    if identity is None or not _fields(binary.version(), identity, with_ctime=False):
+                    if identity is None or not _same(binary.version(), identity, with_ctime=False):
                         refusal = _hash_within(binary, planned, ceiling, where=f"the file at {planned['artifact_path']}")
                         if refusal is not None:
                             return Refused(

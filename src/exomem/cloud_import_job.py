@@ -166,8 +166,7 @@ def run_import(
 
         def record_member(path: str, size: int, digest: str) -> None:
             # `unpack_stream` has set the file's time by now, and the directory rename below keeps the
-            # file's inode, size and times. A retry that keeps an earlier stage keeps its files, so
-            # those identities differ and adoption then hashes the files.
+            # file's inode, size and times. A retry that keeps an earlier stage reads its files again below.
             staged = import_stage.Identity.of((staging / path).stat())
             members.append(import_stage.member(path, size, digest, staged))
 
@@ -247,6 +246,13 @@ def run_import(
                         trees.append(hashes)
                     if trees[0] != trees[1]:
                         raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "committed")
+                    # The kept files stay and the new staging is deleted, so the manifest names the kept files' identity.
+                    members[:] = [
+                        import_stage.member(
+                            entry["path"], entry["size"], entry["sha256"],
+                            import_stage.Identity.of((destination / entry["path"]).stat()))
+                        for entry in members
+                    ]
                 else:
                     os.rename(staging, destination)
                 receipt[import_stage.MEMBERS_KEY] = members

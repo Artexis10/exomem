@@ -7,12 +7,17 @@ none, so nothing in them is consumable.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import private_state, state_migration, state_paths, vault
+
+if TYPE_CHECKING:
+    from . import held_fs
 
 STAGE_DIR = vault.IMPORT_STAGE_DIRNAME
 CLOUD_RECEIPTS = "cloud-imports"
@@ -30,7 +35,8 @@ class Identity:
 
     Each pod can see one volume under another device number, so the device is never part of it.
     A backup restore gives a file another inode and cannot set its change time, which is how a
-    mismatch shows that the file may hold other bytes.
+    mismatch shows that the file may hold other bytes. The fields are spelled here and nowhere else:
+    `record`, `read` and the comparisons below all go through the dataclass.
     """
 
     inode: int
@@ -42,8 +48,27 @@ class Identity:
     def of(cls, info: os.stat_result) -> Identity:
         return cls(info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
+    @classmethod
+    def of_version(cls, version: held_fs.FileVersion) -> Identity:
+        """The same identity, read from a held file's version."""
+        return cls(version.identity.inode, version.size, version.mtime_ns, version.change_time_ns)
+
+    @classmethod
+    def read(cls, value: object) -> Identity | None:
+        """The identity a manifest entry records, or None when it is absent or malformed (hash the file then)."""
+        if not isinstance(value, dict):
+            return None
+        fields = [value.get(item.name) for item in dataclasses.fields(cls)]
+        if any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in fields):
+            return None
+        return cls(*fields)
+
     def record(self) -> dict:
-        return {"inode": self.inode, "size": self.size, "mtime_ns": self.mtime_ns, "ctime_ns": self.ctime_ns}
+        return dataclasses.asdict(self)
+
+    def after_rename(self) -> Identity:
+        """What a rename leaves of the identity: the rename changes the file's change time, so that field is dropped."""
+        return dataclasses.replace(self, ctime_ns=0)
 
 
 def member(path: str, size: int, sha256: str, identity: Identity | None = None) -> dict:
@@ -71,16 +96,6 @@ class Stage:
     identities: dict[str, Identity] = field(default_factory=dict)
 
 
-def _read_identity(value: object) -> Identity | None:
-    """An entry's identity, or None when it has none or a malformed one (both mean: hash the file)."""
-    if not isinstance(value, dict):
-        return None
-    fields = [value.get(key) for key in ("inode", "size", "mtime_ns", "ctime_ns")]
-    if any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in fields):
-        return None
-    return Identity(*fields)
-
-
 def _read_members(entries: object) -> tuple[dict[str, tuple[int, str]], dict[str, Identity]] | None:
     """The manifest as maps, or None when it is malformed: a manifest that cannot be trusted lists nothing."""
     if not isinstance(entries, list):
@@ -95,7 +110,7 @@ def _read_members(entries: object) -> tuple[dict[str, tuple[int, str]], dict[str
                 or not isinstance(size, int) or isinstance(size, bool) or size < 0):
             return None
         members[path] = (size, digest)
-        identity = _read_identity(entry.get(IDENTITY_KEY))
+        identity = Identity.read(entry.get(IDENTITY_KEY))
         if identity is not None:
             identities[path] = identity
     return members, identities

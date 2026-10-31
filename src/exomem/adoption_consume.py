@@ -44,6 +44,18 @@ def identity_of(stage: import_stage.Stage, original_path: str) -> import_stage.I
     return None if member_path is None else stage.identities.get(member_path)
 
 
+def vouched(stage: import_stage.Stage | None, original_path: str) -> tuple[import_stage.Identity, str] | None:
+    """The identity and SHA-256 that a stage's manifest records for a file, or None when it records no identity.
+
+    A file whose stat equals that identity holds the manifest's bytes: plan and scan take the SHA-256 from
+    here, skip the ceiling and read nothing.
+    """
+    if stage is None:
+        return None
+    identity, entry = identity_of(stage, original_path), entry_of(stage, original_path)
+    return None if identity is None or entry is None or entry[0] != identity.size else (identity, entry[1])
+
+
 def _sha256_of(file: held_fs.HeldFile) -> str:
     with os.fdopen(os.dup(file.descriptor), "rb") as stream:
         stream.seek(0)

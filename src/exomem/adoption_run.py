@@ -386,6 +386,7 @@ def build_inventory(
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
     ceiling: int | None = None,
     after: tuple[int, str] | None = None,
+    stage: import_stage.Stage | None = None,
 ) -> tuple[list[dict], int, int]:
     """Return ``(rows, remaining, hidden_files)`` — one page of the adoption candidates outside the KB.
 
@@ -395,7 +396,7 @@ def build_inventory(
     ``hidden_files`` counts every hidden file the scan skipped, whatever the page.
     """
     files, folders, hidden_files = walk_inventory(
-        root, path=path, include_hidden=include_hidden, ceiling=ceiling
+        root, path=path, include_hidden=include_hidden, ceiling=ceiling, stage=stage
     )
     if after is not None:
         files, folders = [row for row in files if _order_key(row) > after], []
@@ -408,6 +409,7 @@ def walk_inventory(
     path: str = "",
     include_hidden: bool = False,
     ceiling: int | None = None,
+    stage: import_stage.Stage | None = None,
 ) -> tuple[list[dict], list[dict], int]:
     """Return ``(files, folders, hidden_files)`` — every adoption candidate outside the KB, in scan order.
 
@@ -416,7 +418,9 @@ def walk_inventory(
     an ``eligible`` flag, and a machine-readable ``reason`` when ineligible
     (never silently dropped). A skipped hidden folder is one ``kind: folder`` row
     with its file count; ``hidden_files`` counts skipped hidden files. Rows are
-    stat-only (no file reads); per-source sha256 is deferred to ``plan``.
+    stat-only (no file reads); per-source sha256 is deferred to ``plan``. A file above the ceiling stays
+    eligible when ``stage`` (a run that consumes) records an identity that its stat equals: adoption files
+    it by rename and copies nothing.
     """
     from . import client_artifacts
 
@@ -470,7 +474,7 @@ def walk_inventory(
                 reason = None
                 if not stat.S_ISREG(st.st_mode):
                     reason = "NOT_REGULAR_FILE"
-                elif st.st_size > limit:
+                elif st.st_size > limit and not _stands_for_manifest(stage, rel, st):
                     reason = adoption_plan.OVER_CEILING
                 # Stat-level junk classification (no reads), mirroring overview's
                 # categories. Rows are the UNCAPPED source of truth for the
@@ -487,6 +491,12 @@ def walk_inventory(
     rows.sort(key=_order_key)
     folders.sort(key=lambda r: r["path"])
     return rows, folders, hidden_files
+
+
+def _stands_for_manifest(stage: import_stage.Stage | None, rel: str, info: os.stat_result) -> bool:
+    """Whether the stat of a staged file equals the identity its stage's manifest records."""
+    vouched = adoption_consume.vouched(stage, rel)
+    return vouched is not None and vouched[0] == import_stage.Identity.of(info)
 
 
 def _row(
@@ -1026,17 +1036,37 @@ def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
-def _recorded_stage(root: Path, source_root: str) -> dict | None:
-    """`{"stage": id, "proof": ...}` when `source_root` lies in an import stage that has a member manifest, else None.
+def _stage_at(root: Path, source_root: str) -> import_stage.Stage | None:
+    """The member manifest of the import stage that `source_root` lies in, or None when it lies in none or the stage has none."""
+    parts = source_root.split("/") if source_root else []
+    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
+        return None
+    return import_stage.read(root, parts[1])
+
+
+def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
+    """`{"stage": id, "proof": ...}` for the stage a run starts in, or None when it has no member manifest.
 
     The manifest itself is read again at each apply, never stored in the run: a discarded stage must stop
     being consumable at once.
     """
-    parts = source_root.split("/") if source_root else []
-    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
-        return None
-    stage = import_stage.read(root, parts[1])
     return None if stage is None else {"stage": stage.import_id, "proof": stage.proof}
+
+
+def _refuse_pending_renames(root: Path, verb: str, *, run_id: str | None = None, under: str | None = None) -> None:
+    """Refuse `verb` while a run has renamed staged files into the Knowledge Base and not committed their Source pages.
+
+    Such a file is in no stage and has no page, so a run that is cancelled, re-planned or restarted would leave
+    it with no run to finish it. `apply` finishes it. A caller names the run, or a folder of staged files.
+    """
+    holds = rename_journal.pending(root, run_id=run_id, under=under)
+    if holds:
+        runs = ", ".join(sorted({hold.run_id for hold in holds}))
+        raise AdoptionRunError(
+            "RENAMES_PENDING",
+            f"{verb} is refused: run {runs} renamed {len(holds)} staged file(s) into the Knowledge Base "
+            "and has not committed their Source pages. Call apply on that run first.",
+        )
 
 
 def _refuse_outside_vault(root: Path, path: str) -> None:
@@ -1151,6 +1181,7 @@ def start(
         path, include_hidden = pinned["path"], pinned["include_hidden"]
         consume, max_candidates = pinned["consume"], pinned["max_candidates"]
     _refuse_outside_vault(root, path)
+    _refuse_pending_renames(root, "start", under=_clean(path))
     run_date = _today(today)
     kb = root / kb_dirname()
     if not kb.is_dir():
@@ -1171,9 +1202,10 @@ def start(
     except overview_module.OverviewError as exc:
         raise AdoptionRunError(exc.code, exc.reason) from exc
 
+    stage = _stage_at(root, _clean(path))
     rows, remaining, hidden_files = build_inventory(
         root, path=path, include_hidden=include_hidden, max_candidates=max_candidates,
-        after=None if pinned is None else tuple(pinned["after"]),
+        after=None if pinned is None else tuple(pinned["after"]), stage=stage if consume else None,
     )
     inv_fp = inventory_fingerprint(rows)
     created_iso = _now_iso()
@@ -1191,7 +1223,7 @@ def start(
         "phase": "selecting",
         "source_root": source_root,
         "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection),
-        "stage": _recorded_stage(root, source_root),
+        "stage": _recorded_stage(stage),
         "consume": consume,
         "scan_summary": {
             "totals": scan.get("totals", {}),
@@ -1317,6 +1349,7 @@ def select(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"select is not allowed from phase {run['phase']!r}"
             )
+        _refuse_pending_renames(root, "select", run_id=run_id)
         # A rule object names a registered kind, domain or note type; resolve before any
         # change so a refused rule leaves the stored selection as it was.
         taxonomy = (
@@ -1396,7 +1429,8 @@ def _whole_scan(root: Path, run: dict) -> list[str] | None:
     if not paging:
         return None
     files, _folders, _hidden = walk_inventory(
-        root, path=run["source_root"], include_hidden=paging["include_hidden"]
+        root, path=run["source_root"], include_hidden=paging["include_hidden"],
+        stage=adoption_consume.recorded(root, run) if run.get("consume", True) else None,
     )
     collection_root = (run.get("collection") or {}).get("root", "")
     return [
@@ -1429,6 +1463,7 @@ def plan(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"plan requires phase 'selecting' or 'planned', got {run['phase']!r}"
             )
+        _refuse_pending_renames(root, "plan", run_id=run_id)
         selection = run.get("selection") or {}
         selected = selection.get("paths") or []
         if not selected:
@@ -1474,6 +1509,7 @@ def plan(
         taxonomy = source_taxonomy.load_taxonomy(root) if classification else None
         inventory = {row["path"]: row for row in run.get("inventory") or []}
         ceiling = client_artifacts.adoption_ceiling()
+        stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
@@ -1497,7 +1533,7 @@ def plan(
                 classification=classification.get(rel), taxonomy=taxonomy,
                 text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
                 date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
-                ceiling=ceiling,
+                ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel),
             )
             draft["next"] += 1
             handled += 1
@@ -1793,15 +1829,16 @@ def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
     return chunk
 
 
-def _space_shortfall(root: Path, chunk: list[dict]) -> dict | None:
+def _space_shortfall(root: Path, chunk: list[dict], stage: import_stage.Stage | None) -> dict | None:
     """Why the chunk cannot start: its bytes and the import reserve do not fit the vault's free space.
 
     The reserve is the one setting an import already keeps (`cloud_import.reserve_bytes_from_env`); it also
     stands for the chunk's derived state (index, graph and sidecars), which is small beside the copy itself.
+    A member that files by rename on one device writes no bytes, so only the reserve covers it.
     """
     from . import cloud_import
 
-    needed = sum(planned["original_bytes"] for planned in chunk)
+    needed = sum(import_rename.written_bytes(root, stage, planned) for planned in chunk)
     reserve = cloud_import.reserve_bytes_from_env()
     free = shutil.disk_usage(root).free
     if needed + reserve <= free:
@@ -1899,6 +1936,10 @@ class _CallReads:
             self.stage, self.stage_read = adoption_consume.recorded(root, run), True
         return self.stage
 
+    def filing_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
+        """The stage a run files from by rename; a run that opted out of consuming keeps every staged copy, so none."""
+        return self.recorded_stage(root, run) if run.get("consume", True) else None
+
 
 def _commit_chunk(
     root: Path, store: AdoptionRunStore, run: dict,
@@ -1990,8 +2031,7 @@ def _apply_chunk(
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
-    # A run that opted out of consuming keeps every staged copy, so it files by copy only.
-    stage = reads.recorded_stage(root, run) if run.get("consume", True) else None
+    stage = reads.filing_stage(root, run)
     placed: dict[str, import_rename.Placed] = {}
     for planned in chunk:
         path = planned["original_path"]
@@ -2002,6 +2042,7 @@ def _apply_chunk(
             # Not a failure when adoption already filed it and removed the staged copy.
             earlier = _filed_and_gone(root, run, reads, planned)
             if earlier is not None:
+                _release_hold(root, planned)
                 outcomes[path] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
                 )
@@ -2016,11 +2057,20 @@ def _apply_chunk(
                 # An earlier call may have renamed the file and stopped before its Source page committed.
                 replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
                 if isinstance(replay, import_rename.Refused):
+                    # The run gives this file up: the outcome names its path, so the scans may bind it.
+                    _release_hold(root, planned)
                     outcomes[path] = _failed(replay.code, replay.reason)
                     continue
                 if replay is not None:
                     moved, failure = replay, None
         if failure is not None:
+            if by_rename and rename_journal.is_held(root, root / planned["artifact_path"]):
+                # An earlier call renamed this member's file and could not put it back: the retry finds the
+                # staged path changed, and the outcome must still say where the file is.
+                failure = _failed(
+                    import_rename.UNBOUND,
+                    f"{failure['reason']}; the file stays unbound at {planned['artifact_path']}",
+                )
             outcomes[path] = failure
             continue
         if text is not None and _owes_note(planned):
@@ -2067,16 +2117,16 @@ def _apply_chunk(
             placed[path] = moved
         survivors.append((planned, item))
     if survivors and stage is not None:
-        survivors = _file_by_rename(root, stage, survivors, ceiling=ceiling, outcomes=outcomes, placed=placed)
+        survivors = _file_by_rename(
+            root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
+        )
     landed: list[dict] = []
     if survivors:
         landed = _commit_chunk(
             root, store, run, survivors, run_date=run_date, label=label, reads=reads, placed=placed
         )
         for planned in landed:
-            if planned["original_path"] in placed:
-                # The Source page binds the file now, so the scans may see it.
-                rename_journal.release(root, planned["artifact_path"])
+            _release_hold(root, planned)
         for planned in landed:
             if _source_status(outcomes[planned["original_path"]]) == "applied":
                 reads.pages.append(planned["target_path"])
@@ -2116,18 +2166,19 @@ def _apply_chunk(
 
 def _file_by_rename(
     root: Path, stage: import_stage.Stage, survivors: list[tuple[dict, adopt_module.ImportItem]], *,
-    ceiling: int, outcomes: dict, placed: dict[str, import_rename.Placed],
+    run_id: str, ceiling: int, outcomes: dict, placed: dict[str, import_rename.Placed],
 ) -> list[tuple[dict, adopt_module.ImportItem]]:
     """Rename each renamable survivor's staged file into its Knowledge Base path, before the batch.
 
     A member that the primitive refuses fails here and leaves the batch; a member it cannot rename
-    stays a survivor and files by copy. Each renamed member is added to `placed`.
+    stays a survivor and files by copy, which the adoption ceiling bounds. Each renamed member is added to `placed`.
     """
-    candidates = [
-        planned for planned, _item in survivors
+    candidates = {
+        planned["original_path"] for planned, _item in survivors
         if planned["original_path"] not in placed and import_rename.renamable(stage, planned)
-    ]
-    verdicts = import_rename.place_all(root, stage, candidates, ceiling=ceiling) if candidates else {}
+    }
+    members = [planned for planned, _item in survivors if planned["original_path"] in candidates]
+    verdicts = import_rename.place_all(root, stage, members, ceiling=ceiling, run_id=run_id) if members else {}
     kept = []
     for planned, item in survivors:
         path = planned["original_path"]
@@ -2138,6 +2189,13 @@ def _file_by_rename(
         if isinstance(verdict, import_rename.Placed):
             item.artifact.placed = True
             placed[path] = verdict
+        elif path in candidates and planned["original_bytes"] > ceiling:
+            # `_read_original` let this member past the ceiling because a rename needs no copy; the copy has no such excuse.
+            outcomes[path] = _failed(
+                adoption_plan.OVER_CEILING,
+                f"the original exceeds the {ceiling:,} byte adoption ceiling and could not be renamed into the vault",
+            )
+            continue
         kept.append((planned, item))
     return kept
 
@@ -2364,6 +2422,12 @@ def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) 
     stats["verified_unchanged"] += int(unchanged)
 
 
+def _release_hold(root: Path, planned: dict) -> None:
+    """Drop the journal record of an item that is settled: its Source page binds the file, or the run gave it up."""
+    if planned.get("artifact_path"):
+        rename_journal.release(root, planned["artifact_path"])
+
+
 def _filed_and_gone(
     root: Path, run: dict, reads: _CallReads, planned: dict
 ) -> adoption_plan.EarlierImport | None:
@@ -2396,6 +2460,7 @@ def _settle_staged(
     """
     if outcome.get("consumed"):
         return
+    _release_hold(root, planned)  # a call that stopped after the commit left the record
     stage = reads.recorded_stage(root, run)
     if not os.path.lexists(root / planned["original_path"]):
         # A run that opted out claims no removal; its missing copy is recorded as changed below.
@@ -2555,7 +2620,7 @@ def apply(
             if not chunk:
                 stopped = True
                 break
-            shortfall = _space_shortfall(root, chunk)
+            shortfall = _space_shortfall(root, chunk, reads.filing_stage(root, run))
             if shortfall is not None:
                 run["apply_stop"] = shortfall
                 stopped = True
@@ -2647,6 +2712,7 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
         # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
         if phase not in ("selecting", "planned", "applying", "partial", "failed"):
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
+        _refuse_pending_renames(root, "cancel", run_id=run_id)
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
         run["phase"] = "cancelled"
         store.save(run)
@@ -2893,6 +2959,9 @@ def finish(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
+        # A file that `apply` could not put back or bind stays in the Knowledge Base, named by its failed outcome;
+        # a finished run replays nothing, so the scans may bind it.
+        rename_journal.release_run(root, run_id)
         recall = _recall_check(root, run)
         coverage = _coverage(root, run, _call_budget())
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.

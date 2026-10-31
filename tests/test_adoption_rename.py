@@ -1,6 +1,7 @@
 """Adoption files a staged artifact by renaming it into the Knowledge Base, and every stop leaves it recoverable."""
 from __future__ import annotations
 
+import collections
 import contextlib
 import hashlib
 import json
@@ -19,8 +20,10 @@ from exomem import (
     adoption_run,
     backfill,
     import_stage,
+    index_sync,
     media_jobs,
     media_processing,
+    private_state,
     rename_journal,
     state_paths,
 )
@@ -232,14 +235,16 @@ def test_a_rename_never_replaces_a_file_that_appears_at_the_knowledge_base_path(
     staged = _staged(vault, import_id)
     run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
     occupant = b"another capture, filed meanwhile"
-    held = rename_journal.hold
+    hold_all = rename_journal.hold_all
 
-    def occupy_then_hold(vault_root, relative_path, inode):
-        if relative_path.endswith("scan.bin"):
-            (vault_root / relative_path).write_bytes(occupant)
-        held(vault_root, relative_path, inode)
+    def occupy_then_hold(vault_root, holds):
+        hold_all(vault_root, holds)
+        for hold in holds:
+            if hold.path.endswith("scan.bin"):
+                (vault_root / hold.path).parent.mkdir(parents=True, exist_ok=True)
+                (vault_root / hold.path).write_bytes(occupant)
 
-    monkeypatch.setattr(rename_journal, "hold", occupy_then_hold)
+    monkeypatch.setattr(rename_journal, "hold_all", occupy_then_hold)
 
     reply = consume._apply(vault, run_id, plan_id)
 
@@ -318,21 +323,34 @@ def test_a_replay_that_finds_other_bytes_leaves_the_file_unbound_and_moves_nothi
 # 7
 
 
-def test_a_stop_after_the_commit_settles_as_already_applied_with_no_byte_read(
-    vault: Path, media_store_configured, monkeypatch
-) -> None:
-    import_id = _job_stage(vault, {"scan.bin": BIG})
-    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
-
+def _stop_inside_the_batch_after_its_commit(monkeypatch) -> None:
+    """The process stops once the Source page is committed, inside the batch and before the run's call returns."""
     def stop(*_arguments, **_keywords):
         raise _Stopped
 
+    monkeypatch.setattr(index_sync, "full_upsert_succeeded", stop)
+
+
+def _journal_records(vault: Path) -> list[Path]:
+    return list((state_paths.vault_state_dir(vault) / rename_journal.STORE).glob("*.json"))
+
+
+@pytest.mark.parametrize("run_record_kept", [True, False], ids=["run-record-kept", "run-record-lost"])
+def test_a_stop_inside_the_batch_after_its_commit_settles_as_already_applied_and_drops_the_hold(
+    vault: Path, media_store_configured, monkeypatch, run_record_kept: bool
+) -> None:
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    run_file = vault / "Knowledge Base" / "_Adoption" / "runs" / run_id / "run.json"
+    planned_only = run_file.read_bytes()
     with monkeypatch.context() as stopping:
-        stopping.setattr(adoption_run, "_settle_staged", stop)
+        _stop_inside_the_batch_after_its_commit(stopping)
         with pytest.raises(_Stopped):
             adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
     artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
     assert _page_of(vault, artifact).is_file() and not _staged(vault, import_id).exists()
+    if not run_record_kept:  # the stop came before the run saved the commit: replay resolves the item from its Source
+        run_file.write_bytes(planned_only)
 
     with _counting_bytes_read() as read:
         reply = consume._apply(vault, run_id, plan_id)
@@ -340,8 +358,41 @@ def test_a_stop_after_the_commit_settles_as_already_applied_with_no_byte_read(
     outcome = reply["outcomes"][_original(import_id)]
     assert outcome["status"] == "already-applied" and outcome["consumed"] is True
     assert read.bytes < len(BIG) // 2
+    assert not _journal_records(vault)
     assert media_jobs.MediaJobStore(vault).get_by_binary(
         artifact, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is not None
+
+
+def test_a_hold_stops_holding_once_the_source_page_beside_the_file_exists(vault: Path, monkeypatch) -> None:
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    with monkeypatch.context() as stopping:
+        _stop_inside_the_batch_after_its_commit(stopping)
+        with pytest.raises(_Stopped):
+            adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+
+    assert _journal_records(vault) and not rename_journal.is_held(vault, artifact)
+
+
+def test_a_stop_between_the_commit_and_the_settlement_leaves_no_hold_after_the_next_call(
+    vault: Path, monkeypatch
+) -> None:
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    with monkeypatch.context() as stopping:
+        def stop(*_arguments, **_keywords):
+            raise _Stopped
+
+        stopping.setattr(rename_journal, "release", stop)
+        with pytest.raises(_Stopped):
+            adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+    assert _journal_records(vault)
+
+    reply = consume._apply(vault, run_id, plan_id)
+
+    assert reply["outcomes"][_original(import_id)]["consumed"] is True
+    assert not _journal_records(vault)
 
 
 # 8
@@ -444,3 +495,347 @@ def test_no_scan_binds_a_renamed_file_before_a_replay_settles_it(vault: Path, mo
     consume._apply(vault, run_id, plan_id)
     assert len(list(imported.glob("*.md"))) == 2
 
+
+
+# 11
+
+
+def _stop_after_the_rename_of(vault: Path, monkeypatch, import_id: str) -> tuple[str, str]:
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    with monkeypatch.context() as stopping:
+        _stop_after_the_rename(stopping)
+        with pytest.raises(_Stopped):
+            adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+    return run_id, plan_id
+
+
+_GUARDED = {
+    "cancel": lambda vault, run_id, import_id: adoption_run.cancel(vault, run_id=run_id, why=None),
+    "select": lambda vault, run_id, import_id: adoption_run.select(
+        vault, run_id=run_id, include=[f"_Imports/{import_id}"]),
+    "plan": lambda vault, run_id, import_id: adoption_run.plan(vault, run_id=run_id, today=consume.TODAY),
+    "start": lambda vault, run_id, import_id: adoption_run.start(
+        vault, path=f"_Imports/{import_id}", today=consume.TODAY),
+}
+
+
+@pytest.mark.parametrize("verb", _GUARDED)
+def test_a_run_whose_renamed_file_waits_for_its_page_refuses_to_leave_it_and_apply_finishes_it(
+    vault: Path, monkeypatch, verb: str
+) -> None:
+    """Catches a cancel, re-plan or restart that strands a renamed file: no stage lists it and no residual names it."""
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    run_id, plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+
+    with pytest.raises(adoption_run.AdoptionRunError) as refused:
+        _GUARDED[verb](vault, run_id, import_id)
+
+    assert refused.value.code == "RENAMES_PENDING"
+    assert run_id in refused.value.reason and "apply" in refused.value.reason
+    assert rename_journal.is_held(vault, artifact)
+
+    consume._apply(vault, run_id, plan_id)
+
+    assert _page_of(vault, artifact).is_file() and not rename_journal.pending(vault)
+
+
+def test_the_journal_record_names_the_import_the_run_the_staged_path_and_the_inode(vault: Path, monkeypatch) -> None:
+    """The record is what a discard reads to find a run's renamed files without its plan."""
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    inode = _staged(vault, import_id).stat().st_ino
+    run_id, _plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
+
+    assert rename_journal.pending(vault, run_id=run_id) == [rename_journal.Hold(
+        path="Knowledge Base/Sources/Imported/2026-10-27-scan.bin", inode=inode, import_id=import_id,
+        run_id=run_id, staged_path=_original(import_id))]
+    assert rename_journal.pending(vault, under=f"_Imports/{import_id}/Field Notes")
+    assert not rename_journal.pending(vault, under=f"_Imports/{import_id}/Other")
+
+
+def test_a_run_may_leave_a_record_whose_file_is_gone(vault: Path, monkeypatch) -> None:
+    """Catches a refusal that no `apply` can lift: the person removed the renamed file, so nothing is left to finish."""
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    run_id, _plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
+    (vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin").unlink()
+
+    cancelled = adoption_run.cancel(vault, run_id=run_id, why=None)
+
+    assert cancelled["phase"] == "cancelled"
+
+
+def test_finish_gives_up_a_file_that_a_failed_batch_could_not_put_back_so_the_scans_may_bind_it(
+    vault: Path, monkeypatch
+) -> None:
+    import_id = _job_stage(vault, {"scan.bin": PDF, "other.bin": OTHER})
+    staged = _staged(vault, import_id)
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    with monkeypatch.context() as failing:
+        _fail_the_batch(failing, before=lambda: staged.write_bytes(b"put there meanwhile"))
+        adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+    adoption_run.apply(
+        vault, run_id=run_id, plan_id=plan_id, retry_failed=True, only_paths=[_original(import_id, "other.bin")],
+        today=consume.TODAY)
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+    assert rename_journal.is_held(vault, artifact)
+
+    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
+
+    assert not rename_journal.is_held(vault, artifact) and artifact.read_bytes() == PDF
+
+
+def test_a_retry_after_an_unbound_file_still_names_the_unbound_path(vault: Path, monkeypatch) -> None:
+    """Catches a retry that reports only the taken staged path while the member's file sits unbound in the vault."""
+    import_id = _job_stage(vault, {"scan.bin": PDF, "other.bin": OTHER})
+    staged = _staged(vault, import_id)
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    with monkeypatch.context() as failing:
+        _fail_the_batch(failing, before=lambda: staged.write_bytes(b"put there meanwhile"))
+        adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+
+    retried = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, retry_failed=True, today=consume.TODAY)
+
+    outcome = retried["outcomes"][_original(import_id)]
+    assert outcome["status"] == "failed" and outcome["code"] == "ARTIFACT_UNBOUND"
+    assert "Knowledge Base/Sources/Imported/2026-10-27-scan.bin" in outcome["reason"]
+
+
+# 12
+
+
+def test_the_journal_is_flushed_once_for_the_chunk_before_its_first_rename(vault: Path, monkeypatch) -> None:
+    """Catches a record that is written but not flushed before the rename: a power loss would keep the rename only."""
+    names = ["a.bin", "b.bin", "c.bin"]
+    import_id = _job_stage(vault, {name: name.encode() * 3 for name in names})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    flushes, durable = [], []
+    flush, write = private_state.sync_directory, private_state.write_record
+
+    def spy_flush(store: Path) -> None:
+        flushes.append({
+            "records": len(list(store.glob("*.json"))),
+            "still_staged": sum(_staged(vault, import_id, name).exists() for name in names)})
+        flush(store)
+
+    def spy_write(store: Path, stem: str, record: dict, **keywords) -> None:
+        if store.name == rename_journal.STORE:
+            durable.append(keywords.get("durable"))
+        write(store, stem, record, **keywords)
+
+    monkeypatch.setattr(private_state, "sync_directory", spy_flush)
+    monkeypatch.setattr(private_state, "write_record", spy_write)
+
+    consume._apply(vault, run_id, plan_id)
+
+    assert flushes == [{"records": 3, "still_staged": 3}] and durable == [True] * 3
+
+
+def test_a_temp_file_left_by_a_stopped_record_write_is_swept_at_the_next_chunk(vault: Path) -> None:
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    store = private_state.store(vault, rename_journal.STORE)
+    leftover, recent = store / "abc.stopped.tmp", store / "abc.writing.tmp"
+    leftover.write_text("{")
+    recent.write_text("{")
+    old = leftover.stat().st_mtime - 2 * rename_journal.STALE_TEMP_SECONDS
+    os.utime(leftover, (old, old))
+
+    consume._apply(vault, run_id, plan_id)
+
+    assert not leftover.exists() and recent.exists()
+
+
+# 13
+
+
+def test_a_rename_that_reports_an_error_after_it_took_place_still_files_the_member(vault: Path, monkeypatch) -> None:
+    """Catches a failed sync after the rename that reports the member failed while its file sits unheld in the vault."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    staged = _staged(vault, import_id)
+    inode = staged.stat().st_ino
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    state = {"renamed": False, "refused": False}
+    real_rename, real_sync = consume._held_fs_posix._rename_noreplace, consume._held_fs_posix._fsync
+
+    def rename_then_remember(*arguments, **keywords):
+        real_rename(*arguments, **keywords)
+        state["renamed"] = True
+
+    def refuse_to_sync_once_after_the_rename(descriptor):
+        if state["renamed"] and not state["refused"]:
+            state["refused"] = True
+            raise OSError(5, "input/output error")
+        real_sync(descriptor)
+
+    monkeypatch.setattr(consume._held_fs_posix, "_rename_noreplace", rename_then_remember)
+    monkeypatch.setattr(consume._held_fs_posix, "_fsync", refuse_to_sync_once_after_the_rename)
+
+    reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+
+    outcome = reply["outcomes"][_original(import_id)]
+    assert outcome["status"] == "applied" and (vault / outcome["artifact_path"]).stat().st_ino == inode
+
+
+# 14
+
+
+def test_an_in_place_write_followed_by_an_mtime_reset_does_not_file_by_rename(vault: Path) -> None:
+    """Catches a manifest identity without the change time: an edit that restores the mtime would then pass for the manifest's bytes."""
+    import_id = _job_stage(vault, {"scan.bin": BIG, "other.bin": OTHER})
+    staged = _staged(vault, import_id)
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    before = staged.stat()
+    edited = BIG[:-1] + b"Y"
+    staged.write_bytes(edited)
+    os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert staged.stat().st_mtime_ns == before.st_mtime_ns and staged.stat().st_size == before.st_size
+
+    reply = consume._apply(vault, run_id, plan_id)
+
+    outcome = reply["outcomes"][_original(import_id)]
+    assert outcome["status"] == "failed" and outcome["code"] == "SOURCE_CHANGED"
+    assert staged.read_bytes() == edited
+    assert not list((vault / "Knowledge Base" / "Sources" / "Imported").glob("*scan.bin"))
+
+
+# 15
+
+
+def test_a_failed_batch_after_a_replay_leaves_the_file_where_it_is_and_never_puts_it_into_the_stage(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches a rollback that treats a file found by replay as this call's rename: a discard of the stage would delete it."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    staged = _staged(vault, import_id)
+    inode = staged.stat().st_ino
+    run_id, plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+    with monkeypatch.context() as failing:
+        _fail_the_batch(failing)
+        failed = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+    assert failed["outcomes"][_original(import_id)]["code"] == "WRITE_FAILED"
+
+    assert artifact.stat().st_ino == inode and not staged.exists()
+    assert rename_journal.is_held(vault, artifact)
+
+    retried = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, retry_failed=True, today=consume.TODAY)
+
+    assert retried["outcomes"][_original(import_id)]["status"] == "applied"
+    assert _page_of(vault, artifact).is_file()
+
+
+# 16
+
+
+def test_a_failed_batch_does_not_move_a_different_file_that_took_the_binarys_path(vault: Path, monkeypatch) -> None:
+    """Catches a rollback that trusts the path: it would carry a stranger's file into the stage, and a discard deletes the stage."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    staged = _staged(vault, import_id)
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    artifact = vault / "Knowledge Base" / "Sources" / "Imported" / "2026-10-27-scan.bin"
+
+    def swap_in_another_file() -> None:
+        # Written beside the binary first, so the stranger has an inode of its own.
+        stranger = artifact.with_name("stranger")
+        stranger.write_bytes(b"a different file that arrived first")
+        os.replace(stranger, artifact)
+
+    _fail_the_batch(monkeypatch, before=swap_in_another_file)
+
+    reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+
+    assert reply["outcomes"][_original(import_id)]["code"] == "ARTIFACT_UNBOUND"
+    assert artifact.read_bytes() == b"a different file that arrived first" and not staged.exists()
+
+
+# 17
+
+
+def test_a_copy_fallback_member_above_the_ceiling_fails_instead_of_copying_without_a_limit(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches the rename's ceiling exemption outliving the rename: a cross-device copy of any size would then pass."""
+    import_id = _job_stage(vault, {"scan.bin": BIG, "other.bin": OTHER})
+    staged = _staged(vault, import_id)
+    monkeypatch.setenv("EXOMEM_ADOPTION_MAX_FILE_BYTES", str(MiB))
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    monkeypatch.setattr(consume._held_fs_posix, "_rename_noreplace",
+                        consume._rename_across_devices(consume._held_fs_posix._rename_noreplace, "scan.bin"))
+
+    reply = consume._apply(vault, run_id, plan_id)
+
+    outcome = reply["outcomes"][_original(import_id)]
+    assert outcome["status"] == "failed" and outcome["code"] == "OVER_ADOPTION_CEILING"
+    assert staged.read_bytes() == BIG
+    assert not list((vault / "Knowledge Base" / "Sources" / "Imported").glob("*scan.bin"))
+    assert reply["outcomes"][_original(import_id, "other.bin")]["status"] == "applied"
+
+
+# 18
+
+
+def test_a_member_larger_than_the_free_space_files_by_rename(vault: Path, monkeypatch) -> None:
+    """Catches a space check that prices a rename like a copy: the run would stop for space that the rename never uses."""
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    staged = _staged(vault, import_id)
+    inode = staged.stat().st_ino
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    reserve = 100_000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage(10 * len(BIG), 0, reserve + len(BIG) // 4))
+
+    reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+
+    assert "apply_stop" not in reply and "continuation" not in reply
+    outcome = reply["outcomes"][_original(import_id)]
+    assert outcome["status"] == "applied" and (vault / outcome["artifact_path"]).stat().st_ino == inode
+
+
+def test_the_import_reserve_still_applies_to_a_member_filed_by_rename(vault: Path, monkeypatch) -> None:
+    """Catches pricing a rename at zero without the margin: derived state still needs room."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    reserve = 100_000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage(10 * reserve, 0, reserve // 2))
+
+    reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
+
+    assert reply["apply_stop"]["code"] == "INSUFFICIENT_SPACE" and reply["apply_stop"]["chunk_bytes"] == 0
+    assert _staged(vault, import_id).read_bytes() == PDF
+
+
+# 19
+
+
+def test_a_matched_member_above_the_ceiling_plans_eligible_with_no_byte_read_and_files_by_rename(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches a plan that hashes, or refuses, a member the manifest vouches for: a 5 GiB Cloud import would never file."""
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    inode = _staged(vault, import_id).stat().st_ino
+    monkeypatch.setenv("EXOMEM_ADOPTION_MAX_FILE_BYTES", str(MiB))
+
+    with _counting_bytes_read() as read:
+        run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+        reply = consume._apply(vault, run_id, plan_id)
+
+    outcome = reply["outcomes"][_original(import_id)]
+    assert outcome["status"] == "applied" and outcome["consumed"] is True
+    assert (vault / outcome["artifact_path"]).stat().st_ino == inode
+    assert read.bytes < len(BIG) // 2
+
+
+def test_a_member_whose_identity_changed_keeps_the_ceiling_when_the_scan_lists_it(vault: Path, monkeypatch) -> None:
+    """Catches a scan that exempts every manifest member from the ceiling, including one that may hold other bytes."""
+    import_id = _job_stage(vault, {"scan.bin": BIG})
+    _touch(_staged(vault, import_id))
+    monkeypatch.setenv("EXOMEM_ADOPTION_MAX_FILE_BYTES", str(MiB))
+
+    run_id = adoption_run.start(vault, path=f"_Imports/{import_id}", today=consume.TODAY)["run_id"]
+
+    row = next(row for row in adoption_run.AdoptionRunStore(vault).load(run_id)["inventory"]
+               if row["path"] == _original(import_id))
+    assert row["eligible"] is False and row["reason"] == "OVER_ADOPTION_CEILING"
