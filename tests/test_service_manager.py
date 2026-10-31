@@ -579,7 +579,10 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
                 assert serving.pid == 0
                 assert manager.phase == "unavailable"
         if not compatible:
-            assert serving.events == ingress.events == []
+            assert serving.events == []
+            # A refused upgrade leaves admission alone; a cold start refuses
+            # calls from its first step, because no worker is serving yet.
+            assert ingress.events == ([] if entrypoint == "upgrade" else ["unavailable"])
         assert not state.exists()
 
     asyncio.run(scenario())
