@@ -5165,6 +5165,8 @@ class LeaseManager:
                 absorbable=refused_before_the_body,
                 request_id=str(uuid.uuid4()),
                 join_on_arrival=True,
+                # The /upload route or the session park hands the refusal to its caller and records it.
+                seam_records=True,
             )
 
     @contextmanager
@@ -6784,11 +6786,13 @@ class LeaseManager:
         request_id: str,
         join_on_arrival: bool,
         on_refuse: Callable[[OpError], None] | None = None,
+        seam_records: bool = False,
     ) -> Any:
         """Attempt a write until it returns, waiting in line after each refusal `absorbable` admits.
 
         Only the calling thread waits. `absorbable` admits a refusal raised before anything
-        committed; every other error propagates on first sight.
+        committed; every other error propagates on first sight. With `seam_records`, the
+        refusal leaves unclaimed: the caller hands it to a seam that journals and counts it.
         """
         # The last refusal this write absorbed: a wait that runs out in line
         # still names the holder that kept it waiting.
@@ -6802,10 +6806,12 @@ class LeaseManager:
                 on_refuse(error)
             if error.code != "MUTATION_BUSY":
                 # A handed-back store or preparation refusal keeps its own shape and cause.
-                mutation_journal.claim_refusal(error)
+                if not seam_records:
+                    mutation_journal.claim_refusal(error)
                 return error
-            # The one place a busy from this loop becomes client-visible.
-            _count_busy_once(error)
+            # The one place a busy from this loop becomes client-visible, unless a seam records it.
+            if not seam_records:
+                _count_busy_once(error)
             # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
             error.details.pop("wait_ms", None)
             error.details.update(cause=cause, waited_ms=wait.waited_ms(), absorbed_attempts=wait.absorbed)
